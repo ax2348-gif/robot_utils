@@ -1,0 +1,12 @@
+[submodule "rev_ctl"]
+	path = rev_ctl
+	url = https://github.com/ax2348-gif/rev_ctl.git
+	branch = main
+[submodule "rebot_ctl"]
+	path = rebot_ctl
+	url = https://github.com/ax2348-gif/rebot_ctl.git
+	branch = main
+[submodule "motorbridge_2ec"]
+	path = motorbridge_2ec
+	url = https://github.com/ax2348-gif/motorbridge_2ec.git
+	branch = feat/nonblocking-register-read
