@@ -17,8 +17,9 @@ source .venv/bin/activate
 | `rebot_ctl` | `robot_utils` | `reBotArm_control_py` | reBot arm kinematics, dynamics and control |
 | `motorbridge_2ec` | `feat/nonblocking-register-read` | `motorbridge` | Rust motor ABI + Python SDK (Damiao/Robstride); fork with fast non-blocking shaft-encoder reads |
 
-`rebot_ctl`'s `robot_utils` branch is its `main` plus the packaging fix that makes it
-pip-installable on Python ≥ 3.10. Submodules clone over HTTPS, so the robot needs no SSH key.
+`rebot_ctl`'s `robot_utils` branch is `feat/joint-safety-and-diagnostics` (motor CAN watchdog,
+joint-limit check, output-shaft reads) plus the packaging fix that makes it pip-installable on
+Python ≥ 3.10. Submodules clone over HTTPS, so the robot needs no SSH key.
 
 ## The environment
 
