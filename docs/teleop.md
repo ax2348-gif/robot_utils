@@ -10,6 +10,9 @@ Two layers, neither of which knows anything about a particular robot:
 A robot is supported by writing one `TeleopApp` subclass.
 [`examples/rebot_quest_teleop.py`](../examples/rebot_quest_teleop.py) is the reBot arm's,
 rewritten from rebot_ctl's `tools/quest_teleop.py`.
+[`examples/rebot_quest_teleop_meshcat.py`](../examples/rebot_quest_teleop_meshcat.py) is the
+same adapter on a simulated arm in MeshCat (no hardware; `--drive` also moves a virtual
+base with the twist channel).
 
 ## The Quest client
 
