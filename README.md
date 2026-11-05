@@ -21,6 +21,19 @@ source .venv/bin/activate
 joint-limit check, output-shaft reads) plus the packaging fix that makes it pip-installable on
 Python ≥ 3.10. Submodules clone over HTTPS, so the robot needs no SSH key.
 
+## Command-line tools
+
+With the venv active, `rebot_ctl` provides (details: `<tool> --help`, `rebot_ctl/README.md`):
+
+- `rebot_setup` — read-only check of the arm's one-time setup (motor CAN watchdog, feedback,
+  joint limits); `--store-watchdog` writes the watchdog to motor flash.
+- `rebot_zero` — set the current pose as every joint's zero (motors stay disabled).
+- `rebot_vis` — all joints slack (MIT, zero gains), live pose in MeshCat reachable from other
+  devices on the network.
+
+On the robot, pass the arm's serial port with `--channel` (the shipped Damiao configs name a
+macOS device path), e.g. `rebot_setup --channel /dev/serial/by-id/...`.
+
 ## The environment
 
 **One env, Python ≥ 3.12.** LeRobot ≥ 0.5 requires Python 3.12 and is not capped. The robot
