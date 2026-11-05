@@ -57,13 +57,16 @@ class HandIntent:
     delta_rotation: np.ndarray = field(repr=False)
     trigger: float
     invalid_reason: Optional[str] = None
+    # body-frozen scheme only: the operator frame this engagement captured, in Quest LOCAL
+    operator_base_position: Optional[np.ndarray] = field(default=None, repr=False)
+    operator_base_rotation: Optional[np.ndarray] = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
 class OperatorIntent:
     session_id: str
     frame: str                    # "operator_base_flu": x forward, y left, z up
-    scheme: str
+    scheme: str                   # "standard" or "body-frozen" (see the Quest app's DEMO.md)
     translation_limit_m: Optional[float]
     twist: np.ndarray = field(repr=False)    # wire "base_velocity": [forward m/s, left m/s, yaw rad/s]
     twist_valid: bool
@@ -164,7 +167,10 @@ def parse_hand(obj: Any) -> HandIntent:
         return HandIntent(valid=False, delta_position=_ZERO3, delta_rotation=_EYE3, trigger=0.0,
                           invalid_reason=reason, **flags)
     return HandIntent(valid=True, delta_position=dp, delta_rotation=dr,
-                      trigger=min(max(float(trigger), 0.0), 1.0), **flags)
+                      trigger=min(max(float(trigger), 0.0), 1.0),
+                      operator_base_position=_vector(obj.get("operator_base_in_quest_position")),
+                      operator_base_rotation=_rotation(obj.get("operator_base_in_quest_rotation")),
+                      **flags)
 
 
 def _invalid_hand(reason: str) -> HandIntent:

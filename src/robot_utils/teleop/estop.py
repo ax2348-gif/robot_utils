@@ -37,6 +37,7 @@ class EStop:
         self.grace_s = grace_s
         self.reason: Optional[str] = None
         self._tripped = threading.Event()
+        self._hooks_done = threading.Event()
         self._signals = 0
         self._lock = threading.Lock()
         self._timer: Optional[threading.Timer] = None
@@ -74,11 +75,18 @@ class EStop:
                                               args=(1, f"shutdown took over {self.grace_s:g} s"))
                 self._timer.daemon = True
                 self._timer.start()
-        for fn in list(self._trip_hooks):
-            try:
-                fn(reason)
-            except Exception:
-                log.exception("e-stop hook failed")
+        try:
+            for fn in list(self._trip_hooks):
+                try:
+                    fn(reason)
+                except Exception:
+                    log.exception("e-stop hook failed")
+        finally:
+            self._hooks_done.set()
+
+    def wait_hooks(self, timeout: Optional[float]) -> bool:
+        """After a trip, wait for the ``on_trip`` hooks (they run on the tripping thread)."""
+        return self._hooks_done.wait(timeout)
 
     def on_trip(self, fn: Callable[[str], None]) -> None:
         """Call ``fn(reason)`` once when the stop trips, on the tripping thread."""

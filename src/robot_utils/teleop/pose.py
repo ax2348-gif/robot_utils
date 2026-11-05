@@ -11,6 +11,15 @@ On each new engagement the anchor is measured once (``measure`` is only called t
 the target is ``(anchor.position + dp, dR @ anchor.rotation)`` with the operator's deltas
 rotated into the robot's frame. While the hand is not engaged the target is None: what
 "hold" means is up to the robot.
+
+Reference-frame policy, for robots whose measuring frame moves (a mobile base):
+
+- ``frame=None`` (live): the target stays fixed relative to the *current* measuring frame,
+  so driving the base carries the target with it. The Quest's ``standard`` scheme default.
+- ``frame=<world pose of the measuring frame>`` (frozen): that pose is captured at
+  engagement and the target stays fixed in the world; it is returned re-expressed in the
+  current measuring frame. Use this for the ``body-frozen`` scheme, where walking with
+  the base should leave the arm's world target alone.
 """
 from __future__ import annotations
 
@@ -41,6 +50,13 @@ class Pose:
         t[:3, :3], t[:3, 3] = self.rotation, self.position
         return t
 
+    def __matmul__(self, other: "Pose") -> "Pose":
+        return Pose(self.position + self.rotation @ other.position, self.rotation @ other.rotation)
+
+    def inverse(self) -> "Pose":
+        rt = self.rotation.T
+        return Pose(-rt @ self.position, rt)
+
 
 Measure = Union[Pose, Callable[[], Pose]]
 
@@ -63,22 +79,30 @@ class PoseClutch:
         self.max_offset_m = max_offset_m
         self.max_angle_rad = max_angle_rad
         self.anchor: Optional[Pose] = None
+        self.frame0: Optional[Pose] = None    # world pose of the measuring frame at engagement (frozen)
         self.target: Optional[Pose] = None
         self._engagement: Optional[int] = None
 
     def reset(self) -> None:
-        self.anchor = self.target = self._engagement = None
+        self.anchor = self.frame0 = self.target = self._engagement = None
 
-    def update(self, hand: HandState, measure: Measure) -> Optional[Pose]:
+    def update(self, hand: HandState, measure: Measure, frame: Optional[Measure] = None) -> Optional[Pose]:
+        """Target in the measuring frame, or None. ``frame``: see the module docstring."""
         if not hand.engaged:
             self.reset()
             return None
+        current_frame = None
+        if frame is not None:
+            current_frame = frame() if callable(frame) else frame
+            _check_pose(current_frame)
         if hand.engagement != self._engagement:
             anchor = measure() if callable(measure) else measure
             if anchor is None:
                 raise ValueError("measure returned None at engagement")
             _check_pose(anchor)
-            self.anchor, self._engagement = anchor, hand.engagement
+            self.anchor, self.frame0, self._engagement = anchor, current_frame, hand.engagement
+        elif (self.frame0 is None) != (current_frame is None):
+            raise ValueError("frame must be given on every update of an engagement, or never")
         r = self.operator_to_robot
         dp = r @ hand.delta_position
         dr = r @ hand.delta_rotation @ r.T
@@ -88,8 +112,11 @@ class PoseClutch:
                 dp = dp * (self.max_offset_m / n)
         if self.max_angle_rad is not None:
             dr = clamp_rotation(dr, self.max_angle_rad)
-        self.target = Pose(self.anchor.position + dp, dr @ self.anchor.rotation)
-        return self.target
+        target = Pose(self.anchor.position + dp, dr @ self.anchor.rotation)
+        if current_frame is not None:   # fixed in the world: re-express in the current frame
+            target = current_frame.inverse() @ self.frame0 @ target
+        self.target = target
+        return target
 
 
 def _check_pose(p: Pose) -> None:

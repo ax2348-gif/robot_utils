@@ -71,6 +71,18 @@ class ParseTest(unittest.TestCase):
         m = r.delta_rotation
         np.testing.assert_allclose(m.T @ m, np.eye(3), atol=1e-12)
 
+    def test_body_frozen_operator_base(self):
+        h = hand(engaged=True, engagement_id=1)
+        h.update(operator_base_in_quest_position=[0.1, 1.5, -0.2], operator_base_in_quest_rotation=rot_z9(0.3))
+        rec = record(1, right=h)
+        rec["control_intent"].update(scheme="body-frozen", translation_limit_m=None)
+        f = parse_frame(rec, 0.0)
+        self.assertEqual(f.intent.scheme, "body-frozen")
+        self.assertIsNone(f.intent.translation_limit_m)
+        np.testing.assert_allclose(f.intent.hands["right"].operator_base_position, [0.1, 1.5, -0.2])
+        self.assertIsNotNone(f.intent.hands["right"].operator_base_rotation)
+        self.assertIsNone(f.intent.hands["left"].operator_base_position)
+
     def test_bad_twist_is_zero(self):
         f = parse_frame(record(1, base_velocity=(None, 0, 0)), 0.0)
         self.assertFalse(f.intent.twist_valid)

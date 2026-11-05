@@ -133,6 +133,8 @@ class TeleopRunner:
             estop.quiet()
             if estop.tripped and stop.kind != ESTOP:
                 stop = _Stop(ESTOP, estop.reason or "e-stop", stop.fault)
+            if estop.tripped and not estop.wait_hooks(1.0):   # emergency_stop before stop
+                self.log.error("emergency_stop still running after 1 s; calling stop anyway")
             result = RunResult(stop.kind, stop.reason, stop.fault, stats=ctx.stats)
             self.log.info("stopping (%s: %s)", result.kind, result.reason)
             try:

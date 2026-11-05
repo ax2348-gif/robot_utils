@@ -26,6 +26,7 @@ from .app import (ESTOP, FAULT, REQUESTED, Context, Fault, FaultAction, Inputs, 
                   RunResult, Stats, TeleopApp)
 from .clutch import ENGAGED, INVALID, NEEDS_RELEASE, NO_INPUT, RELEASED, HandClutch, HandState
 from .estop import EStop
+from .monitor import Monitor, MonitorStats
 from .pose import Pose, PoseClutch, clamp_rotation, rotation_from_vector, rotation_vector
 from .runner import FrameSource, TeleopRunner
 
@@ -33,5 +34,5 @@ __all__ = [
     "TeleopApp", "TeleopRunner", "Context", "Inputs", "Fault", "FaultAction", "Overrun",
     "RunResult", "Stats", "REQUESTED", "ESTOP", "FAULT", "FrameSource",
     "HandClutch", "HandState", "NO_INPUT", "INVALID", "RELEASED", "NEEDS_RELEASE", "ENGAGED",
-    "EStop", "Pose", "PoseClutch", "rotation_vector", "rotation_from_vector", "clamp_rotation",
+    "EStop", "Monitor", "MonitorStats", "Pose", "PoseClutch", "rotation_vector", "rotation_from_vector", "clamp_rotation",
 ]

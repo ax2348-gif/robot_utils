@@ -11,8 +11,8 @@ A robot is supported by writing one `TeleopApp` subclass.
 [`examples/rebot_quest_teleop.py`](../examples/rebot_quest_teleop.py) is the reBot arm's,
 rewritten from rebot_ctl's `tools/quest_teleop.py`.
 [`examples/rebot_quest_teleop_meshcat.py`](../examples/rebot_quest_teleop_meshcat.py) is the
-same adapter on a simulated arm in MeshCat (no hardware; `--drive` also moves a virtual
-base with the twist channel).
+same adapter on a simulated arm in MeshCat. It needs no hardware, drives a virtual base
+with the twist channel, and draws through a `Monitor`.
 
 ## The Quest client
 
@@ -118,6 +118,15 @@ robot's pose.
 - It returns `(anchor.p + R·dp, (R·dR·Rᵀ)·anchor.R)`, where `R = operator_to_robot`.
 - `max_offset_m` and `max_angle_rad` optionally clamp the target.
 
+**Live vs frozen reference frame.** For a robot whose measuring frame moves (a mobile
+base), pass `frame=` the frame's world pose on every update:
+- **Live** (no `frame`, the `standard` scheme): the target moves with the base.
+- **Frozen** (`frame` given): the target is fixed in the world from engagement and
+  re-expressed in the current base frame. This is what the Quest's `body-frozen` walking
+  scheme expects: walking with the base leaves the arm's world target alone. Check
+  `inputs.frame.intent.scheme`; in that scheme `HandIntent.operator_base_*` carries each
+  engagement's captured operator frame.
+
 Pose targets are one use. A hand can equally drive a velocity, a camera or nothing at all,
 and `trigger` can map to any 0–1 actuator.
 
@@ -147,10 +156,23 @@ and `trigger` can map to any 0–1 actuator.
   - The signal reaches a watcher thread through a wakeup pipe. The watcher trips the stop
     and calls `emergency_stop` at once, even while the main thread is blocked in a native
     call.
-  - The loop wakes, starts no further step and calls `stop`.
+  - The loop wakes and starts no further step. It waits up to 1 s for
+    `emergency_stop` to return, then calls `stop`.
   - A second signal, or a `stop` still running after `estop_grace_s` (default 3 s),
     calls `os._exit` (code 130 or 1).
   - `ctx.estop.trip(reason)` does the same from any thread.
+
+### Keep the steps fast: `Monitor`
+
+**Steps should only read, compute and command.** Anything that can block (MeshCat, a
+terminal, network, disk) goes through `Monitor(fn, rate_hz)`. A step calls
+`monitor.publish(snapshot)`, which never blocks. A worker thread calls `fn` with the
+newest snapshot at most `rate_hz` times a second. A failing `fn` is logged and then
+disabled, and never affects the loop. Publish copies, and give the renderer its own model
+data. An overrun fault is a real signal that a step blocked; don't ignore it.
+
+**Clutch threshold.** The Quest app clutches, not this package: grip ≥ 0.6 engages and
+≤ 0.4 releases. The robot side only enforces freshness and release-before-engage.
 
 ### Assumed safety model
 

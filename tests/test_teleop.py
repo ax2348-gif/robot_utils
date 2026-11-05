@@ -12,7 +12,7 @@ import numpy as np
 
 from robot_utils.quest import parse_frame
 from robot_utils.teleop import (ENGAGED, ESTOP, FAULT, INVALID, NEEDS_RELEASE, NO_INPUT, RELEASED,
-                                REQUESTED, FaultAction, HandClutch, Pose, PoseClutch, TeleopApp,
+                                REQUESTED, FaultAction, HandClutch, Monitor, Pose, PoseClutch, TeleopApp,
                                 TeleopRunner, clamp_rotation, rotation_from_vector, rotation_vector)
 
 from _quest_records import hand, record, rot_z9
@@ -123,11 +123,77 @@ class PoseClutchTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             PoseClutch().update(s, lambda: Pose(np.array([np.nan, 0, 0]), np.eye(3)))
 
+    def test_frozen_frame_keeps_world_target(self):
+        def planar(x, y, yaw):
+            return Pose(np.array([x, y, 0.0]), np.array(rot_z9(yaw)).reshape(3, 3))
+        hc, pc = HandClutch("right"), PoseClutch()
+        anchor = Pose(np.array([0.3, 0.0, 0.2]), np.eye(3))
+        s = self.engaged(hc)
+        t0 = pc.update(s, anchor, frame=planar(0, 0, 0))
+        np.testing.assert_allclose(t0.position, anchor.position)
+        # base drives 0.1 m forward and turns 90 deg; no operator motion
+        s = hc.update(H(engaged=True, engagement_id=1), "k")
+        base = planar(0.1, 0, np.pi / 2)
+        t = pc.update(s, anchor, frame=base)
+        np.testing.assert_allclose((base @ t).position, anchor.position, atol=1e-12)   # same world point
+        np.testing.assert_allclose(t.position, [0, -0.2, 0.2], atol=1e-12)
+        with self.assertRaises(ValueError):          # frame dropped mid-engagement
+            pc.update(s, anchor)
+        live = PoseClutch()
+        live.update(self.engaged(HandClutch("right")), anchor)
+        np.testing.assert_allclose(live.target.position, anchor.position)   # live: base-relative
+
+    def test_pose_algebra(self):
+        a = Pose(np.array([1.0, 2, 3]), np.array(rot_z9(0.4)).reshape(3, 3))
+        b = Pose(np.array([-0.5, 0.2, 0]), np.array(rot_z9(-1.0)).reshape(3, 3))
+        np.testing.assert_allclose((a @ b).matrix(), a.matrix() @ b.matrix(), atol=1e-12)
+        np.testing.assert_allclose((a.inverse() @ a).matrix(), np.eye(4), atol=1e-12)
+
     def test_rotation_helpers(self):
         for rv in ([0, 0, 0], [0.3, -0.2, 0.1], [0, np.pi - 1e-9, 0], [1e-9, 0, 0]):
             np.testing.assert_allclose(rotation_vector(rotation_from_vector(np.array(rv))), rv, atol=1e-6)
         r = rotation_from_vector(np.array([0, 0, 2.0]))
         np.testing.assert_allclose(rotation_vector(clamp_rotation(r, 0.5)), [0, 0, 0.5], atol=1e-12)
+
+
+class MonitorTest(unittest.TestCase):
+    def test_latest_only_rate_limited_and_never_blocks(self):
+        seen, gate = [], threading.Event()
+
+        def slow(x):
+            seen.append(x)
+            gate.wait(1.0)
+
+        with Monitor(slow, rate_hz=1000) as m:
+            t = time.monotonic()
+            for i in range(1000):
+                m.publish(i)
+            self.assertLess(time.monotonic() - t, 0.1)   # publish does not wait for fn
+            time.sleep(0.05)
+            gate.set()
+            time.sleep(0.05)
+        self.assertLessEqual(len(seen), 3)
+        self.assertEqual(seen[-1], 999)
+        self.assertEqual(m.stats.published, 1000)
+
+    def test_errors_disable_without_raising(self):
+        def bad(x):
+            raise RuntimeError("render")
+        m = Monitor(bad, rate_hz=1000, max_errors=3).start()
+        for i in range(20):
+            m.publish(i)
+            time.sleep(0.005)
+        m.close()
+        self.assertTrue(m.stats.failed)
+        self.assertEqual(m.stats.errors, 3)
+
+    def test_close_with_stuck_fn_is_bounded(self):
+        m = Monitor(lambda x: time.sleep(5), rate_hz=100).start()
+        m.publish(1)
+        time.sleep(0.02)
+        t = time.monotonic()
+        m.close(timeout_s=0.1)
+        self.assertLess(time.monotonic() - t, 0.5)
 
 
 class Source:
