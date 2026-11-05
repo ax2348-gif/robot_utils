@@ -19,14 +19,14 @@ with the twist channel, and draws through a `Monitor`.
 ```python
 from robot_utils.quest import QuestClient
 
-with QuestClient(host, port) as quest:     # background thread, reconnects with backoff
+with QuestClient(host) as quest:           # port 9391; background thread, reconnects with backoff
     frame = quest.latest()                 # newest QuestFrame or None
     quest.age(frame)                       # seconds since it arrived, on this machine's clock
     quest.stats                            # connected, frames, out_of_order, bad_lines, last_error
 ```
 
-On the headset, the app serves the stream on `127.0.0.1:9391`. Relay it to the network
-there, e.g. `nc -s <quest-ip> -L -p 9392 nc 127.0.0.1 9391`.
+The app serves the stream on every interface, port 9391 (quest_env 447e80f and later), so
+connect to the headset's address directly; no relay is needed.
 
 **Compared with the old `QuestStream` in rebot_ctl:**
 - `close()` and a context manager;

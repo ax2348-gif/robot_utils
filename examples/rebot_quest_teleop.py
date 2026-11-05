@@ -16,7 +16,7 @@ command under gravity feed-forward while released. A bus read error skips the ti
 (IGNORE); three in a row stop the run. On Ctrl-C/e-stop the loop stops commanding and the
 motors' 100 ms CAN watchdog disables them; stop() then disconnects.
 
-    python examples/rebot_quest_teleop.py [hardware_yaml] --host 100.72.77.83 --port 9392
+    python examples/rebot_quest_teleop.py [hardware_yaml] --host 100.72.77.83
 """
 import argparse
 import logging
@@ -32,7 +32,7 @@ from reBotArm_control_py.kinematics import (compute_fk, get_arm_joint_count,
                                             pad_q_for_model)
 from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
 
-from robot_utils.quest import QuestClient
+from robot_utils.quest import DEFAULT_PORT, QuestClient
 from robot_utils.teleop import FaultAction, Pose, PoseClutch, TeleopApp, TeleopRunner
 
 TCP_OFFSET = pin.SE3(np.eye(3), np.array([-0.15, 0.0, 0.0]))   # tool point on end_link
@@ -129,7 +129,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("hardware_yaml", nargs="?", default=None)
     parser.add_argument("--host", default="100.72.77.83")
-    parser.add_argument("--port", type=int, default=9392)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

@@ -19,7 +19,7 @@ The steps only compute; drawing and the status line run on a ``Monitor`` thread 
 Frames (red X / green Y / blue Z): base, end_link (small), ee = TCP; while engaged also
 anchor, target and a yellow anchor->target line. The target ball is green while engaged.
 
-    python examples/rebot_quest_teleop_meshcat.py --host 100.72.77.83 --port 9392 [--hand right]
+    python examples/rebot_quest_teleop_meshcat.py --host 100.72.77.83 [--hand right]
 
 Open the MeshCat URL it prints. Ctrl-C to quit.
 """
@@ -39,7 +39,7 @@ from reBotArm_control_py.kinematics import (compute_fk, get_arm_joint_count,
 from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
 from reBotArm_control_py.kinematics.robot_model import _resolve_urdf
 
-from robot_utils.quest import QuestClient
+from robot_utils.quest import DEFAULT_PORT, QuestClient
 from robot_utils.teleop import Monitor, Pose, PoseClutch, TeleopApp, TeleopRunner
 
 TCP_OFFSET = pin.SE3(np.eye(3), np.array([-0.15, 0.0, 0.0]))   # tool point on end_link
@@ -207,7 +207,7 @@ class SimArmTeleop(TeleopApp):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="100.72.77.83")
-    parser.add_argument("--port", type=int, default=9392)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     parser.add_argument("--urdf", default=None, help="URDF (default: the hardware config's)")
     parser.add_argument("--no-drive", dest="drive", action="store_false", help="ignore the twist (fixed base)")

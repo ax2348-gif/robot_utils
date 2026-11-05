@@ -27,6 +27,7 @@ from .messages import ProtocolError, QuestFrame, parse_frame
 
 log = logging.getLogger(__name__)
 
+DEFAULT_PORT = 9391          # the Quest app's controller stream, on all interfaces
 MAX_LINE_BYTES = 1 << 20
 
 
@@ -46,7 +47,7 @@ class QuestClient:
     Use as a context manager, or call ``start()`` and ``close()``. ``clock`` exists for tests.
     """
 
-    def __init__(self, host: str, port: int, *, connect_timeout_s: float = 2.0,
+    def __init__(self, host: str, port: int = DEFAULT_PORT, *, connect_timeout_s: float = 2.0,
                  read_timeout_s: float = 0.5, backoff_s: tuple[float, float] = (0.2, 2.0),
                  clock: Callable[[], float] = time.monotonic):
         self.address = (host, port)
