@@ -31,9 +31,9 @@ With the venv active, `rebot_ctl` provides (details: `<tool> --help`, `rebot_ctl
 - `rebot_vis` — all joints slack (MIT, zero gains), live pose in MeshCat reachable from other
   devices on the network.
 
-On the robot, pass the arm's serial port with `--channel` (the shipped Damiao configs name a
-macOS device path), e.g. `rebot_setup --channel /dev/serial/by-id/usb-HDSC_CDC_Device_00000000050C-if00`
-(the stable name of the arm's bridge; `/dev/ttyACM*` numbering can change between boots).
+The Damiao configs find the arm's serial bridge by its stable name
+(`serial_by_id: usb-HDSC_CDC_Device_00000000050C-if00`): `/dev/serial/by-id/...` on the robot,
+matched by USB serial number on macOS. No `--channel` needed; it remains available to override.
 
 ## The environment
 
