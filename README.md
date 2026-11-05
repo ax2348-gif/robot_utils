@@ -29,7 +29,7 @@ With the venv active, `rebot_ctl` provides (details: `<tool> --help`, `rebot_ctl
   joint limits); `--store-watchdog` writes the watchdog to motor flash.
 - `rebot_zero` — set the current pose as every joint's zero (motors stay disabled).
 - `rebot_vis` — all joints slack (MIT, zero gains), live pose in MeshCat reachable from other
-  devices on the network.
+  devices on the network; `-g` adds gravity compensation (still zero stiffness).
 
 The Damiao configs find the arm's serial bridge by its stable name
 (`serial_by_id: usb-HDSC_CDC_Device_00000000050C-if00`): `/dev/serial/by-id/...` on the robot,
