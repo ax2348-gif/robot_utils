@@ -14,6 +14,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$ROOT/.venv"
 PYTHON="${PYTHON:-python3.12}"
 FORK_REPO="ax2348-gif/motorbridge_2ec"
+export PIP_NO_CACHE_DIR=1  # don't keep a second copy of every wheel in ~/.cache/pip
+
+# On Linux aarch64 (the robot), constraints.txt pins CPU-only torch, served from PyTorch's
+# index. --extra-index-url (not --index-url): that index also hosts stale copies of common
+# packages, so pip must still see PyPI.
+EXTRA_INDEX=()
+if [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]]; then
+  EXTRA_INDEX=(--extra-index-url https://download.pytorch.org/whl/cpu)
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,7 +59,8 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   "$PYTHON" -m venv "$VENV"
 fi
 PY="$VENV/bin/python"
-"$PY" -m pip install --quiet --upgrade pip packaging
+"$PY" -m pip install --quiet --upgrade pip
+"$PY" -m pip install --quiet packaging  # for wheel selection; no --upgrade (LeRobot bounds it)
 
 step "motorbridge (motorbridge_2ec fork wheel)"
 MB_VERSION="$(sed -nE 's/^motorbridge==(.*)$/\1/p' "$ROOT/constraints.txt")"
@@ -86,7 +96,7 @@ echo "$WHEEL"
 "$PY" -m pip install --quiet -c "$ROOT/constraints.txt" "$WHEEL"
 
 step "rev_ctl, rebot_ctl (editable), robot_utils and LeRobot"
-"$PY" -m pip install --quiet -c "$ROOT/constraints.txt" \
+"$PY" -m pip install --quiet -c "$ROOT/constraints.txt" ${EXTRA_INDEX[@]+"${EXTRA_INDEX[@]}"} \
   -e "$ROOT/rev_ctl[slcan]" \
   -e "$ROOT/rebot_ctl" \
   -e "$ROOT"
