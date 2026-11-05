@@ -16,6 +16,7 @@ dependencies = [
     "rebotarm-control-py",     # rebot_ctl
     "motorbridge>=0.5.6",      # motorbridge_2ec (fork with non-blocking encoder reads)
     "lerobot",                 # no extras by default
+    "numpy",                   # robot_utils.quest / teleop
 ]
 
 [tool.setuptools.packages.find]

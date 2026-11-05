@@ -40,7 +40,8 @@ matched by USB serial number on macOS. No `--channel` needed; it remains availab
 **One env, Python ≥ 3.12.** LeRobot ≥ 0.5 requires Python 3.12 and is not capped. The robot
 (Ubuntu 24.04, aarch64) ships Python 3.12.3, so `install.sh` uses a plain `venv`.
 
-**`robot_utils` is itself a package** (`src/robot_utils`, empty for now). Its dependencies are
+**`robot_utils` is itself a package** (`src/robot_utils`: the Quest client and the generic
+teleop framework, see [docs/teleop.md](docs/teleop.md)). Its dependencies are
 the three submodule packages and `lerobot` (no extras), so installing it defines the
 environment, and it is the home for shared robot code later.
 
