@@ -1,0 +1,7 @@
+# Applied to every install in install.sh.
+#
+# motorbridge must be the motorbridge_2ec fork (non-blocking encoder reads). Its version
+# exists only on the fork's GitHub releases, never on PyPI, so pinning it exactly means no
+# dependency can ever replace it with PyPI's motorbridge 0.5.6. Bump together with
+# motorbridge_2ec/bindings/python/src/motorbridge/_version.py and the fork's 2ec-<version> tag.
+motorbridge==0.5.6+2ec.1

@@ -5,7 +5,7 @@
 [submodule "rebot_ctl"]
 	path = rebot_ctl
 	url = https://github.com/ax2348-gif/rebot_ctl.git
-	branch = main
+	branch = robot_utils
 [submodule "motorbridge_2ec"]
 	path = motorbridge_2ec
 	url = https://github.com/ax2348-gif/motorbridge_2ec.git
