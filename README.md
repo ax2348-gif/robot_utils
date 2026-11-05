@@ -18,6 +18,17 @@ git clone --recursive https://github.com/ax2348-gif/robot_utils.git
 **One env, Python 3.12.** LeRobot ≥ 0.5 requires Python ≥ 3.12 and is not capped; the robot
 (Ubuntu 24.04, aarch64) ships Python 3.12.3, so a plain `venv` on the system Python is enough.
 
+**`robot_utils` is itself a package** (`src/robot_utils`, empty for now) whose dependencies are
+the three submodule packages and `lerobot` (no extras). Installing it therefore defines the
+environment, and it is the home for shared robot code later. Install order:
+
+1. the `motorbridge_2ec` wheel (prebuilt, from a fork release);
+2. `rev_ctl` and `rebot_ctl`, editable from the submodules;
+3. `robot_utils` itself, editable, which pulls in `lerobot` from PyPI;
+
+all under `constraints.txt`, which pins `motorbridge` to the fork's wheel so no step can swap in
+PyPI's copy.
+
 **Nothing compiles on the robot.** Every dependency installs from a prebuilt aarch64 wheel:
 
 | Package | Source on the robot | Notes |
@@ -44,12 +55,9 @@ motorbridge survives the LeRobot install, and both test suites pass (`rebot_ctl`
    builds manylinux aarch64/x86_64 and macOS wheels with cibuildwheel, but targets PyPI and has
    never run on the fork. Point it at GitHub Releases, and give the fork a distinct version
    (e.g. `0.5.6+2ec.1`) so it can never be confused with PyPI's `0.5.6`.
-3. **`robot_utils`: add the installer.** An `install.sh` that creates the venv, installs the
-   fork wheel first, then the editable submodules, then LeRobot, using a constraints file that
-   pins `motorbridge` to the fork's wheel URL so no later install can swap in PyPI's copy;
-   followed by a smoke check (`pip check`, imports, the fork's API).
+3. **`robot_utils`: add `install.sh` and `constraints.txt`.** The script creates the venv and
+   runs the install order above, then a smoke check (`pip check`, imports, the fork's API).
+   The package skeleton is already here; until (1) lands, `pip check` reports only
+   `rebotarm-control-py` missing.
 
-### Open questions
-
-- Which LeRobot extras the robot needs (e.g. camera or dataset tooling).
-- Whether the robot should also keep the existing `~/sparkcan` copy or switch to this checkout.
+The robot's existing `~/sparkcan` copy is left as it is for now.

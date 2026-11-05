@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-utils"
+version = "0.1.0"
+description = "One environment for the robot: REV SPARK, reBot arm and motorbridge control, plus LeRobot"
+readme = "README.md"
+requires-python = ">=3.12"  # LeRobot >= 0.5 needs 3.12
+# The first three are the submodules. install.sh puts them in place before this package
+# (motorbridge as the fork's prebuilt wheel, the others editable), so pip finds them already
+# satisfied; constraints.txt stops anything from replacing the fork's motorbridge with PyPI's.
+dependencies = [
+    "sparkcan",                # rev_ctl
+    "rebotarm-control-py",     # rebot_ctl
+    "motorbridge>=0.5.6",      # motorbridge_2ec (fork with non-blocking encoder reads)
+    "lerobot",                 # no extras by default
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
