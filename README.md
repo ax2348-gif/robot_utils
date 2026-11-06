@@ -35,6 +35,10 @@ The Damiao configs find the arm's serial bridge by its stable name
 (`serial_by_id: usb-HDSC_CDC_Device_00000000050C-if00`): `/dev/serial/by-id/...` on the robot,
 matched by USB serial number on macOS. No `--channel` needed; it remains available to override.
 
+The Orbbec camera has a live browser viewer: `python examples/orbbec_web_viewer.py`, then open
+`http://<robot>:8080/` from any machine on the network (color, depth, IR, per-sensor options;
+design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md)).
+
 ## The environment
 
 **One env, Python ≥ 3.12.** LeRobot ≥ 0.5 requires Python 3.12 and is not capped. The robot
