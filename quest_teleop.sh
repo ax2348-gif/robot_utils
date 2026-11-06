@@ -8,6 +8,14 @@
 # Each process keeps its own Python interpreter, so the arm loop cannot delay
 # the swerve heartbeat.
 
+# Sourced (". quest_teleop.sh")? Run as a child instead: the trap, set -m, cd and exit
+# below would otherwise apply to the login shell, and exiting would close the terminal
+# (the tmux pane or the ssh session).
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    bash "${BASH_SOURCE[0]}" "$@"
+    return
+fi
+
 cd "$(dirname "$0")" || exit 1
 PY=.venv/bin/python
 CAN=${CAN:-slcan:/dev/ttyACM0}

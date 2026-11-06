@@ -27,7 +27,11 @@ With the venv active, `rebot_ctl` provides (details: `<tool> --help`, `rebot_ctl
 
 - `rebot_setup` — read-only check of the arm's one-time setup (motor CAN watchdog, feedback,
   joint limits); `--store-watchdog` writes the watchdog to motor flash.
-- `rebot_zero` — set the current pose as every joint's zero (motors stay disabled).
+- `rebot_zero` — set the current pose as every joint's zero (motors stay disabled). This
+  zeroes the gripper too, wherever it is.
+- `rebot_zero_gripper` — drive the gripper closed against its stop (MIT velocity loop, gains
+  hard-coded in `rebot_ctl/reBotArm_control_py/cli/zero_gripper.py`); `--zero` then sets that
+  closed position as its zero.
 - `rebot_vis` — all joints slack (MIT, zero gains), live pose in MeshCat reachable from other
   devices on the network; `-g` adds gravity compensation (still zero stiffness).
 
