@@ -52,7 +52,14 @@ environment, and it is the home for shared robot code later.
    interpreter and platform);
 2. installs `rev_ctl[slcan]` and `rebot_ctl` editable from the submodules (pure Python);
 3. installs `robot_utils` editable, which pulls `lerobot`, `torch`, `pin`, … from PyPI wheels;
-4. runs `pip check` and an import check that the fork's motorbridge is the one installed.
+4. installs the Orbbec camera SDK (`pyorbbecsdk2`, imported as `pyorbbecsdk`) with `--no-deps`:
+   it needs only numpy, and its declared dependencies serve its examples (`pynput` → `evdev`
+   would compile; `opencv-python` would overwrite lerobot's `opencv-python-headless`);
+5. runs `pip check` (ignoring the SDK's skipped example dependencies) and an import check that
+   the fork's motorbridge is the one installed.
+
+On Linux the camera also needs Orbbec's udev rule, once per machine; `install.sh` prints the
+`sudo` commands if it is missing.
 
 Every step runs under `constraints.txt`, which pins `motorbridge==0.5.6+2ec.1`. That version
 exists only on the fork's releases, so nothing can replace it with PyPI's `motorbridge 0.5.6`,

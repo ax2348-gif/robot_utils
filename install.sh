@@ -101,17 +101,29 @@ step "rev_ctl, rebot_ctl (editable), robot_utils and LeRobot"
   -e "$ROOT/rebot_ctl" \
   -e "$ROOT"
 
+step "pyorbbecsdk2 (Orbbec camera SDK, without its example dependencies)"
+# --no-deps: see constraints.txt. Its only runtime dependency, numpy, is already installed.
+"$PY" -m pip install --quiet --no-deps -c "$ROOT/constraints.txt" pyorbbecsdk2
+if [[ "$(uname -s)" == Linux && ! -e /etc/udev/rules.d/99-obsensor-libusb.rules ]]; then
+  echo "  Orbbec udev rule not installed; the camera will fail to open as a normal user. Run once:"
+  echo "    sudo cp $("$PY" -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("pyorbbecsdk").origin))')/shared/99-obsensor-libusb.rules /etc/udev/rules.d/"
+  echo "    sudo udevadm control --reload-rules && sudo udevadm trigger"
+fi
+
 step "Check"
-"$PY" -m pip check
+# pyorbbecsdk2's example dependencies are skipped on purpose; anything else is a real problem.
+problems="$("$PY" -m pip check 2>&1 | grep -v '^pyorbbecsdk2 [0-9.]* requires ' | grep -v '^No broken requirements' || true)"
+[[ -z "$problems" ]] || { echo "$problems" >&2; exit 1; }
+echo "  pip check: OK"
 "$PY" - <<'PYEOF'
 import importlib.metadata as md
 
-import lerobot, motorbridge, reBotArm_control_py, robot_utils, sparkcan, torch  # noqa: F401
+import lerobot, motorbridge, pyorbbecsdk, reBotArm_control_py, robot_utils, sparkcan, torch  # noqa: F401
 from motorbridge.core import Motor
 
 assert "+2ec" in motorbridge.__version__, f"motorbridge {motorbridge.__version__} is not the 2ec fork"
 assert hasattr(Motor, "get_cached_register_f32"), "motorbridge lacks the fork's non-blocking reads"
-for name in ("robot-utils", "sparkcan", "rebotarm-control-py", "motorbridge", "lerobot", "torch"):
+for name in ("robot-utils", "sparkcan", "rebotarm-control-py", "motorbridge", "lerobot", "torch", "pyorbbecsdk2"):
     print(f"  {name:20} {md.version(name)}")
 print(f"  motorbridge ABI      {motorbridge.abi_version()}")
 PYEOF
