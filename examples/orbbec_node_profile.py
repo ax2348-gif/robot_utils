@@ -64,6 +64,8 @@ CASES = [
     case("color+depth defaults jpeg q95", ONLY("color", "depth"), "color,depth", jpeg_quality=95),
     case("color+depth defaults jpeg 2 clients", ONLY("color", "depth"), "color,depth", clients=2),
     case("color+depth defaults raw 2 clients", ONLY("color", "depth"), "color,depth", "raw", clients=2),
+    case("color+depth defaults jpeg + IMU 200Hz", ONLY("color", "depth"), "color,depth",
+         imu={"enabled": True, "sample_rate": "200Hz"}),
     case("color+depth defaults frame_sync jpeg", ONLY("color", "depth"), "color,depth", frame_sync=True),
     case("color+depth aligned jpeg", ONLY("color", "depth"), "color,depth", align=True),
     case("color+depth aligned raw", ONLY("color", "depth"), "color,depth", "raw", align=True),
