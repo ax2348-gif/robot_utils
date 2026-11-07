@@ -216,3 +216,21 @@ def test_meta_toolkit_and_page_use_relative_urls(node_url):
     assert isinstance(st["state"], str) and "error" in st
     assert st["lease"]["held"] is False and st["estop"]["latched"] is False
     assert httpx.get(url + "/health").json()["ok"] is True
+
+
+def test_cross_origin_estop_and_preflight(node_url):
+    import httpx
+    url, node, _ = node_url
+    origin = {"Origin": "http://frontend.example:80"}
+    pre = httpx.options(url + "/estop", headers={**origin, "Access-Control-Request-Method": "POST",
+                                                  "Access-Control-Request-Headers": "content-type"})
+    assert pre.status_code == 200 and pre.headers["access-control-allow-origin"] in ("*", origin["Origin"])
+    r = httpx.post(url + "/estop", headers=origin)      # no body, no lease
+    assert r.status_code == 200 and r.json()["latched"] is True
+    assert r.headers["access-control-allow-origin"] in ("*", origin["Origin"])
+    for path in ("/meta", "/state", "/health"):
+        g = httpx.get(url + path, headers=origin)
+        assert g.headers["access-control-allow-origin"] in ("*", origin["Origin"])
+    t = time.monotonic()
+    httpx.get(url + "/state")
+    assert time.monotonic() - t < 0.2                    # the dashboard polls with a 0.9 s timeout
