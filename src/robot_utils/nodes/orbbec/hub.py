@@ -76,8 +76,11 @@ class Hub:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._frame_fut: Optional[asyncio.Future] = None
         self._state_fut: Optional[asyncio.Future] = None
-        self._imu_subs: set[ImuSubscriber] = set()
-        self.imu_recent: deque = deque(maxlen=imu_history)   # rows, for GET /imu/latest
+        # IMU channels: "raw" = every 1 kHz sample (protocol.IMU_FIELDS), "state" = filter output
+        # records (imu_filter.STATE_FIELDS)
+        self._imu_subs: dict[str, set[ImuSubscriber]] = {"raw": set(), "state": set()}
+        self.imu_recent: deque = deque(maxlen=imu_history)   # raw rows, for GET /imu/latest
+        self.imu_state_recent: deque = deque(maxlen=imu_history // 10)   # state rows
         self.clients = 0
 
     def attach(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -108,10 +111,10 @@ class Hub:
                     del self._latest[n]
         self._call(self._wake_frames)
 
-    def publish_imu(self, rows: np.ndarray) -> None:
+    def publish_imu(self, rows: np.ndarray, channel: str = "raw") -> None:
         with self._lock:
-            self.imu_recent.extend(rows)
-        self._call(self._dispatch_imu, rows)
+            (self.imu_recent if channel == "raw" else self.imu_state_recent).extend(rows)
+        self._call(self._dispatch_imu, rows, channel)
 
     def state_changed(self) -> None:
         self._call(self._wake_state)
@@ -124,10 +127,11 @@ class Hub:
                 return dict(self._latest)
             return {n: self._latest[n] for n in names if n in self._latest}
 
-    def recent_imu(self, n: int) -> list:
+    def recent_imu(self, n: int, channel: str = "raw") -> list:
         with self._lock:
-            k = len(self.imu_recent)
-            return [self.imu_recent[i] for i in range(max(0, k - n), k)]
+            d = self.imu_recent if channel == "raw" else self.imu_state_recent
+            k = len(d)
+            return [d[i] for i in range(max(0, k - n), k)]
 
     def frames_changed(self) -> asyncio.Future:
         """Future resolved at the next publish. Take it *before* reading latest()."""
@@ -150,16 +154,17 @@ class Hub:
         if f is not None and not f.done():
             f.set_result(None)
 
-    def subscribe_imu(self, max_samples: int) -> ImuSubscriber:
+    def subscribe_imu(self, max_samples: int, channel: str = "state") -> ImuSubscriber:
         sub = ImuSubscriber(max_samples)
-        self._imu_subs.add(sub)
+        sub.channel = channel
+        self._imu_subs[channel].add(sub)
         return sub
 
     def unsubscribe_imu(self, sub: ImuSubscriber) -> None:
-        self._imu_subs.discard(sub)
+        self._imu_subs[sub.channel].discard(sub)
 
-    def _dispatch_imu(self, rows: np.ndarray) -> None:
-        for sub in self._imu_subs:
+    def _dispatch_imu(self, rows: np.ndarray, channel: str = "raw") -> None:
+        for sub in self._imu_subs[channel]:
             sub.batches.append(rows)
             sub.n += len(rows)
             while sub.n > sub.max_samples and len(sub.batches) > 1:

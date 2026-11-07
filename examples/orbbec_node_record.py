@@ -46,16 +46,26 @@ def summarize(out_dir, export=False):
         lat = np.array([r[4] - r[3] for r in rows if r[0] == s and r[4] is not None])
         print(f"{s:9s} {len(tc):5d} frames  {((len(tc) - 1) / (tc[-1] - tc[0])) if len(tc) > 1 else 0:5.1f} fps"
               f"  capture->recv median {np.median(lat) * 1e3 if lat.size else float('nan'):.1f} ms")
+    raw_path = os.path.join(out_dir, "imu_raw.rec")
+    if os.path.exists(raw_path):
+        batches = [d for _, d in read_recording(raw_path)]
+        if batches:
+            s = np.concatenate(batches).view(np.recarray)
+            span = s.t_capture[-1] - s.t_capture[0]
+            print(f"imu raw   {len(s):5d} samples {len(s) / span if span else 0:6.1f} Hz  seq gaps "
+                  f"{int(np.sum(np.diff(s.seq) - 1))}  mean accel {s.ax.mean():.2f} {s.ay.mean():.2f} {s.az.mean():.2f} m/s^2")
+            if export:
+                np.save(os.path.join(exp, "imu_raw.npy"), s)
     imu_path = os.path.join(out_dir, "imu.rec")
     if os.path.exists(imu_path):
         batches = [d for _, d in read_recording(imu_path)]
         if batches:
             s = np.concatenate(batches).view(np.recarray)
-            span = s.t_capture[-1] - s.t_capture[0]
-            print(f"imu       {len(s):5d} samples {len(s) / span if span else 0:6.1f} Hz  seq gaps "
-                  f"{int(np.sum(np.diff(s.seq) - 1))}  mean accel {s.ax.mean():.2f} {s.ay.mean():.2f} {s.az.mean():.2f} m/s^2")
+            span = s.t_end[-1] - s.t_start[0]
+            print(f"imu state {len(s):5d} records {len(s) / span if span else 0:6.1f} Hz  last orientation "
+                  f"(w,x,y,z) {s.qw[-1]:.4f} {s.qx[-1]:.4f} {s.qy[-1]:.4f} {s.qz[-1]:.4f}")
             if export:
-                np.save(os.path.join(exp, "imu.npy"), s)
+                np.save(os.path.join(exp, "imu_state.npy"), s)
 
 
 def main():

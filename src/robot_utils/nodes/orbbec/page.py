@@ -63,7 +63,9 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 <section class="box"><h2>IMU</h2>
 <label class="row"><span class="k">Enabled</span><input type="checkbox" id="imu_enabled"></label>
 <label class="row"><span class="k">Sample rate</span><select id="imu_rate"></select></label>
-<div id="imu" class="mono">-</div></section>
+<div id="imu" class="mono">-</div>
+<div class="row"><button id="imu_cal" title="Keep the camera still">Calibrate (keep still)</button>
+<button id="imu_reset" title="Roll/pitch from gravity, yaw 0">Reset orientation</button></div></section>
 <section class="box"><h2>Device controls <a href="#" id="propsref" class="small" style="float:right">refresh</a></h2><div id="props" class="small">-</div></section>
 <section class="box"><h2>Log</h2><div id="log" class="small"></div></section>
 </aside>
@@ -111,6 +113,9 @@ function buildControls(){
   for(const id of ["pct_lo","pct_hi","min_mm","max_mm","jpeg_quality"])$("#"+id).onchange=e=>post({display:{[id]:Number(e.target.value)}});
   $("#imu_enabled").onchange=e=>post({imu:{enabled:e.target.checked}});
   ir.onchange=e=>post({imu:{sample_rate:e.target.value}});
+  $("#imu_cal").onclick=async()=>{flash("calibrating, keep the camera still...");try{const c=await api("/imu/calibrate",{});
+    flash("calibrated: bias "+c.gyro_bias.map(v=>v.toFixed(5)).join(" ")+" rad/s, |g| "+c.g_ref.toFixed(3))}catch(e){flash(e.message,true)}};
+  $("#imu_reset").onclick=async()=>{try{await api("/imu/reset",{});flash("orientation reset")}catch(e){flash(e.message,true)}};
 }
 function grad(name){const c=CAT.colormaps[name]||[];return "linear-gradient(to right,"+c.join(",")+")"}
 function syncControls(){
@@ -134,7 +139,8 @@ function renderStatus(){
   for(const n of ORDER){const f=$("#fps_"+n),x=S.streams[n];if(f)f.textContent=x.fps?x.fps.toFixed(1)+" fps":""}
   const m=S.imu,l=m.last;
   $("#imu").textContent=!m.available?"no IMU":!m.running?(m.error||"off"):
-    `${m.rate_hz.toFixed(0)} Hz  gaps ${m.gaps}\naccel m/s²  ${l?l.accel.map(v=>v.toFixed(2).padStart(6)).join(" "):"-"}\ngyro rad/s  ${l?l.gyro.map(v=>v.toFixed(3).padStart(6)).join(" "):"-"}\ntemp ${l?l.temperature.toFixed(1):"-"} °C`;
+    `${m.rate_hz.toFixed(0)} Hz  gaps ${m.gaps}\naccel m/s²  ${l?l.accel.map(v=>v.toFixed(2).padStart(6)).join(" "):"-"}\ngyro rad/s  ${l?l.gyro.map(v=>v.toFixed(3).padStart(6)).join(" "):"-"}\ntemp ${l?l.temperature.toFixed(1):"-"} °C`
+    +(m.filter?`\nroll/pitch/yaw ° ${m.filter.rpy_deg.map(v=>v.toFixed(1).padStart(7)).join(" ")}\nbias rad/s ${m.filter.gyro_bias.map(v=>v.toFixed(5).padStart(9)).join(" ")}\n${m.filter.initializing?"initializing":m.filter.calibrating?"calibrating":m.filter.calibrated?"calibrated ("+m.filter.calibration.source+")":"NOT calibrated"}${m.filter.still?", still":""}`:"");
   $("#imu").style.whiteSpace="pre";
 }
 function makeTile(n){

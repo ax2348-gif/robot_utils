@@ -22,6 +22,9 @@ def main(argv=None):
     p.add_argument("--streams", default="color,depth", help="video streams on at start: " + ",".join(STREAM_NAMES))
     p.add_argument("--no-imu", action="store_true", help="start with the IMU off")
     p.add_argument("--fake", action="store_true", help="synthetic camera (no SDK / hardware needed)")
+    p.add_argument("--imu-calibration-file", default=None,
+                   help="where IMU calibrations are kept, per camera serial (default "
+                        "~/.config/robot_utils/orbbec_imu.json; none with --fake); 'none' disables")
     p.add_argument("--encode-workers", type=int, default=3, help="threads for JPEG/zlib encoding")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
@@ -44,7 +47,11 @@ def main(argv=None):
         backend = SdkBackend()
     settings = Settings(streams={n: n in streams for n in STREAM_NAMES}, imu=ImuSettings(enabled=not a.no_imu))
     hub = Hub()
-    app = create_app(Owner(backend, hub, settings), hub, encode_workers=a.encode_workers)
+    from .owner import IMU_CALIBRATION_FILE
+    cal_file = a.imu_calibration_file or (None if a.fake else IMU_CALIBRATION_FILE)
+    if cal_file and cal_file.lower() == "none":
+        cal_file = None
+    app = create_app(Owner(backend, hub, settings, calibration_file=cal_file), hub, encode_workers=a.encode_workers)
     hosts = lan_addresses() if a.host in ("0.0.0.0", "") else [a.host]
     for h in hosts:
         print(f"Orbbec node: http://{h}:{a.port}/   (API docs: http://{h}:{a.port}/docs)", flush=True)

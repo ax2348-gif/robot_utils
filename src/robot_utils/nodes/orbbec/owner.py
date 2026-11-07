@@ -21,8 +21,12 @@ import numpy as np
 
 from .encode import colormap_stops
 from .hub import Frame, Hub
-from .models import (STREAM_LABELS, STREAM_NAMES, Catalog, DeviceInfo, Settings, SettingsError,
+from .imu_filter import AttitudeFilter, Calibration, FilterConfig
+from .models import (STREAM_LABELS, STREAM_NAMES, Catalog, DeviceInfo, ImuSettings, Settings, SettingsError,
                      SettingsPatch, apply_patch, describe, fix_settings)
+
+IMU_FLUSH_MS = 2.0   # the IMU thread hands raw samples over at least this often (SDK bursts are ~10 ms)
+IMU_CALIBRATION_FILE = os.path.expanduser("~/.config/robot_utils/orbbec_imu.json")
 
 log = logging.getLogger("orbbec_node")
 
@@ -60,7 +64,8 @@ class _Rate:
 
 
 class Owner:
-    def __init__(self, backend, hub: Hub, settings: Optional[Settings] = None, startup_s: float = STARTUP_S):
+    def __init__(self, backend, hub: Hub, settings: Optional[Settings] = None, startup_s: float = STARTUP_S,
+                 calibration_file: Optional[str] = IMU_CALIBRATION_FILE):
         self.backend = backend
         self.startup_s = startup_s
         self.hub = hub
@@ -86,6 +91,14 @@ class Owner:
         self.imu = {"running": False, "samples": 0, "gaps": 0, "error": None, "last": None}
         self.imu_seq = 0
         self.imu_rate = _Rate()
+        # Attitude filter: created by _start_imu, fed and controlled only in the IMU thread.
+        # Other threads leave requests in these slots; _imu_sink applies them.
+        self.filter: Optional[AttitudeFilter] = None
+        self._filter_cfg: Optional[FilterConfig] = None      # pending config change
+        self._filter_reset = False
+        self._calib_requests: list = []                       # (seconds, cf.Future)
+        self._calib_waiting: list = []
+        self.calibration_file = calibration_file     # None: don't load or save IMU calibrations
         self._cpu = (time.monotonic(), sum(os.times()[:2]), 0.0)
         self.thread = threading.Thread(target=self._run, name="orbbec-owner", daemon=True)
 
@@ -109,14 +122,15 @@ class Owner:
         return fut
 
     def request_settings(self, patch: SettingsPatch) -> cf.Future:
-        """Display-only patches (and IMU batch size) apply at once; anything that needs the
-        device goes to the owner thread. Raises SettingsError for invalid patches."""
+        """Display and IMU-filter patches apply at once; anything that needs the device goes to
+        the owner thread. Raises SettingsError for invalid patches."""
         p = patch.model_dump(exclude_unset=True)
         imu = p.get("imu") or {}
-        if set(p) <= {"display", "imu"} and set(imu) <= {"batch_ms"}:
+        if set(p) <= {"display", "imu"} and set(imu) <= {"filter"}:
             with self.lock:
                 new, _, _ = apply_patch(self.settings, patch, self.catalog)
                 self._set_settings(new)
+                self._filter_cfg = _filter_config(new.imu)
                 res = self._result(False)
             fut: cf.Future = cf.Future()
             fut.set_result(res)
@@ -181,6 +195,8 @@ class Owner:
                          "running": self.imu["running"], "rate_hz": round(self.imu_rate.rate(now), 1),
                          "samples": self.imu["samples"], "gaps": self.imu["gaps"], "last": self.imu["last"],
                          "error": self.imu["error"]}
+            f = self.filter
+            st["imu"]["filter"] = f.status() if f is not None and self.imu["running"] else None
         st.update(clients=self.hub.clients, cpu=self.cpu(), server_mono=now, server_wall=time.time())
         return st
 
@@ -284,6 +300,91 @@ class Owner:
                 self.hub.state_changed()
         self.hub.publish_frames(frames)
 
+    # -- IMU attitude filter (requests from other threads) ------------------------------------
+
+    def request_imu_calibration(self, seconds: Optional[float] = None) -> cf.Future:
+        """Calibrate the gyro bias / gravity from the next ``seconds`` of still data. The future
+        resolves with the new calibration (dict) or a SettingsError if the IMU moved."""
+        fut: cf.Future = cf.Future()
+        with self.lock:
+            if not self.imu["running"] or self.filter is None:
+                fut.set_exception(DeviceError("the IMU is not running"))
+                return fut
+            self._calib_requests.append((seconds, fut))
+        return fut
+
+    def request_imu_reset(self) -> None:
+        """Restart the orientation from gravity (yaw 0), keeping the calibration."""
+        self._filter_reset = True
+
+    def _load_calibration(self) -> Optional[Calibration]:
+        import json
+        if not self.calibration_file:
+            return None
+        try:
+            with open(self.calibration_file) as fh:
+                d = json.load(fh)
+            serial = self.info.serial if self.info else None
+            return Calibration.from_json(d[serial], "stored") if serial in d else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _save_calibration(self, cal: Calibration) -> None:
+        import json
+        if not self.calibration_file:
+            return
+        serial = self.info.serial if self.info else "unknown"
+        try:
+            try:
+                with open(self.calibration_file) as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                d = {}
+            d[serial] = cal.to_json()
+            os.makedirs(os.path.dirname(self.calibration_file), exist_ok=True)
+            tmp = self.calibration_file + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(d, fh, indent=1)
+            os.replace(tmp, self.calibration_file)
+        except OSError as e:
+            log.warning("could not save IMU calibration: %s", e)
+
+    def _on_calibration(self, cal: Calibration):
+        self._save_calibration(cal)
+        self._event(f"IMU calibrated ({cal.source}): gyro bias "
+                    f"{[round(b, 5) for b in cal.gyro_bias]} rad/s, |g| {cal.g_ref:.3f} m/s²")
+        for fut in self._calib_waiting:
+            if not fut.done():
+                fut.set_result(cal.to_json())
+        self._calib_waiting = []
+
+    def _on_calibration_failed(self, msg: str):
+        self._event(f"IMU calibration refused: {msg}", error=True)
+        for fut in self._calib_waiting:
+            if not fut.done():
+                fut.set_exception(SettingsError(msg))
+        self._calib_waiting = []
+
+    def _filter_step(self, rows: np.ndarray):
+        """IMU thread: apply pending requests, run the filter, publish its records."""
+        f = self.filter
+        if f is None:
+            return
+        cfg, self._filter_cfg = self._filter_cfg, None
+        if cfg is not None:
+            f.configure(cfg)
+        if self._filter_reset:
+            self._filter_reset = False
+            f.reset(recalibrate=False)
+        if self._calib_requests:
+            with self.lock:
+                reqs, self._calib_requests = self._calib_requests, []
+            f.request_calibration(reqs[-1][0])
+            self._calib_waiting.extend(fut for _, fut in reqs)
+        out = f.feed(rows)
+        if out:
+            self.hub.publish_imu(np.array(out, dtype=np.float64), "state")
+
     def _imu_sink(self, rows: np.ndarray, gaps: int = 0):
         """Called by the IMU thread with (n, len(IMU_FIELDS)) rows; column 0 (seq) is set here."""
         n = len(rows)
@@ -297,7 +398,14 @@ class Owner:
             r = rows[-1]
             self.imu["last"] = {"t_capture": float(r[1]), "accel": [round(float(x), 4) for x in r[4:7]],
                                 "gyro": [round(float(x), 5) for x in r[7:10]], "temperature": round(float(r[10]), 2)}
-        self.hub.publish_imu(rows)
+        self.hub.publish_imu(rows, "raw")
+        try:
+            self._filter_step(rows)
+        except Exception as e:     # a filter bug must not take the raw IMU stream down
+            log.exception("IMU filter failed")
+            with self.lock:
+                self.imu["error"] = f"filter: {e}"
+            self.filter = None
 
     def _imu_error(self, msg):
         with self.lock:
@@ -313,8 +421,13 @@ class Owner:
         if not (s.imu.enabled and self.catalog.imu.available):
             return
         try:
-            self.backend.imu_start(s.imu, self._imu_sink, self._imu_error,
-                                   lambda: self.settings.imu.batch_ms)
+            from .sdk_backend import rate_hz
+            cfg = _filter_config(s.imu, rate_hz(s.imu.sample_rate))
+            f = AttitudeFilter(cfg, self._load_calibration())
+            f.on_calibration = self._on_calibration
+            f.on_calibration_failed = self._on_calibration_failed
+            self.filter, self._filter_cfg, self._filter_reset = f, None, False
+            self.backend.imu_start(s.imu, self._imu_sink, self._imu_error, lambda: IMU_FLUSH_MS)
             with self.lock:
                 self.imu["running"] = True
             self._event(f"IMU running at {s.imu.sample_rate} (accel {s.imu.accel_range}, gyro {s.imu.gyro_range})")
@@ -408,3 +521,15 @@ class Owner:
                 return
             if fut.set_running_or_notify_cancel():
                 fut.set_exception(DeviceError(msg))
+
+
+def _filter_config(imu: ImuSettings, nominal_hz: Optional[float] = None) -> FilterConfig:
+    f = imu.filter
+    kw = dict(output_rate_hz=f.output_rate_hz, kp=f.kp, ki=f.ki, accel_gate=f.accel_gate, zaru=f.zaru,
+              zaru_tau_s=f.zaru_tau_s, calib_s=f.calib_s)
+    if nominal_hz is None and imu.sample_rate:
+        from .sdk_backend import rate_hz
+        nominal_hz = rate_hz(imu.sample_rate)
+    if nominal_hz:
+        kw["nominal_hz"] = nominal_hz
+    return FilterConfig(**kw)
