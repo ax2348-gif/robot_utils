@@ -21,6 +21,25 @@ python -m robot_utils.frontend --config ~/nodes.yaml
 Port 80 as a normal user needs a one-time kernel setting (below). Without it the frontend
 exits with a message naming the script; `--port 8080` works meanwhile.
 
+### As a service (the robot)
+
+`./install.sh` installs and starts the landing page as a **systemd user service**,
+`robot-frontend.service` (unit in `~/.config/systemd/user/`, like the robot's
+`ups-dashboard.service`): it runs `.venv/bin/python -m robot_utils.frontend` from the checkout,
+restarts on failure, and starts at boot when lingering is enabled for the user
+(`loginctl show-user $USER -p Linger`; `install.sh` prints `sudo loginctl enable-linger $USER`
+if not). Re-running `install.sh` rewrites and restarts it, so it always serves this
+checkout's code; `./install.sh --no-service` leaves it alone.
+
+```bash
+systemctl --user status robot-frontend        # running?
+journalctl --user -u robot-frontend -f        # logs
+systemctl --user restart robot-frontend       # after editing nodes.yaml or the code
+systemctl --user disable --now robot-frontend # stop it and don't start at boot
+```
+
+To run it by hand instead (e.g. with `--config`), stop the service first: both want port 80.
+
 ## Node registry (`nodes.yaml`)
 
 The default is packaged at `src/robot_utils/frontend/nodes.yaml`; `--config PATH` replaces it.

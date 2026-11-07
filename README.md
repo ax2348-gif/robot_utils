@@ -63,7 +63,9 @@ page. The shared conventions (ports, record framing, time sync, `/meta`, lease, 
   `python -m robot_utils.nodes.swerve.setup_sparks slcan:/dev/ttyACM0` shows the differences,
   `--apply` writes and saves them.
 - Landing page on port 80: once per machine, `sudo tools/enable_low_ports.sh`.
-- Nothing starts at boot yet; run each in a terminal, or with `nohup ... > log 2>&1 &`.
+- The landing page runs as a systemd user service (`robot-frontend.service`), installed and
+  started by `./install.sh` and started at boot ([docs/frontend.md](docs/frontend.md)). The
+  nodes don't start at boot yet; run each in a terminal, or with `nohup ... > log 2>&1 &`.
 
 The older single-file camera viewer (`python examples/orbbec_web_viewer.py`, port 8080) still
 works; design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md).

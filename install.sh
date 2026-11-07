@@ -6,8 +6,10 @@
 #   ./install.sh --venv ~/robot  # somewhere else
 #   PYTHON=python3.13 ./install.sh
 #   MOTORBRIDGE_WHEEL=dist/motorbridge-...whl ./install.sh   # use a local wheel (offline)
+#   ./install.sh --no-service    # don't install/restart the landing-page user service
 #
-# Safe to re-run: it updates the existing venv in place.
+# Safe to re-run: it updates the existing venv in place, and on Linux (re)installs and
+# restarts the landing page as a systemd user service (robot-frontend.service).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +17,7 @@ VENV="$ROOT/.venv"
 PYTHON="${PYTHON:-python3.12}"
 FORK_REPO="ax2348-gif/motorbridge_2ec"
 export PIP_NO_CACHE_DIR=1  # don't keep a second copy of every wheel in ~/.cache/pip
+SERVICE=1                 # install the landing page as a systemd user service (Linux)
 
 # On Linux aarch64 (the robot), constraints.txt pins CPU-only torch, served from PyTorch's
 # index. --extra-index-url (not --index-url): that index also hosts stale copies of common
@@ -27,7 +30,8 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --venv) VENV="$2"; shift 2 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    --no-service) SERVICE=0; shift ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -132,4 +136,47 @@ for name in ("robot-utils", "sparkcan", "rebotarm-control-py", "motorbridge", "l
     print(f"  {name:20} {md.version(name)}")
 print(f"  motorbridge ABI      {motorbridge.abi_version()}")
 PYEOF
+step "Landing page service (systemd user unit robot-frontend.service)"
+# Like the robot's other user services (e.g. ups-dashboard): a user unit, no root needed,
+# started at boot when the user has lingering enabled. Re-running install.sh restarts it, so
+# it always serves the code in this checkout.
+UNIT=robot-frontend.service
+if [[ $SERVICE == 0 ]]; then
+  echo "  skipped (--no-service)"
+elif [[ "$(uname -s)" != Linux ]] || ! command -v systemctl >/dev/null \
+     || ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo "  skipped: no systemd user session here; run it by hand: python -m robot_utils.frontend"
+else
+  UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/$UNIT" <<UNITEOF
+# Written by $ROOT/install.sh; re-run it to update. Logs: journalctl --user -u $UNIT
+[Unit]
+Description=robot_utils landing page on port 80 (python -m robot_utils.frontend)
+
+[Service]
+WorkingDirectory=$ROOT
+ExecStart=$PY -m robot_utils.frontend
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNITEOF
+  systemctl --user daemon-reload
+  systemctl --user enable --quiet "$UNIT"
+  systemctl --user restart "$UNIT"
+  sleep 2
+  if systemctl --user is-active --quiet "$UNIT"; then
+    echo "  $UNIT: active (http://$(hostname)/); logs: journalctl --user -u $UNIT"
+  else
+    echo "  $UNIT did not start; see: journalctl --user -u $UNIT -n 30" >&2
+  fi
+  if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != yes ]]; then
+    echo "  It starts at boot only with lingering enabled for $USER. Run once:"
+    echo "    sudo loginctl enable-linger $USER"
+  fi
+fi
+
 printf '\nDone. Activate with: source %s/bin/activate\n' "$VENV"
