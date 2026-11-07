@@ -10,8 +10,14 @@ Verified on a Gemini 336L, pyorbbecsdk2 2.1.3 (libOrbbecSDK 2.10.6), Pi 5 USB 2.
 - Frame get_system_timestamp_us(): host wall clock (epoch) at SDK receipt. With
   device.enable_global_timestamp(True), get_global_timestamp_us() is the device timestamp mapped
   to the host wall clock (SDK-internal clock sync), i.e. close to the actual capture instant.
-- The default frame aggregation (FULL_FRAME_REQUIRE) makes color wait for depth (~60 ms at
-  10 fps); without frame sync the node uses ANY_SITUATION so each frame leaves immediately.
+- Frame aggregation (measured, color 1280x720@10 + depth 848x480@10, median wait between SDK
+  receipt and wait_for_frames returning):
+      default / frame sync on        color 69 ms (waits for its depth), depth 8 ms
+      sync off + ANY_SITUATION / FULL_FRAME_REQUIRE / COLOR_FRAME_REQUIRE
+                                     color 0.3 ms, depth 140 ms (held for, and paired with, the
+                                     *next* color frame: wrong pairing and a frame late)
+      sync off + DISABLE             color 0.3 ms, depth 8 ms, one frame per frameset
+  so without frame sync the node uses DISABLE.
 """
 from __future__ import annotations
 
@@ -210,7 +216,7 @@ class SdkBackend:
             cfg.enable_stream(self._profile(n, s))
         try:
             cfg.set_frame_aggregate_output_mode(ob.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE if sync
-                                                else ob.OBFrameAggregateOutputMode.ANY_SITUATION)
+                                                else ob.OBFrameAggregateOutputMode.DISABLE)
         except Exception as e:
             log.debug("aggregate mode: %s", e)
         try:
