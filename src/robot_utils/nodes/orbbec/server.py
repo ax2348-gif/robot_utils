@@ -163,6 +163,13 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
     async def health():
         return {"ok": True, "state": owner.state}
 
+    @app.get("/meta", tags=["state"], summary="Node description for the landing frontend")
+    async def meta():
+        """Frontend contract (same JSON as nodes.common's page routes): all paths relative to the node root."""
+        return {"name": "camera", "title": "Orbbec camera", "version": __version__, "kind": "camera",
+                "has_page": True, "page": "./", "actuated": False,
+                "endpoints": {"health": "health", "state": "state", "events": "events", "estop": None}}
+
     @app.get("/state", response_model=State, tags=["state"], summary="Node, device, stream and IMU status")
     async def get_state():
         return owner.status()

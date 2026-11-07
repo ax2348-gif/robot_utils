@@ -251,6 +251,9 @@ def test_end_to_end_fake(fake_node, tmp_path):
     from robot_utils.nodes.orbbec.client import OrbbecClient, OrbbecError, read_recording, record
     with OrbbecClient(fake_node) as c:
         est = c.sync()
+        m = c.get("/meta")
+        assert m["name"] == "camera" and m["page"] == "./" and m["actuated"] is False
+        assert m["endpoints"] == {"health": "health", "state": "state", "events": "events", "estop": None}
         assert abs(est.offset) < 0.01 and est.uncertainty < 0.01   # same machine, same clock
         got = {}
         for fr in c.frames("color,depth", mode="raw"):
