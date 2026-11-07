@@ -79,6 +79,10 @@ class Owner:
         self.shape = {n: (0, 0, "") for n in STREAM_NAMES}
         self.last_capture = {n: None for n in STREAM_NAMES}
         self.last_frame_t = 0.0
+        self.last_pub = {n: 0.0 for n in STREAM_NAMES}
+        self.video_started = 0.0
+        self._silent: set = set()
+        self._silent_check = 0.0
         self.imu = {"running": False, "samples": 0, "gaps": 0, "error": None, "last": None}
         self.imu_seq = 0
         self.imu_rate = _Rate()
@@ -245,6 +249,22 @@ class Owner:
                 continue
             self.last_frame_t = now
             self._publish(frames)
+            if now - self._silent_check > 1.0:
+                self._check_silent(now)
+
+    def _check_silent(self, now):
+        """Report enabled streams that stopped delivering while others still do."""
+        self._silent_check = now
+        s = self.settings
+        for n in STREAM_NAMES:
+            last = max(self.last_pub[n], self.video_started)
+            silent = bool(s.streams.get(n)) and now - last > STALL_S
+            if silent and n not in self._silent:
+                self._silent.add(n)
+                self._event(f"{STREAM_LABELS[n]} delivers no frames (for {STALL_S:.0f} s)", error=True)
+            elif not silent and n in self._silent:
+                self._silent.discard(n)
+                self._event(f"{STREAM_LABELS[n]} frames again")
 
     def _publish(self, frames: list[Frame]):
         now = time.monotonic()
@@ -258,6 +278,7 @@ class Owner:
                 self.rates[f.stream].add(now)
                 self.shape[f.stream] = (f.w, f.h, f.fmt)
                 self.last_capture[f.stream] = f.t_capture
+                self.last_pub[f.stream] = now
             if self.state != "streaming":
                 self.state = "streaming"
                 self.hub.state_changed()
@@ -309,7 +330,8 @@ class Owner:
         self._set_state("starting" if any(new.streams.values()) else "idle")
         try:
             self.backend.start(new)
-            t_started = time.monotonic()
+            t_started = self.video_started = time.monotonic()
+            self._silent.clear()
             self.last_frame_t = t_started + self.startup_s - STALL_S
             if prev is not None and self.backend.running:
                 want = {n for n, on in new.streams.items() if on}
@@ -329,6 +351,7 @@ class Owner:
             self._event(msg, error=True)
             self.hub.drop_frames()
             self.backend.start(prev)          # failure here -> camera error -> reconnect loop
+            self.video_started = time.monotonic()
             self.last_frame_t = time.monotonic() + self.startup_s - STALL_S
             self._set_state("starting" if self.backend.running else "idle")
             raise SettingsError(msg) from None
