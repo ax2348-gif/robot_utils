@@ -1,4 +1,7 @@
-# `robot_utils.nodes.swerve`: MAXSwerve drive base library
+# `robot_utils.nodes.swerve`: MAXSwerve drive base library and node
+
+The HTTP node built on this library (`python -m robot_utils.nodes.swerve`, `node.py`,
+`server.py`, `client.py`, `sim.py`, `page.py`) is documented in `docs/swerve_node.md`.
 
 The swerve-drive code from the `rev_ctl` submodule's `examples/`, ported at **rev_ctl commit
 `cfcfc32`** (the pointer robot_utils' `main` records) into an importable package, so a future
