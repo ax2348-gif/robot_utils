@@ -99,6 +99,7 @@ class Owner:
         self._calib_requests: list = []                       # (seconds, cf.Future)
         self._calib_waiting: list = []
         self.calibration_file = calibration_file     # None: don't load or save IMU calibrations
+        self.calibration: dict = {}                    # camera intrinsics/extrinsics of the active profiles
         self._cpu = (time.monotonic(), sum(os.times()[:2]), 0.0)
         self.thread = threading.Thread(target=self._run, name="orbbec-owner", daemon=True)
 
@@ -464,16 +465,31 @@ class Owner:
             self._event(msg, error=True)
             self.hub.drop_frames()
             self.backend.start(prev)          # failure here -> camera error -> reconnect loop
+            self._update_calibration(prev)
             self.video_started = time.monotonic()
             self.last_frame_t = time.monotonic() + self.startup_s - STALL_S
             self._set_state("starting" if self.backend.running else "idle")
             raise SettingsError(msg) from None
         with self.lock:
             self.error = None
+        self._update_calibration(new)
         self._event(("started " + describe(new)) if self.backend.running else "all video streams off")
         if not self.backend.running:
             self._set_state("idle")
         return t_started
+
+    def _update_calibration(self, s: Settings):
+        """Owner thread: intrinsics/extrinsics of the profiles now in use (for GET /calibration)."""
+        try:
+            cal = self.backend.calibration(s)
+        except Exception as e:
+            log.info("camera calibration not available: %s", e)
+            cal = {}
+        cal["aligned_depth"] = bool(s.align and s.streams.get("depth") and s.streams.get("color"))
+        cal["imu"] = {"accel_to_depth": self.catalog.imu.extrinsics.get("accel_to_depth")}
+        cal["settings_version"] = self.settings_version
+        with self.lock:
+            self.calibration = cal
 
     def _handle_cmds(self, block: float = 0):
         while True:

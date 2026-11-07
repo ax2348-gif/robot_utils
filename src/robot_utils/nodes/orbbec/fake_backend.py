@@ -66,6 +66,19 @@ class FakeBackend:
         self._next = {n: now + 0.05 for n in names}
         self.running = any(s.streams.values())
 
+    def calibration(self, s):
+        """Synthetic pinhole intrinsics (~90 deg horizontal field of view), color 25 mm right of depth."""
+        out = {}
+        for name, key, rows in (("depth", s.stereo_mode, STEREO), ("color", s.color_profile, COLOR)):
+            row = next((r for r in rows if r[0] == key), None)
+            if row is None:
+                continue
+            w, h = row[1], row[2]
+            f = w / 2.0
+            out[name] = {"fx": f, "fy": f, "cx": w / 2.0, "cy": h / 2.0, "width": w, "height": h}
+        out["depth_to_color"] = {"rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "translation_mm": [-25.0, 0.0, 0.0]}
+        return out
+
     def _fps(self, n):
         key = self._s.color_profile if n == "color" else self._s.stereo_mode
         rows = COLOR if n == "color" else STEREO
