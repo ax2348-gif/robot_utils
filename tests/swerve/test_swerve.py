@@ -203,3 +203,26 @@ def test_tick_frames_go_out_in_one_serial_write():
     drive._flush()
     assert writes == [b"".join(to_slcan(f) for f in frames)]
     assert drive._batch is None
+
+
+def test_failed_start_unregisters_its_sparks(iface):
+    from sparkcan.bus import CANBus
+    with pytest.raises(RuntimeError):
+        SwerveDrive(iface)                       # no SPARKs on this bus: no steering reading
+    assert CANBus.get(iface).device_ids == []
+
+
+def test_module_without_steering_reading_is_left_disabled(iface, configured):
+    fl, fr = c.MODULES[0], c.MODULES[1]
+    drive = SwerveDrive(iface)
+    try:
+        configured[fl.steer_id].params[int(P.STATUS_5_PERIOD)] = 5000   # its readings go stale
+        time.sleep(0.3)
+        for _ in range(20):
+            drive.drive(0.2, 0.0, 0.0)
+            time.sleep(0.02)
+        assert not configured[fl.steer_id].enabled and not configured[fl.drive_id].enabled
+        assert configured[fr.steer_id].enabled and configured[fr.drive_id].enabled
+        assert math.isnan(drive.setpoints[0][0]) and drive.setpoints[1][1] > 0
+    finally:
+        drive.close()

@@ -48,13 +48,32 @@ STATUS_1_PERIOD_MS = 250
 
 
 class SwerveDrive:
-    def __init__(self, interface: str):
+    """Twist control loop for the base.
+
+    ``pre_tick(drive)`` and ``on_tick(drive, t_tick)`` are optional hooks called on the control
+    thread at the start and end of every tick (the swerve node uses them to feed commands in and
+    publish each tick's measurements). They must be quick; an exception in a hook stops the loop
+    like any other loop error (motors disabled, ``error`` set).
+
+    After each tick, ``tick_enabled`` says whether motors were enabled and ``setpoints`` holds
+    the (steering angle rad, drive speed m/s) sent to each module, NaN where nothing was sent.
+    """
+
+    def __init__(self, interface: str, pre_tick=None, on_tick=None):
         self.drives = [SparkFlex(interface, m.drive_id) for m in MODULES]
         self.steers = [SparkFlex(interface, m.steer_id) for m in MODULES]
         self.bus = self.drives[0].bus
-        self._configure_status_frames()
-        for i in range(len(MODULES)):
-            self._wait_for_reading(i)
+        try:
+            self._configure_status_frames()
+            for i in range(len(MODULES)):
+                self._wait_for_reading(i)
+        except Exception:   # don't leave 8 registered SPARK objects behind
+            for spark in self.drives + self.steers:
+                spark.close()
+            raise
+        self.pre_tick, self.on_tick = pre_tick, on_tick
+        self.tick_enabled = False
+        self.setpoints = [(math.nan, math.nan)] * len(MODULES)
         # Frames the loop thread sends during a tick are collected and written at once: on the
         # CANable each serial write costs about 0.6 ms (one USB transfer), so 9 separate writes
         # took most of the 10 ms tick (measured: tick body 6 ms -> 1 ms).
@@ -163,12 +182,16 @@ class SwerveDrive:
         raise RuntimeError(f"{MODULES[i].name}: no steering encoder reading (run python -m robot_utils.nodes.swerve.setup_sparks?)")
 
     def _loop(self) -> None:
-        enabled_ids = [s.get_device_id() for s in self.drives + self.steers]
         enabled = False
         deadline = time.monotonic()
+        nan = (math.nan, math.nan)
         try:
             while self._running:
+                now_tick = time.monotonic()
                 self._batch = []
+                if self.pre_tick is not None:
+                    self.pre_tick(self)
+                setpoints = [nan] * len(MODULES)
                 with self._lock:
                     command, age = self._command, time.monotonic() - self._command_time
                 if age > COMMAND_TIMEOUT:
@@ -180,10 +203,14 @@ class SwerveDrive:
                     kind, values = command
                     if kind == "twist":
                         velocities = wheel_velocities(*values)
+                    enabled_ids = []
                     for i, m in enumerate(MODULES):
                         drive = self.drives[i].get_closed_loop_controller()
                         reading = self.encoder_reading(i)
-                        if reading is None:  # no fresh steering reading: stop this wheel
+                        if reading is None:
+                            # No fresh steering reading: stop this wheel and leave the whole
+                            # module out of the heartbeat (disabled), rather than letting its
+                            # steering hold a target computed from an old angle.
                             drive.set_setpoint(0.0, ControlType.VELOCITY)
                             continue
                         heading = self.wheel_angle(reading, i)
@@ -196,8 +223,13 @@ class SwerveDrive:
                         target = (angle / (2 * math.pi) + m.steer_offset) % 1.0
                         self.steers[i].get_closed_loop_controller().set_setpoint(target, ControlType.POSITION)
                         drive.set_setpoint(speed, ControlType.VELOCITY)
+                        setpoints[i] = (angle, speed)
+                        enabled_ids += [m.drive_id, m.steer_id]
                     self.bus.heartbeat(enabled_ids)
                 self._flush()
+                self.tick_enabled, self.setpoints = enabled, setpoints
+                if self.on_tick is not None:
+                    self.on_tick(self, now_tick)
                 # Fixed-rate schedule: sleeping LOOP_PERIOD after the work made the period
                 # work + 10 ms (about 60 Hz on the robot). After an overrun, start again from
                 # now rather than sending a burst to catch up.
