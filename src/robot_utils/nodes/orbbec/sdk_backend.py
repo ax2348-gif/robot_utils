@@ -126,7 +126,7 @@ class SdkBackend:
         return info, self._catalog()
 
     def _catalog(self) -> Catalog:
-        profiles, color, stereo_sets, available = {}, {}, [], []
+        profiles, color, stereo_sets, available, defaults = {}, {}, [], [], {}
         for name, (sensor, _) in self.streams.items():
             try:
                 plist = self.pipe.get_stream_profile_list(sensor)
@@ -134,6 +134,7 @@ class SdkBackend:
                 continue    # the device has no such sensor
             available.append(name)
             d = plist.get_default_video_stream_profile()
+            defaults[name] = d
             dkey = (d.get_width(), d.get_height(), d.get_fps(), d.get_format().name)
             modes = {}
             for i in range(plist.get_count()):
@@ -157,6 +158,7 @@ class SdkBackend:
             return (-w * h, -fps, COLOR_FORMATS.index(fmt[0]) if fmt else 0)
 
         self._profiles = profiles
+        self._defaults = defaults
         self._color = {k: v[0] for k, v in color.items()}
         self._stereo = {k: v[0] for k, v in stereo.items()}
         cat = Catalog(
@@ -166,7 +168,42 @@ class SdkBackend:
             stereo=[ProfileOption(key=k, width=v[0][0], height=v[0][1], fps=v[0][2], default=v[1])
                     for k, v in sorted(stereo.items(), key=order)],
             imu=self._imu_catalog())
+        if cat.imu.available:
+            try:
+                cat.imu.extrinsics, cat.imu.intrinsics = self._imu_calibration(defaults)
+            except Exception as e:   # informational only
+                log.info("IMU extrinsics/intrinsics not available: %s", e)
         return cat
+
+    def _imu_calibration(self, defaults) -> tuple[dict, dict]:
+        """Factory extrinsics (accel -> color/depth, gyro -> accel) and IMU intrinsics."""
+        pa = next(iter(self._imu_profiles["accel"].values()))
+        pg = next(iter(self._imu_profiles["gyro"].values()))
+
+        def ext(src, dst):
+            e = src.get_extrinsic_to(dst)
+            return {"rotation": np.asarray(e.rot, dtype=float).reshape(3, 3).round(6).tolist(),
+                    "translation_mm": np.asarray(e.transform, dtype=float).reshape(3).round(4).tolist()}
+
+        def fields(obj):
+            out = {}
+            for k in dir(obj):
+                if k.startswith("_"):
+                    continue
+                v = getattr(obj, k)
+                if callable(v):
+                    continue
+                try:
+                    out[k] = np.asarray(v, dtype=float).round(8).tolist()
+                except (TypeError, ValueError):
+                    out[k] = str(v)
+            return out
+
+        extrinsics = {f"accel_to_{n}": ext(pa, defaults[n]) for n in ("color", "depth") if n in defaults}
+        extrinsics["gyro_to_accel"] = ext(pg, pa)
+        intrinsics = {"accel": fields(pa.as_accel_stream_profile().get_intrinsic()),
+                      "gyro": fields(pg.as_gyro_stream_profile().get_intrinsic())}
+        return extrinsics, intrinsics
 
     def _imu_catalog(self) -> ImuCatalog:
         ob = self.ob
@@ -187,7 +224,7 @@ class SdkBackend:
         rates = [r for r, _ in found["gyro"] if r in rates_a]
         rates = sorted(dict.fromkeys(rates), key=rate_hz)
         return ImuCatalog(available=bool(rates), sample_rates=rates,
-                          default_rate=next((r for r in ("100Hz", "200Hz") if r in rates), rates[0] if rates else None),
+                          default_rate=next((r for r in ("1kHz", "500Hz", "200Hz") if r in rates), rates[-1] if rates else None),
                           accel_ranges=sorted({g for _, g in found["accel"]}),
                           gyro_ranges=sorted({g for _, g in found["gyro"]}))
 

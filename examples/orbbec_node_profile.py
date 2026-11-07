@@ -165,12 +165,12 @@ def summarize(rows, duration, nclients, state):
 
 def run_imu(url, rate, duration, warmup=1.0):
     with OrbbecClient(url) as c:
-        c.update_settings({"streams": ONLY(), "imu": {"enabled": True, "sample_rate": rate, "batch_ms": 5}})
+        c.update_settings({"streams": ONLY(), "imu": {"enabled": True, "sample_rate": rate}})
         time.sleep(0.5)
         c.sync()
         lat, last_lat, sen, n, dropped, seqs = [], [], [], 0, 0, []
         t_start = time.monotonic() + warmup
-        for b in c.imu():
+        for b in c.imu(raw=True):
             if b.t_recv < t_start:
                 continue
             s = b.samples

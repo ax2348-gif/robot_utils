@@ -14,7 +14,7 @@ STREAM_LABELS = {"color": "Color", "depth": "Depth", "ir_left": "Left IR", "ir_r
 STEREO = ("depth", "ir_left", "ir_right")    # share one resolution/fps on the device
 # Changing any of these restarts the video pipeline.
 PIPELINE_KEYS = ("streams", "color_profile", "stereo_mode", "align", "frame_sync")
-IMU_RESTART_KEYS = ("enabled", "sample_rate", "accel_range", "gyro_range")
+IMU_RESTART_KEYS = ("enabled", "sample_rate", "accel_range", "gyro_range")   # filter changes apply live
 
 
 class SettingsError(ValueError):
@@ -52,17 +52,29 @@ class DisplaySettings(_Strict):
         return self
 
 
+class ImuFilterSettings(_Strict):
+    """Attitude filter (Mahony + gyro-bias tracking) run on every raw sample inside the node."""
+    output_rate_hz: float = Field(100.0, ge=10, le=500, description="Records per second on `/imu/stream`.")
+    kp: float = Field(0.5, ge=0, le=20, description="Gravity correction gain, 1/s (tilt time constant ~1/kp s).")
+    ki: float = Field(0.02, ge=0, le=2, description="Gyro-bias tracking gain through the gravity error, 1/s².")
+    accel_gate: float = Field(0.5, gt=0, le=5, description="Use the accelerometer only when its magnitude is "
+                                                           "within this many m/s² of the calibrated gravity.")
+    zaru: bool = Field(True, description="Zero-rate update: re-estimate all three gyro biases (incl. yaw) "
+                                         "while the IMU is still.")
+    zaru_tau_s: float = Field(5.0, ge=0.5, le=600, description="Time constant of the zero-rate update.")
+    calib_s: float = Field(1.0, ge=0.2, le=30, description="Still time used by a calibration.")
+
+
 class ImuSettings(_Strict):
     """Accelerometer + gyroscope. Rates/ranges come from `GET /catalog` → `imu`."""
     enabled: bool = Field(True, description="Run the IMU (its own SDK pipeline; independent of video).")
-    sample_rate: Optional[str] = Field(None, description="e.g. `100Hz`; null = the catalog's default "
-                                       "(100 Hz when the device offers it).", examples=["100Hz"])
+    sample_rate: Optional[str] = Field(None, description="Raw sample rate the node runs the IMU at, e.g. "
+                                       "`1kHz`; null = the catalog's default (1 kHz when offered). The filtered "
+                                       "stream rate is `filter.output_rate_hz`.", examples=["1kHz"])
     accel_range: Optional[str] = Field(None, description="Accelerometer full scale, e.g. `4g`.")
     gyro_range: Optional[str] = Field(None, description="Gyroscope full scale, e.g. `1000dps`.")
-    batch_ms: float = Field(0.0, ge=0, le=200,
-                            description="0 (default): every sample is sent in its own record as soon as it "
-                                        "arrives. >0: group samples into records covering about this long "
-                                        "(less per-record overhead at high rates, adds up to batch_ms delay).")
+    filter: ImuFilterSettings = Field(default_factory=ImuFilterSettings,
+                                        description="Attitude filter; changes apply at once (no restart).")
 
 
 class Settings(_Strict):
@@ -104,7 +116,24 @@ class ImuPatch(_Strict):
     sample_rate: Optional[str] = None
     accel_range: Optional[str] = None
     gyro_range: Optional[str] = None
-    batch_ms: Optional[float] = None
+    filter: Optional["ImuFilterPatch"] = None
+
+
+class ImuFilterPatch(_Strict):
+    output_rate_hz: Optional[float] = None
+    kp: Optional[float] = None
+    ki: Optional[float] = None
+    accel_gate: Optional[float] = None
+    zaru: Optional[bool] = None
+    zaru_tau_s: Optional[float] = None
+    calib_s: Optional[float] = None
+
+
+ImuPatch.model_rebuild()
+
+
+class ImuCalibrateRequest(_Strict):
+    seconds: Optional[float] = Field(None, ge=0.2, le=30, description="Still time to use; null = filter.calib_s.")
 
 
 class SettingsPatch(_Strict):
@@ -121,7 +150,8 @@ class SettingsPatch(_Strict):
         {"streams": {"color": True, "depth": True}, "stereo_mode": "640x400@30", "color_profile": "640x480@30 MJPG"},
         {"display": {"colormap": "jet", "range_mode": "manual", "min_mm": 300, "max_mm": 2000}},
         {"streams": {"ir_left": True, "ir_right": True}},
-        {"imu": {"enabled": True, "sample_rate": "500Hz"}},
+        {"imu": {"enabled": True, "sample_rate": "1kHz"}},
+        {"imu": {"filter": {"kp": 0.3, "accel_gate": 0.3}}},
     ]})
 
 
@@ -142,6 +172,12 @@ class ImuCatalog(BaseModel):
     default_rate: Optional[str] = None
     accel_ranges: list[str] = []
     gyro_ranges: list[str] = []
+    extrinsics: dict = Field({}, description="From the device calibration: `accel_to_color`, `accel_to_depth`, "
+                                             "`gyro_to_accel`, each {rotation: 3x3 row-major, translation_mm}. "
+                                             "Maps a point in the first frame into the second.")
+    intrinsics: dict = Field({}, description="Factory IMU intrinsics as reported by the device (`accel`, `gyro`: "
+                                             "bias, noise_density, random_walk, scale_misalignment, ...). The node "
+                                             "does not apply them.")
 
 
 class Catalog(BaseModel):
@@ -218,7 +254,9 @@ def apply_patch(cur: Settings, patch: SettingsPatch, cat: Catalog) -> tuple[Sett
                     ("gyro_range", cat.imu.gyro_ranges)):
         if k in imu and imu[k] not in opts:
             raise SettingsError(f"unknown IMU {k} {imu[k]!r}; one of {opts}")
+    filt = imu.pop("filter", None) or {}
     d["imu"].update(imu)
+    d["imu"]["filter"].update({k: v for k, v in filt.items() if v is not None})
     assert not p, p
     try:
         new = Settings.model_validate(d)
@@ -292,6 +330,9 @@ class ImuStatus(BaseModel):
     gaps: int = Field(0, description="Samples missing according to the device frame index.")
     last: Optional[dict] = Field(None, description="Last sample: accel m/s^2, gyro rad/s, temperature C.")
     error: Optional[str] = None
+    filter: Optional[dict] = Field(None, description="Attitude filter: q (IMU->world, w x y z), rpy_deg, "
+                                                     "gyro_bias rad/s, calibrated/still/initializing/"
+                                                     "calibrating, calibration (bias, g_ref, source).")
 
 
 class CpuStatus(BaseModel):

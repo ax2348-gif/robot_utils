@@ -207,9 +207,22 @@ class OrbbecClient:
             params["compress"] = compress
         return self.records("/stream", params, decode_jpeg, **kw)
 
-    def imu(self, max_backlog: int = 20000, **kw) -> Iterator[Record]:
-        """IMU batches; ``rec.samples`` is a structured array (fields: protocol.IMU_FIELDS)."""
-        return self.records("/imu/stream", {"max_backlog": max_backlog}, **kw)
+    def imu(self, raw: bool = False, batch_ms: float = 0.0, max_backlog: int = 20000, **kw) -> Iterator[Record]:
+        """IMU records; ``rec.samples`` is a structured array named by ``rec.header["fields"]``.
+
+        Default: the node's attitude-filter output (~100 Hz; imu_filter.STATE_FIELDS: orientation,
+        delta angle/velocity, means, gyro bias, flags). ``raw=True``: every 1 kHz sample
+        (protocol.IMU_FIELDS); use ``batch_ms`` (e.g. 10) to get them in fewer, larger records."""
+        return self.records("/imu/stream", {"raw": raw, "batch_ms": batch_ms, "max_backlog": max_backlog}, **kw)
+
+    def imu_calibrate(self, seconds: Optional[float] = None) -> dict:
+        """Calibrate gyro bias + gravity from the next ``seconds`` of still data (keep it still)."""
+        r = self.http.post("/imu/calibrate", json={"seconds": seconds}, timeout=(seconds or 1.0) + 15)
+        return self._check(r).json()
+
+    def imu_reset(self) -> dict:
+        """Restart the orientation from gravity (yaw 0), keeping the calibration."""
+        return self.post("/imu/reset", {})
 
     def frame(self, stream: str, mode: str = "raw") -> Record:
         """The latest frame of one stream (GET /frame/{stream})."""
@@ -238,7 +251,8 @@ def record(base_url: str, out_dir: str, streams: str = "color,depth", mode: str 
            progress: bool = True) -> dict:
     """Record streams to ``out_dir`` on *this* machine (the Pi has no disk to spare).
 
-    Writes ``video.rec`` and ``imu.rec`` (the wire records, headers augmented with t_recv) and
+    Writes ``video.rec``, ``imu.rec`` (filter output, ~100 Hz) and ``imu_raw.rec`` (every 1 kHz
+    sample) — the wire records, headers augmented with t_recv — and
     ``meta.json`` (settings, catalog, device, clock-sync history). Read back with
     ``read_recording``. Runs until ``duration`` s or Ctrl-C. Returns counts.
     """
@@ -247,24 +261,26 @@ def record(base_url: str, out_dir: str, streams: str = "color,depth", mode: str 
     est = cam.sync()
     cam.start_auto_sync(resync_s)
     stop = threading.Event()
-    counts = {"frames": 0, "imu_samples": 0, "imu_dropped": 0, "frames_dropped": 0}
+    counts = {"frames": 0, "imu_records": 0, "imu_raw_samples": 0, "imu_dropped": 0, "frames_dropped": 0}
     meta = {"base_url": base_url, "streams": streams, "mode": mode, "started_wall": time.time(),
             "state": cam.state(), "catalog": cam.catalog(), "sync": [est.as_dict()],
             "clock": "all t_* in server time.monotonic() seconds; t_recv_client = this machine's monotonic"}
 
-    def imu_loop():
-        with open(os.path.join(out_dir, "imu.rec"), "wb") as f:
-            for rec in cam.imu():
+    def imu_loop(raw: bool):
+        name, key = ("imu_raw.rec", "imu_raw_samples") if raw else ("imu.rec", "imu_records")
+        with open(os.path.join(out_dir, name), "wb") as f:
+            for rec in cam.imu(raw=raw, batch_ms=10.0 if raw else 0.0):
                 f.write(augment(rec, cam.clock.latest))
-                counts["imu_samples"] += rec.header["n"]
+                counts[key] += rec.header["n"]
                 counts["imu_dropped"] += rec.header.get("dropped", 0)
                 if stop.is_set():
                     break
 
-    th = None
+    threads = []
     if imu:
-        th = threading.Thread(target=imu_loop, daemon=True)
-        th.start()
+        for raw in (False, True):
+            threads.append(threading.Thread(target=imu_loop, args=(raw,), daemon=True))
+            threads[-1].start()
     t_end = None if duration is None else time.monotonic() + duration
     try:
         with open(os.path.join(out_dir, "video.rec"), "wb") as f:
@@ -280,7 +296,7 @@ def record(base_url: str, out_dir: str, streams: str = "color,depth", mode: str 
         pass
     finally:
         stop.set()
-        if th is not None:
+        for th in threads:
             th.join(timeout=3)
         meta["sync"] = [e.as_dict() for e in cam.clock.history]
         meta["drift"] = cam.clock.drift

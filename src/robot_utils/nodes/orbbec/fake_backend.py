@@ -51,7 +51,7 @@ class FakeBackend:
                    for k, w, h, f, d in COLOR],
             stereo=[ProfileOption(key=k, width=w, height=h, fps=f, default=d) for k, w, h, f, d in STEREO],
             imu=ImuCatalog(available=True, sample_rates=["50Hz", "100Hz", "200Hz", "500Hz", "1kHz"],
-                           default_rate="100Hz", accel_ranges=["4g"], gyro_ranges=["1000dps"]))
+                           default_rate="1kHz", accel_ranges=["4g"], gyro_ranges=["1000dps"]))
         return DeviceInfo(name="Fake Gemini", serial="FAKE0001", firmware="0.0", connection="none",
                           global_timestamp=True), cat
 

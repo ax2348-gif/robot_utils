@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
@@ -21,8 +22,10 @@ from . import __version__
 from .encode import encode_frame
 from .hub import Frame, Hub
 from .models import (STREAM_NAMES, Catalog, ErrorResponse, PropertyInfo, PropertySet, Settings,
-                     SettingsError, SettingsPatch, SettingsResult, State, TimeResponse)
+                     SettingsError, SettingsPatch, SettingsResult, State, TimeResponse,
+                     ImuCalibrateRequest)
 from .owner import DeviceError, Owner
+from .imu_filter import STATE_FIELDS
 from .protocol import IMU_FIELDS, imu_payload, pack_record
 
 log = logging.getLogger("orbbec_node.api")
@@ -355,15 +358,32 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                  "ax": "m/s^2", "ay": "m/s^2", "az": "m/s^2", "gx": "rad/s", "gy": "rad/s", "gz": "rad/s",
                  "temperature": "degC"}
 
+    state_units = {"t_start": "s (server monotonic, sensor time)", "t_end": "s (server monotonic, sensor time)",
+                   "t_capture": "s (server monotonic)", "q*": "unit quaternion IMU->world (w, x, y, z), world z up",
+                   "da*": "rad (delta angle over the record, IMU frame)",
+                   "dv*": "m/s (delta velocity over the record, IMU frame, incl. gravity)",
+                   "a*": "m/s^2 (mean)", "g*": "rad/s (mean, bias-corrected)", "bg*": "rad/s (gyro bias estimate)",
+                   "flags": "bits: 1 calibrated, 2 still, 4 initializing, 8 sample gap",
+                   "accel_used": "fraction of samples whose accel corrected the attitude", "temperature": "degC"}
+
     @app.get("/imu/stream", tags=["stream"], response_class=StreamingResponse,
-             summary="Every IMU sample, in small batches (not latest-wins)",
+             summary="IMU: filtered orientation records (default) or every raw sample (`raw=true`)",
              responses={200: {"content": {"application/octet-stream": {}},
-                              "description": "Records with header type `imu`; payload float64 (n, 11) "
-                                             "little endian, columns = header.fields."}})
-    async def imu_stream(max_backlog: int = Query(20000, ge=100, le=1_000_000,
-                                                   description="Samples buffered for a slow client before the "
-                                                               "oldest are dropped (and counted in `dropped`).")):
-        sub = hub.subscribe_imu(max_backlog)
+                              "description": "Records with header type `imu`; payload float64 (n, len(fields)) "
+                                             "little endian, columns = header.fields. `header.kind` is `state` "
+                                             "(filter output, STATE_FIELDS) or `raw` (IMU_FIELDS)."}})
+    async def imu_stream(raw: bool = Query(False, description="Every raw 1 kHz sample instead of the filter "
+                                                              "output (default: ~100 Hz orientation records)."),
+                         batch_ms: float = Query(0.0, ge=0, le=500,
+                                                 description="0: send each record as soon as it exists. >0: wait "
+                                                             "this long after the first pending one and send what "
+                                                             "accumulated as one record (fewer, larger records)."),
+                         max_backlog: int = Query(20000, ge=100, le=1_000_000,
+                                                  description="Rows buffered for a slow client before the "
+                                                              "oldest are dropped (and counted in `dropped`).")):
+        channel = "raw" if raw else "state"
+        fields, units = (IMU_FIELDS, imu_units) if raw else (STATE_FIELDS, state_units)
+        sub = hub.subscribe_imu(max_backlog, channel)
 
         async def gen():
             hub.clients += 1
@@ -377,20 +397,41 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                         except asyncio.TimeoutError:
                             yield pack_record({"type": "ping", "t_send": time.monotonic()})
                         continue
-                    h = {"type": "imu", "n": len(rows), "fields": IMU_FIELDS, "units": imu_units, "dtype": "<f8",
-                         "seq_first": int(rows[0, 0]), "seq_last": int(rows[-1, 0]), "dropped": dropped,
-                         "t_send": time.monotonic()}
+                    if batch_ms > 0:
+                        await asyncio.sleep(batch_ms / 1000)
+                        more, d2 = sub.take()
+                        if more is not None:
+                            rows, dropped = np.concatenate([rows, more]), dropped + d2
+                    h = {"type": "imu", "kind": channel, "n": len(rows), "fields": fields, "units": units,
+                         "dtype": "<f8", "seq_first": int(rows[0, 0]), "seq_last": int(rows[-1, 0]),
+                         "dropped": dropped, "t_send": time.monotonic()}
                     yield pack_record(h, imu_payload(rows))
             finally:
                 hub.unsubscribe_imu(sub)
                 hub.clients -= 1
         return StreamingResponse(gen(), media_type="application/octet-stream", headers=stream_headers)
 
-    @app.get("/imu/latest", tags=["stream"], summary="The most recent IMU samples as JSON")
-    async def imu_latest(n: int = Query(100, ge=1, le=5000)):
-        rows = hub.recent_imu(n)
-        return {"fields": IMU_FIELDS, "units": imu_units,
+    @app.get("/imu/latest", tags=["stream"], summary="The most recent IMU records as JSON")
+    async def imu_latest(n: int = Query(100, ge=1, le=5000),
+                         raw: bool = Query(False, description="Raw samples instead of filter records.")):
+        rows = hub.recent_imu(n, "raw" if raw else "state")
+        return {"kind": "raw" if raw else "state", "fields": IMU_FIELDS if raw else STATE_FIELDS,
+                "units": imu_units if raw else state_units,
                 "samples": [[None if x != x else float(x) for x in r] for r in rows]}
+
+    @app.post("/imu/calibrate", tags=["control"], responses=errors,
+              summary="Calibrate gyro bias and gravity from the next few seconds of still data")
+    async def imu_calibrate(req: ImuCalibrateRequest = ImuCalibrateRequest()):
+        """Keep the camera still. Returns the new calibration (also saved on the Pi and used as the
+        starting point next time). 400 if the IMU moved during it; the previous calibration stays."""
+        fut = owner.request_imu_calibration(req.seconds)
+        return await run_cmd(fut, timeout=(req.seconds or 1.0) + 10.0)
+
+    @app.post("/imu/reset", tags=["control"], summary="Restart the orientation from gravity (yaw 0)")
+    async def imu_reset():
+        """Roll/pitch snap to the current gravity direction, yaw becomes 0; the calibration is kept."""
+        owner.request_imu_reset()
+        return {"ok": True}
 
     return app
 

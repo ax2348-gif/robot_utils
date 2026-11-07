@@ -166,7 +166,7 @@ def test_fix_settings_fills_defaults_and_drops_missing_streams():
     s = fix_settings(Settings(streams={"color": True, "depth": True, "ir_left": True, "ir_right": False},
                               color_profile="nope"), cat)
     assert s.color_profile == "1280x720@10 MJPG" and s.stereo_mode == "848x480@10"
-    assert s.streams["ir_left"] is False and s.imu.sample_rate == "100Hz" and s.imu.batch_ms == 0 and s.imu.gyro_range == "1000dps"
+    assert s.streams["ir_left"] is False and s.imu.sample_rate == "100Hz" and s.imu.gyro_range == "1000dps"
 
 
 def test_apply_patch_restart_flags():
@@ -179,8 +179,8 @@ def test_apply_patch_restart_flags():
     assert restart and not rimu and new.streams["ir_left"] and new.streams["color"]
     new, restart, rimu = apply_patch(cur, SettingsPatch(imu={"sample_rate": "1kHz"}), cat)
     assert rimu and not restart
-    new, restart, rimu = apply_patch(cur, SettingsPatch(imu={"batch_ms": 20}), cat)
-    assert not rimu and new.imu.batch_ms == 20
+    new, restart, rimu = apply_patch(cur, SettingsPatch(imu={"filter": {"kp": 0.2}}), cat)
+    assert not rimu and not restart and new.imu.filter.kp == 0.2 and new.imu.filter.ki == cur.imu.filter.ki
     _, restart, _ = apply_patch(cur, SettingsPatch(color_profile=cur.color_profile), cat)
     assert not restart
 
@@ -194,6 +194,7 @@ def test_apply_patch_restart_flags():
     ({"display": {"jpeg_quality": 5}}, "jpeg_quality"),
     ({"display": {"invalid_color": "red"}}, "invalid_color"),
     ({"imu": {"sample_rate": "7Hz"}}, "unknown IMU sample_rate"),
+    ({"imu": {"filter": {"kp": -1}}}, "kp"),
 ])
 def test_apply_patch_rejects(patch, msg):
     cat = _cat()
@@ -222,7 +223,7 @@ def _free_port():
 
 
 @pytest.fixture(scope="module")
-def fake_node():
+def fake_node(tmp_path_factory):
     pytest.importorskip("fastapi")
     uvicorn = pytest.importorskip("uvicorn")
     pytest.importorskip("httpx")
@@ -231,7 +232,8 @@ def fake_node():
     from robot_utils.nodes.orbbec.owner import Owner
     from robot_utils.nodes.orbbec.server import create_app
     hub = Hub()
-    app = create_app(Owner(FakeBackend(), hub, Settings(), startup_s=1.5), hub)
+    cal = str(tmp_path_factory.mktemp("cal") / "orbbec_imu.json")
+    app = create_app(Owner(FakeBackend(), hub, Settings(), startup_s=1.5, calibration_file=cal), hub)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                            timeout_graceful_shutdown=1))
@@ -259,8 +261,11 @@ def test_end_to_end_fake(fake_node, tmp_path):
         assert d.image.dtype == np.uint16 and d.header["depth_scale"] == 1.0 and d.header["t_capture"] > 0
         assert got["color"].image.ndim == 3 and got["color"].header["format"] == "MJPG"
         assert d.latency is not None and 0 <= d.latency < 1.0
-        b = next(c.imu())
-        assert b.header["type"] == "imu" and len(b.samples) >= 1 and b.samples.ay[0] == pytest.approx(-9.81)
+        b = next(c.imu(raw=True))
+        assert b.header["type"] == "imu" and b.header["kind"] == "raw" and b.samples.ay[0] == pytest.approx(-9.81)
+        b = next(r for r in c.imu() if r.samples.n[0] >= 5)      # filter output (startup records may be short)
+        assert b.header["kind"] == "state" and abs(np.linalg.norm([b.samples.qw[0], b.samples.qx[0],
+                                                                    b.samples.qy[0], b.samples.qz[0]]) - 1) < 1e-6
         with pytest.raises(OrbbecError) as ei:
             c.update_settings({"color_profile": "1920x1080@30 MJPG"})      # fake device refuses it
         assert ei.value.status == 409
@@ -279,8 +284,11 @@ def test_end_to_end_fake(fake_node, tmp_path):
     assert counts["frames"] > 5
     hs = [h for h, _ in read_recording(str(tmp_path / "video.rec"), decode_jpeg=False)]
     assert {h["stream"] for h in hs} == {"color", "depth"} and all("t_recv" in h for h in hs)
-    imu = list(read_recording(str(tmp_path / "imu.rec")))
+    imu = list(read_recording(str(tmp_path / "imu_raw.rec")))
     assert imu and imu[0][1].dtype.names == IMU_FIELDS
+    from robot_utils.nodes.orbbec.imu_filter import STATE_FIELDS
+    imu = list(read_recording(str(tmp_path / "imu.rec")))
+    assert imu and imu[0][1].dtype.names == STATE_FIELDS
 
 
 def test_colorize_depth_lut():
