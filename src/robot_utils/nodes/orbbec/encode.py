@@ -105,7 +105,20 @@ def colorize_depth(raw: np.ndarray, scale: float, ds, bgr: bool = False) -> tupl
     """raw: HxW uint16 depth units; ds: DisplaySettings.
     Returns (HxWx3 uint8 RGB (or BGR), lo_mm, hi_mm, valid fraction (sampled))."""
     lo, hi, valid = depth_range(raw, scale, ds)
-    return depth_lut(lo, hi, scale, ds, bgr)[raw], lo, hi, valid
+    if cv2 is None:
+        return depth_lut(lo, hi, scale, ds, bgr)[raw], lo, hi, valid
+    # OpenCV path (~4x faster on the Pi than a numpy gather): clip, scale to 8 bit, colormap
+    lo_u, hi_u = lo / scale, hi / scale
+    alpha = 255.0 / max(hi_u - lo_u, 1e-6)
+    idx = cv2.convertScaleAbs(cv2.max(raw, int(min(max(lo_u, 0), 65535))), alpha=alpha, beta=-lo_u * alpha)
+    if ds.invert:
+        idx = cv2.bitwise_not(idx)
+    cmap = COLORMAPS.get(ds.colormap, COLORMAPS["gray"])
+    img = cv2.applyColorMap(idx, np.ascontiguousarray((cmap[:, ::-1] if bgr else cmap).reshape(256, 1, 3)))
+    c = ds.invalid_color.lstrip("#")
+    inv = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+    img[raw == 0] = inv[::-1] if bgr else inv
+    return img, lo, hi, valid
 
 
 def to_display(fmt: str, data: np.ndarray, w: int, h: int) -> np.ndarray:
