@@ -66,7 +66,7 @@ for fr in cam.frames("color,depth", mode="raw"):
  │        │ Hub.publish_frames()            ▲ queue.Queue of (cmd, cf.Future)    │
  │        ▼ (store latest per stream,       │                                    │
  │           loop.call_soon_threadsafe)     │                                    │
- │ IMU thread "orbbec-imu"  (own SDK Pipeline, accel+gyro, one record/sample)    │
+ │ IMU thread "orbbec-imu"  (own SDK Pipeline, 1 kHz accel+gyro, attitude filter)│
  │        │ Hub.publish_imu()  -> per-client bounded queues                       │
  │        ▼                                                                      │
  │ event loop (FastAPI)       never calls the SDK, never blocks                  │
@@ -129,8 +129,10 @@ All responses are JSON unless noted. `<pi>` = `100.80.153.120:8000` (Tailscale) 
 | `GET /snapshot/{stream}?format=jpg\|png` | the latest frame as an image (`png`: lossless 16-bit depth/IR); header JSON in `X-Frame-Header` |
 | `GET /mjpeg/{stream}` | plain `multipart/x-mixed-replace` MJPEG (for `<img>`, VLC, OpenCV) |
 | `GET /depth_at?x=&y=` | depth in mm at a point (fractions of width/height) of the latest depth frame |
-| `GET /imu/stream[?max_backlog=20000]` | every IMU sample, binary records |
-| `GET /imu/latest?n=100` | recent IMU samples as JSON |
+| `GET /imu/stream[?raw=false&batch_ms=0&max_backlog=20000]` | IMU attitude-filter records (~100 Hz), or every raw 1 kHz sample with `raw=true` |
+| `GET /imu/latest?n=100[&raw=true]` | recent IMU filter records (or raw samples) as JSON |
+| `POST /imu/calibrate` | calibrate gyro bias + gravity from the next `seconds` of still data |
+| `POST /imu/reset` | restart the orientation from gravity (yaw 0) |
 
 Errors are `{"detail": "..."}`: 400 invalid value / unknown profile, 409 the device refused the
 configuration (previous one restored), 422 malformed body (unknown key, wrong type), 503 no camera
@@ -149,7 +151,9 @@ or no frame, 504 the camera thread did not answer within 20 s.
   "frame_sync": false,
   "display": {"colormap": "turbo", "invert": false, "range_mode": "auto", "pct_lo": 2, "pct_hi": 98,
               "min_mm": 200, "max_mm": 3000, "invalid_color": "#000000", "jpeg_quality": 80},
-  "imu": {"enabled": true, "sample_rate": "100Hz", "accel_range": "4g", "gyro_range": "1000dps", "batch_ms": 0}
+  "imu": {"enabled": true, "sample_rate": "1kHz", "accel_range": "4g", "gyro_range": "1000dps",
+          "filter": {"output_rate_hz": 100, "kp": 0.5, "ki": 0.02, "accel_gate": 0.5, "zaru": true,
+                     "zaru_tau_s": 5, "calib_s": 1}}
 }
 ```
 
@@ -160,7 +164,7 @@ or no frame, 504 the camera thread did not answer within 20 s.
 - `frame_sync`: the SDK pairs color and depth of the same instant. Off (default), each frame leaves
   the SDK as soon as it arrives, which saves tens of ms of latency (see results).
 - `display.*` only affects the monitoring (`mode=jpeg`) encoding of depth/IR and applies to the next
-  frame. `imu.batch_ms` also applies immediately. Everything else restarts the video pipeline
+  frame. `imu.filter.*` also applies immediately. Everything else restarts the video pipeline
   (or the IMU), and the call returns once every enabled stream has delivered a frame.
 
 curl:
@@ -268,9 +272,10 @@ for await (const [h, body] of records(base + "/stream?streams=depth&mode=raw")) 
 }
 ```
 
-IMU record (`type: "imu"`): `n` samples, `fields`, `units`, `dtype: "<f8"`, `seq_first`,
+IMU record (`type: "imu"`, `kind`: `state` = filter output, see [IMU](#imu); `raw` = samples as
+below): `n` rows, `fields`, `units`, `dtype: "<f8"`, `seq_first`,
 `seq_last`, `dropped` (samples dropped because this client fell more than `max_backlog` behind),
-`t_send`. Payload: little-endian float64 array `(n, 11)` with columns
+`t_send`. Raw payload: little-endian float64 array `(n, 11)` with columns
 
 | column | unit |
 |---|---|
@@ -325,26 +330,109 @@ Achieved sync uncertainty: see [Results](#results).
 
 ## IMU
 
-The 336L's IMU offers 50 Hz … 1 kHz (accelerometer ±4 g, gyroscope ±1000 °/s on this unit; the
-choices come from the device's profile list in `GET /catalog`). It is on by default at 100 Hz
-(a native device rate, not software downsampling).
+The 336L's IMU offers 50 Hz … 1 kHz (accelerometer ±4 g, gyroscope ±1000 °/s on this unit). The
+node samples it at **1 kHz** (default) on its own SDK pipeline in the `orbbec-imu` thread,
+independent of video restarts, and runs an **attitude filter** on every sample. Clients get the
+filter output at **100 Hz** by default; every raw sample is still available.
 
-- It runs on its own SDK pipeline in the `orbbec-imu` thread, independent of video restarts.
-- Every sample is delivered (not latest-wins), by default each in its own record as soon as it
-  arrives (`batch_ms` = 0). Setting `batch_ms` > 0 groups samples into records covering about that
-  long (it flushes when waiting for the next sample would exceed it): less per-record overhead at
-  500 Hz / 1 kHz, at the cost of up to `batch_ms` extra delay. Each client has its own queue; a
-  client that falls `max_backlog` samples behind loses the oldest and is told in `dropped`.
-- There is no orientation output: the SDK exposes only accelerometer and gyroscope frames (no
-  pose/quaternion/fusion types). Estimate orientation on the client from the raw samples (e.g. a
-  complementary or Madgwick filter); roll and pitch are observable from gravity, yaw only by
-  integrating the gyro (it drifts; there is no magnetometer).
-- Sample gaps on the device side are counted from the SDK frame index (`/state` → `imu.gaps`).
+### What `/imu/stream` sends
+
+| request | records | columns |
+|---|---|---|
+| `GET /imu/stream` (default) | filter output, one record per 10 ms window (`filter.output_rate_hz`) | `imu_filter.STATE_FIELDS` |
+| `GET /imu/stream?raw=true` | every 1 kHz sample | `protocol.IMU_FIELDS` |
+| `&batch_ms=10` (either) | per client: after the first pending row, wait this long and send what accumulated as one record | |
+
+Filter record columns (`header.fields`; units in `header.units`):
+
+| columns | meaning |
+|---|---|
+| `seq`, `n` | record counter; raw samples in the window |
+| `t_start`, `t_end` | window span, server monotonic s, **sensor time** (use these to align with video `t_sensor`) |
+| `t_capture` | SDK host receipt of the window's last sample |
+| `qw qx qy qz` | orientation at `t_end`: rotation IMU frame → world (world z up, yaw 0 at start/reset) |
+| `dax day daz` | delta angle over the window, rad, IMU frame: every 1 kHz bias-corrected rotation composed exactly |
+| `dvx dvy dvz` | delta velocity over the window, m/s, IMU frame (raw accel incl. gravity) |
+| `ax ay az`, `gx gy gz` | mean accel (m/s²) and mean bias-corrected gyro (rad/s) |
+| `bgx bgy bgz` | current gyro bias estimate, rad/s |
+| `flags` | bits: 1 calibrated, 2 still, 4 initializing (orientation not meaningful yet), 8 sample gap |
+| `accel_used`, `temperature` | fraction of samples that corrected the attitude; °C |
+
+The delta angle/velocity pair is the standard pre-integrated IMU format: downstream fusion (the
+estimator node) gets everything the 1 kHz stream carries about motion, at 100 Hz. Averaging or
+decimating the gyro instead loses up to ~1° at 5–10 Hz motion in simulation.
+
+**Frames.** The IMU frame equals the depth camera frame (`/catalog` → `imu.extrinsics`:
+`accel_to_depth` is the identity rotation, ~16 mm offset; `accel_to_color` is within 0.2°): x right,
+y down, z out of the lens. World is z up; the camera pointing straight up reads roll ≈ pitch ≈ 0.
+The factory IMU intrinsics (`imu.intrinsics`) are placeholders on this unit (zero bias, identity
+scale), so the node does not apply them; it calibrates bias and gravity itself.
+
+### Filter
+
+Mahony complementary filter in plain Python (numpy is ~13× slower for 4-element math):
+
+- **Gyro integration** with the exact exponential map per sample, dt from sensor timestamps (host
+  receipt is bursty: samples arrive in ~10 ms batches).
+- **Gravity correction** (`filter.kp`, default 0.5 /s): the error between measured and predicted
+  gravity direction is fed back, only while `| |a| − g_ref | < filter.accel_gate` (0.5 m/s²), so
+  linear acceleration does not tilt the estimate. The same error trains the roll/pitch-axis gyro
+  bias (`filter.ki`).
+- **Zero-rate update** (`filter.zaru`, time constant `zaru_tau_s` 5 s): while the IMU is still (low
+  gyro/accel spread over 0.25 s), all three biases relax towards the measured rate. This is the
+  only thing that tracks the **yaw** bias, which gravity cannot observe.
+- **Yaw drifts** without a magnetometer; with a calibrated bias the drift is tiny when still (below)
+  but grows with motion and temperature. Heading must come from elsewhere (odometry, vision) in
+  the estimator node.
+
+All `imu.filter.*` settings apply at once, without restarting anything:
 
 ```python
-for batch in cam.imu():
-    s = batch.samples                          # numpy record array, fields as in the table above
-    print(len(s), s.az[-1], s.gx[-1], (batch.t_recv_server - s.t_capture[-1]) * 1e3, "ms")
+cam.update_settings({"imu": {"filter": {"kp": 0.3, "accel_gate": 0.3}}})
+```
+
+### Calibration
+
+- **At startup** (and after an IMU restart) the node skips the first 0.3 s (noisy on this unit),
+  then takes `filter.calib_s` (1 s) of data: gyro bias = mean rate, `g_ref` = mean |a| (this unit
+  reads **10.17 m/s²**, 3.6 % above 9.81, so gravity is calibrated, not assumed), initial roll/pitch
+  from the mean accel. Records are flagged `initializing` until then.
+- If the IMU moves during it (gyro or |a| spread too large, or a mean rate > 0.05 rad/s, which is
+  a rotation rather than a bias), the calibration is refused: the filter runs with the previous
+  bias (the stored one if any) and **retries automatically whenever the IMU is still** again.
+- **On request:** `POST /imu/calibrate` (body `{"seconds": 2}` optional) — keep the camera still;
+  returns the new calibration or 400 if it moved. `POST /imu/reset` restarts the orientation from
+  gravity (yaw 0) keeping the calibration. Both are also buttons on the page.
+- Successful calibrations are saved per camera serial in `~/.config/robot_utils/orbbec_imu.json`
+  on the Pi (a few hundred bytes; `--imu-calibration-file` to change, `none` to disable) and used
+  as the starting bias next time.
+- `GET /state` → `imu.filter`: orientation (quaternion and roll/pitch/yaw), bias, calibration
+  (bias, `g_ref`, noise, temperature, source), `calibrated`/`still`/`initializing` flags.
+
+Measured on the robot (stationary, camera facing up; this unit at 34.6 °C):
+
+| quantity | value |
+|---|---|
+| raw rate (device clock) | 1013.4 Hz, no gaps; host receipt in bursts of 0–13 ms |
+| gyro bias | (−0.00096, −0.0017, +0.0059) rad/s; z = 0.34 °/s = **20 °/min of yaw drift uncorrected** |
+| gyro noise | ~0.001 rad/s per sample (std); LSB 0.000533 rad/s = 1000 dps / 32768, confirming rad/s |
+| bias stability | 1 s means vary by ~0.002 °/s |
+| accel | |a| = 10.168 m/s² at rest, noise 0.016 m/s² |
+| **filter, 120 s still** | yaw drift **0.014°** (raw gyro: ~41°), roll/pitch noise 0.0025° std, 101.3 records/s |
+| record end → client (Mac, Wi-Fi LAN) | median 16 ms, p95 63 ms |
+| CPU | IMU at 1 kHz + filter ≈ 14 % of one core (mostly the SDK sample loop; the filter math ~2 %) |
+| filter cost per sample | ~2–3 µs on the Pi 5 (math), ~5.5 µs on an M-series Mac incl. windowing |
+
+Simulated motion (1 kHz samples, filter at 1 kHz, tilt error): 0.04–0.12° RMS for 0.5–10 Hz
+oscillations up to ±120 °/s.
+
+```python
+for rec in cam.imu():                          # filter output, ~100 Hz
+    s = rec.samples                            # numpy record array, STATE_FIELDS
+    print(s.qw[-1], s.qx[-1], s.qy[-1], s.qz[-1], int(s.flags[-1]))
+for rec in cam.imu(raw=True, batch_ms=10):     # every 1 kHz sample, ~10 per record
+    s = rec.samples                            # IMU_FIELDS
+cam.imu_calibrate(2.0)                         # keep still
 ```
 
 ## Recording on the client
@@ -367,7 +455,8 @@ from robot_utils.nodes.orbbec.client import record, read_recording
 record("http://100.80.153.120:8000", "rec_001", streams="color,depth", mode="raw", duration=30)
 for h, img in read_recording("rec_001/video.rec", decode_jpeg=False):
     print(h["stream"], h["seq"], h["t_sensor"], h["t_capture"], h["t_recv"])   # img: uint16 depth / MJPEG bytes
-imu = [s for _, s in read_recording("rec_001/imu.rec")]
+imu = [s for _, s in read_recording("rec_001/imu.rec")]          # filter output, ~100 Hz
+imu_raw = [s for _, s in read_recording("rec_001/imu_raw.rec")]  # every 1 kHz sample
 ```
 
 The `.rec` files are the wire records with each header extended by `t_recv` (receive time on the
