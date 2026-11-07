@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Swerve teleop</title>
+<meta name="description" content="Drive the swerve base from a phone or laptop: joystick, rotate slider, enable, e-stop.">
+<!--
+  Ported from rev_ctl examples/teleop.py (commit cfcfc32), now a client of the swerve node.
+  Every request goes to this frontend's proxy, relative to this page: ../nodes/swerve/<path>.
+
+  Control: the page takes the swerve node's lease (one controller at a time; another page or
+  script holding it shows here with a "Take control" button that retries). While enabled it
+  POSTs the twist 20 times a second (each accepted command renews the lease; the node stops
+  the base 0.25 s after the last one); while disabled it renews the lease twice a second. It
+  sends a disable when hidden and releases the lease when closed; if the page just dies, the
+  node's 1 s lease lapse stops and disables the base anyway.
+
+  The "achieved" ring and numbers are computed here from the node's per-module measurements
+  (wheel angle and speed), with the same least-squares fit as robot_twist() in
+  robot_utils/nodes/swerve/kinematics.py and the module positions from constants.py.
+-->
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; --pad: min(36vw, 62vh, 320px); }
+  html, body { height: 100%; margin: 0; overscroll-behavior: none; }
+  body { display: grid; grid-template: "move panel turn" 1fr / 1fr minmax(200px, 280px) 1fr;
+         align-items: center; justify-items: center; gap: 8px; padding: 8px; box-sizing: border-box;
+         user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  @media (orientation: portrait) {
+    :root { --pad: min(72vw, 30vh, 320px); }
+    body { grid-template: "panel" auto "move" 1fr "turn" auto / 1fr; row-gap: 24px; }
+  }
+  .panel { grid-area: panel; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 6px; }
+  .pad { grid-area: move; position: relative; width: var(--pad); height: var(--pad); border-radius: 50%; }
+  .slider { grid-area: turn; position: relative; width: var(--pad); height: 88px; border-radius: 44px; }
+  .pad, .slider { border: 2px solid #8886; background: #8881; touch-action: none; }
+  .knob, .ring { position: absolute; left: calc(50% - 36px); top: calc(50% - 36px); width: 72px; height: 72px;
+                 border-radius: 50%; box-sizing: border-box; pointer-events: none; }
+  .knob { background: #3b82f6; }
+  .ring { border: 5px solid #f97316; }
+  body.disabled .ring { opacity: .4; border-style: dashed; }
+  .twist { border-collapse: collapse; }
+  .twist th, .twist td { padding: 0 6px 0 0; text-align: right; font-weight: normal; }
+  .twist th:first-child { text-align: left; }
+  .cmd { color: #3b82f6; } .ach { color: #f97316; }
+  .legend { font-size: 12px; opacity: .8; }
+  .label { position: absolute; width: 100%; text-align: center; top: -1.5em; font-size: 13px; opacity: .7; }
+  button { font: 600 18px system-ui; padding: 10px; border: 0; border-radius: 10px; color: white; cursor: pointer; }
+  .buttons { display: flex; gap: 8px; }
+  #enable { flex: 1; background: #16a34a; }
+  #disable { flex: 2; background: #64748b; font-size: 22px; padding: 14px 10px; }
+  #estop { background: #dc2626; font-size: 24px; padding: 16px 10px; border: 3px solid #7a0d08; }
+  #clear, #take, #release { flex: 1; background: #475569; font-size: 15px; }
+  button:disabled { opacity: .35; cursor: default; }
+  #state { text-align: center; font: 700 20px system-ui; padding: 6px; border-radius: 10px; background: #8883; }
+  #state.on { background: #16a34a; color: white; }
+  #state.off { background: #dc2626; color: white; }
+  .status { font: 13px ui-monospace, monospace; line-height: 1.4; }
+  .limits { display: flex; gap: 8px; font-size: 13px; }
+  .limits input { width: 4.5em; font: inherit; }
+  .bad { color: #dc2626; font-weight: 600; }
+  a.back { font-size: 13px; text-align: center; }
+  #hint { display: none; font-size: 12px; opacity: .7; text-align: center; }
+  @media (orientation: portrait) { #hint { display: block; } }
+  body.inactive .pad, body.inactive .slider { opacity: .25; pointer-events: none; }
+</style></head>
+<body class="inactive disabled">
+<div class="pad" id="move"><span class="label">move</span><div class="knob"></div><div class="ring" hidden></div></div>
+<div class="panel">
+  <div id="state">CONNECTING</div>
+  <button id="estop" type="button">E-STOP</button>
+  <div class="buttons"><button id="enable" disabled>Enable</button><button id="disable" disabled>Disable</button></div>
+  <div class="buttons"><button id="take">Take control</button><button id="clear" disabled>Clear e-stop</button>
+    <button id="release" disabled>Release</button></div>
+  <div class="status">
+    <div>node: <span id="conn">connecting</span></div>
+    <div>control: <span id="ctrl">-</span></div>
+    <table class="twist">
+      <tr><th></th><th class="cmd">command</th><th class="ach">achieved</th></tr>
+      <tr><th>vx m/s</th><td id="cmd0">-</td><td id="ach0">-</td></tr>
+      <tr><th>vy m/s</th><td id="cmd1">-</td><td id="ach1">-</td></tr>
+      <tr><th>ω rad/s</th><td id="cmd2">-</td><td id="ach2">-</td></tr>
+    </table>
+    <div class="legend"><span class="cmd">●</span> knob: command &nbsp;
+      <span class="ach">○</span> ring: achieved (dashed while disabled)</div>
+    <div id="error" class="bad"></div>
+  </div>
+  <div class="limits">
+    <label>max m/s <input id="maxlin" type="number" min="0" step="0.1" value="0.5"></label>
+    <label>max rad/s <input id="maxang" type="number" min="0" step="0.1" value="1.0"></label>
+  </div>
+  <div id="hint">Tip: turn the phone sideways for a gamepad layout.</div>
+  <a class="back" href="../">← all nodes</a>
+</div>
+<div class="slider" id="turn"><span class="label">rotate</span><div class="knob"></div><div class="ring" hidden></div></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const NODE = "../nodes/swerve/";          // the frontend's proxy to the swerve node
+const DEADZONE = 0.08, COMMAND_MS = 50, RENEW_MS = 500, STATE_MS = 100;
+// Module positions (m) from robot_utils/nodes/swerve/constants.py: x forward, y left.
+const H = 0.1656;
+const MODULES = { FL: [H, H], FR: [H, -H], RR: [-H, -H], RL: [-H, H] };
+
+let token = null, holder = null, enabled = false, latched = false;
+let hard = { max_speed: 2.0, max_omega: 4.0 }, soft = { max_speed: 2.0, max_omega: 4.0 };
+let move = [0, 0], turn = 0, lastError = "";
+
+async function api(method, path, body, opts) {
+  const headers = {};
+  if (token) headers["X-Lease-Token"] = token;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(NODE + path, Object.assign({ method, headers, cache: "no-store",
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(1000) }, opts || {}));
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    const e = new Error((data && data.detail) ? String(data.detail) : "HTTP " + r.status);
+    e.status = r.status;
+    throw e;
+  }
+  return data;
+}
+function error(msg) { lastError = msg || ""; $("error").textContent = lastError; }
+function lostLease() { token = null; enabled = false; }
+
+// A draggable control: reports x, y in [-1, 1] (screen axes, y down); springs back on release.
+function stick(el, horizontal, onChange) {
+  const knob = el.querySelector(".knob");
+  let pointer = null;
+  function update(e) {
+    const r = el.getBoundingClientRect();
+    const reach = (horizontal ? r.width : r.height) / 2 - knob.offsetWidth / 2;
+    let x = (e.clientX - r.left - r.width / 2) / reach;
+    let y = horizontal ? 0 : (e.clientY - r.top - r.height / 2) / reach;
+    let m = Math.hypot(x, y);
+    if (m > 1) { x /= m; y /= m; m = 1; }
+    knob.style.transform = `translate(${x * reach}px, ${y * reach}px)`;
+    const k = m < DEADZONE ? 0 : (m - DEADZONE) / (1 - DEADZONE) / m;
+    onChange(x * k, y * k);
+  }
+  function release(e) {
+    if (e.pointerId !== pointer) return;
+    pointer = null;
+    knob.style.transform = "";
+    onChange(0, 0);
+  }
+  el.addEventListener("pointerdown", e => { pointer = e.pointerId; el.setPointerCapture(pointer); update(e); });
+  el.addEventListener("pointermove", e => { if (e.pointerId === pointer) update(e); });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(type, release);
+}
+stick($("move"), false, (x, y) => { move = [x, y]; });
+stick($("turn"), true, x => { turn = x; });
+
+// Page limits, within the node's soft limits (which are within its hard limits).
+function limit(id, cap) {
+  const v = parseFloat($(id).value);
+  return Number.isFinite(v) ? Math.max(0, Math.min(v, cap)) : 0;
+}
+function twistFromSticks() {
+  // up = +vx (forward), left = +vy, rotate left = +omega (counter-clockwise)
+  const lin = limit("maxlin", soft.max_speed), ang = limit("maxang", soft.max_omega);
+  return [-move[1] * lin, -move[0] * lin, -turn * ang];
+}
+
+// Achieved twist from the latest per-module measurements (robot_twist least squares).
+function achieved(t) {
+  if (!t) return null;
+  let sx = 0, sy = 0, num = 0, den = 0, n = 0;
+  for (const [name, [x, y]] of Object.entries(MODULES)) {
+    const a = t[name + "_steer_angle"], v = t[name + "_drive_vel"];
+    if (!Number.isFinite(a) || !Number.isFinite(v)) return null;
+    const wx = v * Math.cos(a), wy = v * Math.sin(a);
+    sx += wx; sy += wy; num += x * wy - y * wx; den += x * x + y * y; n++;
+  }
+  return [sx / n, sy / n, num / den];
+}
+function placeRing(el, horizontal, x, y) {
+  const ring = el.querySelector(".ring");
+  ring.hidden = !Number.isFinite(x) || !Number.isFinite(y);
+  if (ring.hidden) return;
+  const r = el.getBoundingClientRect();
+  const reach = (horizontal ? r.width : r.height) / 2 - ring.offsetWidth / 2;
+  const m = Math.hypot(x, y);
+  if (m > 1) { x /= m; y /= m; }
+  ring.style.transform = `translate(${x * reach}px, ${y * reach}px)`;
+}
+const fmt = v => (v == null || !Number.isFinite(v)) ? "-" : (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
+
+function show(s) {
+  const t = s.latest || {};
+  const cmd = [t.cmd_vx, t.cmd_vy, t.cmd_omega], a = achieved(s.latest);
+  for (let i = 0; i < 3; i++) {
+    $("cmd" + i).textContent = fmt(cmd[i]);
+    $("ach" + i).textContent = a ? fmt(a[i]) : "-";
+  }
+  const lin = limit("maxlin", soft.max_speed), ang = limit("maxang", soft.max_omega);
+  placeRing($("move"), false, a && lin ? -a[1] / lin : NaN, a && lin ? -a[0] / lin : NaN);
+  placeRing($("turn"), true, a && ang ? -a[2] / ang : NaN, 0);
+
+  enabled = !!s.enabled; latched = !!(s.estop && s.estop.latched);
+  holder = s.lease && s.lease.held ? (s.lease.holder || "someone") : null;
+  if (s.limits && s.limits.soft) soft = s.limits.soft;
+  if (s.limits && s.limits.hard) hard = s.limits.hard;
+  const mine = !!token;
+  document.body.classList.toggle("disabled", !enabled);
+  document.body.classList.toggle("inactive", !mine || latched);
+  $("ctrl").innerHTML = "";
+  $("ctrl").append(mine ? "this page" : holder ? `held by ${holder}` : "nobody (take control)");
+  $("ctrl").className = !mine && holder ? "bad" : "";
+  $("enable").disabled = !mine || enabled || latched;
+  $("disable").disabled = !mine || !enabled;
+  $("clear").disabled = !mine || !latched;
+  $("release").disabled = !mine;
+  $("take").disabled = mine;
+  $("state").textContent = latched ? "E-STOPPED" : !mine ? "NOT IN CONTROL" : enabled ? "ENABLED" : "DISABLED";
+  $("state").classList.toggle("on", mine && enabled && !latched);
+  $("state").classList.toggle("off", latched || !mine);
+  if (s.error) error("drive error: " + s.error);
+}
+
+async function take() {
+  try {
+    const r = await api("POST", "lease", { client: "teleop page (" + navigator.platform + ")" });
+    token = r.token; error("");
+  } catch (e) {
+    error(e.status === 409 ? "Another client holds the lease: " + e.message : "take control: " + e.message);
+  }
+}
+async function act(path, label) {
+  try { await api("POST", path); error(""); }
+  catch (e) { if (e.status === 401 || e.status === 403) lostLease(); error(label + ": " + e.message); }
+}
+
+// Command loop: the twist while enabled (renews the lease), a plain renew otherwise.
+let lastRenew = 0;
+setInterval(async () => {
+  if (!token) return;
+  try {
+    if (enabled && !latched) {
+      await api("POST", "command", { twist: twistFromSticks() });
+    } else if (performance.now() - lastRenew > RENEW_MS) {
+      lastRenew = performance.now();
+      await api("POST", "lease/renew");
+    }
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) { lostLease(); error("lease lost: " + e.message); }
+    else if (e.status === 409) { /* disabled or e-stopped meanwhile: the state poll shows it */ }
+    else error("command: " + e.message);
+  }
+}, COMMAND_MS);
+
+// State poll (~10 Hz).
+setInterval(async () => {
+  try {
+    const s = await api("GET", "state");
+    $("conn").textContent = "connected"; $("conn").className = "";
+    show(s);
+  } catch (e) {
+    $("conn").textContent = "LOST (" + e.message + ")"; $("conn").className = "bad";
+  }
+}, STATE_MS);
+
+$("take").onclick = take;
+$("enable").onclick = () => act("enable", "enable");
+$("disable").onclick = () => act("disable", "disable");
+$("clear").onclick = () => act("estop/clear", "clear e-stop");
+$("estop").onclick = async () => {   // anyone may e-stop, with or without the lease
+  try { await api("POST", "estop", { source: "teleop page", reason: "E-STOP button" }); error(""); }
+  catch (e) { error("E-STOP FAILED: " + e.message + " — stop the robot another way!"); }
+};
+$("release").onclick = async () => {
+  try { await api("DELETE", "lease"); } catch (_) {}
+  lostLease(); error("");
+};
+
+// Leaving: disable when hidden, release when closed (best effort; the lease lapse is the backstop).
+function leaving(release) {
+  if (!token) return;
+  const headers = { "X-Lease-Token": token };
+  fetch(NODE + "disable", { method: "POST", headers, keepalive: true }).catch(() => {});
+  if (release) { fetch(NODE + "lease", { method: "DELETE", headers, keepalive: true }).catch(() => {}); lostLease(); }
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) leaving(false); });
+window.addEventListener("pagehide", () => leaving(true));
+
+take();
+</script>
+</body></html>

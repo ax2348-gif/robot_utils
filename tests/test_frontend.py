@@ -219,3 +219,62 @@ def test_cli_bad_config(tmp_path, capsys):
     p.write_text(json.dumps({"nodes": [{"name": "a"}]}))
     assert cli.main(["--config", str(p)]) == 2
     assert "port" in capsys.readouterr().err
+
+
+# --- proxy and tools ------------------------------------------------------------------------
+
+class EchoNode:
+    """Echoes what the proxy forwarded: method, path, query, lease header, body."""
+
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request)
+        if request.url.port != 8102:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(201, json={"method": request.method, "path": request.url.path,
+                                         "query": str(request.url.query, "ascii"),
+                                         "token": request.headers.get("x-lease-token"),
+                                         "body": request.content.decode()},
+                              headers={"x-internal": "not forwarded"})
+
+
+def test_proxy_forwards_to_the_node_same_origin():
+    nodes = [NodeEntry("swerve", 8102), NodeEntry("camera", 8101), NodeEntry("arm", 8103, enabled=False)]
+    echo = EchoNode()
+    with TestClient(create_app(nodes, transport=httpx.MockTransport(echo))) as c:
+        r = c.post("/nodes/swerve/command?x=1", json={"twist": [0.1, 0, 0]},
+                   headers={"X-Lease-Token": "tok", "Cookie": "secret=1"})
+        assert r.status_code == 201
+        body = r.json()
+        assert body["method"] == "POST" and body["path"] == "/command" and body["query"] == "x=1"
+        assert body["token"] == "tok" and '"twist"' in body["body"]
+        assert "x-internal" not in r.headers
+        assert "cookie" not in {k.lower() for k in echo.seen[-1].headers}       # only allow-listed headers
+        assert str(echo.seen[-1].url).startswith("http://127.0.0.1:8102/")      # loopback on the robot
+        assert c.delete("/nodes/swerve/lease").json()["method"] == "DELETE"
+        r = c.get("/nodes/camera/state")                                         # node down
+        assert r.status_code == 502 and "unreachable" in r.json()["detail"]
+        assert c.get("/nodes/arm/state").status_code == 404                      # disabled node
+        assert c.get("/nodes/nope/state").status_code == 404
+
+
+def test_tools_listed_and_served():
+    with client_for([NodeEntry("swerve", 8102)], FakeNodes({})) as c:
+        tools = c.get("/api/tools").json()["tools"]
+        teleop = next(t for t in tools if t["name"] == "swerve_teleop")
+        assert teleop["href"] == "tools/swerve_teleop.html" and teleop["title"] == "Swerve teleop"
+        assert teleop["description"]
+        r = c.get("/tools/swerve_teleop.html")
+        assert r.status_code == 200 and "../nodes/swerve/" in r.text
+        assert "localhost" not in r.text and "https://" not in r.text
+        assert c.get("/tools/missing.html").status_code == 404
+        assert c.get("/tools/..%2Fpage.html").status_code == 404
+
+
+def test_landing_page_uses_the_proxy():
+    with client_for([NodeEntry("swerve", 8102)], FakeNodes({})) as c:
+        page = c.get("/").text
+        assert '"nodes/" + encodeURIComponent(n.cfg.name)' in page
+        assert 'fetchJson("api/tools"' in page

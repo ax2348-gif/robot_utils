@@ -22,4 +22,4 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"robot_utils.frontend" = ["nodes.yaml", "page.html"]
+"robot_utils.frontend" = ["nodes.yaml", "page.html", "tools/*.html"]

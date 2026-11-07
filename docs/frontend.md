@@ -51,21 +51,53 @@ Adding a node is adding a line; no frontend code changes. Restart the frontend t
   scripts, or a browser that can reach port 80 but not the node ports). 200 with `"ok": true`
   only if every actuated node confirmed `latched`; otherwise 502 with per-node results.
 - `GET /api/health` — `{"ok": true}`.
+- `/nodes/<name>/<path>` — **proxy** to the node over the robot's loopback (GET, POST,
+  DELETE, PUT, PATCH; forwards only `Content-Type`, `Accept`, `X-Lease-Token`,
+  `Last-Event-ID`; streams the reply, so `/events` works too). 502 if the node is down, 404
+  for a node that is not enabled in `nodes.yaml`.
+- `GET /api/tools`, `GET /tools/<name>.html` — the tool pages (below).
 
-**Status** is polled by the browser, straight from each node, about once a second
-(`GET /meta` once per (re)connection, then `GET <endpoints.state>`). The frontend never
-contacts a node for status. A node that does not answer in 0.9 s shows **DOWN**.
+**Why a proxy.** The first version polled and e-stopped the nodes straight from the browser
+(nodes allow CORS). In practice browsers may refuse or stall cross-port requests to
+local-network addresses even with CORS allowed: the tiles showed DOWN while the nodes answered
+and their pages opened. So every request the landing page and the tools make is same-origin,
+to this frontend, which forwards it. The proxy is for the nodes' small JSON API (and SSE);
+node pages and their video/raw streams are still opened directly on the node port (the tile
+link), so no bulk data passes through the frontend.
+
+**Status** is polled through the proxy about once a second (`nodes/<name>/meta` once per
+(re)connection, then `nodes/<name>/<endpoints.state>`). A node that does not answer in 0.9 s
+shows **DOWN**, with the reason (`ConnectError` = nothing listening on that port).
 
 **Tile link** = `http://` + `window.location.hostname` (or the configured `host`) + `:port/`
 + `meta.page`. Hidden when `meta.has_page` is `false`.
 
-**E-STOP ALL** posts, from the browser, in parallel, to every enabled node whose last `/meta`
+**E-STOP ALL** posts, in parallel, through the proxy, to every enabled node whose last `/meta`
 says it is actuated (or names an `estop` endpoint). Nodes whose `/meta` was never read are
 tried at `estop` anyway: a stray POST is better than a missed stop. Each node gets a line:
 `LATCHED` (the reply said `{"latched": true}`), `FAILED` (HTTP error, or a reply without
 `latched: true`), `UNREACHABLE` (no reply within 1.5 s), or `SKIPPED` (not actuated). The
 banner turns red unless every actuated node latched. The button never asks to confirm.
-Releasing an e-stop is done on each node's own page.
+Releasing an e-stop is done on each node's own page (or a tool page, by the lease holder).
+If the frontend itself is down, each node's own page and `POST /estop` still work.
+
+## Tools
+
+Static pages in `src/robot_utils/frontend/tools/*.html`, listed in a **Tools** section on the
+landing page (title and description from the page's `<title>` and
+`<meta name="description">`). They call nodes only through the proxy, with URLs relative to
+the page (`../nodes/<name>/...`), so they need no CORS and work under any host or port. To add
+one, drop an `.html` file in that folder (names: lowercase letters, digits, `_`, `-`).
+
+- **Swerve teleop** (`tools/swerve_teleop.html`), ported from rev_ctl `examples/teleop.py`:
+  move joystick, rotate slider, page speed limits (capped at the node's soft limits), Enable,
+  Disable, E-STOP and Clear e-stop. It takes the swerve node's lease ("Take control" if someone
+  else holds it), POSTs the twist 20 times a second while enabled (each command renews the
+  lease; the node stops 0.25 s after the last one), renews the lease twice a second while
+  disabled, disables when the page is hidden and releases the lease when it is closed (the
+  node's 1 s lease lapse is the backstop). The orange "achieved" ring is computed in the page
+  from the per-module wheel angles and speeds, with the same least-squares fit as
+  `robot_twist()` (the node does not serve a measured twist).
 
 ## Node contract
 

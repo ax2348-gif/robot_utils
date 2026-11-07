@@ -1,26 +1,41 @@
-"""The frontend's FastAPI app: landing page, node list, and a server-side E-STOP fan-out.
+"""The frontend's FastAPI app: landing page, tools, node proxy and a server-side E-STOP fan-out.
 
-The page polls nodes and sends its E-STOP straight from the browser (nodes allow CORS), so
-this process holds no state and relays nothing during normal use. ``POST /api/estop`` is the
-same fan-out run from here, for scripts (``curl -X POST http://<robot>/api/estop``) and for
-browsers that can reach port 80 but not the node ports.
+Browser pages never call node ports cross-origin: some browsers refuse or stall cross-port
+requests to local-network addresses even with CORS allowed (the landing tiles showed DOWN while
+the nodes answered). Instead ``/nodes/<name>/<path>`` forwards to the node over the robot's
+own loopback, so the landing page, its E-STOP and the tool pages only make same-origin
+requests. The proxy is meant for the nodes' small JSON API (and SSE); node pages and their
+video/raw streams are still opened directly on the node port ("Open page"), so no bulk data
+passes through here. This process still holds no state and is not on the control path.
+
+``POST /api/estop`` is the same e-stop fan-out run from here, for scripts
+(``curl -X POST http://<robot>/api/estop``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 from contextlib import asynccontextmanager
 from importlib import resources
 from urllib.parse import urljoin
 
 import httpx
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from .config import NodeEntry
 
 META_TIMEOUT_S = 0.75
 ESTOP_TIMEOUT_S = 1.5
+# Proxy: connecting must be quick; no read timeout, because /events and /stream never end
+# (the browser aborts slow requests itself, which closes the upstream request too).
+PROXY_TIMEOUT = httpx.Timeout(connect=1.0, read=None, write=2.0, pool=2.0)
+PROXY_REQUEST_HEADERS = ("content-type", "accept", "x-lease-token", "last-event-id")
+PROXY_RESPONSE_HEADERS = ("content-type", "cache-control")
+TOOL_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def node_base_url(node: NodeEntry, default_host: str) -> str:
@@ -95,6 +110,25 @@ def load_page() -> str:
     return resources.files(__package__).joinpath("page.html").read_text(encoding="utf-8")
 
 
+def list_tools() -> list[dict]:
+    """Static tool pages shipped in ``frontend/tools/*.html`` (title and description from the
+    page's <title> and <meta name="description">)."""
+    out = []
+    folder = resources.files(__package__).joinpath("tools")
+    if not folder.is_dir():
+        return out
+    for f in sorted(folder.iterdir(), key=lambda f: f.name):
+        if not f.name.endswith(".html") or not TOOL_NAME.match(f.name[:-5]):
+            continue
+        text = f.read_text(encoding="utf-8")
+        title = re.search(r"<title>(.*?)</title>", text, re.S)
+        desc = re.search(r'<meta\s+name="description"\s+content="(.*?)"', text, re.S)
+        out.append({"name": f.name[:-5], "href": f"tools/{f.name}",
+                    "title": html.unescape(title.group(1).strip()) if title else f.name[:-5],
+                    "description": html.unescape(desc.group(1).strip()) if desc else ""})
+    return out
+
+
 def create_app(
     nodes: list[NodeEntry],
     *,
@@ -133,5 +167,37 @@ def create_app(
         attempted = [r for r in results if r["status"] != "skipped"]
         ok = bool(attempted) and all(r["status"] == "latched" for r in attempted)
         return JSONResponse({"ok": ok, "results": results}, status_code=200 if ok else 502)
+
+    @app.get("/api/tools")
+    async def tools() -> JSONResponse:
+        return JSONResponse({"tools": list_tools()}, headers=no_cache)
+
+    @app.get("/tools/{name}.html", response_class=HTMLResponse)
+    async def tool(name: str) -> HTMLResponse:
+        f = resources.files(__package__).joinpath("tools", f"{name}.html")
+        if not TOOL_NAME.match(name) or not f.is_file():
+            raise HTTPException(404, f"no tool {name!r}")
+        return HTMLResponse(f.read_text(encoding="utf-8"), headers=no_cache)
+
+    by_name = {n.name: n for n in nodes if n.enabled}
+
+    @app.api_route("/nodes/{name}/{path:path}", methods=["GET", "POST", "DELETE", "PUT", "PATCH"])
+    async def proxy(name: str, path: str, request: Request):
+        node = by_name.get(name)
+        if node is None:
+            raise HTTPException(404, f"no enabled node {name!r} in nodes.yaml")
+        url = urljoin(node_base_url(node, default_host), path)
+        headers = {k: v for k, v in request.headers.items() if k.lower() in PROXY_REQUEST_HEADERS}
+        client: httpx.AsyncClient = app.state.client
+        upstream = client.build_request(request.method, url, params=request.query_params,
+                                        headers=headers, content=await request.body(),
+                                        timeout=PROXY_TIMEOUT)
+        try:
+            r = await client.send(upstream, stream=True)
+        except httpx.HTTPError as e:
+            return JSONResponse({"detail": f"node {name} unreachable: {type(e).__name__}"}, status_code=502)
+        out_headers = {k: v for k, v in r.headers.items() if k.lower() in PROXY_RESPONSE_HEADERS}
+        return StreamingResponse(r.aiter_bytes(), status_code=r.status_code, headers=out_headers,
+                                 background=BackgroundTask(r.aclose))
 
     return app
