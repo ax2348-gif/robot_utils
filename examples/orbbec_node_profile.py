@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Latency profile of the Orbbec node: capture -> client receive, per frame, over a settings matrix.
 
-    PYTHONPATH=src python examples/orbbec_node_profile.py --url http://100.80.153.120:8000 \
+    PYTHONPATH=src python examples/orbbec_node_profile.py --url http://100.80.153.120:8101 \
         --duration 12 --out results_tailscale.json
 
 For every case it (1) applies the settings (POST /settings round trip; time until the first frame
@@ -222,7 +222,7 @@ def settings_timing(url, c):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--url", default="http://localhost:8000")
+    p.add_argument("--url", default="http://localhost:8101")
     p.add_argument("--label", default=None, help="name of this client location (for the table)")
     p.add_argument("--duration", type=float, default=12.0)
     p.add_argument("--only", default="", help="comma-separated substrings; run only matching cases")
