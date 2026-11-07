@@ -114,3 +114,27 @@ def test_quaternion_helpers_roundtrip():
     assert np.allclose(qlog(qexp(*v)), v)
     q = qmul(qexp(0.1, 0, 0), qexp(-0.1, 0, 0))
     assert np.allclose(q, (1, 0, 0, 0))
+
+
+def test_startup_calibration_retries_once_still():
+    f = AttitudeFilter(FilterConfig())
+    fails, cals = [], []
+    f.on_calibration_failed, f.on_calibration = fails.append, cals.append
+    t = np.arange(3000) / HZ
+    moving = rows(3000)
+    moving[:, 7] = 0.5 * np.sin(2 * math.pi * 2 * t)
+    run(f, moving)                                       # first attempt (and silent retries) refused
+    assert len(fails) == 1 and "retry" in fails[0] and not f.initializing and not f.calibrated
+    run(f, rows(3000, gyro=(0.0, 0.0, 0.003), t0=3.0))    # still again: calibrates by itself
+    assert cals and cals[-1].source == "startup" and cals[-1].gyro_bias[2] == pytest.approx(0.003, abs=2e-4)
+    assert len(fails) == 1
+
+
+def test_warmup_samples_are_not_used():
+    f = AttitudeFilter(FilterConfig(warmup_s=0.3))
+    cals = []
+    f.on_calibration = cals.append
+    r = rows(2000)
+    r[:200, 9] = np.random.default_rng(1).normal(0, 0.05, 200)   # noisy first 0.2 s
+    run(f, r)
+    assert cals and abs(cals[0].gyro_bias[2]) < 1e-9

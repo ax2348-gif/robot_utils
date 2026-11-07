@@ -71,6 +71,7 @@ class FilterConfig:
     still_gyro_rate: float = 0.01  # rad/s, |mean rate - bias| (0.57 deg/s)
     still_accel_std: float = 0.06  # m/s^2 per sample (noise ~0.017)
     calib_s: float = 1.0
+    warmup_s: float = 0.3          # samples right after the IMU starts are noisy; not used to calibrate
     max_bias: float = 0.05         # rad/s: a calibration whose mean rate is larger is a rotation, not bias
     nominal_hz: float = 1000.0
 
@@ -218,8 +219,15 @@ class AttitudeFilter:
         self._t_prev = None
         self._win = None
         self.seq = 0
-        self._calib = [] if recalibrate else None
-        self._calib_source = "startup"
+        self._calib = None
+        self._calib_source = None
+        self._calib_len = self.cfg.calib_s
+        # Startup calibration: first attempt right after the warm-up (orientation held as
+        # "initializing"); if the IMU moves, run normally and retry whenever it is still again.
+        self._startup_pending = recalibrate
+        self._initializing = recalibrate
+        self._startup_reported = False
+        self._n = 0
         self._need_attitude = True
         self.still = False
 
@@ -231,7 +239,7 @@ class AttitudeFilter:
 
     @property
     def initializing(self) -> bool:
-        return self._calib is not None and self._calib_source == "startup"
+        return self._initializing
 
     # -- processing ---------------------------------------------------------------------------
 
@@ -274,6 +282,10 @@ class AttitudeFilter:
         else:
             self.still = False
 
+        self._n += 1
+        if (self._startup_pending and self._calib is None and self._n > cfg.warmup_s * cfg.nominal_hz
+                and (self._initializing or self.still)):
+            self._calib, self._calib_len, self._calib_source = [], cfg.calib_s, "startup"
         if self._calib is not None:
             self._calibrate_step(r, ax, ay, az, an, gx, gy, gz)
 
@@ -335,8 +347,7 @@ class AttitudeFilter:
     def _calibrate_step(self, r, ax, ay, az, an, gx, gy, gz):
         c = self._calib
         c.append((gx, gy, gz, ax, ay, az, an, r[_TEMP]))
-        seconds = self._calib_len if self._calib_source != "startup" else self.cfg.calib_s
-        if len(c) < seconds * self.cfg.nominal_hz:
+        if len(c) < self._calib_len * self.cfg.nominal_hz:
             return
         A = np.array(c)
         self._calib = None
@@ -347,20 +358,28 @@ class AttitudeFilter:
                 or np.abs(g_mean).max() >= self.cfg.max_bias):
             msg = (f"IMU moved during calibration (gyro mean {np.round(g_mean, 4).tolist()} std "
                    f"{np.round(g_std, 4).tolist()} rad/s, |a| std {a_std:.3f} m/s^2); kept the previous calibration")
+            if self._calib_source == "startup":
+                if self._initializing:
+                    self._initializing = False
+                    self._need_attitude = True   # run now, from gravity, with the old bias
+                if self._startup_reported:
+                    return                       # retries are silent; they happen whenever still
+                self._startup_reported = True
+                msg += "; will retry when the IMU is still"
             if self.on_calibration_failed:
                 self.on_calibration_failed(msg)
-            if self._calib_source == "startup":
-                self._need_attitude = True   # start anyway, from gravity, with the old bias
             return
         self.cal = Calibration(gyro_bias=tuple(float(x) for x in g_mean), g_ref=float(A[:, 6].mean()),
                                gyro_std=tuple(float(x) for x in g_std), accel_std=a_std,
                                temperature=float(np.nanmean(A[:, 7])), t=r[_T_CAPTURE], source=self._calib_source)
         self.bias = list(self.cal.gyro_bias)
         self.calibrated = True
-        if self._calib_source == "startup":
+        self._startup_pending = False
+        if self._initializing:
             m = A[:, 3:6].mean(0)
             self.q = q_from_gravity(*m)
             self._need_attitude = False
+            self._initializing = False
         if self.on_calibration:
             self.on_calibration(self.cal)
 
