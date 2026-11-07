@@ -73,26 +73,39 @@ def stretch16(a: np.ndarray) -> np.ndarray:
     return np.clip((a.astype(np.float32) - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
 
 
-def colorize_depth(raw: np.ndarray, scale: float, ds) -> tuple[np.ndarray, float, float, float]:
-    """raw: HxW uint16 depth units; ds: DisplaySettings. Returns (RGB, lo_mm, hi_mm, valid fraction)."""
-    valid = raw > 0
-    mm = raw.astype(np.float32)
-    if scale != 1.0:
-        mm *= scale
+def depth_range(raw: np.ndarray, scale: float, ds) -> tuple[float, float, float]:
+    """Colormap range in mm (manual, or percentiles of a 1/16 sample) and the valid fraction (sampled)."""
+    sample = raw[::4, ::4]
+    vs = sample[sample > 0]
+    valid = vs.size / max(sample.size, 1)
     if ds.range_mode == "manual":
         lo, hi = float(ds.min_mm), float(ds.max_mm)
+    elif vs.size > 50:
+        lo, hi = (float(v) * scale for v in np.percentile(vs, [ds.pct_lo, ds.pct_hi]))
     else:
-        sample = mm[::4, ::4][valid[::4, ::4]]
-        lo, hi = (np.percentile(sample, [ds.pct_lo, ds.pct_hi]) if sample.size > 50 else (0.0, 1.0))
-        lo, hi = float(lo), float(hi)
-    hi = max(hi, lo + 1.0)
+        lo, hi = 0.0, 1.0
+    return lo, max(hi, lo + 1.0), valid
+
+
+def depth_lut(lo: float, hi: float, scale: float, ds, bgr: bool = False) -> np.ndarray:
+    """65536 x 3 uint8 table: depth unit -> color (entry 0 = invalid color)."""
+    mm = np.arange(65536, dtype=np.float32) * np.float32(scale)
     idx = np.clip((mm - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
     if ds.invert:
         idx = 255 - idx
-    rgb = COLORMAPS.get(ds.colormap, COLORMAPS["gray"])[idx]
+    cmap = COLORMAPS.get(ds.colormap, COLORMAPS["gray"])
+    lut = cmap[:, ::-1][idx] if bgr else cmap[idx]
     c = ds.invalid_color.lstrip("#")
-    rgb[~valid] = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
-    return rgb, lo, hi, float(valid.mean())
+    inv = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+    lut[0] = inv[::-1] if bgr else inv
+    return lut
+
+
+def colorize_depth(raw: np.ndarray, scale: float, ds, bgr: bool = False) -> tuple[np.ndarray, float, float, float]:
+    """raw: HxW uint16 depth units; ds: DisplaySettings.
+    Returns (HxWx3 uint8 RGB (or BGR), lo_mm, hi_mm, valid fraction (sampled))."""
+    lo, hi, valid = depth_range(raw, scale, ds)
+    return depth_lut(lo, hi, scale, ds, bgr)[raw], lo, hi, valid
 
 
 def to_display(fmt: str, data: np.ndarray, w: int, h: int) -> np.ndarray:
@@ -129,8 +142,13 @@ def encode_frame(frame, mode: str, display, compress: bool = False) -> tuple[obj
             extra["compression"] = "zlib"
         return payload, extra
     if frame.stream == "depth":
-        rgb, lo, hi, valid = colorize_depth(frame.data, frame.depth_scale, display)
-        return encode_jpeg(rgb, display.jpeg_quality), {
+        img, lo, hi, valid = colorize_depth(frame.data, frame.depth_scale, display, bgr=cv2 is not None)
+        if cv2 is not None:
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(display.jpeg_quality)])
+            jpeg = buf.tobytes()
+        else:
+            jpeg = encode_jpeg(img, display.jpeg_quality)
+        return jpeg, {
             "encoding": "jpeg", "format": "JPEG", "lo_mm": round(lo, 1), "hi_mm": round(hi, 1),
             "valid": round(valid, 3)}
     img = to_display(frame.fmt, frame.data, frame.w, frame.h)

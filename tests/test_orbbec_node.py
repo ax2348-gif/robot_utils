@@ -281,3 +281,19 @@ def test_end_to_end_fake(fake_node, tmp_path):
     assert {h["stream"] for h in hs} == {"color", "depth"} and all("t_recv" in h for h in hs)
     imu = list(read_recording(str(tmp_path / "imu.rec")))
     assert imu and imu[0][1].dtype.names == IMU_FIELDS
+
+
+def test_colorize_depth_lut():
+    from robot_utils.nodes.orbbec.encode import COLORMAPS, colorize_depth
+    from robot_utils.nodes.orbbec.models import DisplaySettings
+    ds = DisplaySettings(range_mode="manual", min_mm=1000, max_mm=2000, invalid_color="#ff0000", colormap="gray")
+    raw = np.array([[0, 1000, 1500, 2000, 4000]], np.uint16)
+    rgb, lo, hi, valid = colorize_depth(raw, 1.0, ds)
+    assert (lo, hi) == (1000.0, 2000.0)
+    assert tuple(rgb[0, 0]) == (255, 0, 0)                          # invalid
+    assert tuple(rgb[0, 1]) == tuple(COLORMAPS["gray"][0]) and tuple(rgb[0, 3]) == tuple(COLORMAPS["gray"][255])
+    assert tuple(rgb[0, 4]) == tuple(COLORMAPS["gray"][255])        # clipped
+    bgr, *_ = colorize_depth(raw, 1.0, ds, bgr=True)
+    assert tuple(bgr[0, 0]) == (0, 0, 255)
+    inv, *_ = colorize_depth(raw, 0.5, ds.model_copy(update={"invert": True}))   # scale: 2000 units = 1000 mm
+    assert tuple(inv[0, 3]) == tuple(COLORMAPS["gray"][255])
