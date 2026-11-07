@@ -1,0 +1,38 @@
+{
+ "label": "pi_localhost",
+ "url": "http://127.0.0.1:8102",
+ "sync_uncertainty_ms": 0.514,
+ "sync_rtt_min_ms": 1.037,
+ "loop_hz": 100.0,
+ "tick_period_ms": {
+  "n": 1650,
+  "p50": 10.0,
+  "p95": 10.03,
+  "p99": 10.75,
+  "max": 11.91
+ },
+ "tick_to_client_ms": {
+  "n": 1651,
+  "p50": 1.65,
+  "p95": 2.82,
+  "p99": 4.08,
+  "max": 5.16
+ },
+ "command_rtt_ms": {
+  "n": 300,
+  "p50": 3.16,
+  "p95": 4.52,
+  "p99": 5.14,
+  "max": 7.24
+ },
+ "command_to_applied_ms": {
+  "n": 300,
+  "p50": 4.46,
+  "p95": 9.64,
+  "p99": 10.31,
+  "max": 10.46
+ },
+ "commands_seen": "300/300",
+ "rows": 1651,
+ "dropped": 0
+}

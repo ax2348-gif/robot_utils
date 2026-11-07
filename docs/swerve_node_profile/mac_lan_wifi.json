@@ -1,0 +1,38 @@
+{
+ "label": "mac_lan_wifi",
+ "url": "http://192.168.8.209:8102",
+ "sync_uncertainty_ms": 2.09,
+ "sync_rtt_min_ms": 4.242,
+ "loop_hz": 100.0,
+ "tick_period_ms": {
+  "n": 1649,
+  "p50": 10.0,
+  "p95": 10.02,
+  "p99": 10.48,
+  "max": 11.33
+ },
+ "tick_to_client_ms": {
+  "n": 1650,
+  "p50": 3.93,
+  "p95": 49.08,
+  "p99": 69.58,
+  "max": 78.0
+ },
+ "command_rtt_ms": {
+  "n": 279,
+  "p50": 8.21,
+  "p95": 45.21,
+  "p99": 77.08,
+  "max": 79.92
+ },
+ "command_to_applied_ms": {
+  "n": 277,
+  "p50": 7.0,
+  "p95": 37.32,
+  "p99": 60.23,
+  "max": 72.04
+ },
+ "commands_seen": "277/279",
+ "rows": 1650,
+ "dropped": 0
+}

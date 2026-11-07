@@ -1,0 +1,38 @@
+{
+ "label": "mac_tailscale",
+ "url": "http://100.80.153.120:8102",
+ "sync_uncertainty_ms": 2.411,
+ "sync_rtt_min_ms": 5.028,
+ "loop_hz": 100.0,
+ "tick_period_ms": {
+  "n": 1655,
+  "p50": 10.0,
+  "p95": 10.02,
+  "p99": 10.4,
+  "max": 11.71
+ },
+ "tick_to_client_ms": {
+  "n": 1656,
+  "p50": 4.48,
+  "p95": 48.85,
+  "p99": 70.0,
+  "max": 75.1
+ },
+ "command_rtt_ms": {
+  "n": 282,
+  "p50": 8.6,
+  "p95": 43.67,
+  "p99": 76.09,
+  "max": 79.36
+ },
+ "command_to_applied_ms": {
+  "n": 282,
+  "p50": 7.38,
+  "p95": 39.11,
+  "p99": 66.61,
+  "max": 73.9
+ },
+ "commands_seen": "282/282",
+ "rows": 1656,
+ "dropped": 0
+}
