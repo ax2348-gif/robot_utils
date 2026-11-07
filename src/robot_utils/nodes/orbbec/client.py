@@ -2,7 +2,7 @@
 
     from robot_utils.nodes.orbbec.client import OrbbecClient
 
-    cam = OrbbecClient("http://100.80.153.120:8000")
+    cam = OrbbecClient("http://100.80.153.120:8101")
     est = cam.sync()                                 # NTP-style; est.uncertainty in s
     cam.update_settings({"streams": {"color": True, "depth": True}})
     for fr in cam.frames("color,depth", mode="raw"):
@@ -83,7 +83,7 @@ class Record:
 
 
 class OrbbecClient:
-    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 10.0):
+    def __init__(self, base_url: str = "http://localhost:8101", timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.http = httpx.Client(base_url=self.base_url, timeout=timeout)

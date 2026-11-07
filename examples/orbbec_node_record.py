@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record the Orbbec node's streams on THIS machine (the Pi has no disk to spare).
 
-    PYTHONPATH=src python examples/orbbec_node_record.py --url http://100.80.153.120:8000 \
+    PYTHONPATH=src python examples/orbbec_node_record.py --url http://100.80.153.120:8101 \
         --out rec_001 --streams color,depth --mode raw --duration 30
     PYTHONPATH=src python examples/orbbec_node_record.py --read rec_001      # summary + export
 
@@ -70,7 +70,7 @@ def summarize(out_dir, export=False):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--url", default="http://localhost:8000")
+    p.add_argument("--url", default="http://localhost:8101")
     p.add_argument("--out", default="orbbec_rec")
     p.add_argument("--streams", default="color,depth")
     p.add_argument("--mode", default="raw", choices=["raw", "jpeg"])

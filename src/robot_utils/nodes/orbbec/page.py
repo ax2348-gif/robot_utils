@@ -38,7 +38,7 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 @media (max-width:760px){#main{flex-direction:column}aside{width:100%;min-height:0;border-right:none}#tiles{width:100%;grid-template-columns:1fr}}
 </style></head><body>
 <header><h1>Orbbec node</h1><span id="dev">connecting...</span><span id="pill" class="pill">...</span>
-<span id="sync" class="small"></span><span id="msg" class="small"></span><a href="/docs" class="small">API docs</a></header>
+<span id="sync" class="small"></span><span id="msg" class="small"></span><a href="docs" class="small">API docs</a></header>
 <div id="banner"></div>
 <div id="main">
 <aside>
@@ -82,13 +82,13 @@ async function api(path,body){
   const j=await r.json().catch(()=>({detail:r.statusText}));
   if(!r.ok)throw new Error(typeof j.detail==="string"?j.detail:JSON.stringify(j.detail));return j}
 let msgT=0;function flash(t,bad){const m=$("#msg");m.textContent=t;m.style.color=bad?"var(--err)":"var(--dim)";clearTimeout(msgT);if(t)msgT=setTimeout(()=>m.textContent="",bad?8000:2500)}
-async function post(patch){try{const r=await api("/settings",patch);flash(r.restarted?"applied (pipeline restarted)":"applied")}catch(e){flash(e.message,true)}}
+async function post(patch){try{const r=await api("settings",patch);flash(r.restarted?"applied (pipeline restarted)":"applied")}catch(e){flash(e.message,true)}}
 
 // --- clock sync (NTP-style): server_mono = performance.now()/1000 + OFF, within +-UNC ---
 let OFF=null, UNC=null;
 async function sync(n=12){
-  const xs=[];await fetch("/time",{cache:"no-store"});
-  for(let i=0;i<n;i++){const t0=performance.now()/1000;const j=await (await fetch("/time",{cache:"no-store"})).json();const t1=performance.now()/1000;xs.push({t0,t1,ts:j.mono})}
+  const xs=[];await fetch("time",{cache:"no-store"});
+  for(let i=0;i<n;i++){const t0=performance.now()/1000;const j=await (await fetch("time",{cache:"no-store"})).json();const t1=performance.now()/1000;xs.push({t0,t1,ts:j.mono})}
   xs.sort((a,b)=>(a.t1-a.t0)-(b.t1-b.t0));const best=xs.slice(0,6);
   let lo=-Infinity,hi=Infinity;for(const s of best){lo=Math.max(lo,s.ts-s.t1);hi=Math.min(hi,s.ts-s.t0)}
   if(lo<=hi){OFF=(lo+hi)/2;UNC=(hi-lo)/2}else{const b=xs[0];OFF=b.ts-(b.t0+b.t1)/2;UNC=(b.t1-b.t0)/2}
@@ -113,9 +113,9 @@ function buildControls(){
   for(const id of ["pct_lo","pct_hi","min_mm","max_mm","jpeg_quality"])$("#"+id).onchange=e=>post({display:{[id]:Number(e.target.value)}});
   $("#imu_enabled").onchange=e=>post({imu:{enabled:e.target.checked}});
   ir.onchange=e=>post({imu:{sample_rate:e.target.value}});
-  $("#imu_cal").onclick=async()=>{flash("calibrating, keep the camera still...");try{const c=await api("/imu/calibrate",{});
+  $("#imu_cal").onclick=async()=>{flash("calibrating, keep the camera still...");try{const c=await api("imu/calibrate",{});
     flash("calibrated: bias "+c.gyro_bias.map(v=>v.toFixed(5)).join(" ")+" rad/s, |g| "+c.g_ref.toFixed(3))}catch(e){flash(e.message,true)}};
-  $("#imu_reset").onclick=async()=>{try{await api("/imu/reset",{});flash("orientation reset")}catch(e){flash(e.message,true)}};
+  $("#imu_reset").onclick=async()=>{try{await api("imu/reset",{});flash("orientation reset")}catch(e){flash(e.message,true)}};
 }
 function grad(name){const c=CAT.colormaps[name]||[];return "linear-gradient(to right,"+c.join(",")+")"}
 function syncControls(){
@@ -146,9 +146,9 @@ function renderStatus(){
 function makeTile(n){
   const img=el("img",{alt:n}),ro=el("div",{class:"ro"}),nof=el("div",{class:"nof"},"waiting for frames..."),pin=el("div",{class:"pin"});pin.style.display="none";
   const st=el("span",{class:"st"}),links=el("span",{});
-  links.append(el("a",{href:"/snapshot/"+n+"?format=jpg",target:"_blank",title:"current frame as JPEG"},"jpg"));
-  if(n!=="color"){links.append(" ",el("a",{href:"/snapshot/"+n+"?format=png",target:"_blank",title:"lossless 16-bit (depth: mm x depth_scale) PNG"},"png"))}
-  links.append(" ",el("a",{href:"/mjpeg/"+n,target:"_blank",title:"MJPEG stream of this sensor alone"},"mjpeg"));
+  links.append(el("a",{href:"snapshot/"+n+"?format=jpg",target:"_blank",title:"current frame as JPEG"},"jpg"));
+  if(n!=="color"){links.append(" ",el("a",{href:"snapshot/"+n+"?format=png",target:"_blank",title:"lossless 16-bit (depth: mm x depth_scale) PNG"},"png"))}
+  links.append(" ",el("a",{href:"mjpeg/"+n,target:"_blank",title:"MJPEG stream of this sensor alone"},"mjpeg"));
   const wrap=el("div",{class:"wrap"},img,nof,pin,ro);
   const t={n,img,ro,nof,pin,st,url:null,frames:[],lat:[],meta:null,busy:false,pinxy:null};
   const box=el("div",{class:"tile"},el("div",{class:"hd"},el("b",{},S.streams[n].label),st,links),wrap);
@@ -166,10 +166,10 @@ async function hover(t){
   const m=t.meta,u=Math.floor(t.hover[0]*m.width),v=Math.floor(t.hover[1]*m.height);
   if(t.n!=="depth"){t.ro.textContent=`(${u}, ${v})`;return}
   if(t.busy)return;t.busy=true;
-  try{const r=await api(`/depth_at?x=${t.hover[0]}&y=${t.hover[1]}`);if(t.hover)t.ro.textContent=`(${r.u}, ${r.v}) ${fmtmm(r)}`}catch(e){}
+  try{const r=await api(`depth_at?x=${t.hover[0]}&y=${t.hover[1]}`);if(t.hover)t.ro.textContent=`(${r.u}, ${r.v}) ${fmtmm(r)}`}catch(e){}
   t.busy=false}
 setInterval(async()=>{const t=tiles.depth;if(!t||!t.pinxy)return;
-  try{t.pinval=await api(`/depth_at?x=${t.pinxy[0]}&y=${t.pinxy[1]}`);if(!t.hover)t.ro.textContent=pinText(t)}catch(e){}},500);
+  try{t.pinval=await api(`depth_at?x=${t.pinxy[0]}&y=${t.pinxy[1]}`);if(!t.hover)t.ro.textContent=pinText(t)}catch(e){}},500);
 const med=a=>{if(!a.length)return null;const s=a.slice().sort((x,y)=>x-y);return s[s.length>>1]};
 function renderTiles(){
   const want=ORDER.filter(n=>S.settings.streams[n]&&S.streams[n].available);
@@ -194,7 +194,7 @@ function onFrame(h,body){
 async function live(){
   for(;;){
     try{
-      const r=await fetch("/stream?streams="+ORDER.join(",")+"&mode=jpeg",{cache:"no-store"});const rd=r.body.getReader();let buf=new Uint8Array(0);
+      const r=await fetch("stream?streams="+ORDER.join(",")+"&mode=jpeg",{cache:"no-store"});const rd=r.body.getReader();let buf=new Uint8Array(0);
       for(;;){
         const{value,done}=await rd.read();if(done)break;
         const nb=new Uint8Array(buf.length+value.length);nb.set(buf);nb.set(value,buf.length);buf=nb;
@@ -207,13 +207,13 @@ async function live(){
     }catch(e){}
     await sleep(1000)}
 }
-async function loadProps(){let props;try{props=await api("/properties")}catch(e){$("#props").textContent=e.message;return}renderProps(props)}
+async function loadProps(){let props;try{props=await api("properties")}catch(e){$("#props").textContent=e.message;return}renderProps(props)}
 function renderProps(props){
   const box=$("#props");box.innerHTML="";if(!props.length){box.textContent="none reported";return}
   let group=null;
   for(const p of props){
     if(p.group!==group){group=p.group;box.append(el("div",{style:"margin-top:6px;font-weight:600;color:var(--fg)"},group))}
-    const set=async v=>{try{renderProps(await api("/properties",{id:p.id,value:v}));flash(p.label+" set")}catch(e){flash(p.label+": "+e.message,true);loadProps()}};
+    const set=async v=>{try{renderProps(await api("properties",{id:p.id,value:v}));flash(p.label+" set")}catch(e){flash(p.label+": "+e.message,true);loadProps()}};
     if(p.type==="bool"){const cb=el("input",{type:"checkbox"});cb.checked=p.value;cb.onchange=()=>set(cb.checked);box.append(el("label",{class:"row"},el("span",{class:"k"},p.label),cb))}
     else if(p.type==="int"||p.type==="float"){
       const num=el("input",{type:"number",min:p.min,max:p.max,step:p.step||1});num.value=p.value;
@@ -225,14 +225,14 @@ function renderProps(props){
 $("#propsref").onclick=e=>{e.preventDefault();loadProps()};
 async function onState(st){
   S=st;
-  if(S.catalog_id!==catId){try{CAT=await api("/catalog");catId=S.catalog_id;buildControls();loadProps();setVer=-1}catch(e){return}}
+  if(S.catalog_id!==catId){try{CAT=await api("catalog");catId=S.catalog_id;buildControls();loadProps();setVer=-1}catch(e){return}}
   if(S.settings_version!==setVer){setVer=S.settings_version;syncControls()}
   renderStatus();renderTiles()}
 function events(){
-  const es=new EventSource("/events");
+  const es=new EventSource("events");
   es.addEventListener("state",e=>onState(JSON.parse(e.data)));
   es.onerror=()=>{const p=$("#pill");p.textContent="server unreachable";p.className="pill err"};
 }
-(async()=>{try{await onState(await api("/state"))}catch(e){}events();sync().catch(()=>{});setInterval(()=>sync().catch(()=>{}),30000);live()})();
+(async()=>{try{await onState(await api("state"))}catch(e){}events();sync().catch(()=>{});setInterval(()=>sync().catch(()=>{}),30000);live()})();
 </script></body></html>
 """
