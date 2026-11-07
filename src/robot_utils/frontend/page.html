@@ -80,7 +80,7 @@
 <main>
   <header>
     <h1>Robot nodes <span class="sub" id="where"></span></h1>
-    <button id="estop" type="button" title="POST estop to every actuated node, in parallel">
+    <button id="estop" type="button" aria-label="E-STOP ALL" title="POST estop to every actuated node, in parallel">
       E-STOP ALL<small>every actuated node</small>
     </button>
   </header>
@@ -244,7 +244,8 @@ async function estopAll() {
     : attempted.length === 0
       ? `E-STOP: no actuated node found to stop (${when}). Use each node's own e-stop.`
       : `E-STOP NOT CONFIRMED on ${attempted.length - latched} of ${attempted.length} node(s) (${when}). Stop them another way!`;
-  const pillCls = { latched: "pill bad", failed: "pill warn", unreachable: "pill warn", skipped: "pill" };
+  // Green = stop confirmed; red = this node may still be moving.
+  const pillCls = { latched: "pill ok", failed: "pill bad", unreachable: "pill bad", skipped: "pill" };
   box.replaceChildren(h("h2", { textContent: title }), h("ul", {}, ...targets.map((n, i) => {
     const r = results[i];
     return h("li", {},
