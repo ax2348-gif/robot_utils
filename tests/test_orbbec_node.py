@@ -319,6 +319,7 @@ def test_meta_and_shared_toolkit_served(fake_node):
     import httpx
     meta = httpx.get(fake_node + "/meta").json()
     assert meta["name"] == "camera" and meta["actuated"] is False and meta["page"] == "./"
+    assert meta["title"] == "Orbbec camera" and meta["kind"] == "camera"
     assert meta["endpoints"] == {"health": "health", "state": "state", "events": "events", "estop": None}
     assert "RU.TimeSync" in httpx.get(fake_node + "/common/ui.js").text
     st = httpx.get(fake_node + "/state").json()

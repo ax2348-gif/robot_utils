@@ -133,7 +133,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
                        expose_headers=["X-Frame-Header", "X-Depth-Scale"])
     app.state.owner, app.state.hub = owner, hub
-    add_page_routes(app, node_meta("camera", "Camera (Orbbec Gemini 336L)", __version__, "orbbec", actuated=False))
+    # GET /meta (the landing frontend's contract) plus the shared toolkit at common/ui.{js,css}
+    add_page_routes(app, node_meta("camera", "Orbbec camera", __version__, "camera", actuated=False))
     errors = {400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}
 
     async def run_cmd(fut, timeout=20.0):
@@ -175,13 +176,6 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         z out of the lens."""
         with owner.lock:
             return dict(owner.calibration)
-
-    @app.get("/meta", tags=["state"], summary="Node description for the landing frontend")
-    async def meta():
-        """Frontend contract (same JSON as nodes.common's page routes): all paths relative to the node root."""
-        return {"name": "camera", "title": "Orbbec camera", "version": __version__, "kind": "camera",
-                "has_page": True, "page": "./", "actuated": False,
-                "endpoints": {"health": "health", "state": "state", "events": "events", "estop": None}}
 
     @app.get("/state", response_model=State, tags=["state"], summary="Node, device, stream and IMU status")
     async def get_state():

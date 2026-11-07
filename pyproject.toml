@@ -16,6 +16,13 @@ dependencies = [
     "rebotarm-control-py",     # rebot_ctl
     "motorbridge>=0.5.6",      # motorbridge_2ec (fork with non-blocking encoder reads)
     "lerobot",                 # no extras by default
+    # Nodes (src/robot_utils/nodes) and the landing frontend (src/robot_utils/frontend)
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "pyyaml>=6",
+    "numpy",
+    "pillow",
 ]
 
 [tool.setuptools.packages.find]
