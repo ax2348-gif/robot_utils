@@ -93,3 +93,36 @@ API would wrap:
   **not** close the `CANBus` (sparkcan shares one bus per interface name in
   `CANBus._instances`), so the serial port stays open until the process exits or
   `drive.bus.close()` is called.
+
+## Open direction: commanding a twist as direction + magnitude
+
+The node's command will be a plain twist `(vx, vy, omega)` for now. A twist has only 3
+degrees of freedom, and it leaves the wheels' steering undefined when the robot is not
+moving: at zero twist `module_command` keeps each wheel's current heading, so a client cannot
+pre-steer the modules before it starts moving (or hold a heading while stopped).
+
+A more complete command separates the twist into a **direction** and a **magnitude**:
+
+- a unit twist `u = (vx, vy, omega) / |(vx, vy, omega)|` fixes every module's steering angle
+  uniquely, up to the sign of each module's drive direction (which the 180° flip in
+  `module_command` already resolves by choosing the nearer heading);
+- a scalar magnitude `s` (which may be 0) sets the actual twist `s * u`, i.e. the drive
+  speeds.
+
+So `(u, s)` is a well-defined command at every speed, including steering while stopped:
+`s = 0` points the wheels for the direction `u` without moving the robot. A plain twist is
+the special case `u = twist / |twist|`, `s = |twist|`.
+
+Things to settle before implementing it:
+
+- **Units in the norm.** `vx, vy` are m/s and `omega` is rad/s, so "unit" needs a length
+  scale, e.g. normalise `(vx, vy, L * omega)` with `L` the wheel radius from the centre
+  (about 0.23 m), so that pure translation and pure rotation at the same wheel speed have the
+  same magnitude.
+- **Transitions.** When `u` changes while `s` is 0, the modules turn in place; when `s > 0`
+  the existing cosine scaling (`speed * cos(angle - heading)`) keeps a wheel from driving
+  while it is still far from its target angle.
+- **Limits.** Hard and soft limits apply to the resulting twist `s * u` (per component).
+- **API shape.** For example `{"direction": [ux, uy, uw], "magnitude": s}` beside the plain
+  `{"twist": [vx, vy, omega]}` form, both carried by the same command model.
+
