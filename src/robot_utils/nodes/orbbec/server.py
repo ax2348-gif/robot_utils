@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
+from ..common.server import add_page_routes, node_meta
 from . import __version__
 from .encode import encode_frame
 from .hub import Frame, Hub
@@ -132,6 +133,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
                        expose_headers=["X-Frame-Header", "X-Depth-Scale"])
     app.state.owner, app.state.hub = owner, hub
+    add_page_routes(app, node_meta("camera", "Camera (Orbbec Gemini 336L)", __version__, "orbbec", actuated=False))
     errors = {400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}
 
     async def run_cmd(fut, timeout=20.0):

@@ -305,3 +305,14 @@ def test_colorize_depth_lut():
     assert tuple(bgr[0, 0]) == (0, 0, 255)
     inv, *_ = colorize_depth(raw, 0.5, ds.model_copy(update={"invert": True}))   # scale: 2000 units = 1000 mm
     assert tuple(inv[0, 3]) == tuple(COLORMAPS["gray"][255])
+
+
+
+def test_meta_and_shared_toolkit_served(fake_node):
+    import httpx
+    meta = httpx.get(fake_node + "/meta").json()
+    assert meta["name"] == "camera" and meta["actuated"] is False and meta["page"] == "./"
+    assert meta["endpoints"] == {"health": "health", "state": "state", "events": "events", "estop": None}
+    assert "RU.TimeSync" in httpx.get(fake_node + "/common/ui.js").text
+    st = httpx.get(fake_node + "/state").json()
+    assert isinstance(st["state"], str) and "error" in st
