@@ -39,13 +39,34 @@ The Damiao configs find the arm's serial bridge by its stable name
 (`serial_by_id: usb-HDSC_CDC_Device_00000000050C-if00`): `/dev/serial/by-id/...` on the robot,
 matched by USB serial number on macOS. No `--channel` needed; it remains available to override.
 
-The Orbbec camera has a live browser viewer: `python examples/orbbec_web_viewer.py`, then open
-`http://<robot>:8080/` from any machine on the network (color, depth, IR, per-sensor options;
-design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md)).
+## Robot nodes (HTTP)
 
-`python -m robot_utils.frontend` serves a landing page at `http://<robot>/` indexing the
-robot's HTTP nodes, with a global E-STOP; it is not on the control path
-([docs/frontend.md](docs/frontend.md); port 80 needs `sudo tools/enable_low_ports.sh` once).
+The robot's hardware is served over HTTP by one process ("node") per hardware bus, plus a
+landing page that indexes them. Start each on the robot from this checkout, with the venv
+(`source .venv/bin/activate`); none of them needs the others:
+
+| | command | port | docs |
+|---|---|---|---|
+| camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | 8101 | [docs/orbbec_node.md](docs/orbbec_node.md) |
+| swerve base | `python -m robot_utils.nodes.swerve` | 8102 | [docs/swerve_node.md](docs/swerve_node.md) |
+| landing page | `python -m robot_utils.frontend` | 80 | [docs/frontend.md](docs/frontend.md) |
+
+Then open `http://<robot>/` (on the robot's Wi-Fi, `botcore/`): a tile per node linking to
+its own page, a global E-STOP, and a Tools section (swerve teleop). Every node also serves its
+own page and interactive API docs (`/docs`) on its port, and keeps working without the landing
+page. The shared conventions (ports, record framing, time sync, `/meta`, lease, e-stop) are in
+[docs/nodes.md](docs/nodes.md).
+
+- Camera: keep the robot still for about 2 s after starting it (startup IMU calibration).
+- Swerve: holds the CAN adapter while it runs, so `quest_teleop.sh`'s base process cannot run
+  at the same time. One-time SPARK setup (already done on this robot):
+  `python -m robot_utils.nodes.swerve.setup_sparks slcan:/dev/ttyACM0` shows the differences,
+  `--apply` writes and saves them.
+- Landing page on port 80: once per machine, `sudo tools/enable_low_ports.sh`.
+- Nothing starts at boot yet; run each in a terminal, or with `nohup ... > log 2>&1 &`.
+
+The older single-file camera viewer (`python examples/orbbec_web_viewer.py`, port 8080) still
+works; design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md).
 
 ## The environment
 
