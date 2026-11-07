@@ -115,10 +115,10 @@ the special case `u = twist / |twist|`, `s = |twist|`.
 
 Things to settle before implementing it:
 
-- **Units in the norm.** `vx, vy` are m/s and `omega` is rad/s, so "unit" needs a length
-  scale, e.g. normalise `(vx, vy, L * omega)` with `L` the wheel radius from the centre
-  (about 0.23 m), so that pure translation and pure rotation at the same wheel speed have the
-  same magnitude.
+- **Units.** Use the twist's own units (m/s, m/s, rad/s) with the plain Euclidean norm; no
+  length scale. The steering depends only on the direction of `(vx, vy, omega)`, which is the
+  same for any positive scaling, so the choice of norm only defines what the magnitude `s`
+  means, not where the wheels point.
 - **Transitions.** When `u` changes while `s` is 0, the modules turn in place; when `s > 0`
   the existing cosine scaling (`speed * cos(angle - heading)`) keeps a wheel from driving
   while it is still far from its target angle.
