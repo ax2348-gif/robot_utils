@@ -3,7 +3,7 @@
 Same interface as SdkBackend. Color is a moving gradient encoded to JPEG (like the camera's
 MJPG), depth a moving uint16 ramp, IR a gray pattern, IMU a slow sine plus gravity. The
 ``1920x1080@30 MJPG`` color profile is listed but refused at start, to exercise the
-restore-on-reject path; ``fail_after`` makes the stream stall (simulated unplug).
+restore-on-reject path; ``640x480@30 RGB`` starts but delivers no color frames (like the real camera on USB 2).
 """
 from __future__ import annotations
 
@@ -21,10 +21,11 @@ from .protocol import IMU_FIELDS
 from .sdk_backend import rate_hz
 
 COLOR = [("1920x1080@30 MJPG", 1920, 1080, 30, False), ("1280x720@10 MJPG", 1280, 720, 10, True),
-         ("640x480@30 MJPG", 640, 480, 30, False)]
+         ("640x480@30 MJPG", 640, 480, 30, False), ("640x480@30 RGB", 640, 480, 30, False)]
 STEREO = [("848x480@10", 848, 480, 10, True), ("640x400@30", 640, 400, 30, False),
           ("480x270@60", 480, 270, 60, False)]
-REJECT = {"1920x1080@30 MJPG"}
+REJECT = {"1920x1080@30 MJPG"}     # refused at start
+SILENT = {"640x480@30 RGB"}        # starts but never delivers (like uncompressed color on USB 2)
 
 
 class FakeBackend:
@@ -46,7 +47,8 @@ class FakeBackend:
         self.is_open = True
         cat = Catalog(
             available=["color", "depth", "ir_left", "ir_right"],
-            color=[ProfileOption(key=k, width=w, height=h, fps=f, format="MJPG", default=d) for k, w, h, f, d in COLOR],
+            color=[ProfileOption(key=k, width=w, height=h, fps=f, format=k.split()[1], default=d)
+                   for k, w, h, f, d in COLOR],
             stereo=[ProfileOption(key=k, width=w, height=h, fps=f, default=d) for k, w, h, f, d in STEREO],
             imu=ImuCatalog(available=True, sample_rates=["50Hz", "100Hz", "200Hz", "500Hz", "1kHz"],
                            default_rate="200Hz", accel_ranges=["4g"], gyro_ranges=["1000dps"]))
@@ -58,10 +60,11 @@ class FakeBackend:
         self._s = s
         if s.streams.get("color") and s.color_profile in REJECT:
             raise RuntimeError("fake device refuses this profile")
-        names = [n for n, on in s.streams.items() if on]
+        names = [n for n, on in s.streams.items() if on
+                 and not (n == "color" and s.color_profile in SILENT)]
         now = time.monotonic()
         self._next = {n: now + 0.05 for n in names}
-        self.running = bool(names)
+        self.running = any(s.streams.values())
 
     def _fps(self, n):
         key = self._s.color_profile if n == "color" else self._s.stereo_mode

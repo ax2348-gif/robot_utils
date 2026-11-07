@@ -192,8 +192,10 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
               summary="Change settings (partial update)")
     async def post_settings(patch: SettingsPatch):
         """Only the given fields change. Stream/profile/alignment/frame-sync changes restart the video
-        pipeline and the call returns once the camera has accepted them (typically 0.3-1 s).
-        A configuration the device refuses returns **409** and the previous settings stay active.
+        pipeline and the call returns once **every enabled stream has delivered a frame** with the new
+        configuration (typically 0.3-1 s). A configuration the device refuses, or one that starts but
+        stays silent for 8 s (uncompressed color on USB 2), returns **409** and the previous settings
+        are restored.
         Display (`display.*`) and `imu.batch_ms` changes apply to the next frame without a restart."""
         try:
             fut = owner.request_settings(patch)

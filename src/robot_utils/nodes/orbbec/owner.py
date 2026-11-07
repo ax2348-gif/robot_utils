@@ -60,8 +60,9 @@ class _Rate:
 
 
 class Owner:
-    def __init__(self, backend, hub: Hub, settings: Optional[Settings] = None):
+    def __init__(self, backend, hub: Hub, settings: Optional[Settings] = None, startup_s: float = STARTUP_S):
         self.backend = backend
+        self.startup_s = startup_s
         self.hub = hub
         self.settings = settings or Settings()
         self.settings_version = 0
@@ -125,9 +126,9 @@ class Owner:
         self.settings_version += 1
         self.hub.state_changed()
 
-    def _result(self, restarted):
+    def _result(self, restarted, t_applied=None):
         return {"ok": True, "settings": self.settings, "settings_version": self.settings_version,
-                "restarted": restarted, "t_applied": time.monotonic()}
+                "restarted": restarted, "t_applied": time.monotonic() if t_applied is None else t_applied}
 
     # -- status ------------------------------------------------------------------------------
 
@@ -299,27 +300,44 @@ class Owner:
         except Exception as e:
             self._imu_error(f"could not start: {e}")
 
-    def _start_video(self, new: Settings, prev: Optional[Settings]):
-        """(Re)start the video pipeline; on rejection restore prev and raise SettingsError."""
+    def _start_video(self, new: Settings, prev: Optional[Settings]) -> float:
+        """(Re)start the video pipeline. For a change (prev given), wait until every enabled
+        stream delivered a frame; if the device refuses the config or a stream stays silent
+        (e.g. uncompressed color on USB 2), restore prev and raise SettingsError.
+        Returns the server monotonic time the new pipeline was started."""
         self.hub.drop_frames()
         self._set_state("starting" if any(new.streams.values()) else "idle")
         try:
             self.backend.start(new)
+            t_started = time.monotonic()
+            self.last_frame_t = t_started + self.startup_s - STALL_S
+            if prev is not None and self.backend.running:
+                want = {n for n, on in new.streams.items() if on}
+                seen: set = set()
+                while seen != want and time.monotonic() - t_started < self.startup_s and not self.stopping.is_set():
+                    frames = self.backend.wait(WAIT_MS)
+                    if frames:
+                        self.last_frame_t = time.monotonic()
+                        self._publish(frames)
+                        seen |= {f.stream for f in frames}
+                if seen != want and not self.stopping.is_set():
+                    raise RuntimeError(f"no frames from {', '.join(sorted(want - seen))} within {self.startup_s:.0f} s")
         except Exception as e:
             if prev is None or self.stopping.is_set():
                 raise
             msg = f"could not start {describe(new)}: {e}; restored the previous settings"
             self._event(msg, error=True)
+            self.hub.drop_frames()
             self.backend.start(prev)          # failure here -> camera error -> reconnect loop
-            self.last_frame_t = time.monotonic() + STARTUP_S - STALL_S
+            self.last_frame_t = time.monotonic() + self.startup_s - STALL_S
             self._set_state("starting" if self.backend.running else "idle")
             raise SettingsError(msg) from None
-        self.last_frame_t = time.monotonic() + STARTUP_S - STALL_S
         with self.lock:
             self.error = None
-        self._event(("starting " + describe(new)) if self.backend.running else "all video streams off")
+        self._event(("started " + describe(new)) if self.backend.running else "all video streams off")
         if not self.backend.running:
             self._set_state("idle")
+        return t_started
 
     def _handle_cmds(self, block: float = 0):
         while True:
@@ -340,13 +358,14 @@ class Owner:
             with self.lock:
                 new, restart, restart_imu = apply_patch(self.settings, arg, self.catalog)
                 prev = self.settings
+            t_applied = None
             if restart and self.backend.is_open:
-                self._start_video(new, prev)   # raises SettingsError after restoring prev
+                t_applied = self._start_video(new, prev)   # raises SettingsError after restoring prev
             with self.lock:
                 self._set_settings(new)
             if restart_imu and self.backend.is_open:
                 self._start_imu(new)
-            return self._result(restart and self.backend.is_open)
+            return self._result(t_applied is not None, t_applied)
         if not self.backend.is_open:
             raise DeviceError("camera not connected")
         if kind == "properties":

@@ -231,7 +231,7 @@ def fake_node():
     from robot_utils.nodes.orbbec.owner import Owner
     from robot_utils.nodes.orbbec.server import create_app
     hub = Hub()
-    app = create_app(Owner(FakeBackend(), hub, Settings()), hub)
+    app = create_app(Owner(FakeBackend(), hub, Settings(), startup_s=1.5), hub)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
                                            timeout_graceful_shutdown=1))
@@ -265,6 +265,9 @@ def test_end_to_end_fake(fake_node, tmp_path):
             c.update_settings({"color_profile": "1920x1080@30 MJPG"})      # fake device refuses it
         assert ei.value.status == 409
         assert c.settings()["color_profile"] == "1280x720@10 MJPG"       # previous config restored
+        with pytest.raises(OrbbecError, match="no frames from color") as ei:
+            c.update_settings({"color_profile": "640x480@30 RGB"})         # starts, delivers nothing
+        assert ei.value.status == 409 and c.settings()["color_profile"] == "1280x720@10 MJPG"
         r = c.update_settings({"stereo_mode": "640x400@30"})
         assert r["restarted"]
         fr = next(f for f in c.frames("depth", mode="raw") if f.header["t_capture"] > r["t_applied"])
