@@ -1,0 +1,1144 @@
+{
+ "url": "http://192.168.8.209:8000",
+ "label": "Mac -> Pi, LAN",
+ "started": 1794021557.537408,
+ "sync": {
+  "uncertainty_ms": [
+   2.02,
+   2.004,
+   2.097,
+   2.049,
+   1.702
+  ],
+  "rtt_min_ms": [
+   4.178,
+   4.008,
+   4.331,
+   4.226,
+   3.706
+  ],
+  "rtt_median_ms": [
+   4.662,
+   4.778,
+   4.512,
+   4.669,
+   4.671
+  ],
+  "offset_spread_ms": 0.362
+ },
+ "cases": [
+  {
+   "case": "color 720p10",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 1059.5,
+    "restarted": true,
+    "first_new_frame_ms": 1082.3
+   },
+   "streams": {
+    "color": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.0,
+     "lat_p95": 48.3,
+     "lat_p99": 67.7,
+     "lat_min": 4.0,
+     "sensor_to_capture": 29.0,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.4,
+     "kbytes": 126.4,
+     "mbit_s": 10.44
+    }
+   },
+   "cpu_pct": 2.3,
+   "errors": []
+  },
+  {
+   "case": "depth 848x480@10 jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 450.4,
+    "restarted": true,
+    "first_new_frame_ms": 481.5
+   },
+   "streams": {
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 22.0,
+     "lat_p95": 67.4,
+     "lat_p99": 86.5,
+     "lat_min": 21.0,
+     "sensor_to_capture": 90.2,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 7.9,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.8,
+     "kbytes": 57.3,
+     "mbit_s": 4.73
+    }
+   },
+   "cpu_pct": 23.7,
+   "errors": []
+  },
+  {
+   "case": "depth 848x480@10 raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 40.7,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 24.3,
+     "lat_p95": 69.5,
+     "lat_p99": 92.2,
+     "lat_min": 19.4,
+     "sensor_to_capture": 90.6,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 15.1,
+     "kbytes": 795.0,
+     "mbit_s": 65.67
+    }
+   },
+   "cpu_pct": 13.1,
+   "errors": []
+  },
+  {
+   "case": "depth 848x480@10 raw+zlib",
+   "mode": "raw",
+   "compress": "zlib",
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 34.0,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 34.0,
+     "lat_p95": 74.8,
+     "lat_p99": 102.2,
+     "lat_min": 29.8,
+     "sensor_to_capture": 90.4,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 15.6,
+     "encoded_to_send": 0.1,
+     "send_to_recv": 9.1,
+     "kbytes": 318.3,
+     "mbit_s": 26.29
+    }
+   },
+   "cpu_pct": 26.3,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 709.6,
+    "restarted": true,
+    "first_new_frame_ms": 730.4
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.3,
+     "lat_p95": 50.1,
+     "lat_p99": 69.2,
+     "lat_min": 4.4,
+     "sensor_to_capture": 28.5,
+     "capture_to_owner": 0.3,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.6,
+     "kbytes": 126.5,
+     "mbit_s": 10.36
+    },
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 22.2,
+     "lat_p95": 65.8,
+     "lat_p99": 83.0,
+     "lat_min": 19.2,
+     "sensor_to_capture": 89.8,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 7.9,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.9,
+     "kbytes": 57.9,
+     "mbit_s": 4.78
+    }
+   },
+   "cpu_pct": 26.0,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 8.4,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 5.1,
+     "lat_p95": 52.8,
+     "lat_p99": 71.7,
+     "lat_min": 4.0,
+     "sensor_to_capture": 29.3,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.5,
+     "kbytes": 126.6,
+     "mbit_s": 10.37
+    },
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 24.0,
+     "lat_p95": 60.8,
+     "lat_p99": 84.0,
+     "lat_min": 20.5,
+     "sensor_to_capture": 90.6,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 14.6,
+     "kbytes": 795.0,
+     "mbit_s": 65.67
+    }
+   },
+   "cpu_pct": 14.5,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults jpeg q50",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 22.5,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.3,
+     "lat_p95": 55.2,
+     "lat_p99": 70.0,
+     "lat_min": 4.2,
+     "sensor_to_capture": 29.5,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.6,
+     "kbytes": 126.5,
+     "mbit_s": 10.36
+    },
+    "depth": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 21.6,
+     "lat_p95": 60.5,
+     "lat_p99": 83.5,
+     "lat_min": 19.3,
+     "sensor_to_capture": 90.8,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 7.8,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.6,
+     "kbytes": 34.5,
+     "mbit_s": 2.83
+    }
+   },
+   "cpu_pct": 25.6,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults jpeg q95",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 49.3,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.5,
+     "lat_p95": 56.4,
+     "lat_p99": 72.8,
+     "lat_min": 4.4,
+     "sensor_to_capture": 29.1,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.8,
+     "kbytes": 126.6,
+     "mbit_s": 10.37
+    },
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 24.0,
+     "lat_p95": 67.2,
+     "lat_p99": 86.1,
+     "lat_min": 19.9,
+     "sensor_to_capture": 90.3,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 8.3,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.6,
+     "kbytes": 122.2,
+     "mbit_s": 10.09
+    }
+   },
+   "cpu_pct": 26.3,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults jpeg 2 clients",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 2,
+   "settings_change": {
+    "post_rtt_ms": 54.3,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 240,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 8.4,
+     "lat_p95": 54.7,
+     "lat_p99": 71.9,
+     "lat_min": 5.4,
+     "sensor_to_capture": 28.5,
+     "capture_to_owner": 0.3,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.4,
+     "send_to_recv": 7.5,
+     "kbytes": 126.6,
+     "mbit_s": 10.37
+    },
+    "depth": {
+     "frames": 242,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 21.9,
+     "lat_p95": 68.5,
+     "lat_p99": 86.0,
+     "lat_min": 20.1,
+     "sensor_to_capture": 89.8,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 7.8,
+     "encoded_to_send": 0.4,
+     "send_to_recv": 4.5,
+     "kbytes": 57.9,
+     "mbit_s": 4.78
+    }
+   },
+   "cpu_pct": 26.3,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults raw 2 clients",
+   "mode": "raw",
+   "compress": null,
+   "clients": 2,
+   "settings_change": {
+    "post_rtt_ms": 15.0,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 240,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.9,
+     "lat_p95": 63.0,
+     "lat_p99": 74.7,
+     "lat_min": 4.7,
+     "sensor_to_capture": 29.3,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.4,
+     "send_to_recv": 6.9,
+     "kbytes": 126.6,
+     "mbit_s": 10.37
+    },
+    "depth": {
+     "frames": 240,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 32.5,
+     "lat_p95": 82.5,
+     "lat_p99": 99.6,
+     "lat_min": 24.6,
+     "sensor_to_capture": 90.6,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.8,
+     "send_to_recv": 22.5,
+     "kbytes": 795.0,
+     "mbit_s": 65.13
+    }
+   },
+   "cpu_pct": 15.8,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults jpeg + IMU 200Hz",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 93.1,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.1,
+     "lat_p95": 56.2,
+     "lat_p99": 72.5,
+     "lat_min": 3.7,
+     "sensor_to_capture": 29.5,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.5,
+     "kbytes": 126.5,
+     "mbit_s": 10.37
+    },
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 21.9,
+     "lat_p95": 61.6,
+     "lat_p99": 87.6,
+     "lat_min": 20.1,
+     "sensor_to_capture": 90.8,
+     "capture_to_owner": 8.5,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 7.8,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.7,
+     "kbytes": 57.9,
+     "mbit_s": 4.78
+    }
+   },
+   "cpu_pct": 31.1,
+   "errors": []
+  },
+  {
+   "case": "color+depth defaults frame_sync jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 1138.0,
+    "restarted": true,
+    "first_new_frame_ms": 1161.8
+   },
+   "streams": {
+    "color": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 77.8,
+     "lat_p95": 114.9,
+     "lat_p99": 140.9,
+     "lat_min": 74.7,
+     "sensor_to_capture": 29.2,
+     "capture_to_owner": 70.2,
+     "owner_to_publish": 0.8,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 6.5,
+     "kbytes": 126.5,
+     "mbit_s": 10.45
+    },
+    "depth": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 22.5,
+     "lat_p95": 64.7,
+     "lat_p99": 87.4,
+     "lat_min": 21.0,
+     "sensor_to_capture": 90.5,
+     "capture_to_owner": 8.5,
+     "owner_to_publish": 0.8,
+     "publish_to_encoded": 8.2,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.7,
+     "kbytes": 57.8,
+     "mbit_s": 4.74
+    }
+   },
+   "cpu_pct": 25.4,
+   "errors": []
+  },
+  {
+   "case": "color+depth aligned jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 1011.5,
+    "restarted": true,
+    "first_new_frame_ms": 1033.2
+   },
+   "streams": {
+    "color": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 85.6,
+     "lat_p95": 130.6,
+     "lat_p99": 150.8,
+     "lat_min": 82.2,
+     "sensor_to_capture": 28.5,
+     "capture_to_owner": 70.1,
+     "owner_to_publish": 9.1,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 6.5,
+     "kbytes": 126.4,
+     "mbit_s": 10.44
+    },
+    "depth": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 40.1,
+     "lat_p95": 82.8,
+     "lat_p99": 97.9,
+     "lat_min": 35.6,
+     "sensor_to_capture": 89.9,
+     "capture_to_owner": 8.4,
+     "owner_to_publish": 9.1,
+     "publish_to_encoded": 17.1,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 5.6,
+     "kbytes": 103.8,
+     "mbit_s": 8.51
+    }
+   },
+   "cpu_pct": 42.1,
+   "errors": []
+  },
+  {
+   "case": "color+depth aligned raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 30.0,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 84.3,
+     "lat_p95": 126.9,
+     "lat_p99": 147.9,
+     "lat_min": 82.2,
+     "sensor_to_capture": 29.4,
+     "capture_to_owner": 70.2,
+     "owner_to_publish": 8.6,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 5.1,
+     "kbytes": 126.3,
+     "mbit_s": 10.43
+    },
+    "depth": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 44.5,
+     "lat_p95": 96.1,
+     "lat_p99": 106.4,
+     "lat_min": 38.1,
+     "sensor_to_capture": 90.7,
+     "capture_to_owner": 8.5,
+     "owner_to_publish": 8.6,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.5,
+     "send_to_recv": 26.7,
+     "kbytes": 1800.0,
+     "mbit_s": 148.68
+    }
+   },
+   "cpu_pct": 23.2,
+   "errors": []
+  },
+  {
+   "case": "all four defaults jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 990.6,
+    "restarted": true,
+    "first_new_frame_ms": 1012.0
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 7.2,
+     "lat_p95": 52.2,
+     "lat_p99": 69.7,
+     "lat_min": 4.3,
+     "sensor_to_capture": 28.8,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 6.5,
+     "kbytes": 126.4,
+     "mbit_s": 10.35
+    },
+    "depth": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 21.9,
+     "lat_p95": 66.1,
+     "lat_p99": 88.1,
+     "lat_min": 19.3,
+     "sensor_to_capture": 90.1,
+     "capture_to_owner": 8.9,
+     "owner_to_publish": 0.6,
+     "publish_to_encoded": 7.2,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.8,
+     "kbytes": 57.9,
+     "mbit_s": 4.74
+    },
+    "ir_left": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 12.0,
+     "lat_p95": 53.6,
+     "lat_p99": 74.6,
+     "lat_min": 7.2,
+     "sensor_to_capture": 88.4,
+     "capture_to_owner": 0.1,
+     "owner_to_publish": 0.5,
+     "publish_to_encoded": 6.1,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 5.3,
+     "kbytes": 65.9,
+     "mbit_s": 5.4
+    },
+    "ir_right": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 10.2,
+     "lat_p95": 49.5,
+     "lat_p99": 72.5,
+     "lat_min": 8.2,
+     "sensor_to_capture": 87.6,
+     "capture_to_owner": 0.1,
+     "owner_to_publish": 0.6,
+     "publish_to_encoded": 3.5,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 5.6,
+     "kbytes": 67.0,
+     "mbit_s": 5.53
+    }
+   },
+   "cpu_pct": 35.4,
+   "errors": []
+  },
+  {
+   "case": "all four defaults raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 24.7,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 5.7,
+     "lat_p95": 56.6,
+     "lat_p99": 70.8,
+     "lat_min": 4.4,
+     "sensor_to_capture": 29.5,
+     "capture_to_owner": 0.2,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 5.0,
+     "kbytes": 126.4,
+     "mbit_s": 10.36
+    },
+    "depth": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 24.8,
+     "lat_p95": 80.1,
+     "lat_p99": 91.1,
+     "lat_min": 20.2,
+     "sensor_to_capture": 91.0,
+     "capture_to_owner": 8.7,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 15.1,
+     "kbytes": 795.0,
+     "mbit_s": 65.13
+    },
+    "ir_left": {
+     "frames": 120,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 14.0,
+     "lat_p95": 56.5,
+     "lat_p99": 77.0,
+     "lat_min": 7.7,
+     "sensor_to_capture": 89.2,
+     "capture_to_owner": 0.1,
+     "owner_to_publish": 0.8,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.4,
+     "send_to_recv": 12.5,
+     "kbytes": 397.5,
+     "mbit_s": 32.56
+    },
+    "ir_right": {
+     "frames": 121,
+     "fps_cam": 9.99,
+     "fps_recv": 9.99,
+     "dropped": 0,
+     "lat_med": 10.7,
+     "lat_p95": 52.8,
+     "lat_p99": 75.7,
+     "lat_min": 8.3,
+     "sensor_to_capture": 88.3,
+     "capture_to_owner": 0.1,
+     "owner_to_publish": 0.6,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.6,
+     "send_to_recv": 9.6,
+     "kbytes": 397.5,
+     "mbit_s": 32.83
+    }
+   },
+   "cpu_pct": 21.7,
+   "errors": []
+  },
+  {
+   "case": "color+depth 30fps jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 1070.4,
+    "restarted": true,
+    "first_new_frame_ms": 1084.9
+   },
+   "streams": {
+    "color": {
+     "frames": 360,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 5.5,
+     "lat_p95": 50.1,
+     "lat_p99": 68.4,
+     "lat_min": 4.0,
+     "sensor_to_capture": 31.5,
+     "capture_to_owner": 0.5,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 4.6,
+     "kbytes": 47.2,
+     "mbit_s": 11.61
+    },
+    "depth": {
+     "frames": 360,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 18.3,
+     "lat_p95": 60.7,
+     "lat_p99": 81.5,
+     "lat_min": 15.4,
+     "sensor_to_capture": 31.5,
+     "capture_to_owner": 3.0,
+     "owner_to_publish": 0.5,
+     "publish_to_encoded": 9.6,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.9,
+     "kbytes": 68.2,
+     "mbit_s": 16.76
+    }
+   },
+   "cpu_pct": 65.1,
+   "errors": []
+  },
+  {
+   "case": "color+depth 30fps raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 19.9,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "color": {
+     "frames": 361,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 6.2,
+     "lat_p95": 52.2,
+     "lat_p99": 71.0,
+     "lat_min": 4.5,
+     "sensor_to_capture": 31.9,
+     "capture_to_owner": 0.4,
+     "owner_to_publish": 0.2,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.3,
+     "send_to_recv": 5.3,
+     "kbytes": 47.3,
+     "mbit_s": 11.66
+    },
+    "depth": {
+     "frames": 361,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 14.9,
+     "lat_p95": 64.1,
+     "lat_p99": 84.1,
+     "lat_min": 11.4,
+     "sensor_to_capture": 31.8,
+     "capture_to_owner": 2.9,
+     "owner_to_publish": 0.5,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 11.3,
+     "kbytes": 500.0,
+     "mbit_s": 123.22
+    }
+   },
+   "cpu_pct": 24.8,
+   "errors": []
+  },
+  {
+   "case": "all four 30fps jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 763.7,
+    "restarted": true,
+    "first_new_frame_ms": 779.9
+   },
+   "streams": {
+    "color": {
+     "frames": 360,
+     "fps_cam": 29.97,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 6.6,
+     "lat_p95": 53.1,
+     "lat_p99": 70.4,
+     "lat_min": 4.0,
+     "sensor_to_capture": 32.6,
+     "capture_to_owner": 0.9,
+     "owner_to_publish": 0.1,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.4,
+     "send_to_recv": 5.0,
+     "kbytes": 47.4,
+     "mbit_s": 11.64
+    },
+    "depth": {
+     "frames": 360,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 19.2,
+     "lat_p95": 68.5,
+     "lat_p99": 84.1,
+     "lat_min": 15.0,
+     "sensor_to_capture": 32.4,
+     "capture_to_owner": 3.4,
+     "owner_to_publish": 0.6,
+     "publish_to_encoded": 9.5,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 5.2,
+     "kbytes": 68.4,
+     "mbit_s": 16.8
+    },
+    "ir_left": {
+     "frames": 360,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 8.9,
+     "lat_p95": 53.6,
+     "lat_p99": 73.3,
+     "lat_min": 7.3,
+     "sensor_to_capture": 31.7,
+     "capture_to_owner": 1.1,
+     "owner_to_publish": 0.6,
+     "publish_to_encoded": 3.0,
+     "encoded_to_send": 0.5,
+     "send_to_recv": 3.8,
+     "kbytes": 43.1,
+     "mbit_s": 10.59
+    },
+    "ir_right": {
+     "frames": 360,
+     "fps_cam": 29.96,
+     "fps_recv": 29.96,
+     "dropped": 0,
+     "lat_med": 10.3,
+     "lat_p95": 54.4,
+     "lat_p99": 74.6,
+     "lat_min": 7.4,
+     "sensor_to_capture": 31.6,
+     "capture_to_owner": 0.3,
+     "owner_to_publish": 0.7,
+     "publish_to_encoded": 3.5,
+     "encoded_to_send": 0.6,
+     "send_to_recv": 4.9,
+     "kbytes": 43.5,
+     "mbit_s": 10.69
+    }
+   },
+   "cpu_pct": 87.7,
+   "errors": []
+  },
+  {
+   "case": "depth 480x270@60 jpeg",
+   "mode": "jpeg",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 373.8,
+    "restarted": true,
+    "first_new_frame_ms": 396.2
+   },
+   "streams": {
+    "depth": {
+     "frames": 720,
+     "fps_cam": 59.89,
+     "fps_recv": 59.89,
+     "dropped": 0,
+     "lat_med": 10.9,
+     "lat_p95": 56.0,
+     "lat_p99": 74.8,
+     "lat_min": 7.9,
+     "sensor_to_capture": 14.9,
+     "capture_to_owner": 2.1,
+     "owner_to_publish": 0.3,
+     "publish_to_encoded": 3.8,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 4.3,
+     "kbytes": 28.1,
+     "mbit_s": 13.83
+    }
+   },
+   "cpu_pct": 74.2,
+   "errors": []
+  },
+  {
+   "case": "depth 480x270@60 raw",
+   "mode": "raw",
+   "compress": null,
+   "clients": 1,
+   "settings_change": {
+    "post_rtt_ms": 15.3,
+    "restarted": false,
+    "first_new_frame_ms": null
+   },
+   "streams": {
+    "depth": {
+     "frames": 720,
+     "fps_cam": 59.89,
+     "fps_recv": 59.89,
+     "dropped": 0,
+     "lat_med": 10.8,
+     "lat_p95": 61.2,
+     "lat_p99": 76.4,
+     "lat_min": 7.4,
+     "sensor_to_capture": 15.7,
+     "capture_to_owner": 2.2,
+     "owner_to_publish": 0.3,
+     "publish_to_encoded": 0.0,
+     "encoded_to_send": 0.2,
+     "send_to_recv": 8.0,
+     "kbytes": 253.1,
+     "mbit_s": 124.42
+    }
+   },
+   "cpu_pct": 26.0,
+   "errors": []
+  }
+ ],
+ "imu": [
+  {
+   "samples": 2434,
+   "rate_recv": 202.8,
+   "rate_server": 203.0,
+   "batches": 1228,
+   "dropped": 0,
+   "seq_gaps": 0,
+   "device_gaps_total": 0,
+   "lat_med": 2.3,
+   "lat_p95": 47.1,
+   "lat_p99": 67.5,
+   "newest_in_batch_lat_med": 2.3,
+   "sensor_to_capture": 2.4,
+   "cpu": {
+    "process_pct": 8.2,
+    "load1": 0.86,
+    "cores": 4
+   },
+   "case": "imu 200Hz"
+  },
+  {
+   "samples": 12170,
+   "rate_recv": 1014.2,
+   "rate_server": 1013.6,
+   "batches": 1217,
+   "dropped": 0,
+   "seq_gaps": 0,
+   "device_gaps_total": 0,
+   "lat_med": 12.8,
+   "lat_p95": 58.2,
+   "lat_p99": 77.4,
+   "newest_in_batch_lat_med": 2.9,
+   "sensor_to_capture": 4.8,
+   "cpu": {
+    "process_pct": 10.9,
+    "load1": 0.67,
+    "cores": 4
+   },
+   "case": "imu 1kHz"
+  }
+ ]
+}
