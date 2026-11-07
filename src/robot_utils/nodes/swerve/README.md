@@ -40,6 +40,33 @@ They are clients of `SwerveDrive`, not part of it; a node replaces them.
 
 They still import the flat `examples/` copies, so there are now two copies of the library code.
 
+## Changes since the port (loop timing)
+
+Measured on the robot (wheels off the ground, slow twists), `SwerveDrive`'s loop ran at about
+60 Hz, not 100: it slept 10 ms *after* each tick's work, and the work took about 6 ms, nearly
+all of it 9 separate serial writes to the CANable (about 0.6 ms each, one USB transfer per
+write). Three changes, each measured on the robot:
+
+| | loop rate | period p99 | tick work p50 | frames received/s | CPU |
+|---|---|---|---|---|---|
+| as ported | 62 Hz | 19.1 ms | 5.9 ms | 2,990 | 24% |
+| + fixed-rate schedule | 100 Hz | 10.1 ms | 5.2 ms | 2,990 | 28% |
+| + trimmed status frames | 100 Hz | 10.0 ms | 6.5 ms | 1,750 | 22% |
+| + one serial write per tick | 100 Hz | 10.0 ms | 1.4 ms | 1,750 | 17% |
+| library as committed | 100 Hz | 10.3 ms | 0.7-1.1 ms (write) | 1,690 | 15-16% |
+
+- **Fixed-rate schedule**: the loop sleeps until the next 10 ms deadline; after an overrun it
+  restarts from now instead of bursting.
+- **Status frames, set at runtime by `SwerveDrive` (not persisted)**: STATUS_0 and the one
+  signal frame each SPARK needs (drives STATUS_2, steers STATUS_5) at 10 ms, the other signal
+  frame off, STATUS_1 at 250 ms. All status signals then arrive at 100 Hz (p99 about 11 ms;
+  rare single late frames), at about 40% bus load with 100 Hz control. setup_sparks still
+  stores 20 ms, which applies after a power cycle until the next `SwerveDrive` starts.
+- **Batched writes**: frames the loop thread sends during a tick are written in one
+  `ser.write` (slcan only; other transports send them one at a time).
+- Not adopted: `sys.setswitchinterval(0.001)` made no difference (wake-up lateness was already
+  about 0.06 ms).
+
 ## Notes for the swerve node
 
 `SwerveDrive` already is the hardware-owner thread: the constructor opens the bus, waits up

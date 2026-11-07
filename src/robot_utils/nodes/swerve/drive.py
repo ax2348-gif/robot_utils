@@ -8,7 +8,8 @@
     ...                          # call drive() again at least every COMMAND_TIMEOUT seconds
     drive.close()
 
-A background loop sends the setpoints and the enable heartbeat every 10 ms. If drive() is
+A background loop sends the setpoints and the enable heartbeat every 10 ms (a fixed-rate
+schedule; each tick's frames go out in one serial write on slcan). If drive() is
 not called for COMMAND_TIMEOUT seconds (or stop() is called), the loop sends one heartbeat
 that enables no SPARKs and then stays silent, so every motor stops and other tools can use
 the bus. Configure the SPARKs with ``python -m robot_utils.nodes.swerve.setup_sparks`` first:
@@ -29,13 +30,21 @@ import threading
 import time
 
 from sparkcan import ControlType, PeriodicFrame, SparkFlex
+from sparkcan.protocol import to_slcan
 
 from .constants import COMMAND_TIMEOUT, MAX_WHEEL_SPEED, MODULES
 from .kinematics import (MIN_SPEED, module_command, robot_twist,  # noqa: F401 (re-exported)
                          wheel_velocities, wrap_angle)
 
 LOOP_PERIOD = 0.01   # s; the heartbeat must come at least every 20 ms
-ANGLE_MAX_AGE = 0.1  # s; an older steering reading is stale (setup_sparks sets 20 ms frames)
+ANGLE_MAX_AGE = 0.1  # s; an older steering reading is stale
+# Status frames, set at runtime by SwerveDrive (not persisted; setup_sparks stores 20 ms):
+# STATUS_0 and the one signal frame each SPARK needs come every loop tick (drives: STATUS_2,
+# position and velocity; steers: STATUS_5, absolute angle). The other signal frame is turned
+# off and STATUS_1 (faults/warnings) slowed down, which keeps the bus near 40% at 100 Hz and
+# halves the frames the receive thread has to parse (measured on the robot: 2,990 -> 1,750/s).
+STATUS_PERIOD_MS = 10
+STATUS_1_PERIOD_MS = 250
 
 
 class SwerveDrive:
@@ -43,8 +52,14 @@ class SwerveDrive:
         self.drives = [SparkFlex(interface, m.drive_id) for m in MODULES]
         self.steers = [SparkFlex(interface, m.steer_id) for m in MODULES]
         self.bus = self.drives[0].bus
+        self._configure_status_frames()
         for i in range(len(MODULES)):
             self._wait_for_reading(i)
+        # Frames the loop thread sends during a tick are collected and written at once: on the
+        # CANable each serial write costs about 0.6 ms (one USB transfer), so 9 separate writes
+        # took most of the 10 ms tick (measured: tick body 6 ms -> 1 ms).
+        self._batch = None
+        self.bus.send = self._send
         self.error = None   # set if the control loop stopped on an exception
         self._lock = threading.Lock()
         self._command = ("twist", (0.0, 0.0, 0.0))
@@ -80,9 +95,40 @@ class SwerveDrive:
     def close(self) -> None:
         self._running = False
         self._thread.join()
+        if self.bus.__dict__.get("send") == self._send:
+            del self.bus.send   # back to CANBus.send
         self.bus.disable()
         for spark in self.drives + self.steers:
             spark.close()
+
+    def _configure_status_frames(self) -> None:
+        for sparks, keep, off in ((self.drives, PeriodicFrame.STATUS_2, PeriodicFrame.STATUS_5),
+                                  (self.steers, PeriodicFrame.STATUS_5, PeriodicFrame.STATUS_2)):
+            for s in sparks:
+                s.set_periodic_frames_enabled({PeriodicFrame.STATUS_0: True, keep: True, off: False})
+                s.set_periodic_frame_period(PeriodicFrame.STATUS_0, STATUS_PERIOD_MS)
+                s.set_periodic_frame_period(keep, STATUS_PERIOD_MS)
+                s.set_periodic_frame_period(PeriodicFrame.STATUS_1, STATUS_1_PERIOD_MS)
+
+    def _send(self, frame, **kw) -> None:
+        """CANBus.send for this bus: frames from the loop thread are batched during a tick."""
+        if self._batch is not None and threading.current_thread() is self._thread:
+            self._batch.append(frame)
+        else:
+            type(self.bus).send(self.bus, frame, **kw)
+
+    def _flush(self) -> None:
+        frames, self._batch = self._batch, None
+        if not frames:
+            return
+        transport = getattr(self.bus, "_transport", None)
+        ser, lock = getattr(transport, "_ser", None), getattr(transport, "_lock", None)
+        if ser is None or lock is None:   # not slcan (SocketCAN, simulator): one at a time
+            for f in frames:
+                type(self.bus).send(self.bus, f)
+            return
+        with self.bus._tx_lock, lock:
+            ser.write(b"".join(to_slcan(f) for f in frames))
 
     def encoder_reading(self, i: int):
         """Steering encoder position (rotations, 0-1), or None if there is no fresh reading."""
@@ -119,8 +165,10 @@ class SwerveDrive:
     def _loop(self) -> None:
         enabled_ids = [s.get_device_id() for s in self.drives + self.steers]
         enabled = False
+        deadline = time.monotonic()
         try:
             while self._running:
+                self._batch = []
                 with self._lock:
                     command, age = self._command, time.monotonic() - self._command_time
                 if age > COMMAND_TIMEOUT:
@@ -149,8 +197,17 @@ class SwerveDrive:
                         self.steers[i].get_closed_loop_controller().set_setpoint(target, ControlType.POSITION)
                         drive.set_setpoint(speed, ControlType.VELOCITY)
                     self.bus.heartbeat(enabled_ids)
-                time.sleep(LOOP_PERIOD)
+                self._flush()
+                # Fixed-rate schedule: sleeping LOOP_PERIOD after the work made the period
+                # work + 10 ms (about 60 Hz on the robot). After an overrun, start again from
+                # now rather than sending a burst to catch up.
+                deadline += LOOP_PERIOD
+                now = time.monotonic()
+                if deadline < now:
+                    deadline = now
+                time.sleep(deadline - now)
         except Exception as e:  # never leave the motors enabled after a crash
+            self._batch = None
             self.error = e
             self.bus.disable()
             raise

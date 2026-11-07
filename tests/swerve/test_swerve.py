@@ -170,3 +170,36 @@ def test_wheel_without_steering_reading_gets_zero_drive(iface, configured):
         assert configured[c.MODULES[1].drive_id].setpoint[1] > 0
     finally:
         drive.close()
+
+
+def test_status_frames_configured_for_the_loop(iface, configured):
+    from robot_utils.nodes.swerve.drive import STATUS_1_PERIOD_MS, STATUS_PERIOD_MS
+    drive = SwerveDrive(iface)
+    try:
+        for m in c.MODULES:
+            d, s = configured[m.drive_id], configured[m.steer_id]
+            assert d.params[int(P.STATUS_2_PERIOD)] == STATUS_PERIOD_MS
+            assert s.params[int(P.STATUS_5_PERIOD)] == STATUS_PERIOD_MS
+            for spark in (d, s):
+                assert spark.params[int(P.STATUS_0_PERIOD)] == STATUS_PERIOD_MS
+                assert spark.params[int(P.STATUS_1_PERIOD)] == STATUS_1_PERIOD_MS
+            assert not d.enabled_statuses >> 5 & 1 and d.enabled_statuses >> 2 & 1
+            assert not s.enabled_statuses >> 2 & 1 and s.enabled_statuses >> 5 & 1
+    finally:
+        drive.close()
+
+
+def test_tick_frames_go_out_in_one_serial_write():
+    import threading
+    from types import SimpleNamespace
+    from sparkcan.protocol import heartbeat_frame, to_slcan
+
+    writes = []
+    transport = SimpleNamespace(_ser=SimpleNamespace(write=writes.append), _lock=threading.Lock())
+    drive = object.__new__(SwerveDrive)
+    drive.bus = SimpleNamespace(_transport=transport, _tx_lock=threading.Lock())
+    frames = [heartbeat_frame([1, 2]), heartbeat_frame(())]
+    drive._batch = list(frames)
+    drive._flush()
+    assert writes == [b"".join(to_slcan(f) for f in frames)]
+    assert drive._batch is None
