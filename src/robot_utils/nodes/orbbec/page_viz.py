@@ -120,7 +120,7 @@ function drawAtt(){
 
 // ===================== point cloud (WebGL2) =====================
 const PC={ctl:null,tile:null,gl:null,prog:null,depthTex:null,colorTex:null,frame:null,newFrame:false,colorSeq:-1,
-          cal:null,calVer:-1,az:-1.2,el:0.35,dist:3.0,target:[0,1.5,0.6],n:0,fps:[],lat:null};
+          cal:null,calVer:-1,az:0,el:0.25,zoom:1,med:2.0,medT:0,n:0,fps:[],lat:null};
 const PC_VS=`#version 300 es
 precision highp float;precision highp int;precision highp usampler2D;
 uniform usampler2D depthTex;uniform sampler2D colorTex;
@@ -152,8 +152,8 @@ function makePcTile(){
   c.onmousedown=e=>{drag=[e.clientX,e.clientY,PC.az,PC.el];c.style.cursor="grabbing"};
   window.addEventListener("mouseup",()=>{drag=null;c.style.cursor="grab"});
   window.addEventListener("mousemove",e=>{if(!drag)return;PC.az=drag[2]-(e.clientX-drag[0])*0.008;PC.el=Math.max(-1.4,Math.min(1.4,drag[3]+(e.clientY-drag[1])*0.008))});
-  c.onwheel=e=>{e.preventDefault();PC.dist=Math.max(0.3,Math.min(30,PC.dist*Math.exp(e.deltaY*0.001)))};
-  c.ondblclick=()=>{PC.az=-1.2;PC.el=0.35;PC.dist=3.0};
+  c.onwheel=e=>{e.preventDefault();PC.zoom=Math.max(0.05,Math.min(10,PC.zoom*Math.exp(e.deltaY*0.001)))};
+  c.ondblclick=()=>{PC.az=0;PC.el=0.25;PC.zoom=1};
   PC.tile={box,c,ro,st};
   const gl=c.getContext("webgl2",{antialias:false});
   if(!gl){ro.textContent="WebGL2 is not available in this browser";return PC.tile}
@@ -200,10 +200,17 @@ function drawPc(){
     M=new Float32Array([R[0][0],R[1][0],R[2][0],0,R[0][1],R[1][1],R[2][1],0,R[0][2],R[1][2],R[2][2],0,0,0,0,1])}
   else M=new Float32Array([1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1]);   // x right, z forward -> y forward, -y down -> z up
   const c=T.c,dpr=fitCanvas(c);gl.viewport(0,0,c.width,c.height);gl.clearColor(0.043,0.055,0.07,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);
-  // orbit around a point ~1.5 m in front of the camera (in world)
-  const fwd=mv([[M[0],M[4],M[8]],[M[1],M[5],M[9]],[M[2],M[6],M[10]]],[0,0,1.5]);
-  const tgt=fwd,eye=[tgt[0]+PC.dist*Math.cos(PC.el)*Math.cos(PC.az),tgt[1]+PC.dist*Math.cos(PC.el)*Math.sin(PC.az),tgt[2]+PC.dist*Math.sin(PC.el)];
-  const VP=m4mul(persp(1.0,c.width/c.height,0.05,60),lookAt(eye,tgt,[0,0,1]));
+  // Orbit around the cloud: target = median depth along the optical axis; the default eye sits
+  // behind the camera looking along its axis (drag adds azimuth/elevation, wheel scales distance).
+  const now=performance.now();if(now-PC.medT>1000){PC.medT=now;const d=new Uint16Array(body.buffer,0,w*ht),s=[];
+    for(let i=0;i<d.length;i+=97)if(d[i])s.push(d[i]);if(s.length){s.sort((a,b)=>a-b);PC.med=s[s.length>>1]*(h.depth_scale||1)*0.001}}
+  const R3=[[M[0],M[4],M[8]],[M[1],M[5],M[9]],[M[2],M[6],M[10]]],fwd=mv(R3,[0,0,1]),camUp=mv(R3,[0,-1,0]);
+  const tgt=fwd.map(v=>v*PC.med),dist=PC.med*1.35*PC.zoom;
+  const az0=Math.atan2(-fwd[1],-fwd[0]),el0=Math.asin(Math.max(-1,Math.min(1,-fwd[2])));
+  const az=az0+PC.az,el=Math.max(-1.55,Math.min(1.55,el0+PC.el));
+  const dir=[Math.cos(el)*Math.cos(az),Math.cos(el)*Math.sin(az),Math.sin(el)],eye=dir.map((v,i)=>tgt[i]+v*dist);
+  const up=Math.abs(dir[2])>0.9?camUp:[0,0,1];
+  const VP=m4mul(persp(1.0,c.width/c.height,0.05,80),lookAt(eye,tgt,up));
   gl.useProgram(PC.prog);gl.bindVertexArray(PC.vao);const U=n=>gl.getUniformLocation(PC.prog,n);
   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,PC.depthTex);gl.uniform1i(U("depthTex"),0);
   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,PC.colorTex);gl.uniform1i(U("colorTex"),1);
