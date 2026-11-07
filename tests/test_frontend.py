@@ -278,3 +278,39 @@ def test_landing_page_uses_the_proxy():
         page = c.get("/").text
         assert '"nodes/" + encodeURIComponent(n.cfg.name)' in page
         assert 'fetchJson("api/tools"' in page
+
+
+# --- restarting the frontend's own service --------------------------------------------------
+
+def test_restart_refused_when_not_the_service():
+    async def no():
+        return False
+    restarted = []
+
+    async def restart():
+        restarted.append(1)
+    with TestClient(create_app([], transport=httpx.MockTransport(FakeNodes({})), is_service=no,
+                               restart=restart)) as c:
+        info = c.get("/api/frontend").json()
+        assert info["service"] is False and info["unit"] == "robot-frontend.service"
+        r = c.post("/api/frontend/restart")
+        assert r.status_code == 409 and "not running as robot-frontend.service" in r.json()["detail"]
+    assert restarted == []
+
+
+def test_restart_replies_then_restarts():
+    async def yes():
+        return True
+    restarted = []
+
+    async def restart():
+        restarted.append(1)
+    with TestClient(create_app([], transport=httpx.MockTransport(FakeNodes({})), is_service=yes,
+                               restart=restart)) as c:
+        started = c.get("/api/frontend").json()["started"]
+        r = c.post("/api/frontend/restart")
+        assert r.status_code == 202 and r.json()["started"] == started
+    assert restarted == [1]                     # ran after the reply (background task)
+    with client_for([], FakeNodes({})) as c:
+        page = c.get("/").text
+        assert 'fetchJson("api/frontend/restart"' in page and "Restart landing page" in page

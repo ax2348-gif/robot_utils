@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 import re
+import subprocess
+import time
 from contextlib import asynccontextmanager
 from importlib import resources
 from urllib.parse import urljoin
@@ -37,6 +40,25 @@ PROXY_TIMEOUT = httpx.Timeout(connect=1.0, read=None, write=2.0, pool=2.0)
 PROXY_REQUEST_HEADERS = ("content-type", "accept", "x-lease-token", "last-event-id")
 PROXY_RESPONSE_HEADERS = ("content-type", "cache-control")
 TOOL_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+SERVICE_UNIT = "robot-frontend.service"   # installed by install.sh
+
+
+async def running_as_service() -> bool:
+    """True if this process is the main process of robot-frontend.service (systemd user unit)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "--user", "show", SERVICE_UNIT, "-p", "MainPID", "--value",
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), 5)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    return out.strip().isdigit() and int(out.strip()) == os.getpid()
+
+
+async def restart_service() -> None:
+    """Ask systemd to restart our own unit; --no-block returns at once, then systemd stops us."""
+    proc = await asyncio.create_subprocess_exec("systemctl", "--user", "restart", "--no-block", SERVICE_UNIT)
+    await proc.wait()
 
 
 def node_base_url(node: NodeEntry, default_host: str) -> str:
@@ -136,6 +158,8 @@ def create_app(
     default_host: str = "127.0.0.1",
     transport: httpx.AsyncBaseTransport | None = None,
     manager: NodeManager | None = None,
+    is_service=running_as_service,
+    restart=restart_service,
 ) -> FastAPI:
     """``default_host``: how this process reaches nodes without a ``host`` (server-side e-stop
     only; the browser uses its own hostname). ``transport``: for tests."""
@@ -203,6 +227,29 @@ def create_app(
             return JSONResponse({"lines": await app.state.manager.logs(name, lines)}, headers=no_cache)
         except ManagerError as e:
             return manager_error(e)
+
+    # -- restarting this frontend (reloads nodes.yaml and the code) ----------------------------
+
+    started = time.time()
+
+    @app.get("/api/frontend")
+    async def frontend_info() -> JSONResponse:
+        return JSONResponse({"service": await is_service(), "unit": SERVICE_UNIT, "pid": os.getpid(),
+                             "started": started}, headers=no_cache)
+
+    @app.post("/api/frontend/restart")
+    async def frontend_restart() -> JSONResponse:
+        """Restart robot-frontend.service. Only works when this process is that service (started
+        by install.sh), not when run by hand. Managed nodes are separate units and keep running."""
+        if not await is_service():
+            return JSONResponse({"detail": f"this frontend is not running as {SERVICE_UNIT} "
+                                           "(started by hand?); restart it where it runs"}, status_code=409)
+
+        async def later():
+            await asyncio.sleep(0.3)   # let this reply reach the browser first
+            await restart()
+        return JSONResponse({"restarting": True, "pid": os.getpid(), "started": started}, status_code=202,
+                            background=BackgroundTask(later))
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:

@@ -24,6 +24,10 @@
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 16px; }
   header h1 { font-size: 20px; margin: 0; flex: 1 1 auto; }
   header .sub { color: var(--muted); font-size: 13px; font-weight: normal; display: block; }
+  #restart { font: 600 12px system-ui, sans-serif; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+             border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #restart:disabled { opacity: .5; cursor: default; }
+  #restart-msg.err { color: var(--bad); font-weight: 600; }
 
   #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid #7a0d08;
            border-radius: 12px; background: #d7261e; color: #fff; cursor: pointer;
@@ -99,7 +103,9 @@
 <body>
 <main>
   <header>
-    <h1>Robot nodes <span class="sub" id="where"></span></h1>
+    <h1>Robot nodes <span class="sub"><span id="where"></span>
+      · <button id="restart" type="button" title="Restart this landing page (robot-frontend.service): reloads nodes.yaml and the code. Running nodes keep running.">Restart landing page</button>
+      <span id="restart-msg"></span></span></h1>
     <button id="estop" type="button" aria-label="E-STOP ALL" title="POST estop to every actuated node, in parallel">
       E-STOP ALL<small>every actuated node</small>
     </button>
@@ -369,6 +375,7 @@ async function estopAll() {
 async function start() {
   document.getElementById("where").textContent = location.host;
   document.getElementById("estop").addEventListener("click", estopAll);
+  document.getElementById("restart").addEventListener("click", restartFrontend);
   let cfg;
   for (;;) {
     try {
@@ -399,6 +406,31 @@ async function start() {
   tick();
   setInterval(tick, POLL_MS);
 }
+// Restart this frontend's systemd service, wait until the new process answers, reload the page.
+async function restartFrontend() {
+  const btn = document.getElementById("restart"), msg = document.getElementById("restart-msg");
+  btn.disabled = true; msg.className = ""; msg.textContent = "restarting…";
+  let before = null;
+  try {
+    const r = await fetchJson("api/frontend/restart", { method: "POST" }, 5000);
+    if (r.status !== 202) {
+      msg.className = "err"; msg.textContent = (r.body && r.body.detail) || "HTTP " + r.status;
+      btn.disabled = false; return;
+    }
+    before = r.body.started;
+  } catch (e) { msg.className = "err"; msg.textContent = "restart: " + netError(e); btn.disabled = false; return; }
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, 500));
+    try {
+      const r = await fetchJson("api/frontend", {}, 1000);
+      if (r.ok && r.body && r.body.started !== before) { location.reload(); return; }
+    } catch (_) { /* down while it restarts */ }
+  }
+  msg.className = "err"; msg.textContent = "did not come back within 30 s (journalctl --user -u robot-frontend)";
+  btn.disabled = false;
+}
+
 async function loadTools() {
   try {
     const r = await fetchJson("api/tools", {}, 3000);

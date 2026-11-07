@@ -40,6 +40,13 @@ systemctl --user disable --now robot-frontend # stop it and don't start at boot
 
 To run it by hand instead (e.g. with `--config`), stop the service first: both want port 80.
 
+The landing page's **Restart landing page** button (next to the hostname) does the same as
+`systemctl --user restart robot-frontend` (e.g. after editing `nodes.yaml` or pulling new code):
+`POST /api/frontend/restart` replies 202, then asks systemd for a non-blocking restart of its own
+unit; the page waits until the new process answers (`GET /api/frontend` reports its start time)
+and reloads. It refuses (409) when the frontend was started by hand rather than as the service.
+Nodes keep running: managed ones are separate units.
+
 ## Node registry (`nodes.yaml`)
 
 The default is packaged at `src/robot_utils/frontend/nodes.yaml`; `--config PATH` replaces it.
