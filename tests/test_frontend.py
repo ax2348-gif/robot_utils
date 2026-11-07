@@ -21,7 +21,7 @@ def test_packaged_default_config():
     assert (nodes["camera"].port, nodes["camera"].enabled) == (8101, True)
     assert (nodes["swerve"].port, nodes["swerve"].enabled) == (8102, True)
     assert (nodes["arm"].port, nodes["arm"].enabled) == (8103, False)
-    assert (nodes["estimator"].port, nodes["estimator"].enabled) == (8110, False)
+    assert (nodes["estimator"].port, nodes["estimator"].enabled) == (8110, True)
     assert all(n.host is None for n in nodes.values())
 
 

@@ -17,4 +17,4 @@ nodes:
   - {name: camera, port: 8101, start: {module: robot_utils.nodes.orbbec}}
   - {name: swerve, port: 8102, start: {module: robot_utils.nodes.swerve}}
   - {name: arm, port: 8103, enabled: false}        # future
-  - {name: estimator, port: 8110, enabled: false}  # future
+  - {name: estimator, port: 8110, start: {module: robot_utils.nodes.estimator}}
