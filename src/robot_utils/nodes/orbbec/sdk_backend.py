@@ -187,7 +187,7 @@ class SdkBackend:
         rates = [r for r, _ in found["gyro"] if r in rates_a]
         rates = sorted(dict.fromkeys(rates), key=rate_hz)
         return ImuCatalog(available=bool(rates), sample_rates=rates,
-                          default_rate="200Hz" if "200Hz" in rates else (rates[0] if rates else None),
+                          default_rate=next((r for r in ("100Hz", "200Hz") if r in rates), rates[0] if rates else None),
                           accel_ranges=sorted({g for _, g in found["accel"]}),
                           gyro_ranges=sorted({g for _, g in found["gyro"]}))
 

@@ -155,7 +155,7 @@ def _cat(**kw):
                ProfileOption(key="640x480@30 MJPG", width=640, height=480, fps=30, format="MJPG")],
         stereo=[ProfileOption(key="848x480@10", width=848, height=480, fps=10, default=True),
                 ProfileOption(key="640x400@30", width=640, height=400, fps=30)],
-        imu=ImuCatalog(available=True, sample_rates=["200Hz", "1kHz"], default_rate="200Hz",
+        imu=ImuCatalog(available=True, sample_rates=["100Hz", "200Hz", "1kHz"], default_rate="100Hz",
                        accel_ranges=["4g"], gyro_ranges=["1000dps"]),
         colormaps={"turbo": [], "jet": []}, **kw)
 
@@ -166,7 +166,7 @@ def test_fix_settings_fills_defaults_and_drops_missing_streams():
     s = fix_settings(Settings(streams={"color": True, "depth": True, "ir_left": True, "ir_right": False},
                               color_profile="nope"), cat)
     assert s.color_profile == "1280x720@10 MJPG" and s.stereo_mode == "848x480@10"
-    assert s.streams["ir_left"] is False and s.imu.sample_rate == "200Hz" and s.imu.gyro_range == "1000dps"
+    assert s.streams["ir_left"] is False and s.imu.sample_rate == "100Hz" and s.imu.batch_ms == 0 and s.imu.gyro_range == "1000dps"
 
 
 def test_apply_patch_restart_flags():

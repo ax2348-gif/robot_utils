@@ -55,12 +55,14 @@ class DisplaySettings(_Strict):
 class ImuSettings(_Strict):
     """Accelerometer + gyroscope. Rates/ranges come from `GET /catalog` → `imu`."""
     enabled: bool = Field(True, description="Run the IMU (its own SDK pipeline; independent of video).")
-    sample_rate: Optional[str] = Field(None, description="e.g. `200Hz`; null = device default.",
-                                       examples=["200Hz"])
+    sample_rate: Optional[str] = Field(None, description="e.g. `100Hz`; null = the catalog's default "
+                                       "(100 Hz when the device offers it).", examples=["100Hz"])
     accel_range: Optional[str] = Field(None, description="Accelerometer full scale, e.g. `4g`.")
     gyro_range: Optional[str] = Field(None, description="Gyroscope full scale, e.g. `1000dps`.")
-    batch_ms: float = Field(5.0, ge=0, le=200,
-                            description="Samples are sent in records covering about this long (0 = every sample).")
+    batch_ms: float = Field(0.0, ge=0, le=200,
+                            description="0 (default): every sample is sent in its own record as soon as it "
+                                        "arrives. >0: group samples into records covering about this long "
+                                        "(less per-record overhead at high rates, adds up to batch_ms delay).")
 
 
 class Settings(_Strict):

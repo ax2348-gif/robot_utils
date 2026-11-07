@@ -66,7 +66,7 @@ for fr in cam.frames("color,depth", mode="raw"):
  │        │ Hub.publish_frames()            ▲ queue.Queue of (cmd, cf.Future)    │
  │        ▼ (store latest per stream,       │                                    │
  │           loop.call_soon_threadsafe)     │                                    │
- │ IMU thread "orbbec-imu"  (own SDK Pipeline, accel+gyro, batches every ~5 ms)  │
+ │ IMU thread "orbbec-imu"  (own SDK Pipeline, accel+gyro, one record/sample)    │
  │        │ Hub.publish_imu()  -> per-client bounded queues                       │
  │        ▼                                                                      │
  │ event loop (FastAPI)       never calls the SDK, never blocks                  │
@@ -149,7 +149,7 @@ or no frame, 504 the camera thread did not answer within 20 s.
   "frame_sync": false,
   "display": {"colormap": "turbo", "invert": false, "range_mode": "auto", "pct_lo": 2, "pct_hi": 98,
               "min_mm": 200, "max_mm": 3000, "invalid_color": "#000000", "jpeg_quality": 80},
-  "imu": {"enabled": true, "sample_rate": "200Hz", "accel_range": "4g", "gyro_range": "1000dps", "batch_ms": 5}
+  "imu": {"enabled": true, "sample_rate": "100Hz", "accel_range": "4g", "gyro_range": "1000dps", "batch_ms": 0}
 }
 ```
 
@@ -326,13 +326,19 @@ Achieved sync uncertainty: see [Results](#results).
 ## IMU
 
 The 336L's IMU offers 50 Hz … 1 kHz (accelerometer ±4 g, gyroscope ±1000 °/s on this unit; the
-choices come from the device's profile list in `GET /catalog`). It is on by default at 200 Hz.
+choices come from the device's profile list in `GET /catalog`). It is on by default at 100 Hz
+(a native device rate, not software downsampling).
 
 - It runs on its own SDK pipeline in the `orbbec-imu` thread, independent of video restarts.
-- Every sample is delivered (not latest-wins): the IMU thread batches samples (flushes when
-  waiting for the next sample would exceed `batch_ms`, default 5 ms, so at ≤200 Hz every sample
-  is sent on its own) and each client has its own queue; a client that falls `max_backlog`
-  samples behind loses the oldest and is told in `dropped`.
+- Every sample is delivered (not latest-wins), by default each in its own record as soon as it
+  arrives (`batch_ms` = 0). Setting `batch_ms` > 0 groups samples into records covering about that
+  long (it flushes when waiting for the next sample would exceed it): less per-record overhead at
+  500 Hz / 1 kHz, at the cost of up to `batch_ms` extra delay. Each client has its own queue; a
+  client that falls `max_backlog` samples behind loses the oldest and is told in `dropped`.
+- There is no orientation output: the SDK exposes only accelerometer and gyroscope frames (no
+  pose/quaternion/fusion types). Estimate orientation on the client from the raw samples (e.g. a
+  complementary or Madgwick filter); roll and pitch are observable from gravity, yaw only by
+  integrating the gyro (it drifts; there is no magnetometer).
 - Sample gaps on the device side are counted from the SDK frame index (`/state` → `imu.gaps`).
 
 ```python
