@@ -1,4 +1,4 @@
-"""python -m robot_utils.nodes.orbbec [--host 0.0.0.0] [--port 8000] [--streams color,depth] [--fake]"""
+"""python -m robot_utils.nodes.orbbec [--host 0.0.0.0] [--port 8101] [--streams color,depth] [--fake]"""
 import argparse
 import logging
 import socket
@@ -18,7 +18,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.orbbec",
                                 description="HTTP node for the Orbbec depth camera (docs/orbbec_node.md).")
     p.add_argument("--host", default="0.0.0.0", help="address to bind (default: all interfaces)")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=int, default=8101)
     p.add_argument("--streams", default="color,depth", help="video streams on at start: " + ",".join(STREAM_NAMES))
     p.add_argument("--no-imu", action="store_true", help="start with the IMU off")
     p.add_argument("--fake", action="store_true", help="synthetic camera (no SDK / hardware needed)")

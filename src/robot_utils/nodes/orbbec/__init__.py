@@ -2,7 +2,7 @@
 
 Run on the machine the camera is plugged into::
 
-    python -m robot_utils.nodes.orbbec --host 0.0.0.0 --port 8000
+    python -m robot_utils.nodes.orbbec --host 0.0.0.0 --port 8101
 
 Client side::
 

@@ -9,7 +9,7 @@ data, JSON for control, every timestamp on the Pi's `time.monotonic()` clock.
 - Client library: `src/robot_utils/nodes/orbbec/client.py`
 - Examples: `examples/orbbec_node_record.py` (record on the client), `examples/orbbec_node_profile.py`
   (latency profile)
-- Interactive API docs (OpenAPI): `http://<pi>:8000/docs`; quick-look page: `http://<pi>:8000/`
+- Interactive API docs (OpenAPI): `http://<pi>:8101/docs`; quick-look page: `http://<pi>:8101/`
 - Tests (no hardware): `PYTHONPATH=src python -m pytest tests/test_orbbec_node.py`
 
 The older stdlib viewer (`examples/orbbec_web_viewer.py`, `docs/orbbec_viewer.md`) does the same
@@ -22,20 +22,20 @@ On the Pi (needs `fastapi` and `uvicorn` in the venv, see [Dependencies](#depend
 
 ```bash
 cd ~/robot_utils && source .venv/bin/activate
-python -m robot_utils.nodes.orbbec --host 0.0.0.0 --port 8000           # Ctrl-C to stop
+python -m robot_utils.nodes.orbbec --host 0.0.0.0 --port 8101           # Ctrl-C to stop
 python -m robot_utils.nodes.orbbec --streams color,depth,ir_left --no-imu -v
 python -m robot_utils.nodes.orbbec --fake --port 8765                   # synthetic camera, any machine
 ```
 
-It prints a URL per interface (LAN `http://192.168.8.209:8000/`, Tailscale
-`http://100.80.153.120:8000/`). Open it in a browser for live tiles, settings, device controls,
+It prints a URL per interface (LAN `http://192.168.8.209:8101/`, Tailscale
+`http://100.80.153.120:8101/`). Open it in a browser for live tiles, settings, device controls,
 IMU readout and the true capture→display latency (the page syncs its clock to the Pi).
 
 In the background with a log (how it was left running):
 
 ```bash
 PYTHONPATH=~/robot_utils/src nohup ~/robot_utils/.venv/bin/python -m robot_utils.nodes.orbbec \
-    --host 0.0.0.0 --port 8000 > /tmp/orbbec_node.log 2>&1 &
+    --host 0.0.0.0 --port 8101 > /tmp/orbbec_node.log 2>&1 &
 pkill -f "robot_utils.nodes.orbbec"          # stop
 ```
 
@@ -44,7 +44,7 @@ From any machine (Python):
 ```python
 from robot_utils.nodes.orbbec.client import OrbbecClient
 
-cam = OrbbecClient("http://100.80.153.120:8000")
+cam = OrbbecClient("http://100.80.153.120:8101")
 print(cam.sync())                      # offset to the Pi clock, ± uncertainty
 cam.update_settings({"streams": {"color": True, "depth": True}, "stereo_mode": "848x480@10"})
 for fr in cam.frames("color,depth", mode="raw"):
@@ -108,8 +108,8 @@ for fr in cam.frames("color,depth", mode="raw"):
 
 ## Endpoints
 
-All responses are JSON unless noted. `<pi>` = `100.80.153.120:8000` (Tailscale) or
-`192.168.8.209:8000` (LAN).
+All responses are JSON unless noted. `<pi>` = `100.80.153.120:8101` (Tailscale) or
+`192.168.8.209:8101` (LAN).
 
 | Method & path | What |
 |---|---|
@@ -189,7 +189,7 @@ cam.set_property("OB_PROP_LASER_CONTROL_INT", 1)
 JavaScript (browser or Node 18+; CORS is open):
 
 ```js
-const base = "http://100.80.153.120:8000";
+const base = "http://100.80.153.120:8101";
 await fetch(base + "/settings", {method: "POST", headers: {"Content-Type": "application/json"},
   body: JSON.stringify({streams: {ir_left: true}})}).then(r => r.json());
 const es = new EventSource(base + "/events");
@@ -354,7 +354,7 @@ needs over the API: lossless depth (`mode=raw`, uint16 + `depth_scale`), IR as c
 the camera's own MJPEG bytes, every IMU sample, and per-frame timestamps on one clock.
 
 ```bash
-PYTHONPATH=src python examples/orbbec_node_record.py --url http://100.80.153.120:8000 \
+PYTHONPATH=src python examples/orbbec_node_record.py --url http://100.80.153.120:8101 \
     --out rec_001 --streams color,depth --mode raw --duration 30
 PYTHONPATH=src python examples/orbbec_node_record.py --read rec_001 --export   # PNG/JPEG + CSV
 ```
@@ -364,7 +364,7 @@ In code:
 ```python
 from robot_utils.nodes.orbbec.client import record, read_recording
 
-record("http://100.80.153.120:8000", "rec_001", streams="color,depth", mode="raw", duration=30)
+record("http://100.80.153.120:8101", "rec_001", streams="color,depth", mode="raw", duration=30)
 for h, img in read_recording("rec_001/video.rec", decode_jpeg=False):
     print(h["stream"], h["seq"], h["t_sensor"], h["t_capture"], h["t_recv"])   # img: uint16 depth / MJPEG bytes
 imu = [s for _, s in read_recording("rec_001/imu.rec")]
@@ -381,9 +381,9 @@ Measured 2026-11-06 with `examples/orbbec_node_profile.py` (12 s per case after 
 off during video cases), node commit on `feat/orbbec-node`, Pi 5 (4 cores), camera on USB 2.1.
 Raw JSON: `docs/orbbec_node_profile/*.json`. Three client locations:
 
-- **Pi localhost**: the profiler on the Pi itself (`http://127.0.0.1:8000`).
-- **Mac → Pi LAN**: `http://192.168.8.209:8000`; the Mac is on **Wi-Fi** (en0), the Pi on Ethernet.
-- **Mac → Pi Tailscale**: `http://100.80.153.120:8000`; `tailscale ping` shows a *direct* path via
+- **Pi localhost**: the profiler on the Pi itself (`http://127.0.0.1:8101`).
+- **Mac → Pi LAN**: `http://192.168.8.209:8101`; the Mac is on **Wi-Fi** (en0), the Pi on Ethernet.
+- **Mac → Pi Tailscale**: `http://100.80.153.120:8101`; `tailscale ping` shows a *direct* path via
   the same LAN (192.168.8.209:41641), i.e. the same Wi-Fi link plus WireGuard.
 
 ### Clock sync
