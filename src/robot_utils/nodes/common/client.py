@@ -81,15 +81,18 @@ class NodeClient:
 
     # -- streams -------------------------------------------------------------------------------
 
-    def records(self, path: str, chunk: int = 1 << 14, **params) -> Iterator[tuple[dict, bytes, float]]:
-        """(header, payload, t_receive) for every record of a streaming endpoint (client monotonic)."""
+    def records(self, path: str, **params) -> Iterator[tuple[dict, bytes, float]]:
+        """(header, payload, t_receive) for every record of a streaming endpoint (client monotonic).
+
+        Bytes are handed on as they arrive (``iter_raw()`` without a chunk size: with one, httpx
+        waits until that many bytes have accumulated, which delayed 100 Hz ticks by ~120 ms)."""
         reader = RecordReader()
         with httpx.stream("GET", self.base_url + path, params=params, timeout=None,
                           headers=self.headers) as r:
             if r.status_code >= 400:
                 r.read()
                 self._check(r)
-            for data in r.iter_raw(chunk):
+            for data in r.iter_raw():
                 t = time.monotonic()
                 for h, p in reader.feed(data):
                     yield h, p, t
@@ -107,7 +110,7 @@ class NodeClient:
         n, t_end = 0, None if seconds is None else time.monotonic() + seconds
         with open(filename, "wb") as f, httpx.stream("GET", self.base_url + path, params=params,
                                                      timeout=None, headers=self.headers) as r:
-            for data in r.iter_raw(1 << 16):
+            for data in r.iter_raw():
                 f.write(data)
                 n += len(data)
                 if t_end is not None and time.monotonic() > t_end:
