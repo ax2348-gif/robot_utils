@@ -50,7 +50,7 @@ def summarize(out_dir, export=False):
     if os.path.exists(imu_path):
         batches = [d for _, d in read_recording(imu_path)]
         if batches:
-            s = np.concatenate(batches)
+            s = np.concatenate(batches).view(np.recarray)
             span = s.t_capture[-1] - s.t_capture[0]
             print(f"imu       {len(s):5d} samples {len(s) / span if span else 0:6.1f} Hz  seq gaps "
                   f"{int(np.sum(np.diff(s.seq) - 1))}  mean accel {s.ax.mean():.2f} {s.ay.mean():.2f} {s.az.mean():.2f} m/s^2")

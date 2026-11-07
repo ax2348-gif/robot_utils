@@ -213,13 +213,11 @@ class OrbbecClient:
 
     def frame(self, stream: str, mode: str = "raw") -> Record:
         """The latest frame of one stream (GET /frame/{stream})."""
-        t0 = time.monotonic()
         r = self._check(self.http.get(f"/frame/{stream}", params={"mode": mode}))
         t = time.monotonic()
         (h, p), = RecordReader().feed(r.content)
         with self._clock_lock:
             ts = self.clock.to_server(t) if self.clock.latest else None
-        del t0
         return Record(h, p, t, ts)
 
 
