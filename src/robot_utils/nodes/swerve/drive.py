@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Twist (vx, vy, omega) control of the MAXSwerve drive base.
+
+    from robot_utils.nodes.swerve.drive import SwerveDrive
+
+    drive = SwerveDrive("slcan:/dev/ttyACM0")
+    drive.drive(0.2, 0.0, 0.0)   # robot frame: m/s forward, m/s left, rad/s counter-clockwise
+    ...                          # call drive() again at least every COMMAND_TIMEOUT seconds
+    drive.close()
+
+A background loop sends the setpoints and the enable heartbeat every 10 ms. If drive() is
+not called for COMMAND_TIMEOUT seconds (or stop() is called), the loop sends one heartbeat
+that enables no SPARKs and then stays silent, so every motor stops and other tools can use
+the bus. Configure the SPARKs with ``python -m robot_utils.nodes.swerve.setup_sparks`` first:
+the drive setpoint is in m/s and the steering setpoint in encoder rotations.
+
+Command-line test (wheels off the ground):
+
+    python -m robot_utils.nodes.swerve.drive slcan:/dev/ttyACM0 0.1 0 0 --seconds 2
+
+Ported from rev_ctl ``examples/swerve_drive.py`` (commit cfcfc32); the kinematics functions
+moved to ``kinematics.py`` and are re-exported here.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import threading
+import time
+
+from sparkcan import ControlType, PeriodicFrame, SparkFlex
+
+from .constants import COMMAND_TIMEOUT, MAX_WHEEL_SPEED, MODULES
+from .kinematics import (MIN_SPEED, module_command, robot_twist,  # noqa: F401 (re-exported)
+                         wheel_velocities, wrap_angle)
+
+LOOP_PERIOD = 0.01   # s; the heartbeat must come at least every 20 ms
+ANGLE_MAX_AGE = 0.1  # s; an older steering reading is stale (setup_sparks sets 20 ms frames)
+
+
+class SwerveDrive:
+    def __init__(self, interface: str):
+        self.drives = [SparkFlex(interface, m.drive_id) for m in MODULES]
+        self.steers = [SparkFlex(interface, m.steer_id) for m in MODULES]
+        self.bus = self.drives[0].bus
+        for i in range(len(MODULES)):
+            self._wait_for_reading(i)
+        self.error = None   # set if the control loop stopped on an exception
+        self._lock = threading.Lock()
+        self._command = ("twist", (0.0, 0.0, 0.0))
+        self._command_time = -math.inf
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, name="swerve", daemon=True)
+        self._thread.start()
+
+    def drive(self, vx: float, vy: float, omega: float) -> None:
+        """Command a robot twist; it holds for COMMAND_TIMEOUT seconds."""
+        self._set_command("twist", vx, vy, omega)
+
+    def drive_wheels(self, angle: float, speed: float = 0.0) -> None:
+        """Point every wheel at ``angle`` (rad, 0 = forward) and drive it at ``speed`` (m/s).
+
+        For bench tests. Unlike drive(), a wheel never reverses instead of turning, so it ends
+        up exactly at ``angle``. Holds for COMMAND_TIMEOUT seconds.
+        """
+        self._set_command("wheels", angle, max(-MAX_WHEEL_SPEED, min(MAX_WHEEL_SPEED, speed)))
+
+    def _set_command(self, kind: str, *values: float) -> None:
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("command values must be finite")
+        with self._lock:
+            self._command = (kind, values)
+            self._command_time = time.monotonic()
+
+    def stop(self) -> None:
+        """Disable every motor now (the next drive() enables them again)."""
+        with self._lock:
+            self._command_time = -math.inf
+
+    def close(self) -> None:
+        self._running = False
+        self._thread.join()
+        self.bus.disable()
+        for spark in self.drives + self.steers:
+            spark.close()
+
+    def encoder_reading(self, i: int):
+        """Steering encoder position (rotations, 0-1), or None if there is no fresh reading."""
+        status = self.steers[i].get_periodic_status(PeriodicFrame.STATUS_5)  # also enables it
+        if status.timestamp is None or time.monotonic() - status.timestamp > ANGLE_MAX_AGE:
+            return None
+        return status["DUTY_CYCLE_ENCODER_POSITION"]
+
+    def measured_twist(self):
+        """Achieved robot twist (vx, vy, omega) from the wheels' measured headings and speeds,
+        or None if a steering reading is missing."""
+        velocities = []
+        for i in range(len(MODULES)):
+            reading = self.encoder_reading(i)
+            if reading is None:
+                return None
+            heading = self.wheel_angle(reading, i)
+            speed = self.drives[i].get_encoder().get_velocity()   # m/s (setup_sparks)
+            velocities.append((speed * math.cos(heading), speed * math.sin(heading)))
+        return robot_twist(velocities)
+
+    def wheel_angle(self, reading: float, i: int) -> float:
+        """Wheel angle (rad, 0 = forward) for a steering encoder reading."""
+        return wrap_angle((reading - MODULES[i].steer_offset) * 2 * math.pi)
+
+    def _wait_for_reading(self, i: int, timeout: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.encoder_reading(i) is not None:
+                return
+            time.sleep(0.02)
+        raise RuntimeError(f"{MODULES[i].name}: no steering encoder reading (run python -m robot_utils.nodes.swerve.setup_sparks?)")
+
+    def _loop(self) -> None:
+        enabled_ids = [s.get_device_id() for s in self.drives + self.steers]
+        enabled = False
+        try:
+            while self._running:
+                with self._lock:
+                    command, age = self._command, time.monotonic() - self._command_time
+                if age > COMMAND_TIMEOUT:
+                    if enabled:  # one disabling heartbeat, then silence: other tools may use the bus
+                        self.bus.disable()
+                        enabled = False
+                else:
+                    enabled = True
+                    kind, values = command
+                    if kind == "twist":
+                        velocities = wheel_velocities(*values)
+                    for i, m in enumerate(MODULES):
+                        drive = self.drives[i].get_closed_loop_controller()
+                        reading = self.encoder_reading(i)
+                        if reading is None:  # no fresh steering reading: stop this wheel
+                            drive.set_setpoint(0.0, ControlType.VELOCITY)
+                            continue
+                        heading = self.wheel_angle(reading, i)
+                        if kind == "twist":
+                            angle, speed = module_command(*velocities[i], heading)
+                        else:  # "wheels": exactly this angle (bench tests)
+                            angle, speed = values[0], values[1] * max(0.0, math.cos(values[0] - heading))
+                        # Position PID on the absolute encoder, which wraps at 0/1 (setup_sparks),
+                        # so the setpoint is simply the angle's encoder reading.
+                        target = (angle / (2 * math.pi) + m.steer_offset) % 1.0
+                        self.steers[i].get_closed_loop_controller().set_setpoint(target, ControlType.POSITION)
+                        drive.set_setpoint(speed, ControlType.VELOCITY)
+                    self.bus.heartbeat(enabled_ids)
+                time.sleep(LOOP_PERIOD)
+        except Exception as e:  # never leave the motors enabled after a crash
+            self.error = e
+            self.bus.disable()
+            raise
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Drive the swerve base with a constant twist")
+    ap.add_argument("interface", help='e.g. "slcan:/dev/ttyACM0"')
+    ap.add_argument("vx", type=float, help="m/s forward")
+    ap.add_argument("vy", type=float, help="m/s left")
+    ap.add_argument("omega", type=float, help="rad/s counter-clockwise")
+    ap.add_argument("--seconds", type=float, default=2.0)
+    args = ap.parse_args()
+
+    if input("Wheels off the ground and clear? Type GO: ").strip() != "GO":
+        return
+    drive = SwerveDrive(args.interface)
+    try:
+        end = time.monotonic() + args.seconds
+        while time.monotonic() < end and drive.error is None:
+            drive.drive(args.vx, args.vy, args.omega)
+            time.sleep(0.05)
+    finally:
+        drive.close()
+    if drive.error:
+        raise SystemExit(f"control loop failed: {drive.error}")
+
+
+if __name__ == "__main__":
+    main()
