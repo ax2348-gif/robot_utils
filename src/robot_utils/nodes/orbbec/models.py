@@ -330,6 +330,9 @@ class ImuStatus(BaseModel):
     gaps: int = Field(0, description="Samples missing according to the device frame index.")
     last: Optional[dict] = Field(None, description="Last sample: accel m/s^2, gyro rad/s, temperature C.")
     error: Optional[str] = None
+    filter: Optional[dict] = Field(None, description="Attitude filter: q (IMU->world, w x y z), rpy_deg, "
+                                                     "gyro_bias rad/s, calibrated/still/initializing/"
+                                                     "calibrating, calibration (bias, g_ref, source).")
 
 
 class CpuStatus(BaseModel):
