@@ -127,3 +127,32 @@ async def sse(hub: RowHub, state: Callable[[], Any]):
             await asyncio.wait_for(asyncio.shield(fut), 1.0)
         except asyncio.TimeoutError:
             pass
+
+
+def node_meta(name: str, title: str, version: str, kind: str, *, actuated: bool,
+              has_page: bool = True, **extra) -> dict:
+    """``GET /meta`` body (the frontend's contract). Paths are relative to the node root."""
+    return {"name": name, "title": title, "version": version, "kind": kind,
+            "has_page": has_page, "page": "./" if has_page else None, "actuated": actuated,
+            "endpoints": {"health": "health", "state": "state", "events": "events",
+                          "estop": "estop" if actuated else None},
+            **extra}
+
+
+def add_page_routes(app: FastAPI, meta: dict) -> None:
+    """``GET /meta`` plus the shared browser toolkit at ``common/ui.js`` and ``common/ui.css``."""
+    from fastapi.responses import Response
+
+    from .ui_assets import UI_CSS, UI_JS
+
+    @app.get("/meta", tags=["state"], summary="What this node is (for dashboards)")
+    async def get_meta():
+        return meta
+
+    @app.get("/common/ui.js", include_in_schema=False)
+    async def ui_js():
+        return Response(UI_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/common/ui.css", include_in_schema=False)
+    async def ui_css():
+        return Response(UI_CSS, media_type="text/css", headers={"Cache-Control": "no-cache"})
