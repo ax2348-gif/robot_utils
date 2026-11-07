@@ -236,3 +236,12 @@ function events(){
 (async()=>{try{await onState(await api("state"))}catch(e){}events();sync().catch(()=>{});setInterval(()=>sync().catch(()=>{}),30000);live()})();
 </script></body></html>
 """
+
+# Visualisations (IMU attitude + strip charts, WebGL2 point cloud) live in page_viz.py.
+from .page_viz import VIZ_CSS, VIZ_HTML, VIZ_JS  # noqa: E402
+
+for _old, _new in (("</style>", VIZ_CSS + "</style>"),
+                   ('<section class="box"><h2>Device controls', VIZ_HTML + '<section class="box"><h2>Device controls'),
+                   ("</script></body>", "</script><script>\n\"use strict\";\n" + VIZ_JS + "</script></body>")):
+    assert PAGE.count(_old) == 1, _old
+    PAGE = PAGE.replace(_old, _new)

@@ -238,6 +238,33 @@ class SdkBackend:
                 return p
         raise ValueError(f"{name} has no {w}x{h}@{fps} profile")
 
+    def calibration(self, s: Settings) -> dict:
+        """Factory intrinsics of the depth and color profiles of ``s``, and the depth -> color
+        extrinsic (pinhole: fx, fy, cx, cy in pixels of that profile's width x height)."""
+        out = {}
+        prof = {}
+        for name in ("depth", "color"):
+            try:
+                p = self._profile(name, s).as_video_stream_profile()
+            except Exception:
+                continue
+            prof[name] = p
+            i = p.get_intrinsic()
+            d = {"fx": float(i.fx), "fy": float(i.fy), "cx": float(i.cx), "cy": float(i.cy),
+                 "width": int(i.width), "height": int(i.height)}
+            try:
+                dist = p.get_distortion()
+                d["distortion"] = {k: float(getattr(dist, k)) for k in ("k1", "k2", "k3", "k4", "k5", "k6", "p1", "p2")
+                                   if hasattr(dist, k)}
+            except Exception:
+                pass
+            out[name] = d
+        if "depth" in prof and "color" in prof:
+            e = prof["depth"].get_extrinsic_to(prof["color"])
+            out["depth_to_color"] = {"rotation": np.asarray(e.rot, dtype=float).reshape(3, 3).round(6).tolist(),
+                                     "translation_mm": np.asarray(e.transform, dtype=float).reshape(3).round(4).tolist()}
+        return out
+
     # -- video -------------------------------------------------------------------------------
 
     def start(self, s: Settings):

@@ -129,6 +129,7 @@ All responses are JSON unless noted. `<pi>` = `100.80.153.120:8101` (Tailscale) 
 | `GET /snapshot/{stream}?format=jpg\|png` | the latest frame as an image (`png`: lossless 16-bit depth/IR); header JSON in `X-Frame-Header` |
 | `GET /mjpeg/{stream}` | plain `multipart/x-mixed-replace` MJPEG (for `<img>`, VLC, OpenCV) |
 | `GET /depth_at?x=&y=` | depth in mm at a point (fractions of width/height) of the latest depth frame |
+| `GET /calibration` | factory intrinsics of the active depth/colour profiles, depth→colour extrinsic, IMU→depth extrinsic |
 | `GET /imu/stream[?raw=false&batch_ms=0&max_backlog=20000]` | IMU attitude-filter records (~100 Hz), or every raw 1 kHz sample with `raw=true` |
 | `GET /imu/latest?n=100[&raw=true]` | recent IMU filter records (or raw samples) as JSON |
 | `POST /imu/calibrate` | calibrate gyro bias + gravity from the next `seconds` of still data |
@@ -434,6 +435,32 @@ for rec in cam.imu(raw=True, batch_ms=10):     # every 1 kHz sample, ~10 per rec
     s = rec.samples                            # IMU_FIELDS
 cam.imu_calibrate(2.0)                         # keep still
 ```
+
+## Page visualisations
+
+The page at `/` has a **Visualisation** box (left column) with two tiles, both built from the
+public API in the browser (no CDN, no server-side rendering):
+
+- **Orientation** (on by default): reads the 100 Hz filter records from `imu/stream`. A 3D view
+  (drag to orbit) shows the camera body and its lens axis in the gravity-aligned world (z up),
+  with world axes and a floor grid; the readout gives roll/pitch/yaw, calibration and still state,
+  accel use and the gyro bias. Strip charts show the last 10 s of roll/pitch, yaw, |ω| and |a|, with
+  still periods shaded green.
+- **Point cloud** (off by default; it adds the raw depth stream, ~8 MB/s at 848x480@10): WebGL2
+  unprojects every depth pixel on the GPU (depth as an R16UI texture, pinhole intrinsics from
+  `/calibration`, pixel stride 1/2/4). Colour: each point is projected into the **colour camera**
+  with the factory depth→colour extrinsic and sampled from the colour tile's latest JPEG, so no
+  server-side alignment (and none of its ~70 ms) is needed; or by height (auto-ranged, 2nd–98th
+  percentile) or distance. "Level with IMU" applies the filter orientation (and the IMU→depth
+  extrinsic), so the cloud is gravity-aligned: floors are horizontal however the camera is held.
+  Drag orbits around the cloud's median depth, wheel zooms, double-click resets.
+
+Measured with the robot's camera facing a ~4 m ceiling (Mac on Wi-Fi LAN): 101,760 points at
+stride 2, 10 fps (the camera rate), capture → drawn ~45–135 ms; the orientation tile's sensor →
+display ~20–35 ms. Limits of the prototype: colour and depth frames are not time-synchronised
+(colour may lag/lead by up to one frame), colour lens distortion is not applied (small on this
+unit: k1 = −0.03), and each frame is drawn on its own (no accumulation across frames — that needs
+a pose source and belongs in the estimator node).
 
 ## Recording on the client
 

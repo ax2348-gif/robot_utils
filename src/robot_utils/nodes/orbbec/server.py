@@ -165,6 +165,24 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
     async def health():
         return {"ok": True, "state": owner.state}
 
+    @app.get("/calibration", tags=["state"], summary="Camera intrinsics/extrinsics of the active profiles")
+    async def calibration():
+        """Factory calibration for the profiles in use (updated when the pipeline restarts):
+        `depth` / `color` pinhole intrinsics {fx, fy, cx, cy, width, height, distortion} in pixels of
+        that profile; `depth_to_color` {rotation 3x3, translation_mm} maps a depth-frame point into
+        the color frame; `aligned_depth`: depth is aligned to color (use the color intrinsics);
+        `imu.accel_to_depth` maps an IMU-frame point into the depth frame. Frames: x right, y down,
+        z out of the lens."""
+        with owner.lock:
+            return dict(owner.calibration)
+
+    @app.get("/meta", tags=["state"], summary="Node description for the landing frontend")
+    async def meta():
+        """Frontend contract (same JSON as nodes.common's page routes): all paths relative to the node root."""
+        return {"name": "camera", "title": "Orbbec camera", "version": __version__, "kind": "camera",
+                "has_page": True, "page": "./", "actuated": False,
+                "endpoints": {"health": "health", "state": "state", "events": "events", "estop": None}}
+
     @app.get("/state", response_model=State, tags=["state"], summary="Node, device, stream and IMU status")
     async def get_state():
         return owner.status()
