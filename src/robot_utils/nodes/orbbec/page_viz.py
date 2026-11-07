@@ -120,12 +120,12 @@ function drawAtt(){
 
 // ===================== point cloud (WebGL2) =====================
 const PC={ctl:null,tile:null,gl:null,prog:null,depthTex:null,colorTex:null,frame:null,newFrame:false,colorSeq:-1,
-          cal:null,calVer:-1,az:0,el:0.25,zoom:1,med:2.0,medT:0,n:0,fps:[],lat:null};
+          cal:null,calVer:-1,az:0,el:0.25,zoom:1,med:2.0,medT:0,hr:[-1.5,1.5],n:0,fps:[],lat:null};
 const PC_VS=`#version 300 es
 precision highp float;precision highp int;precision highp usampler2D;
 uniform usampler2D depthTex;uniform sampler2D colorTex;
 uniform ivec2 dsize;uniform int stride;uniform vec4 dK;uniform float dscale;uniform mat4 model;uniform mat4 viewProj;
-uniform mat3 Rdc;uniform vec3 tdc;uniform vec4 cK;uniform vec2 csize;uniform int colorMode;uniform float maxRange;uniform float psize;uniform int hasColor;
+uniform mat3 Rdc;uniform vec3 tdc;uniform vec4 cK;uniform vec2 csize;uniform int colorMode;uniform float maxRange;uniform float psize;uniform int hasColor;uniform vec2 hrange;
 out vec3 vcol;
 vec3 turbo(float x){x=clamp(x,0.,1.);vec4 v4=vec4(1.,x,x*x,x*x*x);vec2 v2=v4.zw*v4.z;
   return vec3(dot(v4,vec4(0.13572138,4.61539260,-42.66032258,132.13108234))+dot(v2,vec2(-152.94239396,59.28637943)),
@@ -139,7 +139,7 @@ void main(){
   vec4 w=model*vec4(p,1.);gl_Position=viewProj*w;gl_PointSize=psize;
   if(colorMode==0&&hasColor==1){vec3 pc=Rdc*p+tdc;vec2 uv=vec2(cK.x*pc.x/pc.z+cK.z,cK.y*pc.y/pc.z+cK.w)/csize;
     vcol=(pc.z>0.&&uv.x>=0.&&uv.y>=0.&&uv.x<1.&&uv.y<1.)?texture(colorTex,uv).rgb:vec3(.35);}
-  else if(colorMode==1)vcol=turbo((w.z+1.5)/3.);
+  else if(colorMode==1)vcol=turbo((w.z-hrange.x)/max(hrange.y-hrange.x,0.01));
   else vcol=turbo(z/maxRange);
 }`;
 const PC_FS=`#version 300 es
@@ -202,9 +202,11 @@ function drawPc(){
   const c=T.c,dpr=fitCanvas(c);gl.viewport(0,0,c.width,c.height);gl.clearColor(0.043,0.055,0.07,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);
   // Orbit around the cloud: target = median depth along the optical axis; the default eye sits
   // behind the camera looking along its axis (drag adds azimuth/elevation, wheel scales distance).
-  const now=performance.now();if(now-PC.medT>1000){PC.medT=now;const d=new Uint16Array(body.buffer,0,w*ht),s=[];
-    for(let i=0;i<d.length;i+=97)if(d[i])s.push(d[i]);if(s.length){s.sort((a,b)=>a-b);PC.med=s[s.length>>1]*(h.depth_scale||1)*0.001}}
   const R3=[[M[0],M[4],M[8]],[M[1],M[5],M[9]],[M[2],M[6],M[10]]],fwd=mv(R3,[0,0,1]),camUp=mv(R3,[0,-1,0]);
+  const now=performance.now();if(now-PC.medT>1000){PC.medT=now;const d=new Uint16Array(body.buffer,0,w*ht),s=[],hz=[],sc=(h.depth_scale||1)*0.001;
+    for(let i=0;i<d.length;i+=97)if(d[i]){const z=d[i]*sc;s.push(z);const u=i%w,v=(i/w)|0;
+      hz.push(R3[2][0]*(u-K[2])/K[0]*z+R3[2][1]*(v-K[3])/K[1]*z+R3[2][2]*z)}
+    if(s.length){s.sort((a,b)=>a-b);hz.sort((a,b)=>a-b);PC.med=s[s.length>>1];PC.hr=[hz[Math.floor(hz.length*0.02)],hz[Math.floor(hz.length*0.98)]]}}
   const tgt=fwd.map(v=>v*PC.med),dist=PC.med*1.35*PC.zoom;
   const az0=Math.atan2(-fwd[1],-fwd[0]),el0=Math.asin(Math.max(-1,Math.min(1,-fwd[2])));
   const az=az0+PC.az,el=Math.max(-1.55,Math.min(1.55,el0+PC.el));
@@ -218,7 +220,7 @@ function drawPc(){
   gl.uniform1f(U("dscale"),(h.depth_scale||1)*0.001);gl.uniformMatrix4fv(U("model"),false,M);gl.uniformMatrix4fv(U("viewProj"),false,VP);
   const Rr=ex.rotation;gl.uniformMatrix3fv(U("Rdc"),false,new Float32Array([Rr[0][0],Rr[1][0],Rr[2][0],Rr[0][1],Rr[1][1],Rr[2][1],Rr[0][2],Rr[1][2],Rr[2][2]]));
   gl.uniform3f(U("tdc"),...ex.translation_mm.map(v=>v*0.001));gl.uniform4f(U("cK"),cK.fx,cK.fy,cK.cx,cK.cy);gl.uniform2f(U("csize"),cK.width,cK.height);
-  gl.uniform1i(U("colorMode"),Number($("#pc_color").value));gl.uniform1i(U("hasColor"),hasColor);
+  gl.uniform1i(U("colorMode"),Number($("#pc_color").value));gl.uniform2f(U("hrange"),PC.hr[0],PC.hr[1]);gl.uniform1i(U("hasColor"),hasColor);
   gl.uniform1f(U("maxRange"),Number($("#pc_max").value));gl.uniform1f(U("psize"),Number($("#pc_size").value)*dpr);
   const n=Math.ceil(w/stride)*Math.ceil(ht/stride);gl.drawArrays(gl.POINTS,0,n);
   const fps=PC.fps.length>1?(PC.fps.length-1)*1000/(PC.fps[PC.fps.length-1]-PC.fps[0]):0,lat=OFF!=null?(serverNow()-h.t_capture)*1000:null;
