@@ -46,8 +46,8 @@ The default is packaged at `src/robot_utils/frontend/nodes.yaml`; `--config PATH
 
 ```yaml
 nodes:
-  - {name: camera, port: 8101}
-  - {name: swerve, port: 8102}
+  - {name: camera, port: 8101, start: {module: robot_utils.nodes.orbbec}}
+  - {name: swerve, port: 8102, start: {module: robot_utils.nodes.swerve}}
   - {name: arm, port: 8103, enabled: false}        # future
   - {name: estimator, port: 8110, enabled: false}  # future
 ```
@@ -58,6 +58,7 @@ nodes:
 | `port` | required | the node's HTTP port |
 | `host` | optional | omit for "same machine as the frontend": the page then uses the hostname the browser reached the frontend by, so links work from any machine. Set it only for a node on another machine (never `localhost`) |
 | `enabled` | optional, default `true` | `false`: listed under "Planned", not polled, not e-stopped |
+| `start` | optional | `{module: ..., args: [...]}`: the landing page can start/stop this node (below). Local nodes only (no `host`) |
 
 Adding a node is adding a line; no frontend code changes. Restart the frontend to reload.
 
@@ -99,6 +100,50 @@ tried at `estop` anyway: a stray POST is better than a missed stop. Each node ge
 banner turns red unless every actuated node latched. The button never asks to confirm.
 Releasing an e-stop is done on each node's own page (or a tool page, by the lease holder).
 If the frontend itself is down, each node's own page and `POST /estop` still work.
+
+## Starting and stopping nodes
+
+A node with a `start:` recipe gets a control row on its tile: a status pill, **Start** or
+**Stop**, and **logs**. The frontend runs each such node as a **systemd user unit**,
+`robot-node-<name>.service`, started with
+`systemd-run --user --unit robot-node-<name> ... <frontend's python> -m <module> <args>`
+(the frontend's interpreter is the robot venv; working directory = the frontend's).
+
+The scope is deliberately small (`frontend/manager.py`):
+
+- **Start** is refused (409) if that unit is already running, or if **anything already listens
+  on the node's port**, e.g. a node started by hand in a terminal. The frontend never looks for
+  such processes; the tile just shows **running (not managed)** with Start disabled.
+- **Stop** stops that unit (`systemctl --user stop`: SIGTERM, so the node shuts down cleanly
+  and the swerve node disables the base; SIGKILL after 10 s). It works on the unit whoever
+  started it, and refuses (409) if the unit isn't running. Hand-started nodes are stopped by
+  hand.
+- **No restart policy.** A node that exits stays down; a failed unit shows **managed: failed**
+  with its systemd result, and its logs open on the tile. The next Start clears it.
+- **Managed nodes outlive the frontend**: each unit has its own lifetime, so restarting the
+  frontend service (as `install.sh` does) leaves running nodes alone, and the frontend picks
+  them up again from systemd.
+- **Anyone** who can reach the landing page can start and stop nodes (for now).
+
+Pill states: `stopped`, `managed: starting…`, `managed: running`, `managed: stopping…`,
+`managed: failed (<result>)`, `running (not managed)`. Starting the camera shows a reminder
+to keep the robot still for ~2 s (startup IMU calibration).
+
+Endpoints: `GET /api/managed` (every node: `startable`, `unit`, `managed.state`, `pid`, `since`,
+`result`, `port_in_use`), `POST /api/nodes/<name>/start`, `POST /api/nodes/<name>/stop`,
+`GET /api/nodes/<name>/logs?lines=40` (the unit's journal). Errors are `{"detail": ...}` with
+400 (no recipe), 404 (unknown or disabled node), 409 (already running / not running).
+
+On the robot, by hand:
+
+```bash
+systemctl --user list-units 'robot-node-*'      # what the landing page started
+journalctl --user -u robot-node-swerve -f       # a node's log
+systemctl --user stop robot-node-swerve         # same as the Stop button
+```
+
+Without a systemd user session (development on macOS) the same controls run nodes as plain
+child processes of the frontend instead; those stop when the frontend stops.
 
 ## Tools
 

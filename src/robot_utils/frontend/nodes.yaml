@@ -7,10 +7,14 @@
 #            hostname the browser used to reach the frontend, so links work from other
 #            machines). Never write "localhost" here unless only local browsers matter.
 #   enabled: optional, default true; false = listed as "planned", not polled, not e-stopped
+#   start:   optional; lets the landing page start/stop the node: {module: ..., args: [...]}
+#            runs `python -m <module> <args>` with the frontend's interpreter (the robot venv).
+#            The frontend refuses to start a node whose port is already in use (e.g. started
+#            by hand) and only stops nodes it started itself. Local nodes only (no host).
 #
 # Override with: python -m robot_utils.frontend --config /path/to/nodes.yaml
 nodes:
-  - {name: camera, port: 8101}
-  - {name: swerve, port: 8102}
+  - {name: camera, port: 8101, start: {module: robot_utils.nodes.orbbec}}
+  - {name: swerve, port: 8102, start: {module: robot_utils.nodes.swerve}}
   - {name: arm, port: 8103, enabled: false}        # future
   - {name: estimator, port: 8110, enabled: false}  # future

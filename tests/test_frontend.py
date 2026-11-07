@@ -111,9 +111,9 @@ def test_landing_page_and_node_list():
         assert 'fetchJson("api/nodes"' in r.text  # relative URL within the frontend
         r = c.get("/api/nodes")
         assert r.json() == {"nodes": [
-            {"name": "camera", "port": 8101, "host": None, "enabled": True},
-            {"name": "arm", "port": 8103, "host": None, "enabled": False},
-            {"name": "x", "port": 9000, "host": "other", "enabled": True},
+            {"name": "camera", "port": 8101, "host": None, "enabled": True, "start": None},
+            {"name": "arm", "port": 8103, "host": None, "enabled": False, "start": None},
+            {"name": "x", "port": 9000, "host": "other", "enabled": True, "start": None},
         ]}
         assert c.get("/api/health").json() == {"ok": True}
 

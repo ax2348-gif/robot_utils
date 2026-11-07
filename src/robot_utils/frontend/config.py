@@ -11,10 +11,22 @@ import yaml
 
 DEFAULT_CONFIG = "nodes.yaml"  # packaged next to this module
 _NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 class ConfigError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class StartRecipe:
+    """How the frontend may start a node: ``python -m <module> <args...>`` (the frontend's own
+    interpreter, i.e. the robot venv)."""
+    module: str
+    args: tuple[str, ...] = ()
+
+    def argv(self, python: str) -> list[str]:
+        return [python, "-m", self.module, *self.args]
 
 
 @dataclass(frozen=True)
@@ -23,9 +35,12 @@ class NodeEntry:
     port: int
     host: str | None = None  # None: same host as the frontend (the browser's hostname)
     enabled: bool = True
+    start: StartRecipe | None = None  # None: the frontend cannot start this node
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["start"] = None if self.start is None else {"module": self.start.module, "args": list(self.start.args)}
+        return d
 
 
 def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
@@ -39,7 +54,7 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
         where = f"{source}: nodes[{i}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where}: expected a mapping like {{name: swerve, port: 8102}}")
-        unknown = set(raw) - {"name", "port", "host", "enabled"}
+        unknown = set(raw) - {"name", "port", "host", "enabled", "start"}
         if unknown:
             raise ConfigError(f"{where}: unknown keys {sorted(unknown)}")
         name = raw.get("name")
@@ -56,9 +71,25 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
         enabled = raw.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"{where}: 'enabled' must be true or false, got {enabled!r}")
+        start = _parse_start(raw.get("start"), where)
+        if start is not None and host is not None:
+            raise ConfigError(f"{where}: 'start' only works for nodes on this machine (no 'host')")
         seen.add(name)
-        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled))
+        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled, start))
     return nodes
+
+
+def _parse_start(raw: object, where: str) -> StartRecipe | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"module", "args"}:
+        raise ConfigError(f"{where}: 'start' must be {{module: robot_utils.nodes.x, args: [...]}}")
+    module, args = raw.get("module"), raw.get("args", [])
+    if not isinstance(module, str) or not _MODULE.match(module):
+        raise ConfigError(f"{where}: 'start.module' must be a Python module path, got {module!r}")
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ConfigError(f"{where}: 'start.args' must be a list of strings, got {args!r}")
+    return StartRecipe(module, tuple(args))
 
 
 def load_config(path: str | Path | None = None) -> list[NodeEntry]:

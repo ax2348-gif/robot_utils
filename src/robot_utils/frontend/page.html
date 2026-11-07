@@ -63,6 +63,18 @@
   .tile a.open { color: var(--link); font-weight: 600; text-decoration: none; }
   .tile a.open:hover { text-decoration: underline; }
 
+  .tile .ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+  .tile .ctl:empty { display: none; }
+  .tile .ctl button { font: 600 13px system-ui, sans-serif; padding: 4px 12px; border-radius: 6px;
+                      border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+  .tile .ctl button.go { border-color: var(--ok); color: var(--ok); }
+  .tile .ctl button.stop { border-color: var(--bad); color: var(--bad); }
+  .tile .ctl button:disabled { opacity: .45; cursor: default; }
+  .tile .ctl a { color: var(--link); cursor: pointer; text-decoration: none; }
+  .tile .ctl .msg { flex-basis: 100%; color: var(--muted); }
+  .tile .ctl .msg.err { color: var(--bad); font-weight: 600; }
+  .tile pre.logs { margin: 0; max-height: 160px; overflow: auto; font: 11px/1.35 ui-monospace, monospace;
+                   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
   .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
           white-space: nowrap; background: var(--off-bg); color: var(--off); }
   .pill.ok { background: var(--ok-bg); color: var(--ok); }
@@ -165,8 +177,10 @@ function makeTile(n) {
   ui.dl = h("dl");
   ui.link = h("a", { className: "open", textContent: "Open page →" });
   ui.age = h("span", { className: "age" });
+  ui.ctl = h("div", { className: "ctl" });
+  ui.logs = h("pre", { className: "logs", hidden: true });
   ui.root = h("article", { className: "tile" },
-    h("div", { className: "head" }, ui.title, ui.pill), ui.kind, ui.dl,
+    h("div", { className: "head" }, ui.title, ui.pill), ui.kind, ui.dl, ui.ctl, ui.logs,
     h("div", { className: "foot" }, ui.age, ui.link));
   return ui;
 }
@@ -209,6 +223,83 @@ function render(n) {
     ui.link.textContent = "Open page →";
   }
   ui.age.textContent = n.lastOk ? "updated " + ((Date.now() - n.lastOk) / 1000).toFixed(1) + " s ago" : "never reached";
+  renderControls(n);
+}
+
+// -- start / stop (api/nodes/<name>/start|stop; systemd user unit robot-node-<name>) -------
+const START_NOTES = { camera: "Keep the robot still for ~2 s after start (IMU calibration)." };
+
+function renderControls(n) {
+  const ui = n.ui, m = n.managed;
+  ui.ctl.replaceChildren();
+  if (!m || !m.startable) return;
+  const st = m.managed.state, busy = n.ctlBusy;
+  const pills = { running: ["managed: running", "ok"], starting: ["managed: starting…", "warn"],
+                  stopping: ["managed: stopping…", "warn"],
+                  failed: ["managed: failed" + (m.managed.result ? " (" + m.managed.result + ")" : ""), "bad"] };
+  let pill = pills[st];
+  if (!pill) pill = m.port_in_use ? ["running (not managed)", ""] : ["stopped", ""];
+  ui.ctl.append(h("span", { className: "pill " + pill[1], textContent: pill[0] }));
+  if (st === "running" || st === "starting") {
+    ui.ctl.append(h("button", { className: "stop", textContent: "Stop", disabled: busy,
+                                onclick: () => control(n, "stop") }));
+  } else {
+    const blocked = m.port_in_use && st !== "stopping";
+    ui.ctl.append(h("button", { className: "go", textContent: "Start", disabled: busy || blocked || st === "stopping",
+                                title: blocked ? "Already running outside the landing page (e.g. in a terminal)" : "",
+                                onclick: () => control(n, "start") }));
+  }
+  ui.ctl.append(h("a", { textContent: ui.logs.hidden ? "logs" : "hide logs", onclick: () => toggleLogs(n) }));
+  if (n.ctlMsg) ui.ctl.append(h("span", { className: "msg" + (n.ctlErr ? " err" : ""), textContent: n.ctlMsg }));
+}
+
+async function control(n, action) {
+  n.ctlBusy = true; n.ctlErr = false;
+  n.ctlMsg = action === "start" ? "starting… " + (START_NOTES[(n.meta && n.meta.kind) || n.cfg.name] || "")
+                                : "stopping…";
+  renderControls(n);
+  try {
+    const r = await fetchJson("api/nodes/" + encodeURIComponent(n.cfg.name) + "/" + action,
+                              { method: "POST" }, 25000);
+    if (r.ok) { n.managed = r.body; n.ctlMsg = action === "start" ? (START_NOTES[(n.meta && n.meta.kind) || n.cfg.name] || "") : ""; }
+    else { n.ctlErr = true; n.ctlMsg = (r.body && r.body.detail) || "HTTP " + r.status; }
+  } catch (e) {
+    n.ctlErr = true; n.ctlMsg = action + ": " + netError(e);
+  } finally {
+    n.ctlBusy = false;
+    renderControls(n);
+    if (!n.ui.logs.hidden) loadLogs(n);
+  }
+}
+
+async function loadLogs(n) {
+  try {
+    const r = await fetchJson("api/nodes/" + encodeURIComponent(n.cfg.name) + "/logs?lines=30", {}, 5000);
+    const lines = (r.ok && r.body && r.body.lines) || [];
+    n.ui.logs.textContent = lines.length ? lines.join("\n") : "(no log lines)";
+    n.ui.logs.scrollTop = n.ui.logs.scrollHeight;
+  } catch (e) { n.ui.logs.textContent = "logs: " + netError(e); }
+}
+function toggleLogs(n) {
+  n.ui.logs.hidden = !n.ui.logs.hidden;
+  if (!n.ui.logs.hidden) loadLogs(n);
+  renderControls(n);
+}
+
+async function pollManaged() {
+  try {
+    const r = await fetchJson("api/managed", {}, 3000);
+    if (!r.ok || !r.body) return;
+    for (const m of r.body.nodes || []) {
+      const n = nodes.find(x => x.cfg.name === m.name);
+      if (!n) continue;
+      const failedNow = m.managed.state === "failed" && (!n.managed || n.managed.managed.state !== "failed");
+      n.managed = m;
+      if (failedNow && n.ui.logs.hidden) toggleLogs(n);   // show why it died
+      else if (!n.ui.logs.hidden && m.managed.state !== "stopped") loadLogs(n);
+      if (!n.ctlBusy) renderControls(n);
+    }
+  } catch (_) { /* frontend unreachable: the tiles say so */ }
 }
 
 async function poll(n) {
@@ -290,7 +381,8 @@ async function start() {
   const grid = document.getElementById("grid");
   grid.replaceChildren();
   for (const c of cfg.filter(c => c.enabled !== false)) {
-    const n = { cfg: c, meta: null, state: null, up: undefined, err: null, lastOk: 0, busy: false };
+    const n = { cfg: c, meta: null, state: null, up: undefined, err: null, lastOk: 0, busy: false,
+                managed: null, ctlBusy: false, ctlMsg: "", ctlErr: false };
     n.ui = makeTile(n);
     grid.append(n.ui.root);
     nodes.push(n);
@@ -301,6 +393,8 @@ async function start() {
   document.getElementById("planned").textContent = planned.length
     ? "Planned (disabled in nodes.yaml): " + planned.map(c => c.name + " :" + c.port).join(", ") : "";
   loadTools();
+  pollManaged();
+  setInterval(pollManaged, 2000);
   const tick = () => nodes.forEach(poll);
   tick();
   setInterval(tick, POLL_MS);

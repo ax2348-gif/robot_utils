@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .config import NodeEntry
+from .manager import ManagerError, NodeManager, default_runner
 
 META_TIMEOUT_S = 0.75
 ESTOP_TIMEOUT_S = 1.5
@@ -134,6 +135,7 @@ def create_app(
     *,
     default_host: str = "127.0.0.1",
     transport: httpx.AsyncBaseTransport | None = None,
+    manager: NodeManager | None = None,
 ) -> FastAPI:
     """``default_host``: how this process reaches nodes without a ``host`` (server-side e-stop
     only; the browser uses its own hostname). ``transport``: for tests."""
@@ -141,9 +143,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        app.state.manager = manager or NodeManager(nodes, default_runner())
         async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
             app.state.client = client
             yield
+        close = getattr(app.state.manager.runner, "close", None)
+        if close is not None:   # only the subprocess fallback: its children die with us
+            await close()
 
     app = FastAPI(title="robot frontend", lifespan=lifespan, docs_url=None, redoc_url=None)
     no_cache = {"Cache-Control": "no-store"}
@@ -167,6 +173,36 @@ def create_app(
         attempted = [r for r in results if r["status"] != "skipped"]
         ok = bool(attempted) and all(r["status"] == "latched" for r in attempted)
         return JSONResponse({"ok": ok, "results": results}, status_code=200 if ok else 502)
+
+    # -- starting and stopping nodes (manager.py: systemd user units robot-node-<name>) ------
+
+    def manager_error(e: ManagerError) -> JSONResponse:
+        return JSONResponse({"detail": e.detail}, status_code=e.status)
+
+    @app.get("/api/managed")
+    async def managed() -> JSONResponse:
+        return JSONResponse({"nodes": await app.state.manager.status_all()}, headers=no_cache)
+
+    @app.post("/api/nodes/{name}/start")
+    async def start_node(name: str) -> JSONResponse:
+        try:
+            return JSONResponse(await app.state.manager.start(name))
+        except ManagerError as e:
+            return manager_error(e)
+
+    @app.post("/api/nodes/{name}/stop")
+    async def stop_node(name: str) -> JSONResponse:
+        try:
+            return JSONResponse(await app.state.manager.stop(name))
+        except ManagerError as e:
+            return manager_error(e)
+
+    @app.get("/api/nodes/{name}/logs")
+    async def node_logs(name: str, lines: int = 40) -> JSONResponse:
+        try:
+            return JSONResponse({"lines": await app.state.manager.logs(name, lines)}, headers=no_cache)
+        except ManagerError as e:
+            return manager_error(e)
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:
