@@ -43,6 +43,10 @@ The Orbbec camera has a live browser viewer: `python examples/orbbec_web_viewer.
 `http://<robot>:8080/` from any machine on the network (color, depth, IR, per-sensor options;
 design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md)).
 
+`python -m robot_utils.frontend` serves a landing page at `http://<robot>/` indexing the
+robot's HTTP nodes, with a global E-STOP; it is not on the control path
+([docs/frontend.md](docs/frontend.md); port 80 needs `sudo tools/enable_low_ports.sh` once).
+
 ## The environment
 
 **One env, Python ≥ 3.12.** LeRobot ≥ 0.5 requires Python 3.12 and is not capped. The robot

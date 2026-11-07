@@ -109,6 +109,11 @@ if [[ "$(uname -s)" == Linux && ! -e /etc/udev/rules.d/99-obsensor-libusb.rules 
   echo "    sudo cp $("$PY" -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("pyorbbecsdk").origin))')/shared/99-obsensor-libusb.rules /etc/udev/rules.d/"
   echo "    sudo udevadm control --reload-rules && sudo udevadm trigger"
 fi
+PORTS=/proc/sys/net/ipv4/ip_unprivileged_port_start
+if [[ "$(uname -s)" == Linux && -r $PORTS && "$(cat $PORTS)" -gt 80 ]]; then
+  echo "  Port 80 needs root; the frontend (python -m robot_utils.frontend) serves on it. Run once:"
+  echo "    sudo $ROOT/tools/enable_low_ports.sh"
+fi
 
 step "Check"
 # pyorbbecsdk2's example dependencies are skipped on purpose; anything else is a real problem.

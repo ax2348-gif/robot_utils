@@ -1,0 +1,16 @@
+# Nodes shown on the robot's landing page (python -m robot_utils.frontend).
+#
+# One entry per node process. Adding a node = adding a line here; no code changes.
+#   name:    short id, used as the tile's fallback title until the node's /meta answers
+#   port:    the node's HTTP port
+#   host:    optional; omit for "same machine as the frontend" (the page then uses whatever
+#            hostname the browser used to reach the frontend, so links work from other
+#            machines). Never write "localhost" here unless only local browsers matter.
+#   enabled: optional, default true; false = listed as "planned", not polled, not e-stopped
+#
+# Override with: python -m robot_utils.frontend --config /path/to/nodes.yaml
+nodes:
+  - {name: camera, port: 8101}
+  - {name: swerve, port: 8102}
+  - {name: arm, port: 8103, enabled: false}        # future
+  - {name: estimator, port: 8110, enabled: false}  # future
