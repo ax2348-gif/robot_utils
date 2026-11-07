@@ -86,17 +86,20 @@ def add_base_routes(app: FastAPI, health: Callable[[], dict]) -> None:
 
 
 async def rows_stream(hub: RowHub, fields: Sequence[str], units: Sequence[str], *,
+                      channel: Optional[str] = None, kind: Optional[str] = None,
                       batch_ms: float = 0.0, max_rows: int = 2000, schema_id: int = 1,
                       schema_extra: Optional[dict] = None):
-    """Every published row, as a schema record and then rows records (bytes chunks).
+    """Every row published on a hub channel, as a schema record and then rows records.
 
-    ``batch_ms`` > 0 collects rows for that long before sending (fewer, larger records).
-    A client more than ``max_rows`` behind loses the oldest rows; the next record's ``dropped``
-    says how many.
+    ``batch_ms`` > 0 coalesces each client's rows for that long before sending (fewer, larger
+    records; per client). ``kind`` (e.g. "tick") goes into every schema/rows header. A client
+    more than ``max_rows`` behind loses the oldest rows; the next record's ``dropped`` says how
+    many.
     """
-    sub = hub.subscribe(max_rows)
+    sub = hub.subscribe(max_rows, channel)
+    k = {"kind": kind} if kind else {}
     try:
-        yield schema_record(schema_id, fields, units, t_send=time.monotonic(), **(schema_extra or {}))
+        yield schema_record(schema_id, fields, units, t_send=time.monotonic(), **k, **(schema_extra or {}))
         last_send = time.monotonic()
         while True:
             try:
@@ -112,7 +115,7 @@ async def rows_stream(hub: RowHub, fields: Sequence[str], units: Sequence[str], 
             rows, dropped = sub.take()
             if rows is None:
                 continue
-            yield rows_record(rows, schema_id, dropped=dropped, t_send=time.monotonic())
+            yield rows_record(rows, schema_id, dropped=dropped, t_send=time.monotonic(), **k)
             last_send = time.monotonic()
     finally:
         hub.unsubscribe(sub)

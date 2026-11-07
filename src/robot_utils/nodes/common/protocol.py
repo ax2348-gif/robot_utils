@@ -13,7 +13,8 @@ Every header has ``type`` and ``len``. Types used across nodes:
 ``rows``    every-sample data: a little-endian float64 array of shape ``(n, len(fields))``;
             the header has ``n`` and ``schema`` (the id of the schema record that names the
             columns). A header may instead carry ``fields`` itself (the Orbbec IMU records do),
-            which is simpler for low-rate streams with few columns.
+            which is simpler for low-rate streams with few columns. Both may carry an optional
+            ``kind`` naming what the rows are (swerve "tick"; camera IMU "raw" / "state").
 
 Node-specific types (e.g. the camera's ``frame`` and ``imu``) use the same envelope. A client
 recording is simply the bytes of the stream written to a file; ``iter_records`` reads it back.

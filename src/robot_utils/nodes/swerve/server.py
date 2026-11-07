@@ -109,7 +109,8 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
              summary="Every control tick as binary float64 rows (schema record first)")
     async def stream(batch_ms: float = Query(0.0, ge=0, le=1000, description="Collect rows this long per record (0 = every tick)."),
                      max_backlog_s: float = Query(20.0, gt=0, le=600, description="Drop the oldest rows beyond this backlog.")):
-        gen = rows_stream(node.hub, FIELDS, UNITS, batch_ms=batch_ms, max_rows=int(max_backlog_s * 100),
+        gen = rows_stream(node.hub, FIELDS, UNITS, channel="tick", kind="tick", batch_ms=batch_ms,
+                          max_rows=int(max_backlog_s * 100),
                           schema_extra={"node": "swerve", "rate_hz": 100})
         return StreamingResponse(gen, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
 

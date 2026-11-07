@@ -43,7 +43,7 @@ def node_url():
 
 
 def latest(node):
-    return dict(zip(FIELDS, node.hub.recent(1)[0]))
+    return dict(zip(FIELDS, node.hub.recent(1, "tick")[0]))
 
 
 def test_clamp_keeps_direction():
@@ -174,6 +174,7 @@ def test_stream_framing_every_tick(node_url):
         ticks = [t for r in got for t in r["tick"]]
         assert ticks == list(range(int(ticks[0]), int(ticks[0]) + len(ticks)))   # none missing
         assert set(got[0].dtype.names) == set(FIELDS)
+        assert header["kind"] == "tick"
         assert a.get("/fields")["fields"] == FIELDS
 
 
@@ -194,3 +195,24 @@ def test_reset_rebuilds_a_crashed_drive(node_url):
         a.enable()
         a.command(0.1, 0, 0)
         wait_for(lambda: latest(node)["motors_enabled"] == 1)
+
+
+def test_meta_toolkit_and_page_use_relative_urls(node_url):
+    import re
+    import httpx
+    url, node, _ = node_url
+    meta = httpx.get(url + "/meta").json()
+    assert meta == {"name": "swerve", "title": "Swerve base", "version": meta["version"], "kind": "swerve",
+                    "has_page": True, "page": "./", "actuated": True,
+                    "endpoints": {"health": "health", "state": "state", "events": "events", "estop": "estop"},
+                    "rate_hz": 100, "port_default": 8102}
+    js = httpx.get(url + "/common/ui.js")
+    assert js.status_code == 200 and "javascript" in js.headers["content-type"] and "RU.leaseWidget" in js.text
+    assert httpx.get(url + "/common/ui.css").status_code == 200
+    page = httpx.get(url + "/").text
+    assert 'src="common/ui.js"' in page
+    assert not re.search(r'''(?:src|href)="/|RU\.(?:api|sse|rows|stream)\(\s*["'`]/|call\(\s*["'`]/''', page)
+    st = httpx.get(url + "/state").json()
+    assert isinstance(st["state"], str) and "error" in st
+    assert st["lease"]["held"] is False and st["estop"]["latched"] is False
+    assert httpx.get(url + "/health").json()["ok"] is True

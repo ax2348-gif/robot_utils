@@ -114,3 +114,20 @@ def test_hub_delivers_every_row_and_counts_drops():
         with pytest.raises(ValueError):
             hub.publish_rows([[1, 2, 3]])
     asyncio.run(main())
+
+
+def test_hub_named_channels_are_independent():
+    async def main():
+        hub = RowHub({"raw": 3, "state": 2})
+        hub.attach(asyncio.get_running_loop())
+        raw, state = hub.subscribe(10, "raw"), hub.subscribe(10, "state")
+        hub.publish_rows([[1, 2, 3]], "raw")
+        hub.publish_rows([[4, 5]], "state")
+        await asyncio.sleep(0.01)
+        assert raw.take()[0].tolist() == [[1, 2, 3]] and state.take()[0].tolist() == [[4, 5]]
+        assert hub.recent(5, "state").shape == (1, 2) and hub.subscribers == 2
+        with pytest.raises(KeyError):
+            hub.publish_rows([[1, 2]], "nope")
+        with pytest.raises(ValueError):
+            hub.publish_rows([[1, 2]], "raw")
+    asyncio.run(main())

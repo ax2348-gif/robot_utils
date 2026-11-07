@@ -120,7 +120,7 @@ def clamp(twist, max_speed: float, max_omega: float) -> tuple[tuple[float, float
 class SwerveNode:
     def __init__(self, interface: str, hub: Optional[RowHub] = None):
         self.interface = interface
-        self.hub = hub or RowHub(len(FIELDS))
+        self.hub = hub or RowHub({"tick": len(FIELDS)})
         self.events = EventLog(on_add=self.hub.state_changed)
         self.slot = CommandSlot()
         self.lease = Lease(LEASE_HEARTBEAT, on_end=self._lease_ended)
@@ -310,7 +310,7 @@ class SwerveNode:
                 s0d["CURRENT"] if s0d.timestamp else nan,
                 s0d.timestamp or nan,
             ]
-        self.hub.publish_rows(np.array([row]))
+        self.hub.publish_rows(np.array([row]), "tick")
 
     # -- state for /state and /events -----------------------------------------------------------
 
@@ -318,11 +318,11 @@ class SwerveNode:
         info, e = self.lease.info, self.estop.info
         cmd = self.slot.read()
         now = time.monotonic()
-        last = self.hub.recent(1)
+        last = self.hub.recent(1, "tick")
         # NaN (no value) -> null: JSON has no NaN
         latest = ({k: (v if math.isfinite(v) else None) for k, v in zip(FIELDS, last[0].tolist())}
                   if len(last) else None)
-        recent = self.hub.recent(101)
+        recent = self.hub.recent(101, "tick")
         rate = (len(recent) - 1) / (recent[-1, 0] - recent[0, 0]) if len(recent) > 10 and recent[-1, 0] > recent[0, 0] else None
         return {
             "state": self.status,      # starting | running | error | no drive
