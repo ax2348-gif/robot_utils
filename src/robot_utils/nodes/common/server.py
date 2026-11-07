@@ -1,7 +1,7 @@
 """FastAPI building blocks shared by the nodes (see docs/nodes.md for the conventions).
 
 - ``setup_app(app)``: CORS open to every origin (a dashboard on another port talks to several
-  nodes), and ``LeaseError`` -> its HTTP status with ``{"detail": ...}``.
+  nodes), and ``RequestError`` / ``LeaseError`` -> its HTTP status with ``{"detail": ...}``.
 - ``add_base_routes(app, health)``: ``GET /time`` (NTP-style clock sync) and ``GET /health``.
 - ``EventLog``: a short log of node events for ``/state``.
 - ``rows_stream(...)``: the async generator behind every-sample ``GET /stream`` endpoints
@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .hub import RowHub
-from .lease import LeaseError
+from .lease import RequestError
 from .protocol import pack_record, rows_record, schema_record
 
 PING_S = 1.0   # keep-alive interval of idle streams
@@ -65,8 +65,8 @@ def setup_app(app: FastAPI) -> None:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
                        expose_headers=["*"])
 
-    @app.exception_handler(LeaseError)
-    async def _lease_error(request: Request, exc: LeaseError):
+    @app.exception_handler(RequestError)
+    async def _request_error(request: Request, exc: RequestError):
         return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
 

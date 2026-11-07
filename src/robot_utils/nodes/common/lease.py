@@ -25,16 +25,18 @@ from typing import Callable, Optional
 DEFAULT_HEARTBEAT = 1.0   # s
 
 
-class LeaseError(Exception):
-    """Raised when a request needs the lease and does not have it.
-
-    ``status`` is the HTTP status a server should answer with: 401 (no token), 403 (wrong or
-    expired token), 409 (someone else holds the lease).
-    """
+class RequestError(Exception):
+    """A request the node refuses; ``status`` is the HTTP status to answer with
+    (``common.server.setup_app`` maps it to ``{"detail": message}``)."""
 
     def __init__(self, status: int, msg: str):
         super().__init__(msg)
         self.status = status
+
+
+class LeaseError(RequestError):
+    """The request needs the lease and does not have it: 401 (no token), 403 (wrong or expired
+    token), 409 (someone else holds the lease)."""
 
 
 @dataclass(frozen=True)
