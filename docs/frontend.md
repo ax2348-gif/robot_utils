@@ -160,6 +160,14 @@ landing page (title and description from the page's `<title>` and
 the page (`../nodes/<name>/...`), so they need no CORS and work under any host or port. To add
 one, drop an `.html` file in that folder (names: lowercase letters, digits, `_`, `-`).
 
+- **Remote teleop** (`tools/remote_teleop.html`): the swerve teleop's controls and logic over the
+  camera's live view, for driving without line of sight. The background is the camera node's
+  active stream (color if on, else depth, then IR), shown with `<img src="http://<host>:<port>/mjpeg/<stream>">`
+  straight from the camera's port (from `api/nodes`), so the video never passes through the
+  frontend's proxy; it follows the camera's settings (polled every 2 s) and shows "camera: …"
+  in the corner. Controls are hollow (thick coloured outlines, transparent, shadowed text) and the
+  layout fits the screen without scrolling (sizes scale with the viewport; checked from 320×568 to
+  1920×1080, portrait and landscape).
 - **Swerve teleop** (`tools/swerve_teleop.html`), ported from rev_ctl `examples/teleop.py`:
   move joystick, rotate slider, page speed limits (capped at the node's soft limits), Enable,
   Disable, E-STOP and Clear e-stop. It takes the swerve node's lease ("Take control" if someone

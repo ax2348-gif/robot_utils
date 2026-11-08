@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Remote teleop</title>
+<meta name="description" content="Swerve teleop over the camera's live view: drive the base without seeing it.">
+<!--
+  Remote teleop: a copy of swerve_teleop.html (same controls and control logic) drawn over the
+  camera node's active stream (color if on, else depth / IR), for driving without line of sight.
+  Layout: fits the screen, never scrolls; controls are hollow (thick coloured outlines, no fills).
+  The video goes straight to the camera node's port (<img> of /mjpeg/<stream>, found via
+  ../api/nodes), not through this frontend's proxy, so it costs the frontend nothing.
+
+  Original notes (swerve_teleop.html), ported from rev_ctl examples/teleop.py (commit cfcfc32):
+  Every request goes to this frontend's proxy, relative to this page: ../nodes/swerve/<path>.
+
+  Control: the page takes the swerve node's lease (one controller at a time; another page or
+  script holding it shows here with a "Take control" button that retries). While enabled it
+  POSTs the twist 20 times a second (each accepted command renews the lease; the node stops
+  the base 0.25 s after the last one); while disabled it renews the lease twice a second. It
+  sends a disable when hidden and releases the lease when closed; if the page just dies, the
+  node's 1 s lease lapse stops and disables the base anyway.
+
+  The "achieved" ring and numbers are computed here from the node's per-module measurements
+  (wheel angle and speed), with the same least-squares fit as robot_twist() in
+  robot_utils/nodes/swerve/kinematics.py and the module positions from constants.py.
+-->
+<style>
+  /* Everything sits on the camera view: transparent controls, thick outlines, shadowed text. */
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; --fg: #f8fafc;
+          --u: clamp(8px, min(2.65vh, 1.45vw), 15px);            /* panel text size: shrinks with the screen */
+          --pad: min(30vw, 64vh, 340px); --bw: 3px;
+          --k: clamp(34px, calc(var(--pad) * .2), 60px);            /* knob size; the achieved ring is 1.35x */
+          --sh: 0 0 2px #000, 0 0 4px #000, 0 1px 3px #000; --edge: 0 0 0 1px #000a, inset 0 0 0 1px #000a; }
+  html, body { height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; background: #0b0e12; color: var(--fg); }
+  body { position: fixed; inset: 0; display: grid; grid-template: "move panel turn" 1fr / 1fr auto 1fr;
+         align-items: center; justify-items: center; gap: 1vmin; padding: 1vmin; box-sizing: border-box;
+         user-select: none; -webkit-user-select: none; touch-action: manipulation; text-shadow: var(--sh); }
+  @media (orientation: portrait) {
+    :root { --u: clamp(8px, min(1.6vh, 3.3vw), 15px); --pad: min(70vw, 29vh, 340px); }
+    body { grid-template: "panel" auto "move" 1fr "turn" auto / 1fr; row-gap: 2vh; }
+  }
+  #bg { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; z-index: -2; display: none; }
+  #veil { position: fixed; inset: 0; z-index: -1; background: #0003; pointer-events: none; }
+  #video { position: fixed; left: 1vmin; bottom: 1vmin; font: 12px ui-monospace, monospace; opacity: .85; pointer-events: none; }
+  .panel { grid-area: panel; width: clamp(200px, 27vw, 300px); max-height: 100%; display: flex; flex-direction: column;
+           gap: calc(var(--u) * .45); font-size: var(--u); }
+  @media (orientation: portrait) { .panel { width: min(92vw, 380px); } }
+  .pad { grid-area: move; position: relative; width: var(--pad); height: var(--pad); border-radius: 50%; }
+  .slider { grid-area: turn; position: relative; width: var(--pad); height: calc(var(--k) * 1.35 + 10px);
+            border-radius: 999px; }
+  .pad, .slider { border: var(--bw) solid #f8fafccc; background: transparent; box-shadow: var(--edge); touch-action: none; }
+  .knob, .ring { position: absolute; border-radius: 50%; box-sizing: border-box; pointer-events: none; box-shadow: var(--edge); }
+  .knob { left: calc(50% - var(--k) / 2); top: calc(50% - var(--k) / 2); width: var(--k); height: var(--k);
+          border: calc(var(--k) / 10) solid #3b82f6; }
+  .ring { --r: calc(var(--k) * 1.35); left: calc(50% - var(--r) / 2); top: calc(50% - var(--r) / 2); width: var(--r);
+          height: var(--r); border: calc(var(--k) / 12) solid #f97316; }
+  body.disabled .ring { opacity: .5; border-style: dashed; }
+  .twist { border-collapse: collapse; }
+  .twist th, .twist td { padding: 0 .5em 0 0; text-align: right; font-weight: normal; }
+  .twist th:first-child { text-align: left; }
+  .cmd { color: #60a5fa; } .ach { color: #fb923c; }
+  .legend { font-size: .85em; opacity: .9; }
+  .label { position: absolute; width: 100%; text-align: center; top: -1.5em; font-size: 13px; opacity: .85; }
+  button { font: 700 1.25em system-ui; padding: .45em .5em; border-radius: .6em; cursor: pointer; background: transparent;
+           border: var(--bw) solid currentColor; box-shadow: var(--edge); text-shadow: var(--sh); }
+  .buttons { display: flex; gap: .5em; }
+  #enable { flex: 1; color: #4ade80; }
+  #disable { flex: 2; color: #e2e8f0; font-size: 1.5em; padding: .45em .5em; }
+  #estop { color: #ef4444; font-size: 1.75em; padding: .4em .5em; border-width: 5px; letter-spacing: .04em; }
+  #clear, #take, #release { flex: 1; color: #cbd5e1; font-size: 1.05em; }
+  button:disabled { opacity: .35; cursor: default; }
+  #state { text-align: center; font: 800 1.4em system-ui; padding: .25em; border-radius: .6em;
+           border: var(--bw) solid #94a3b8; color: #e2e8f0; box-shadow: var(--edge); }
+  #state.on { border-color: #4ade80; color: #4ade80; }
+  #state.off { border-color: #ef4444; color: #ef4444; }
+  .status { font: 1em/1.35 ui-monospace, monospace; }
+  .limits { display: flex; gap: .6em; font-size: 1em; }
+  .limits input { width: 4.5em; font: inherit; color: var(--fg); background: transparent; border: 2px solid #f8fafcaa;
+                  border-radius: .35em; padding: .1em .3em; text-shadow: var(--sh); box-shadow: var(--edge); }
+  .bad { color: #f87171; font-weight: 700; }
+  a.back { font-size: .95em; text-align: center; color: #93c5fd; }
+  #hint { display: none; font-size: .85em; opacity: .85; text-align: center; }
+  @media (orientation: portrait) { #hint { display: block; } }
+  body.inactive .pad, body.inactive .slider { opacity: .3; pointer-events: none; }
+</style></head>
+<body class="inactive disabled">
+<img id="bg" alt=""><div id="veil"></div><div id="video">camera: looking…</div>
+<div class="pad" id="move"><span class="label">move</span><div class="knob"></div><div class="ring" hidden></div></div>
+<div class="panel">
+  <div id="state">CONNECTING</div>
+  <button id="estop" type="button">E-STOP</button>
+  <div class="buttons"><button id="enable" disabled>Enable</button><button id="disable" disabled>Disable</button></div>
+  <div class="buttons"><button id="take">Take control</button><button id="clear" disabled>Clear e-stop</button>
+    <button id="release" disabled>Release</button></div>
+  <div class="status">
+    <div>node: <span id="conn">connecting</span></div>
+    <div>control: <span id="ctrl">-</span></div>
+    <table class="twist">
+      <tr><th></th><th class="cmd">command</th><th class="ach">achieved</th></tr>
+      <tr><th>vx m/s</th><td id="cmd0">-</td><td id="ach0">-</td></tr>
+      <tr><th>vy m/s</th><td id="cmd1">-</td><td id="ach1">-</td></tr>
+      <tr><th>ω rad/s</th><td id="cmd2">-</td><td id="ach2">-</td></tr>
+    </table>
+    <div class="legend"><span class="cmd">●</span> knob: command &nbsp;
+      <span class="ach">○</span> ring: achieved (dashed while disabled)</div>
+    <div id="error" class="bad"></div>
+  </div>
+  <div class="limits">
+    <label>max m/s <input id="maxlin" type="number" min="0" step="0.1" value="0.5"></label>
+    <label>max rad/s <input id="maxang" type="number" min="0" step="0.1" value="1.0"></label>
+  </div>
+  <div id="hint">Tip: turn the phone sideways for a gamepad layout.</div>
+  <a class="back" href="../">← all nodes</a>
+</div>
+<div class="slider" id="turn"><span class="label">rotate</span><div class="knob"></div><div class="ring" hidden></div></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const NODE = "../nodes/swerve/";          // the frontend's proxy to the swerve node
+const DEADZONE = 0.08, COMMAND_MS = 50, RENEW_MS = 500, STATE_MS = 100;
+// Module positions (m) from robot_utils/nodes/swerve/constants.py: x forward, y left.
+const H = 0.1656;
+const MODULES = { FL: [H, H], FR: [H, -H], RR: [-H, -H], RL: [-H, H] };
+
+let token = null, holder = null, enabled = false, latched = false;
+let hard = { max_speed: 2.0, max_omega: 4.0 }, soft = { max_speed: 2.0, max_omega: 4.0 };
+let move = [0, 0], turn = 0, lastError = "";
+
+async function api(method, path, body, opts) {
+  const headers = {};
+  if (token) headers["X-Lease-Token"] = token;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(NODE + path, Object.assign({ method, headers, cache: "no-store",
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(1000) }, opts || {}));
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    const e = new Error((data && data.detail) ? String(data.detail) : "HTTP " + r.status);
+    e.status = r.status;
+    throw e;
+  }
+  return data;
+}
+function error(msg) { lastError = msg || ""; $("error").textContent = lastError; }
+function lostLease() { token = null; enabled = false; }
+
+// A draggable control: reports x, y in [-1, 1] (screen axes, y down); springs back on release.
+function stick(el, horizontal, onChange) {
+  const knob = el.querySelector(".knob");
+  let pointer = null;
+  function update(e) {
+    const r = el.getBoundingClientRect();
+    const reach = (horizontal ? r.width : r.height) / 2 - knob.offsetWidth / 2;
+    let x = (e.clientX - r.left - r.width / 2) / reach;
+    let y = horizontal ? 0 : (e.clientY - r.top - r.height / 2) / reach;
+    let m = Math.hypot(x, y);
+    if (m > 1) { x /= m; y /= m; m = 1; }
+    knob.style.transform = `translate(${x * reach}px, ${y * reach}px)`;
+    const k = m < DEADZONE ? 0 : (m - DEADZONE) / (1 - DEADZONE) / m;
+    onChange(x * k, y * k);
+  }
+  function release(e) {
+    if (e.pointerId !== pointer) return;
+    pointer = null;
+    knob.style.transform = "";
+    onChange(0, 0);
+  }
+  el.addEventListener("pointerdown", e => { pointer = e.pointerId; el.setPointerCapture(pointer); update(e); });
+  el.addEventListener("pointermove", e => { if (e.pointerId === pointer) update(e); });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(type, release);
+}
+stick($("move"), false, (x, y) => { move = [x, y]; });
+stick($("turn"), true, x => { turn = x; });
+
+// Page limits, within the node's soft limits (which are within its hard limits).
+function limit(id, cap) {
+  const v = parseFloat($(id).value);
+  return Number.isFinite(v) ? Math.max(0, Math.min(v, cap)) : 0;
+}
+function twistFromSticks() {
+  // up = +vx (forward), left = +vy, rotate left = +omega (counter-clockwise)
+  const lin = limit("maxlin", soft.max_speed), ang = limit("maxang", soft.max_omega);
+  return [-move[1] * lin, -move[0] * lin, -turn * ang];
+}
+
+// Achieved twist from the latest per-module measurements (robot_twist least squares).
+function achieved(t) {
+  if (!t) return null;
+  let sx = 0, sy = 0, num = 0, den = 0, n = 0;
+  for (const [name, [x, y]] of Object.entries(MODULES)) {
+    const a = t[name + "_steer_angle"], v = t[name + "_drive_vel"];
+    if (!Number.isFinite(a) || !Number.isFinite(v)) return null;
+    const wx = v * Math.cos(a), wy = v * Math.sin(a);
+    sx += wx; sy += wy; num += x * wy - y * wx; den += x * x + y * y; n++;
+  }
+  return [sx / n, sy / n, num / den];
+}
+function placeRing(el, horizontal, x, y) {
+  const ring = el.querySelector(".ring");
+  ring.hidden = !Number.isFinite(x) || !Number.isFinite(y);
+  if (ring.hidden) return;
+  const r = el.getBoundingClientRect();
+  const reach = (horizontal ? r.width : r.height) / 2 - ring.offsetWidth / 2;
+  const m = Math.hypot(x, y);
+  if (m > 1) { x /= m; y /= m; }
+  ring.style.transform = `translate(${x * reach}px, ${y * reach}px)`;
+}
+const fmt = v => (v == null || !Number.isFinite(v)) ? "-" : (Math.abs(v) < 0.005 ? 0 : v).toFixed(2);
+
+function show(s) {
+  const t = s.latest || {};
+  const cmd = [t.cmd_vx, t.cmd_vy, t.cmd_omega], a = achieved(s.latest);
+  for (let i = 0; i < 3; i++) {
+    $("cmd" + i).textContent = fmt(cmd[i]);
+    $("ach" + i).textContent = a ? fmt(a[i]) : "-";
+  }
+  const lin = limit("maxlin", soft.max_speed), ang = limit("maxang", soft.max_omega);
+  placeRing($("move"), false, a && lin ? -a[1] / lin : NaN, a && lin ? -a[0] / lin : NaN);
+  placeRing($("turn"), true, a && ang ? -a[2] / ang : NaN, 0);
+
+  enabled = !!s.enabled; latched = !!(s.estop && s.estop.latched);
+  holder = s.lease && s.lease.held ? (s.lease.holder || "someone") : null;
+  if (s.limits && s.limits.soft) soft = s.limits.soft;
+  if (s.limits && s.limits.hard) hard = s.limits.hard;
+  const mine = !!token;
+  document.body.classList.toggle("disabled", !enabled);
+  document.body.classList.toggle("inactive", !mine || latched);
+  $("ctrl").innerHTML = "";
+  $("ctrl").append(mine ? "this page" : holder ? `held by ${holder}` : "nobody (take control)");
+  $("ctrl").className = !mine && holder ? "bad" : "";
+  $("enable").disabled = !mine || enabled || latched;
+  $("disable").disabled = !mine || !enabled;
+  $("clear").disabled = !mine || !latched;
+  $("release").disabled = !mine;
+  $("take").disabled = mine;
+  $("state").textContent = latched ? "E-STOPPED" : !mine ? "NOT IN CONTROL" : enabled ? "ENABLED" : "DISABLED";
+  $("state").classList.toggle("on", mine && enabled && !latched);
+  $("state").classList.toggle("off", latched || !mine);
+  if (s.error) error("drive error: " + s.error);
+}
+
+async function take() {
+  try {
+    const r = await api("POST", "lease", { client: "remote teleop (" + navigator.platform + ")" });
+    token = r.token; error("");
+  } catch (e) {
+    error(e.status === 409 ? "Another client holds the lease: " + e.message : "take control: " + e.message);
+  }
+}
+async function act(path, label) {
+  try { await api("POST", path); error(""); }
+  catch (e) { if (e.status === 401 || e.status === 403) lostLease(); error(label + ": " + e.message); }
+}
+
+// Command loop: the twist while enabled (renews the lease), a plain renew otherwise.
+let lastRenew = 0;
+setInterval(async () => {
+  if (!token) return;
+  try {
+    if (enabled && !latched) {
+      await api("POST", "command", { twist: twistFromSticks() });
+    } else if (performance.now() - lastRenew > RENEW_MS) {
+      lastRenew = performance.now();
+      await api("POST", "lease/renew");
+    }
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) { lostLease(); error("lease lost: " + e.message); }
+    else if (e.status === 409) { /* disabled or e-stopped meanwhile: the state poll shows it */ }
+    else error("command: " + e.message);
+  }
+}, COMMAND_MS);
+
+// State poll (~10 Hz).
+setInterval(async () => {
+  try {
+    const s = await api("GET", "state");
+    $("conn").textContent = "connected"; $("conn").className = "";
+    show(s);
+  } catch (e) {
+    $("conn").textContent = "LOST (" + e.message + ")"; $("conn").className = "bad";
+  }
+}, STATE_MS);
+
+$("take").onclick = take;
+$("enable").onclick = () => act("enable", "enable");
+$("disable").onclick = () => act("disable", "disable");
+$("clear").onclick = () => act("estop/clear", "clear e-stop");
+$("estop").onclick = async () => {   // anyone may e-stop, with or without the lease
+  try { await api("POST", "estop", { source: "remote teleop", reason: "E-STOP button" }); error(""); }
+  catch (e) { error("E-STOP FAILED: " + e.message + " — stop the robot another way!"); }
+};
+$("release").onclick = async () => {
+  try { await api("DELETE", "lease"); } catch (_) {}
+  lostLease(); error("");
+};
+
+// Leaving: disable when hidden, release when closed (best effort; the lease lapse is the backstop).
+function leaving(release) {
+  if (!token) return;
+  const headers = { "X-Lease-Token": token };
+  fetch(NODE + "disable", { method: "POST", headers, keepalive: true }).catch(() => {});
+  if (release) { fetch(NODE + "lease", { method: "DELETE", headers, keepalive: true }).catch(() => {}); lostLease(); }
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) leaving(false); });
+window.addEventListener("pagehide", () => leaving(true));
+
+// --- Background video: the camera node's active stream, straight from its port ----------------
+const STREAM_ORDER = ["color", "depth", "ir_left", "ir_right"];
+let camBase = null, videoStream = null;
+async function camUrl() {
+  if (camBase) return camBase;
+  const r = await fetch("../api/nodes", { cache: "no-store", signal: AbortSignal.timeout(2000) });
+  const cam = ((await r.json()).nodes || []).find(n => n.name === "camera" && n.enabled !== false);
+  if (!cam) throw new Error("no camera node configured");
+  camBase = `${location.protocol}//${cam.host || location.hostname}:${cam.port}/`;
+  return camBase;
+}
+function setVideo(name, why) {
+  const bg = $("bg");
+  if (name !== videoStream) {
+    videoStream = name;
+    if (name) { bg.src = camBase + "mjpeg/" + name + "?t=" + Date.now(); bg.style.display = "block"; }
+    else { bg.removeAttribute("src"); bg.style.display = "none"; }
+  }
+  $("video").textContent = name ? `camera: ${name}` : `camera: ${why}`;
+}
+$("bg").onerror = () => { const s = videoStream; videoStream = null; if (s) setTimeout(() => setVideo(s, ""), 2000); };
+async function pollVideo() {
+  try {
+    const st = await (await fetch("../nodes/camera/state", { cache: "no-store", signal: AbortSignal.timeout(2000) })).json();
+    await camUrl();
+    const on = (st.settings && st.settings.streams) || {};
+    const name = st.state === "streaming" ? STREAM_ORDER.find(n => on[n]) || null : null;
+    setVideo(name, st.state === "streaming" ? "no video stream enabled" : st.state || "not streaming");
+  } catch (e) { setVideo(null, "unavailable"); }
+}
+pollVideo(); setInterval(pollVideo, 2000);
+
+take();
+</script>
+</body></html>

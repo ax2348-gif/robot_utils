@@ -263,6 +263,10 @@ def test_proxy_forwards_to_the_node_same_origin():
 def test_tools_listed_and_served():
     with client_for([NodeEntry("swerve", 8102)], FakeNodes({})) as c:
         tools = c.get("/api/tools").json()["tools"]
+        remote = next(t for t in tools if t["name"] == "remote_teleop")
+        assert remote["href"] == "tools/remote_teleop.html" and remote["title"] == "Remote teleop"
+        page = c.get("/tools/remote_teleop.html").text
+        assert "../api/nodes" in page and "mjpeg/" in page and "overflow: hidden" in page
         teleop = next(t for t in tools if t["name"] == "swerve_teleop")
         assert teleop["href"] == "tools/swerve_teleop.html" and teleop["title"] == "Swerve teleop"
         assert teleop["description"]
