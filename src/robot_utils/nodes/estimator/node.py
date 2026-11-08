@@ -77,7 +77,7 @@ class Upstream(threading.Thread):
         reported = None
         while not self.stop.is_set():
             try:
-                self._client = NodeClient(self.url)
+                self._client = NodeClient.for_instance(self.url)   # name -> socket (or URL)
                 self._sync()
                 next_sync = time.monotonic() + SYNC_EVERY_S
                 dec = RowsDecoder()
@@ -114,8 +114,8 @@ class Upstream(threading.Thread):
 
 
 class EstimatorNode:
-    def __init__(self, swerve_url: Optional[str] = "http://127.0.0.1:8102",
-                 camera_url: Optional[str] = "http://127.0.0.1:8101"):
+    def __init__(self, swerve_url: Optional[str] = "swerve", camera_url: Optional[str] = "camera"):
+        """Upstreams: instance names on this machine (unix sockets) or URLs; None = off."""
         self.hub = RowHub({"pose": len(FIELDS)}, recent=1000)
         self.events = EventLog(on_add=self.hub.state_changed)
         self.q: queue.Queue = queue.Queue(maxsize=10000)

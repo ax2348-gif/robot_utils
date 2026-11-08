@@ -2,7 +2,7 @@
 
     from robot_utils.nodes.orbbec.client import OrbbecClient
 
-    cam = OrbbecClient("http://100.80.153.120:8101")
+    cam = OrbbecClient("http://botcore/nodes/camera")   # from another machine; on the robot: OrbbecClient("camera")
     est = cam.sync()                                 # NTP-style; est.uncertainty in s
     cam.update_settings({"streams": {"color": True, "depth": True}})
     for fr in cam.frames("color,depth", mode="raw"):
@@ -83,14 +83,21 @@ class Record:
 
 
 class OrbbecClient:
-    def __init__(self, base_url: str = "http://localhost:8101", timeout: float = 10.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, target: str = "camera", timeout: float = 10.0):
+        """``target``: an instance name (its unix socket on this machine) or a URL such as
+        ``http://botcore/nodes/camera`` (through the robot's port-80 proxy)."""
+        from ..common.serve import connect_target
+        self.base_url, self._uds = connect_target(target)
         self.timeout = timeout
-        self.http = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self.http = self._new_http()
         self.clock = ClockSync()
         self._clock_lock = threading.Lock()
         self._resync: Optional[threading.Thread] = None
         self._resync_stop = threading.Event()
+
+    def _new_http(self) -> httpx.Client:
+        transport = httpx.HTTPTransport(uds=self._uds) if self._uds else None
+        return httpx.Client(base_url=self.base_url, timeout=self.timeout, transport=transport)
 
     def close(self):
         self.stop_auto_sync()
@@ -160,7 +167,7 @@ class OrbbecClient:
         self._resync_stop = stop = threading.Event()
 
         def loop():
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as http:
+            with self._new_http() as http:
                 while not stop.wait(interval):
                     try:
                         self.sync(n, http=http)

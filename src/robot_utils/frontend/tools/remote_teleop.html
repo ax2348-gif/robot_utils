@@ -7,8 +7,9 @@
   Remote teleop: a copy of swerve_teleop.html (same controls and control logic) drawn over the
   camera node's active stream (color if on, else depth / IR), for driving without line of sight.
   Layout: fits the screen, never scrolls; controls are hollow (thick coloured outlines, no fills).
-  The video goes straight to the camera node's port (<img> of /mjpeg/<stream>, found via
-  ../api/nodes), not through this frontend's proxy, so it costs the frontend nothing.
+  The video is the camera node's /mjpeg/<stream> at ../nodes/camera/ (same origin): the robot's
+  port-80 proxy (nginx) serves it straight from the camera's socket, so it costs the frontend
+  nothing.
 
   Original notes (swerve_teleop.html), ported from rev_ctl examples/teleop.py (commit cfcfc32):
   Every request goes to this frontend's proxy, relative to this page: ../nodes/swerve/<path>.
@@ -305,7 +306,7 @@ function leaving(release) {
 document.addEventListener("visibilitychange", () => { if (document.hidden) leaving(false); });
 window.addEventListener("pagehide", () => leaving(true));
 
-// --- Background video: the camera node's active stream, straight from its port ----------------
+// --- Background video: the camera node's active stream (../nodes/camera/, nginx -> its socket) ---
 const STREAM_ORDER = ["color", "depth", "ir_left", "ir_right"];
 let camBase = null, videoStream = null;
 async function camUrl() {
@@ -313,7 +314,7 @@ async function camUrl() {
   const r = await fetch("../api/nodes", { cache: "no-store", signal: AbortSignal.timeout(2000) });
   const cam = ((await r.json()).nodes || []).find(n => n.name === "camera" && n.enabled !== false);
   if (!cam) throw new Error("no camera node configured");
-  camBase = `${location.protocol}//${cam.host || location.hostname}:${cam.port}/`;
+  camBase = "../nodes/" + encodeURIComponent(cam.name) + "/";
   return camBase;
 }
 function setVideo(name, why) {

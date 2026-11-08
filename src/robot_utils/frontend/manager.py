@@ -5,9 +5,10 @@ Scope, on purpose: the frontend controls exactly one systemd user unit per node,
 for node processes started any other way (e.g. in a terminal); such a node only shows up as
 "something already listens on its port", which blocks Start. So:
 
-- Start: refused if the unit is already active, or if anything listens on the node's port.
+- Start: refused if the unit is already active, or if the instance's unix socket already
+  accepts connections (or, with a debug ``port`` in nodes.yaml, that port is in use).
   Otherwise ``systemd-run --user --unit robot-node-<name> ...`` runs
-  ``<this interpreter> -m <module> <args>`` (``start:`` in nodes.yaml).
+  ``<this interpreter> -m <module> --name <name> <args>`` (``start:`` in nodes.yaml).
 - Stop: ``systemctl --user stop robot-node-<name>`` (SIGTERM, so the node shuts down cleanly;
   SIGKILL after TimeoutStopSec). Refused if that unit is not running.
 
@@ -34,6 +35,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
+from ..nodes.common.serve import socket_path
 from .config import NodeEntry
 
 UNIT_PREFIX = "robot-node-"
@@ -60,6 +62,21 @@ class UnitStatus:
 
 def unit_name(node: NodeEntry) -> str:
     return f"{UNIT_PREFIX}{node.name}.service"
+
+
+def instance_up(node: NodeEntry) -> bool:
+    """True if the instance answers: its unix socket accepts a connection, or (when nodes.yaml
+    gives it a debug port) something listens on that port. The generic "already up" test."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(0.3)
+    try:
+        s.connect(str(socket_path(node.name)))
+        return True
+    except OSError:
+        pass
+    finally:
+        s.close()
+    return node.port is not None and port_in_use(node.port)
 
 
 def port_in_use(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
@@ -217,12 +234,12 @@ class NodeManager:
     """The policy (what may be started/stopped) on top of a runner."""
 
     def __init__(self, nodes: list[NodeEntry], runner: Runner, *, cwd: str | None = None,
-                 python: str = sys.executable, port_check=port_in_use):
+                 python: str = sys.executable, up_check=instance_up):
         self.nodes = {n.name: n for n in nodes if n.enabled}
         self.runner = runner
         self.cwd = cwd or os.getcwd()
         self.python = python
-        self._port_in_use = port_check
+        self._up = up_check
         self._locks = {name: asyncio.Lock() for name in self.nodes}
 
     def _node(self, name: str) -> NodeEntry:
@@ -234,9 +251,10 @@ class NodeManager:
     async def status(self, name: str) -> dict:
         node = self._node(name)
         st = await self.runner.status(node) if node.start else UnitStatus("stopped")
-        listening = await asyncio.to_thread(self._port_in_use, node.port)
+        listening = await asyncio.to_thread(self._up, node)
         return {"name": name, "startable": node.start is not None, "unit": unit_name(node),
-                "runner": self.runner.kind, "managed": st.as_dict(), "port_in_use": listening}
+                "runner": self.runner.kind, "managed": st.as_dict(), "listening": listening,
+                "socket": str(socket_path(name))}
 
     async def status_all(self) -> list[dict]:
         return list(await asyncio.gather(*(self.status(n) for n in self.nodes)))
@@ -249,11 +267,11 @@ class NodeManager:
             st = await self.runner.status(node)
             if st.state in ("running", "starting", "stopping"):
                 raise ManagerError(409, f"{unit_name(node)} is already {st.state}")
-            if await asyncio.to_thread(self._port_in_use, node.port):
-                raise ManagerError(409, f"port {node.port} is already in use: node {name!r} is "
-                                        "running outside the landing page (e.g. started in a "
+            if await asyncio.to_thread(self._up, node):
+                raise ManagerError(409, f"node {name!r} is already running outside the landing page "
+                                        f"(its socket {socket_path(name)} answers, e.g. started in a "
                                         "terminal); stop it there first")
-            await self.runner.start(node, node.start.argv(self.python), self.cwd)
+            await self.runner.start(node, node.start.argv(self.python, node.name), self.cwd)
         return await self.status(name)
 
     async def stop(self, name: str) -> dict:

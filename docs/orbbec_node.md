@@ -9,7 +9,7 @@ data, JSON for control, every timestamp on the Pi's `time.monotonic()` clock.
 - Client library: `src/robot_utils/nodes/orbbec/client.py`
 - Examples: `examples/orbbec_node_record.py` (record on the client), `examples/orbbec_node_profile.py`
   (latency profile)
-- Interactive API docs (OpenAPI): `http://<pi>:8101/docs`; quick-look page: `http://<pi>:8101/`
+- Interactive API docs (OpenAPI): `http://<robot>/nodes/camera/docs`; quick-look page: `http://<robot>/nodes/camera/`
 - Tests (no hardware): `PYTHONPATH=src python -m pytest tests/test_orbbec_node.py`
 
 The older stdlib viewer (`examples/orbbec_web_viewer.py`, `docs/orbbec_viewer.md`) does the same
@@ -22,20 +22,21 @@ On the Pi (needs `fastapi` and `uvicorn` in the venv, see [Dependencies](#depend
 
 ```bash
 cd ~/robot_utils && source .venv/bin/activate
-python -m robot_utils.nodes.orbbec --host 0.0.0.0 --port 8101           # Ctrl-C to stop
+python -m robot_utils.nodes.orbbec                                      # instance 'camera'; Ctrl-C to stop
 python -m robot_utils.nodes.orbbec --streams color,depth,ir_left --no-imu -v
-python -m robot_utils.nodes.orbbec --fake --port 8765                   # synthetic camera, any machine
+python -m robot_utils.nodes.orbbec --fake --port 8765                   # synthetic camera, any machine (TCP for debugging)
 ```
 
-It prints a URL per interface (LAN `http://192.168.8.209:8101/`, Tailscale
-`http://100.80.153.120:8101/`). Open it in a browser for live tiles, settings, device controls,
+It listens on its unix socket (instance `camera`, `--name` for another); through the robot's port-80
+proxy that is `http://192.168.8.209/nodes/camera/` (LAN) or `http://100.80.153.120/nodes/camera/`
+(Tailscale). Open it in a browser for live tiles, settings, device controls,
 IMU readout and the true capture→display latency (the page syncs its clock to the Pi).
 
 In the background with a log (how it was left running):
 
 ```bash
 PYTHONPATH=~/robot_utils/src nohup ~/robot_utils/.venv/bin/python -m robot_utils.nodes.orbbec \
-    --host 0.0.0.0 --port 8101 > /tmp/orbbec_node.log 2>&1 &
+    > /tmp/orbbec_node.log 2>&1 &
 pkill -f "robot_utils.nodes.orbbec"          # stop
 ```
 
@@ -44,7 +45,7 @@ From any machine (Python):
 ```python
 from robot_utils.nodes.orbbec.client import OrbbecClient
 
-cam = OrbbecClient("http://100.80.153.120:8101")
+cam = OrbbecClient("http://100.80.153.120/nodes/camera")   # on the robot: OrbbecClient("camera")
 print(cam.sync())                      # offset to the Pi clock, ± uncertainty
 cam.update_settings({"streams": {"color": True, "depth": True}, "stereo_mode": "848x480@10"})
 for fr in cam.frames("color,depth", mode="raw"):

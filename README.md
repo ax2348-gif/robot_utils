@@ -45,18 +45,23 @@ The robot's hardware is served over HTTP by one process ("node") per hardware bu
 landing page that indexes them. Start each on the robot from this checkout, with the venv
 (`source .venv/bin/activate`); none of them needs the others:
 
-| | command | port | docs |
+| | command | URL | docs |
 |---|---|---|---|
-| camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | 8101 | [docs/orbbec_node.md](docs/orbbec_node.md) |
-| swerve base | `python -m robot_utils.nodes.swerve` | 8102 | [docs/swerve_node.md](docs/swerve_node.md) |
-| estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | 8110 | [docs/estimator_node.md](docs/estimator_node.md) |
-| robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | 8104 | [docs/description_node.md](docs/description_node.md) |
-| landing page | `python -m robot_utils.frontend` | 80 | [docs/frontend.md](docs/frontend.md) |
+| camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | `/nodes/camera/` | [docs/orbbec_node.md](docs/orbbec_node.md) |
+| swerve base | `python -m robot_utils.nodes.swerve` | `/nodes/swerve/` | [docs/swerve_node.md](docs/swerve_node.md) |
+| estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | `/nodes/estimator/` | [docs/estimator_node.md](docs/estimator_node.md) |
+| robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | port 8104 (for now) | [docs/description_node.md](docs/description_node.md) |
+| landing page | `python -m robot_utils.frontend` | `/` | [docs/frontend.md](docs/frontend.md) |
+
+Everything is one origin on port 80: nginx (`robot-proxy.service`) serves the landing page at `/`
+and each node instance at `/nodes/<name>/` from the node's unix socket, so a second instance
+(`--name camera2`) needs no configuration change ([docs/nodes.md](docs/nodes.md), Routing).
+Node ports are only for debugging (`--port`).
 
 Then open `http://<robot>/` (on the robot's Wi-Fi, `botcore/`): a tile per node linking to
 its own page, a global E-STOP, and a Tools section (swerve teleop). Every node also serves its
-own page and interactive API docs (`/docs`) on its port, and keeps working without the landing
-page. The shared conventions (ports, record framing, time sync, `/meta`, lease, e-stop) are in
+own page and interactive API docs (`/nodes/<name>/docs`), and keeps working without the landing
+page. The shared conventions (routing, record framing, time sync, `/meta`, lease, e-stop) are in
 [docs/nodes.md](docs/nodes.md).
 
 - Camera: keep the robot still for about 2 s after starting it (startup IMU calibration).
@@ -64,9 +69,11 @@ page. The shared conventions (ports, record framing, time sync, `/meta`, lease, 
   at the same time. One-time SPARK setup (already done on this robot):
   `python -m robot_utils.nodes.swerve.setup_sparks slcan:/dev/ttyACM0` shows the differences,
   `--apply` writes and saves them.
-- Landing page on port 80: once per machine, `sudo tools/enable_low_ports.sh`.
-- The landing page runs as a systemd user service (`robot-frontend.service`), installed and
-  started by `./install.sh` and started at boot ([docs/frontend.md](docs/frontend.md)). It can
+- Port 80 needs, once per machine, `sudo tools/enable_low_ports.sh` and the `nginx` package
+  with the system `nginx.service` disabled (`install.sh` prints what to run).
+- The landing page and the port-80 proxy run as systemd user services (`robot-frontend.service`,
+  `robot-proxy.service`), installed and started by `./install.sh` and started at boot
+  ([docs/frontend.md](docs/frontend.md)). It can
   also **start and stop the nodes** (Start/Stop on each tile; each runs as a systemd user unit
   `robot-node-<name>`); a node started in a terminal shows as "running (not managed)".
 

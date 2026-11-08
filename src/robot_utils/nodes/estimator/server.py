@@ -55,7 +55,7 @@ def create_app(node: EstimatorNode, start: bool = True) -> FastAPI:
     half_len = max(abs(m.x) for m in MODULES)
     half_wid = max(abs(m.y) for m in MODULES)
     add_page_routes(app, node_meta("estimator", "State estimator", __version__, "estimator", actuated=False,
-                                   rate_hz=100, port_default=8110,
+                                   rate_hz=100,
                                    footprint={"half_length": half_len, "half_width": half_wid}))
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)

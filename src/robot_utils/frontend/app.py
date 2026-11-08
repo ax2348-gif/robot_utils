@@ -1,14 +1,16 @@
-"""The frontend's FastAPI app: landing page, tools, node proxy and a server-side E-STOP fan-out.
+"""The frontend's FastAPI app: landing page, tools, node start/stop, and a server-side E-STOP fan-out.
 
-Browser pages never call node ports cross-origin: some browsers refuse or stall cross-port
-requests to local-network addresses even with CORS allowed (the landing tiles showed DOWN while
-the nodes answered). Instead ``/nodes/<name>/<path>`` forwards to the node over the robot's
-own loopback, so the landing page, its E-STOP and the tool pages only make same-origin
-requests. The proxy is meant for the nodes' small JSON API (and SSE); node pages and their
-video/raw streams are still opened directly on the node port ("Open page"), so no bulk data
-passes through here. This process still holds no state and is not on the control path.
+On the robot everything is one origin on port 80: nginx (``robot-proxy.service``) serves this
+app (unix socket ``frontend.sock``) at ``/`` and each node instance at ``/nodes/<name>/``
+straight from its own socket (docs/nodes.md). The page and the tools therefore only make
+same-origin requests (``nodes/<name>/...``), and heavy node streams never pass through Python.
 
-``POST /api/estop`` is the same e-stop fan-out run from here, for scripts
+This app also has its own ``/nodes/<name>/<path>`` proxy. nginx uses it as a fallback when a
+node's socket does not answer (so a down node gets a JSON 502 instead of nginx's error page),
+and it serves nodes on other machines (``host:`` in nodes.yaml). When the frontend runs alone
+(``--port``, no nginx), it is the only route to the nodes.
+
+``POST /api/estop`` is the same e-stop fan-out as the button, for scripts
 (``curl -X POST http://<robot>/api/estop``).
 """
 
@@ -29,6 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from ..nodes.common.serve import socket_path
 from .config import NodeEntry
 from .manager import ManagerError, NodeManager, default_runner
 
@@ -61,11 +64,43 @@ async def restart_service() -> None:
     await proc.wait()
 
 
-def node_base_url(node: NodeEntry, default_host: str) -> str:
-    host = node.host or default_host
+def _via_socket(node: NodeEntry) -> bool:
+    """A local node is reached over its unix socket; one whose socket doesn't exist but has a
+    debug ``port`` in nodes.yaml (e.g. a node not yet on the serve helper) over 127.0.0.1:port."""
+    return node.host is None and (node.port is None or socket_path(node.name).exists())
+
+
+def node_base_url(node: NodeEntry) -> str:
+    """``http://<name>/`` for a node on this machine (over its unix socket); otherwise
+    ``http://host:port/`` (``host`` defaults to 127.0.0.1 for a local node with only a port)."""
+    if _via_socket(node):
+        return f"http://{node.name}/"
+    host = node.host or "127.0.0.1"
     if ":" in host and not host.startswith("["):  # bare IPv6 literal
         host = f"[{host}]"
     return f"http://{host}:{node.port}/"
+
+class NodeLinks:
+    """HTTP clients for reaching nodes: one per local node (its unix socket) plus one for remote
+    nodes. With ``transport`` (tests) a single client on that transport serves every node."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
+        self._transport = transport
+        self._clients: dict[str, httpx.AsyncClient] = {}
+
+    def client(self, node: NodeEntry) -> httpx.AsyncClient:
+        sock = self._transport is None and _via_socket(node)
+        key = node.name if sock else "*"
+        c = self._clients.get(key)
+        if c is None:
+            transport = self._transport or (httpx.AsyncHTTPTransport(uds=str(socket_path(node.name)))
+                                            if sock else None)
+            c = self._clients[key] = httpx.AsyncClient(transport=transport, trust_env=False)
+        return c
+
+    async def aclose(self) -> None:
+        for c in self._clients.values():
+            await c.aclose()
 
 
 def estop_path(meta: dict | None) -> str | None:
@@ -86,8 +121,8 @@ def estop_path(meta: dict | None) -> str | None:
     return "estop"
 
 
-async def estop_node(client: httpx.AsyncClient, node: NodeEntry, default_host: str) -> dict:
-    base = node_base_url(node, default_host)
+async def estop_node(links: NodeLinks, node: NodeEntry) -> dict:
+    base, client = node_base_url(node), links.client(node)
     result = {"name": node.name, "url": None, "status": "unreachable", "detail": ""}
     meta = None
     try:
@@ -123,10 +158,10 @@ async def estop_node(client: httpx.AsyncClient, node: NodeEntry, default_host: s
     return result
 
 
-async def estop_all(client: httpx.AsyncClient, nodes: list[NodeEntry], default_host: str) -> list[dict]:
+async def estop_all(links: NodeLinks, nodes: list[NodeEntry]) -> list[dict]:
     """E-stop every enabled node in parallel; one result dict per node, in config order."""
     targets = [n for n in nodes if n.enabled]
-    return list(await asyncio.gather(*(estop_node(client, n, default_host) for n in targets)))
+    return list(await asyncio.gather(*(estop_node(links, n) for n in targets)))
 
 
 def load_page() -> str:
@@ -155,22 +190,23 @@ def list_tools() -> list[dict]:
 def create_app(
     nodes: list[NodeEntry],
     *,
-    default_host: str = "127.0.0.1",
     transport: httpx.AsyncBaseTransport | None = None,
     manager: NodeManager | None = None,
     is_service=running_as_service,
     restart=restart_service,
 ) -> FastAPI:
-    """``default_host``: how this process reaches nodes without a ``host`` (server-side e-stop
-    only; the browser uses its own hostname). ``transport``: for tests."""
+    """``transport``: one transport for every node (tests); otherwise unix sockets for local
+    nodes and TCP for nodes with a ``host``."""
     page = load_page()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.manager = manager or NodeManager(nodes, default_runner())
-        async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
-            app.state.client = client
+        app.state.links = links = NodeLinks(transport)
+        try:
             yield
+        finally:
+            await links.aclose()
         close = getattr(app.state.manager.runner, "close", None)
         if close is not None:   # only the subprocess fallback: its children die with us
             await close()
@@ -184,7 +220,6 @@ def create_app(
 
     @app.get("/api/nodes")
     async def list_nodes() -> JSONResponse:
-        # host null = "the hostname you reached me by"; the page fills it in.
         return JSONResponse({"nodes": [n.as_dict() for n in nodes]}, headers=no_cache)
 
     @app.get("/api/health")
@@ -193,7 +228,7 @@ def create_app(
 
     @app.post("/api/estop")
     async def estop() -> JSONResponse:
-        results = await estop_all(app.state.client, nodes, default_host)
+        results = await estop_all(app.state.links, nodes)
         attempted = [r for r in results if r["status"] != "skipped"]
         ok = bool(attempted) and all(r["status"] == "latched" for r in attempted)
         return JSONResponse({"ok": ok, "results": results}, status_code=200 if ok else 502)
@@ -264,21 +299,29 @@ def create_app(
 
     by_name = {n.name: n for n in nodes if n.enabled}
 
+    @app.get("/nodes/{name}")
+    async def node_root(name: str):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(f"{name}/", status_code=301)
+
     @app.api_route("/nodes/{name}/{path:path}", methods=["GET", "POST", "DELETE", "PUT", "PATCH"])
     async def proxy(name: str, path: str, request: Request):
         node = by_name.get(name)
         if node is None:
-            raise HTTPException(404, f"no enabled node {name!r} in nodes.yaml")
-        url = urljoin(node_base_url(node, default_host), path)
+            return JSONResponse({"detail": f"no enabled node {name!r} in nodes.yaml"}, status_code=404)
+        url = urljoin(node_base_url(node), path)
         headers = {k: v for k, v in request.headers.items() if k.lower() in PROXY_REQUEST_HEADERS}
-        client: httpx.AsyncClient = app.state.client
+        headers["x-forwarded-prefix"] = f"/nodes/{name}"
+        client: httpx.AsyncClient = app.state.links.client(node)
         upstream = client.build_request(request.method, url, params=request.query_params,
                                         headers=headers, content=await request.body(),
                                         timeout=PROXY_TIMEOUT)
         try:
             r = await client.send(upstream, stream=True)
         except httpx.HTTPError as e:
-            return JSONResponse({"detail": f"node {name} unreachable: {type(e).__name__}"}, status_code=502)
+            where = "its socket" if node.host is None else f"{node.host}:{node.port}"
+            return JSONResponse({"detail": f"node {name} is not running ({where} does not answer: "
+                                           f"{type(e).__name__})"}, status_code=502)
         out_headers = {k: v for k, v in r.headers.items() if k.lower() in PROXY_RESPONSE_HEADERS}
         return StreamingResponse(r.aiter_bytes(), status_code=r.status_code, headers=out_headers,
                                  background=BackgroundTask(r.aclose))

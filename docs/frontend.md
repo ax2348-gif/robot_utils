@@ -4,41 +4,57 @@
 HTTP nodes: a tile per node (up/down, title and kind, state, error, lease holder, e-stop) and a
 global **E-STOP ALL** button.
 
-**It is not on the control path.** Each node (camera 8101, swerve 8102, …) is its own process
-with its own page and its own e-stop at `http://<robot>:<port>/`. The frontend holds no state
-and relays nothing in normal use: if it is stopped or crashes, nodes, their pages and their
-e-stops keep working, and `curl -X POST http://<robot>:<port>/estop` still stops a node.
+On the robot it sits behind the port-80 proxy (nginx, `robot-proxy.service`): `/` is this
+page (unix socket `frontend.sock`), `/nodes/<name>/` each node instance straight from its own
+socket (docs/nodes.md, Routing).
+
+**It is not on the control path.** Each node is its own process with its own page and its own
+e-stop at `http://<robot>/nodes/<name>/`, served by nginx straight from the node's socket. The
+frontend holds no state: if it is stopped or crashes, nodes, their pages and their e-stops keep
+working, and `curl -X POST http://<robot>/nodes/swerve/estop` still stops a node.
 
 ## Running
 
 ```bash
 source .venv/bin/activate
-python -m robot_utils.frontend                      # 0.0.0.0:80, packaged nodes.yaml
-python -m robot_utils.frontend --port 8080          # no port-80 setup needed
+python -m robot_utils.frontend                      # unix socket frontend.sock (behind nginx)
+python -m robot_utils.frontend --port 8080          # also TCP 8080: without nginx / debugging
 python -m robot_utils.frontend --config ~/nodes.yaml
 ```
 
-Port 80 as a normal user needs a one-time kernel setting (below). Without it the frontend
-exits with a message naming the script; `--port 8080` works meanwhile.
+Without nginx, `--port` makes the landing page reachable on its own, and its built-in
+`/nodes/<name>/` proxy then reaches the nodes' sockets (all traffic through Python: fine for
+debugging, not for heavy streams). `--port 80` as a normal user needs a one-time kernel setting
+(below).
 
 ### As a service (the robot)
 
-`./install.sh` installs and starts the landing page as a **systemd user service**,
-`robot-frontend.service` (unit in `~/.config/systemd/user/`, like the robot's
-`ups-dashboard.service`): it runs `.venv/bin/python -m robot_utils.frontend` from the checkout,
-restarts on failure, and starts at boot when lingering is enabled for the user
-(`loginctl show-user $USER -p Linger`; `install.sh` prints `sudo loginctl enable-linger $USER`
-if not). Re-running `install.sh` rewrites and restarts it, so it always serves this
-checkout's code; `./install.sh --no-service` leaves it alone.
+`./install.sh` installs and starts two **systemd user services** (units in
+`~/.config/systemd/user/`, like the robot's `ups-dashboard.service`; restart on failure; start at
+boot when lingering is enabled for the user, `install.sh` prints `sudo loginctl enable-linger
+$USER` if not):
+
+- `robot-frontend.service`: `.venv/bin/python -m robot_utils.frontend` from the checkout, on
+  `frontend.sock`.
+- `robot-proxy.service`: nginx on port 80 (config generated into
+  `~/.config/robot_utils/nginx/nginx.conf` by `python -m robot_utils.frontend.proxy`; pid, logs,
+  temp under `~/.local/state/robot_utils/nginx`). It needs the `nginx` package and the system
+  `nginx.service` disabled; if either is missing, `install.sh` prints the `sudo` commands and
+  runs the landing page with `--port 80` instead, so the robot stays reachable meanwhile.
+
+Re-running `install.sh` rewrites and restarts both (frontend first, then the proxy), so they
+always serve this checkout's code; `./install.sh --no-service` leaves them alone.
 
 ```bash
 systemctl --user status robot-frontend        # running?
 journalctl --user -u robot-frontend -f        # logs
 systemctl --user restart robot-frontend       # after editing nodes.yaml or the code
+systemctl --user status robot-proxy           # nginx; logs: journalctl --user -u robot-proxy
 systemctl --user disable --now robot-frontend # stop it and don't start at boot
 ```
 
-To run it by hand instead (e.g. with `--config`), stop the service first: both want port 80.
+To run the landing page by hand instead (e.g. with `--config`), stop the service first: both
+want `frontend.sock` (a second one refuses: "already running").
 
 The landing page's **Restart landing page** button (next to the hostname) does the same as
 `systemctl --user restart robot-frontend` (e.g. after editing `nodes.yaml` or pulling new code):
@@ -51,19 +67,25 @@ Nodes keep running: managed ones are separate units.
 
 The default is packaged at `src/robot_utils/frontend/nodes.yaml`; `--config PATH` replaces it.
 
+Entries are **instances**: the same kind can run twice under different names (e.g. two cameras).
+
 ```yaml
 nodes:
-  - {name: camera, port: 8101, start: {module: robot_utils.nodes.orbbec}}
-  - {name: swerve, port: 8102, start: {module: robot_utils.nodes.swerve}}
-  - {name: arm, port: 8103, enabled: false}        # future
-  - {name: estimator, port: 8110, enabled: false}  # future
+  - {name: camera, kind: camera, start: {module: robot_utils.nodes.orbbec}}
+  - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve}}
+  - {name: arm, kind: arm, enabled: false}        # future
+  - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
+  - {name: description, kind: description, port: 8104, start: {module: robot_utils.nodes.description}}
+  # a second camera would be e.g.
+  # - {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 ```
 
 | key | | |
 |---|---|---|
-| `name` | required | short id; the tile's title until the node's `/meta` answers |
-| `port` | required | the node's HTTP port |
-| `host` | optional | omit for "same machine as the frontend": the page then uses the hostname the browser reached the frontend by, so links work from any machine. Set it only for a node on another machine (never `localhost`) |
+| `name` | required | instance name: socket `<runtime dir>/robot/<name>.sock`, URL `/nodes/<name>/`, tile title until `/meta` answers |
+| `kind` | optional, default = `name` | what the node is (camera, swerve, ...) |
+| `port` | optional | a local instance's TCP port, used only while its socket doesn't exist (a node not yet on the `serve` helper, e.g. description on 8104), and as an "already up" check |
+| `host` | optional, with `port` | a node on another machine, reached through the frontend's own proxy |
 | `enabled` | optional, default `true` | `false`: listed under "Planned", not polled, not e-stopped |
 | `start` | optional | `{module: ..., args: [...]}`: the landing page can start/stop this node (below). Local nodes only (no `host`) |
 
@@ -72,32 +94,31 @@ Adding a node is adding a line; no frontend code changes. Restart the frontend t
 ## How it works
 
 - `GET /` — the page (inline HTML/CSS/JS, no CDN).
-- `GET /api/nodes` — the configured list: `{"nodes": [{"name", "port", "host", "enabled"}]}`
-  (`host: null` = the browser's own hostname).
+- `GET /api/nodes` — the configured list: `{"nodes": [{"name", "kind", "port", "host", "enabled", "start"}]}`.
 - `POST /api/estop` — the same e-stop fan-out as the button, run from the frontend (for
   scripts, or a browser that can reach port 80 but not the node ports). 200 with `"ok": true`
   only if every actuated node confirmed `latched`; otherwise 502 with per-node results.
 - `GET /api/health` — `{"ok": true}`.
-- `/nodes/<name>/<path>` — **proxy** to the node over the robot's loopback (GET, POST,
-  DELETE, PUT, PATCH; forwards only `Content-Type`, `Accept`, `X-Lease-Token`,
-  `Last-Event-ID`; streams the reply, so `/events` works too). 502 if the node is down, 404
-  for a node that is not enabled in `nodes.yaml`.
+- `/nodes/<name>/<path>` — the frontend's own **proxy** to the node's socket (or `host:port`)
+  (GET, POST, DELETE, PUT, PATCH; forwards only `Content-Type`, `Accept`, `X-Lease-Token`,
+  `Last-Event-ID`, adds `X-Forwarded-Prefix`; streams the reply). Behind nginx it only sees what
+  nginx hands it: requests for a node whose socket does not answer (→ JSON 502 "not running")
+  and nodes on other machines. Without nginx (`--port`) it carries all node traffic. 404 for a
+  node that is not enabled in `nodes.yaml`.
 - `GET /api/tools`, `GET /tools/<name>.html` — the tool pages (below).
 
-**Why a proxy.** The first version polled and e-stopped the nodes straight from the browser
-(nodes allow CORS). In practice browsers may refuse or stall cross-port requests to
-local-network addresses even with CORS allowed: the tiles showed DOWN while the nodes answered
-and their pages opened. So every request the landing page and the tools make is same-origin,
-to this frontend, which forwards it. The proxy is for the nodes' small JSON API (and SSE);
-node pages and their video/raw streams are still opened directly on the node port (the tile
-link), so no bulk data passes through the frontend.
+**Why one origin.** Browsers may refuse or stall cross-port requests to local-network
+addresses even with CORS allowed (the first version's tiles showed DOWN while the nodes
+answered), so every request the page and the tools make is same-origin: `nodes/<name>/...`.
+nginx serves those straight from the node's socket, so node pages and their video/raw streams
+cost the frontend nothing.
 
 **Status** is polled through the proxy about once a second (`nodes/<name>/meta` once per
 (re)connection, then `nodes/<name>/<endpoints.state>`). A node that does not answer in 0.9 s
-shows **DOWN**, with the reason (`ConnectError` = nothing listening on that port).
+shows **DOWN**, with the reason ("not running" = its socket does not answer).
 
-**Tile link** = `http://` + `window.location.hostname` (or the configured `host`) + `:port/`
-+ `meta.page`. Hidden when `meta.has_page` is `false`.
+**Tile link** = `nodes/<name>/` + `meta.page` on the same origin. Hidden when
+`meta.has_page` is `false`.
 
 **E-STOP ALL** posts, in parallel, through the proxy, to every enabled node whose last `/meta`
 says it is actuated (or names an `estop` endpoint). Nodes whose `/meta` was never read are
@@ -113,13 +134,14 @@ If the frontend itself is down, each node's own page and `POST /estop` still wor
 A node with a `start:` recipe gets a control row on its tile: a status pill, **Start** or
 **Stop**, and **logs**. The frontend runs each such node as a **systemd user unit**,
 `robot-node-<name>.service`, started with
-`systemd-run --user --unit robot-node-<name> ... <frontend's python> -m <module> <args>`
+`systemd-run --user --unit robot-node-<name> ... <frontend's python> -m <module> --name <name> <args>`
 (the frontend's interpreter is the robot venv; working directory = the frontend's).
 
 The scope is deliberately small (`frontend/manager.py`):
 
-- **Start** is refused (409) if that unit is already running, or if **anything already listens
-  on the node's port**, e.g. a node started by hand in a terminal. The frontend never looks for
+- **Start** is refused (409) if that unit is already running, or if **the instance's socket
+  already answers** (or its configured `port` is in use), e.g. a node started by hand in a
+  terminal. The frontend never looks for
   such processes; the tile just shows **running (not managed)** with Start disabled.
 - **Stop** stops that unit (`systemctl --user stop`: SIGTERM, so the node shuts down cleanly
   and the swerve node disables the base; SIGKILL after 10 s). It works on the unit whoever
@@ -137,7 +159,7 @@ Pill states: `stopped`, `managed: starting…`, `managed: running`, `managed: st
 to keep the robot still for ~2 s (startup IMU calibration).
 
 Endpoints: `GET /api/managed` (every node: `startable`, `unit`, `managed.state`, `pid`, `since`,
-`result`, `port_in_use`), `POST /api/nodes/<name>/start`, `POST /api/nodes/<name>/stop`,
+`result`, `listening`, `socket`), `POST /api/nodes/<name>/start`, `POST /api/nodes/<name>/stop`,
 `GET /api/nodes/<name>/logs?lines=40` (the unit's journal). Errors are `{"detail": ...}` with
 400 (no recipe), 404 (unknown or disabled node), 409 (already running / not running).
 
@@ -180,8 +202,8 @@ one, drop an `.html` file in that folder (names: lowercase letters, digits, `_`,
 
 ## Node contract
 
-What a node serves to appear on the page (paths relative to the node's root; nodes must send
-permissive CORS headers, since the browser calls them from the frontend's origin):
+What a node serves to appear on the page (paths relative to the node's root, which is
+`/nodes/<name>/` behind nginx):
 
 - `GET /meta` → `{"name", "title", "version", "kind", "has_page", "page", "actuated",
   "endpoints": {"health", "state", "events", "estop"}}`. `page` is relative to the node root
@@ -192,11 +214,12 @@ permissive CORS headers, since the browser calls them from the frontend's origin
   `"lease": {"held": bool, "holder": str|null}` and `"estop": {"latched": bool, ...}`.
   A tile is **UP** when this returns 2xx JSON.
 - `POST /estop` (no body, no auth) → `200 {"latched": true}`.
-- Its own page at `meta.page`, using relative URLs (served via `http://<robot>:<port>/`).
+- Its own page at `meta.page`, using relative URLs (served at `http://<robot>/nodes/<name>/`).
+- It listens on its unix socket via `robot_utils.nodes.common.serve` (`--name`), which also sets
+  `/meta`'s `name` to the instance.
 
-If a node does not send CORS headers, its e-stop POST may still reach it but the browser
-cannot read the reply, so it shows as `UNREACHABLE`; its tile will show `LATCHED` on the next
-poll only if `/state` is readable, which it is not without CORS either. CORS is required.
+Everything is same-origin now, so CORS is no longer needed for the landing page (nodes still
+send it, for scripts and other tools).
 
 ## Port 80 without root
 
@@ -215,7 +238,9 @@ what it changed. Ports 1–79 (ssh, …) stay privileged. Undo: delete that file
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m pytest tests/test_frontend.py
+PYTHONPATH=src python -m pytest tests/test_frontend.py tests/test_frontend_manager.py tests/test_frontend_proxy.py
 ```
 
-No hardware or network: fake nodes are `httpx.MockTransport` handlers.
+No hardware or network: fake nodes are `httpx.MockTransport` handlers; the manager's end-to-end
+test runs a stand-in node through `serve`; the nginx config test also runs `nginx -t` when an
+nginx binary is available (on `PATH` or `NGINX_BIN`).

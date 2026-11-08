@@ -132,16 +132,8 @@ function h(tag, props, ...kids) {
   return e;
 }
 
-// Node URLs use the hostname the browser reached this page by (never a fixed loopback name),
-// unless the config gives the node its own host.
-function baseUrl(cfg) {
-  let host = cfg.host || location.hostname;
-  if (host.includes(":") && !host.startsWith("[")) host = "[" + host + "]";
-  return "http://" + host + ":" + cfg.port + "/";
-}
-// API calls go through this frontend's same-origin proxy (/nodes/<name>/...): some browsers
-// refuse or stall cross-port requests to local-network addresses even with CORS. Only the
-// "Open page" link goes to the node's own port.
+// Every node is on this page's origin at nodes/<name>/ (the robot's port-80 proxy maps it to the
+// node's unix socket; docs/nodes.md), so polling, E-STOP and "Open page" are all same-origin.
 function proxyBase(n) {
   return new URL("nodes/" + encodeURIComponent(n.cfg.name) + "/", location.href).href;
 }
@@ -179,7 +171,7 @@ function makeTile(n) {
   const ui = {};
   ui.title = h("span", { className: "title", textContent: n.cfg.name });
   ui.pill = h("span", { className: "pill", textContent: "…" });
-  ui.kind = h("div", { className: "kind", textContent: ":" + n.cfg.port });
+  ui.kind = h("div", { className: "kind", textContent: "/nodes/" + n.cfg.name + "/" });
   ui.dl = h("dl");
   ui.link = h("a", { className: "open", textContent: "Open page →" });
   ui.age = h("span", { className: "age" });
@@ -198,7 +190,8 @@ function row(dl, label, value, cls) {
 function render(n) {
   const ui = n.ui, m = n.meta || {}, s = n.state || {};
   ui.title.textContent = m.title || n.cfg.name;
-  const kindBits = [m.kind, m.version && "v" + m.version, (n.cfg.host ? n.cfg.host : "") + ":" + n.cfg.port];
+  const kindBits = [m.kind || n.cfg.kind, m.version && "v" + m.version,
+                    n.cfg.host ? n.cfg.host + ":" + n.cfg.port : "/nodes/" + n.cfg.name + "/"];
   ui.kind.textContent = kindBits.filter(Boolean).join(" · ");
   const latched = !!(n.up && s.estop && s.estop.latched);
   ui.root.className = "tile " + (n.up === undefined ? "" : n.up ? "up" : "down") + (latched ? " latched" : "");
@@ -225,7 +218,7 @@ function render(n) {
     ui.link.removeAttribute("href");
     ui.link.textContent = "no page";
   } else {
-    ui.link.href = new URL(typeof m.page === "string" && m.page ? m.page : "./", baseUrl(n.cfg)).href;
+    ui.link.href = new URL(typeof m.page === "string" && m.page ? m.page : "./", proxyBase(n)).href;
     ui.link.textContent = "Open page →";
   }
   ui.age.textContent = n.lastOk ? "updated " + ((Date.now() - n.lastOk) / 1000).toFixed(1) + " s ago" : "never reached";
@@ -244,13 +237,13 @@ function renderControls(n) {
                   stopping: ["managed: stopping…", "warn"],
                   failed: ["managed: failed" + (m.managed.result ? " (" + m.managed.result + ")" : ""), "bad"] };
   let pill = pills[st];
-  if (!pill) pill = m.port_in_use ? ["running (not managed)", ""] : ["stopped", ""];
+  if (!pill) pill = m.listening ? ["running (not managed)", ""] : ["stopped", ""];
   ui.ctl.append(h("span", { className: "pill " + pill[1], textContent: pill[0] }));
   if (st === "running" || st === "starting") {
     ui.ctl.append(h("button", { className: "stop", textContent: "Stop", disabled: busy,
                                 onclick: () => control(n, "stop") }));
   } else {
-    const blocked = m.port_in_use && st !== "stopping";
+    const blocked = m.listening && st !== "stopping";
     ui.ctl.append(h("button", { className: "go", textContent: "Start", disabled: busy || blocked || st === "stopping",
                                 title: blocked ? "Already running outside the landing page (e.g. in a terminal)" : "",
                                 onclick: () => control(n, "start") }));
@@ -398,7 +391,7 @@ async function start() {
   if (!nodes.length) grid.append(h("p", { id: "empty", textContent: "No nodes enabled in the frontend's nodes.yaml." }));
   const planned = cfg.filter(c => c.enabled === false);
   document.getElementById("planned").textContent = planned.length
-    ? "Planned (disabled in nodes.yaml): " + planned.map(c => c.name + " :" + c.port).join(", ") : "";
+    ? "Planned (disabled in nodes.yaml): " + planned.map(c => c.name).join(", ") : "";
   loadTools();
   pollManaged();
   setInterval(pollManaged, 2000);

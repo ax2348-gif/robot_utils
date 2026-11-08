@@ -205,7 +205,7 @@ def test_meta_toolkit_and_page_use_relative_urls(node_url):
     assert meta == {"name": "swerve", "title": "Swerve base", "version": meta["version"], "kind": "swerve",
                     "has_page": True, "page": "./", "actuated": True,
                     "endpoints": {"health": "health", "state": "state", "events": "events", "estop": "estop"},
-                    "rate_hz": 100, "port_default": 8102}
+                    "rate_hz": 100}
     js = httpx.get(url + "/common/ui.js")
     assert js.status_code == 200 and "javascript" in js.headers["content-type"] and "RU.leaseWidget" in js.text
     assert httpx.get(url + "/common/ui.css").status_code == 200

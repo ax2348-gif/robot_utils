@@ -18,11 +18,13 @@ from robot_utils.frontend.config import ConfigError, NodeEntry, load_config, par
 
 def test_packaged_default_config():
     nodes = {n.name: n for n in load_config()}
-    assert (nodes["camera"].port, nodes["camera"].enabled) == (8101, True)
-    assert (nodes["swerve"].port, nodes["swerve"].enabled) == (8102, True)
-    assert (nodes["arm"].port, nodes["arm"].enabled) == (8103, False)
-    assert (nodes["estimator"].port, nodes["estimator"].enabled) == (8110, True)
+    assert (nodes["camera"].node_kind, nodes["camera"].enabled) == ("camera", True)
+    assert (nodes["swerve"].node_kind, nodes["swerve"].enabled) == ("swerve", True)
+    assert (nodes["arm"].node_kind, nodes["arm"].enabled) == ("arm", False)
+    assert (nodes["estimator"].node_kind, nodes["estimator"].enabled) == ("estimator", True)
     assert all(n.host is None for n in nodes.values())
+    # sockets, no ports (description keeps TCP 8104 until it moves to the serve helper)
+    assert all(n.port is None for name, n in nodes.items() if name != "description")
 
 
 def test_config_file(tmp_path):
@@ -34,7 +36,8 @@ def test_config_file(tmp_path):
 @pytest.mark.parametrize(
     "data, msg",
     [
-        ({"nodes": [{"name": "a"}]}, "port"),
+        ({"nodes": [{"name": "a", "host": "pi"}]}, "needs a 'port'"),
+        ({"nodes": [{"name": "a", "kind": "x y"}]}, "kind"),
         ({"nodes": [{"name": "a", "port": 0}]}, "port"),
         ({"nodes": [{"name": "a", "port": True}]}, "port"),
         ({"nodes": [{"name": "a b", "port": 1}]}, "name"),
@@ -72,7 +75,8 @@ def meta(name, actuated, estop="estop"):
 
 
 class FakeNodes:
-    """Routes requests by port: {port: behaviour}. Records every request it sees."""
+    """Routes requests by node: {name: behaviour} for local nodes (URL http://<name>/, i.e. its
+    unix socket) or {port: behaviour} for remote ones. Records every request it sees."""
 
     def __init__(self, nodes: dict[int, dict]):
         self.nodes = nodes
@@ -80,7 +84,8 @@ class FakeNodes:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.seen.append((request.method, str(request.url)))
-        node = self.nodes.get(request.url.port)
+        key = request.url.host if request.url.host in self.nodes else request.url.port
+        node = self.nodes.get(key)
         if node is None or node.get("down"):
             raise httpx.ConnectError("refused", request=request)
         path = request.url.path
@@ -106,32 +111,31 @@ def test_landing_page_and_node_list():
     with client_for(nodes, FakeNodes({})) as c:
         r = c.get("/")
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
-        assert "E-STOP ALL" in r.text and "location.hostname" in r.text
+        assert "E-STOP ALL" in r.text and '"nodes/" + encodeURIComponent(n.cfg.name)' in r.text
         assert "localhost" not in r.text and "https://" not in r.text  # no CDN, no hardwired host
         assert 'fetchJson("api/nodes"' in r.text  # relative URL within the frontend
         r = c.get("/api/nodes")
         assert r.json() == {"nodes": [
-            {"name": "camera", "port": 8101, "host": None, "enabled": True, "start": None},
-            {"name": "arm", "port": 8103, "host": None, "enabled": False, "start": None},
-            {"name": "x", "port": 9000, "host": "other", "enabled": True, "start": None},
+            {"name": "camera", "port": 8101, "host": None, "enabled": True, "start": None, "kind": None},
+            {"name": "arm", "port": 8103, "host": None, "enabled": False, "start": None, "kind": None},
+            {"name": "x", "port": 9000, "host": "other", "enabled": True, "start": None, "kind": None},
         ]}
         assert c.get("/api/health").json() == {"ok": True}
 
 
 def test_estop_fanout_mixed():
     fake = FakeNodes({
-        8101: {"meta": meta("camera", actuated=False)},
-        8102: {"meta": meta("swerve", actuated=True)},
-        8103: {"meta": meta("arm", actuated=True, estop="stop/now"), "estop_path": "/stop/now"},
-        8104: {"down": True},
-        8105: {"meta": meta("bad", actuated=True), "estop_status": 500, "estop_reply": {}},
-        8106: {"meta": meta("liar", actuated=True), "estop_reply": {"latched": False}},
-        8107: {"meta": meta("slow", actuated=True), "estop_timeout": True},
-        8108: {"meta": meta("off", actuated=True)},
+        "camera": {"meta": meta("camera", actuated=False)},
+        "swerve": {"meta": meta("swerve", actuated=True)},
+        "arm": {"meta": meta("arm", actuated=True, estop="stop/now"), "estop_path": "/stop/now"},
+        "gone": {"down": True},
+        "bad": {"meta": meta("bad", actuated=True), "estop_status": 500, "estop_reply": {}},
+        "liar": {"meta": meta("liar", actuated=True), "estop_reply": {"latched": False}},
+        "slow": {"meta": meta("slow", actuated=True), "estop_timeout": True},
+        "off": {"meta": meta("off", actuated=True)},
     })
-    nodes = [NodeEntry(n, p) for n, p in [("camera", 8101), ("swerve", 8102), ("arm", 8103), ("gone", 8104),
-                                          ("bad", 8105), ("liar", 8106), ("slow", 8107)]]
-    nodes.append(NodeEntry("off", 8108, enabled=False))
+    nodes = [NodeEntry(n) for n in ("camera", "swerve", "arm", "gone", "bad", "liar", "slow")]
+    nodes.append(NodeEntry("off", enabled=False))
     with client_for(nodes, fake) as c:
         r = c.post("/api/estop")
     assert r.status_code == 502
@@ -148,30 +152,30 @@ def test_estop_fanout_mixed():
         "slow": ("unreachable", "timed out"),
     }
     posts = [u for m, u in fake.seen if m == "POST"]
-    assert "http://127.0.0.1:8103/stop/now" in posts
-    assert not any(":8101/" in u or ":8108/" in u for u in posts)  # camera and disabled: never posted
+    assert "http://arm/stop/now" in posts                        # local node: its unix socket
+    assert not any("//camera/" in u or "//off/" in u for u in posts)  # camera and disabled: never posted
 
 
 def test_estop_all_latched_is_ok_and_uses_host():
-    fake = FakeNodes({8102: {"meta": meta("swerve", actuated=True)}, 8103: {"meta": meta("arm", actuated=True)}})
-    nodes = [NodeEntry("swerve", 8102), NodeEntry("arm", 8103, host="arm-pi")]
+    fake = FakeNodes({"swerve": {"meta": meta("swerve", actuated=True)}, 8103: {"meta": meta("arm", actuated=True)}})
+    nodes = [NodeEntry("swerve"), NodeEntry("arm", 8103, host="arm-pi")]
     with client_for(nodes, fake) as c:
         r = c.post("/api/estop")
     assert r.status_code == 200 and r.json()["ok"] is True
     assert ("POST", "http://arm-pi:8103/estop") in fake.seen
-    assert ("POST", "http://127.0.0.1:8102/estop") in fake.seen
+    assert ("POST", "http://swerve/estop") in fake.seen
 
 
 def test_estop_without_meta_still_tries_default_path():
-    fake = FakeNodes({8102: {}})  # /meta 404, /estop works
-    with client_for([NodeEntry("swerve", 8102)], fake) as c:
+    fake = FakeNodes({"swerve": {}})  # /meta 404, /estop works
+    with client_for([NodeEntry("swerve")], fake) as c:
         r = c.post("/api/estop")
     assert r.json()["results"][0]["status"] == "latched"
 
 
 def test_estop_nothing_actuated_is_not_ok():
-    fake = FakeNodes({8101: {"meta": meta("camera", actuated=False)}})
-    with client_for([NodeEntry("camera", 8101)], fake) as c:
+    fake = FakeNodes({"camera": {"meta": meta("camera", actuated=False)}})
+    with client_for([NodeEntry("camera")], fake) as c:
         r = c.post("/api/estop")
     assert r.status_code == 502 and r.json()["results"][0]["status"] == "skipped"
 
@@ -195,28 +199,31 @@ def test_estop_path(m, expected):
 
 # --- CLI ------------------------------------------------------------------------------------
 
-def test_cli_permission_error_points_to_script(monkeypatch, capsys):
+def test_cli_permission_error_points_to_script(monkeypatch, capsys, tmp_sock_dir):
+    import robot_utils.nodes.common.serve as serve_mod
+
     def deny(host, port):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(cli, "bind", deny)
-    assert cli.main(["--port", "80"]) == 1
-    err = capsys.readouterr().err
-    assert "sudo tools/enable_low_ports.sh" in err and "--port 8080" in err
+    monkeypatch.setattr(serve_mod, "bind_tcp", deny)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--port", "80"])
+    assert "sudo tools/enable_low_ports.sh" in str(e.value) and "--port 8080" in str(e.value)
 
 
-def test_cli_port_in_use(capsys):
+def test_cli_port_in_use(tmp_sock_dir):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         s.listen()
         port = s.getsockname()[1]
-        assert cli.main(["--host", "127.0.0.1", "--port", str(port)]) == 1
-    assert "already in use" in capsys.readouterr().err
+        with pytest.raises(SystemExit) as e:
+            cli.main(["--host", "127.0.0.1", "--port", str(port)])
+    assert "cannot listen" in str(e.value)
 
 
 def test_cli_bad_config(tmp_path, capsys):
     p = tmp_path / "n.yaml"
-    p.write_text(json.dumps({"nodes": [{"name": "a"}]}))
+    p.write_text(json.dumps({"nodes": [{"name": "a", "host": "pi"}]}))
     assert cli.main(["--config", str(p)]) == 2
     assert "port" in capsys.readouterr().err
 
@@ -231,7 +238,7 @@ class EchoNode:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
-        if request.url.port != 8102:
+        if request.url.host != "swerve":
             raise httpx.ConnectError("refused", request=request)
         return httpx.Response(201, json={"method": request.method, "path": request.url.path,
                                          "query": str(request.url.query, "ascii"),
@@ -241,7 +248,7 @@ class EchoNode:
 
 
 def test_proxy_forwards_to_the_node_same_origin():
-    nodes = [NodeEntry("swerve", 8102), NodeEntry("camera", 8101), NodeEntry("arm", 8103, enabled=False)]
+    nodes = [NodeEntry("swerve"), NodeEntry("camera"), NodeEntry("arm", enabled=False)]
     echo = EchoNode()
     with TestClient(create_app(nodes, transport=httpx.MockTransport(echo))) as c:
         r = c.post("/nodes/swerve/command?x=1", json={"twist": [0.1, 0, 0]},
@@ -252,12 +259,15 @@ def test_proxy_forwards_to_the_node_same_origin():
         assert body["token"] == "tok" and '"twist"' in body["body"]
         assert "x-internal" not in r.headers
         assert "cookie" not in {k.lower() for k in echo.seen[-1].headers}       # only allow-listed headers
-        assert str(echo.seen[-1].url).startswith("http://127.0.0.1:8102/")      # loopback on the robot
+        assert str(echo.seen[-1].url).startswith("http://swerve/")              # its unix socket
+        assert echo.seen[-1].headers["x-forwarded-prefix"] == "/nodes/swerve"
         assert c.delete("/nodes/swerve/lease").json()["method"] == "DELETE"
         r = c.get("/nodes/camera/state")                                         # node down
-        assert r.status_code == 502 and "unreachable" in r.json()["detail"]
+        assert r.status_code == 502 and "not running" in r.json()["detail"]
         assert c.get("/nodes/arm/state").status_code == 404                      # disabled node
         assert c.get("/nodes/nope/state").status_code == 404
+        r = c.get("/nodes/swerve", follow_redirects=False)
+        assert r.status_code == 301 and r.headers["location"] == "swerve/"
 
 
 def test_tools_listed_and_served():
@@ -318,3 +328,25 @@ def test_restart_replies_then_restarts():
     with client_for([], FakeNodes({})) as c:
         page = c.get("/").text
         assert 'fetchJson("api/frontend/restart"' in page and "Restart landing page" in page
+
+
+def test_local_node_with_port_uses_tcp_until_its_socket_exists():
+    """A local node not yet on the serve helper (e.g. description on 8104) is reached on
+    127.0.0.1:<port>; once its socket exists, over the socket."""
+    from robot_utils.frontend.app import node_base_url
+    from robot_utils.nodes.common.serve import bind_uds, socket_path
+    node = NodeEntry("description", 8104)
+    assert node_base_url(node) == "http://127.0.0.1:8104/"
+    s = bind_uds(socket_path("description"))
+    try:
+        assert node_base_url(node) == "http://description/"
+    finally:
+        s.close()
+    assert node_base_url(NodeEntry("swerve")) == "http://swerve/"
+    assert node_base_url(NodeEntry("arm", 8103, host="arm-pi")) == "http://arm-pi:8103/"
+
+
+def test_packaged_config_covers_description_for_estop():
+    nodes = {n.name: n for n in load_config()}
+    d = nodes["description"]
+    assert d.enabled and d.node_kind == "description" and d.start.module == "robot_utils.nodes.description"

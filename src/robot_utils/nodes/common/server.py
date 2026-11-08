@@ -148,6 +148,8 @@ def add_page_routes(app: FastAPI, meta: dict) -> None:
 
     from .ui_assets import UI_CSS, UI_JS
 
+    app.state.node_meta = meta   # serve() sets meta["name"] to the instance name
+
     @app.get("/meta", tags=["state"], summary="What this node is (for dashboards)")
     async def get_meta():
         return meta

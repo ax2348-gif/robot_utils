@@ -5,8 +5,8 @@ over HTTP: a twist command, a lease so only one client controls the base, an e-s
 control tick as a binary telemetry stream. Shared conventions (time, framing, lease, e-stop,
 `/meta`, the browser toolkit): [nodes.md](nodes.md).
 
-- Page: `http://<pi>:8102/` (lease, enable, jog pad with W A S D / Q E, e-stop, live plot)
-- Interactive API docs: `http://<pi>:8102/docs`
+- Page: `http://<robot>/nodes/swerve/` (lease, enable, jog pad with W A S D / Q E, e-stop, live plot)
+- Interactive API docs: `http://<robot>/nodes/swerve/docs`
 - `<pi>` = `botcore-desktop`, `192.168.8.209` (LAN) or `100.80.153.120` (Tailscale)
 
 ## Quick start
@@ -14,7 +14,7 @@ control tick as a binary telemetry stream. Shared conventions (time, framing, le
 On the robot (SPARKs configured once with `python -m robot_utils.nodes.swerve.setup_sparks`):
 
 ```bash
-cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.swerve      # port 8102, all interfaces
+cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.swerve      # instance 'swerve': /nodes/swerve/ (--port 8102 to debug)
 ```
 
 It finds the CANable under `/dev/serial/by-id` (or `$CAN`, or `--interface slcan:/dev/ttyACM0`).
@@ -25,7 +25,7 @@ From any machine:
 ```python
 from robot_utils.nodes.swerve.client import SwerveClient
 
-with SwerveClient("http://botcore-desktop:8102") as base:
+with SwerveClient("http://botcore/nodes/swerve") as base:   # on the robot: SwerveClient("swerve")
     base.sync()                                    # clock sync for the stream's timestamps
     with base.control("my-experiment"):            # lease + enable; disable + release on exit
         base.set_limits(max_speed=0.3, max_omega=1.0)
@@ -69,7 +69,7 @@ is applied (seen as a `seq` that never appears in the stream).
 ### curl
 
 ```bash
-N=http://botcore-desktop:8102
+N=http://botcore/nodes/swerve
 T=$(curl -s -X POST $N/lease -H 'content-type: application/json' -d '{"client":"curl"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 curl -s -X POST $N/enable -H "X-Lease-Token: $T"
 for i in $(seq 20); do curl -s -X POST $N/command -H "X-Lease-Token: $T" -H 'content-type: application/json' \
@@ -81,7 +81,7 @@ curl -s -X POST $N/estop                                      # anyone, any time
 ### JavaScript (from another page or a dashboard; CORS is open)
 
 ```js
-const N = "http://botcore-desktop:8102/";
+const N = "http://botcore/nodes/swerve/";
 const {token} = await (await fetch(N + "lease", {method: "POST", headers: {"content-type": "application/json"},
                                                   body: JSON.stringify({client: "my-page"})})).json();
 const H = {"content-type": "application/json", "X-Lease-Token": token};

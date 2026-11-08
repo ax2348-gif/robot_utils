@@ -2,7 +2,7 @@
 
     from robot_utils.nodes.swerve.client import SwerveClient
 
-    with SwerveClient("http://botcore-desktop:8102") as base:
+    with SwerveClient("http://botcore/nodes/swerve") as base:   # on the robot: SwerveClient("swerve")
         base.sync()                              # clock sync for the stream's timestamps
         with base.control("my-experiment"):      # lease + enable; stops, disables, releases on exit
             base.drive_for((0.2, 0.0, 0.0), seconds=1.0)   # resends every 50 ms (0.25 s timeout)
@@ -23,8 +23,8 @@ from ..common.client import NodeClient, NodeError   # noqa: F401 (re-exported)
 
 
 class SwerveClient(NodeClient):
-    def __init__(self, base_url: str = "http://localhost:8102", timeout: float = 5.0):
-        super().__init__(base_url, timeout)
+    def __init__(self, target: str = "swerve", timeout: float = 5.0):
+        super().__init__(target, timeout)
         self.token: Optional[str] = None
         self._seq = 0
 

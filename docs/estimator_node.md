@@ -5,19 +5,19 @@
 attitude filter** (heading). It moves nothing and needs no lease. Shared conventions (time,
 framing, `/meta`, the browser toolkit): [nodes.md](nodes.md).
 
-- Page: `http://<pi>:8110/`: trajectory map, pose, inputs, heading / yaw-rate / speed plots
-- Interactive API docs: `http://<pi>:8110/docs`
+- Page: `http://<robot>/nodes/estimator/`: trajectory map, pose, inputs, heading / yaw-rate / speed plots
+- Interactive API docs: `http://<robot>/nodes/estimator/docs`
 - `<pi>` = `botcore-desktop`, `192.168.8.209` (LAN) or `100.80.153.120` (Tailscale)
 
 ## Quick start
 
-On the robot, with the swerve (8102) and camera (8101) nodes running:
+On the robot, with the swerve and camera nodes running:
 
 ```bash
-cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.estimator      # port 8110
+cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.estimator      # instance 'estimator': /nodes/estimator/
 ```
 
-Options: `--swerve URL` and `--camera URL` (defaults `http://127.0.0.1:8102` / `:8101`; `none`
+Options: `--swerve` and `--camera` take instance names or URLs (defaults `swerve` / `camera`: their unix sockets, docs/nodes.md; `none`
 disables one), `--host`, `--port`. Either upstream may be down or start later: the node
 reconnects every second and reports what it is running on (`mode`).
 
@@ -26,7 +26,7 @@ estimator at them, and drive the simulated base from the swerve page.
 
 ```python
 from robot_utils.nodes.common.client import NodeClient
-with NodeClient("http://botcore-desktop:8110") as est:
+with NodeClient("http://botcore/nodes/estimator") as est:   # on the robot: NodeClient("estimator")
     est.post("/reset", {})                      # pose = origin (x forward, y left)
     print(est.get("/state")["pose"])            # latest pose as JSON
     for header, rows in est.rows("/stream"):    # every pose, 100 Hz
@@ -102,7 +102,7 @@ visual odometry. The world frame is the pose at the last `POST /reset`. Assumes 
 ### curl / JavaScript
 
 ```bash
-N=http://botcore-desktop:8110
+N=http://botcore/nodes/estimator
 curl -s $N/pose
 curl -s -X POST $N/reset -H 'content-type: application/json' -d '{"x": 0, "y": 0, "theta": 0}'
 curl -s -N $N/stream | head -c 2000 | xxd | head        # binary records
@@ -110,7 +110,7 @@ curl -s -N $N/stream | head -c 2000 | xxd | head        # binary records
 
 ```js
 // on another page (CORS is open); with common/ui.js: RU.rows(N + "stream", d => ...)
-const N = "http://botcore-desktop:8110/";
+const N = "http://botcore/nodes/estimator/";
 setInterval(async () => { const p = await (await fetch(N + "pose")).json(); console.log(p.x, p.y, p.theta); }, 500);
 ```
 

@@ -84,7 +84,7 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     setup_app(app)
     add_base_routes(app, lambda: {"node": "swerve", "state": node.status})
     add_page_routes(app, node_meta("swerve", "Swerve base", app.version, "swerve", actuated=True,
-                                   rate_hz=100, port_default=8102))
+                                   rate_hz=100))
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def index():

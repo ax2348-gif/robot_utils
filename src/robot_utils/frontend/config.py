@@ -20,22 +20,30 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class StartRecipe:
-    """How the frontend may start a node: ``python -m <module> <args...>`` (the frontend's own
-    interpreter, i.e. the robot venv)."""
+    """How the frontend may start a node: ``python -m <module> --name <instance> <args...>``
+    (the frontend's own interpreter, i.e. the robot venv)."""
     module: str
     args: tuple[str, ...] = ()
 
-    def argv(self, python: str) -> list[str]:
-        return [python, "-m", self.module, *self.args]
+    def argv(self, python: str, name: str) -> list[str]:
+        return [python, "-m", self.module, "--name", name, *self.args]
 
 
 @dataclass(frozen=True)
 class NodeEntry:
+    """One node instance. On this machine (no ``host``) it is reached over its unix socket
+    ``<runtime dir>/robot/<name>.sock``; ``port`` is then optional (a debug TCP port the node was
+    told to open, checked as "already up"). On another machine, ``host`` and ``port`` are needed."""
     name: str
-    port: int
-    host: str | None = None  # None: same host as the frontend (the browser's hostname)
+    port: int | None = None
+    host: str | None = None
     enabled: bool = True
     start: StartRecipe | None = None  # None: the frontend cannot start this node
+    kind: str | None = None           # camera, swerve, estimator, ... (default: the name)
+
+    @property
+    def node_kind(self) -> str:
+        return self.kind or self.name
 
     def as_dict(self) -> dict:
         d = asdict(self)
@@ -53,8 +61,8 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
     for i, raw in enumerate(data.get("nodes") or []):
         where = f"{source}: nodes[{i}]"
         if not isinstance(raw, dict):
-            raise ConfigError(f"{where}: expected a mapping like {{name: swerve, port: 8102}}")
-        unknown = set(raw) - {"name", "port", "host", "enabled", "start"}
+            raise ConfigError(f"{where}: expected a mapping like {{name: swerve, kind: swerve}}")
+        unknown = set(raw) - {"name", "kind", "port", "host", "enabled", "start"}
         if unknown:
             raise ConfigError(f"{where}: unknown keys {sorted(unknown)}")
         name = raw.get("name")
@@ -62,12 +70,17 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
             raise ConfigError(f"{where}: 'name' must be a short identifier, got {name!r}")
         if name in seen:
             raise ConfigError(f"{where}: duplicate name {name!r}")
+        kind = raw.get("kind")
+        if kind is not None and (not isinstance(kind, str) or not _NAME.match(kind)):
+            raise ConfigError(f"{where}: 'kind' must be a short identifier, got {kind!r}")
         port = raw.get("port")
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
             raise ConfigError(f"{where}: 'port' must be an integer 1-65535, got {port!r}")
         host = raw.get("host")
         if host is not None and (not isinstance(host, str) or not host.strip()):
             raise ConfigError(f"{where}: 'host' must be a hostname or omitted, got {host!r}")
+        if host is not None and port is None:
+            raise ConfigError(f"{where}: a node on another machine ('host') needs a 'port'")
         enabled = raw.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"{where}: 'enabled' must be true or false, got {enabled!r}")
@@ -75,7 +88,7 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
         if start is not None and host is not None:
             raise ConfigError(f"{where}: 'start' only works for nodes on this machine (no 'host')")
         seen.add(name)
-        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled, start))
+        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled, start, kind))
     return nodes
 
 

@@ -1,20 +1,26 @@
-# Nodes shown on the robot's landing page (python -m robot_utils.frontend).
+# Node instances shown on the robot's landing page (python -m robot_utils.frontend).
 #
-# One entry per node process. Adding a node = adding a line here; no code changes.
-#   name:    short id, used as the tile's fallback title until the node's /meta answers
-#   port:    the node's HTTP port
-#   host:    optional; omit for "same machine as the frontend" (the page then uses whatever
-#            hostname the browser used to reach the frontend, so links work from other
-#            machines). Never write "localhost" here unless only local browsers matter.
+# One entry per node process. Adding an instance = adding a line here; no code changes, no proxy
+# change: the robot's port-80 proxy maps http://<robot>/nodes/<name>/ to the unix socket
+# <runtime dir>/robot/<name>.sock, which the node opens itself (--name <name>).
+#   name:    instance name: socket, URL path, tile title until the node's /meta answers
+#   kind:    optional, default = name: what the node is (camera, swerve, estimator, ...)
+#   start:   optional; lets the landing page start/stop the instance: {module: ..., args: [...]}
+#            runs `python -m <module> --name <name> <args>` with the frontend's interpreter (the
+#            robot venv) as the systemd user unit robot-node-<name>. The frontend refuses to
+#            start an instance whose socket already answers (e.g. started by hand) and only
+#            stops its own units. A second camera, e.g.:
+#              {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 #   enabled: optional, default true; false = listed as "planned", not polled, not e-stopped
-#   start:   optional; lets the landing page start/stop the node: {module: ..., args: [...]}
-#            runs `python -m <module> <args>` with the frontend's interpreter (the robot venv).
-#            The frontend refuses to start a node whose port is already in use (e.g. started
-#            by hand) and only stops nodes it started itself. Local nodes only (no host).
+#   port:    optional; for a local instance, a debug TCP port it was told to open (--port);
+#   host:    with port, for a node on another machine (reached through the frontend's proxy)
 #
 # Override with: python -m robot_utils.frontend --config /path/to/nodes.yaml
 nodes:
-  - {name: camera, port: 8101, start: {module: robot_utils.nodes.orbbec}}
-  - {name: swerve, port: 8102, start: {module: robot_utils.nodes.swerve}}
-  - {name: arm, port: 8103, enabled: false}        # future
-  - {name: estimator, port: 8110, start: {module: robot_utils.nodes.estimator}}
+  - {name: camera, kind: camera, start: {module: robot_utils.nodes.orbbec}}
+  - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve}}
+  - {name: arm, kind: arm, enabled: false}        # future
+  - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
+  # port 8104: the description node listens on TCP until it moves to the serve helper (--name);
+  # the landing page and proxy reach it on 127.0.0.1:8104 while its socket doesn't exist.
+  - {name: description, kind: description, port: 8104, start: {module: robot_utils.nodes.description}}

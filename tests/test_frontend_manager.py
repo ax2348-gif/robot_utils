@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from robot_utils.frontend.app import create_app
 from robot_utils.frontend.config import ConfigError, NodeEntry, StartRecipe, load_config, parse_config
 from robot_utils.frontend.manager import (ManagerError, NodeManager, SubprocessRunner, SystemdRunner,
-                                          UnitStatus, port_in_use)
+                                          UnitStatus, instance_up)
 
 
 # --- config ---------------------------------------------------------------------------------
@@ -22,7 +22,7 @@ def test_start_recipe_parsed_and_packaged():
     assert nodes["swerve"].start == StartRecipe("robot_utils.nodes.swerve")
     assert nodes["arm"].start is None
     n = parse_config({"nodes": [{"name": "a", "port": 1, "start": {"module": "x.y", "args": ["--v"]}}]})[0]
-    assert n.start.argv("/py") == ["/py", "-m", "x.y", "--v"]
+    assert n.start.argv("/py", "a") == ["/py", "-m", "x.y", "--name", "a", "--v"]
 
 
 @pytest.mark.parametrize("start, msg", [
@@ -70,9 +70,9 @@ NODES = [NodeEntry("cam", 8101, start=StartRecipe("robot_utils.nodes.orbbec")),
          NodeEntry("view", 8105), NodeEntry("off", 8103, enabled=False, start=StartRecipe("m"))]
 
 
-def manager(busy_ports=()):
+def manager(up=()):
     return NodeManager(NODES, FakeRunner(), cwd="/repo", python="/venv/python",
-                       port_check=lambda port: port in busy_ports)
+                       up_check=lambda node: node.name in up)
 
 
 def run(coro):
@@ -83,7 +83,8 @@ def test_start_runs_recipe_and_stop_only_own():
     m = manager()
     st = run(m.start("cam"))
     assert st["managed"]["state"] == "running" and st["startable"] and st["unit"] == "robot-node-cam.service"
-    assert m.runner.calls == [("start", "cam", ["/venv/python", "-m", "robot_utils.nodes.orbbec"], "/repo")]
+    assert m.runner.calls == [("start", "cam", ["/venv/python", "-m", "robot_utils.nodes.orbbec",
+                                                "--name", "cam"], "/repo")]
     with pytest.raises(ManagerError) as e:
         run(m.start("cam"))                     # unit already running
     assert e.value.status == 409
@@ -93,14 +94,29 @@ def test_start_runs_recipe_and_stop_only_own():
     assert e.value.status == 409 and "only stops nodes it started" in e.value.detail
 
 
-def test_start_refused_when_port_in_use():
-    m = manager(busy_ports={8101})
+def test_start_refused_when_instance_already_up():
+    m = manager(up={"cam"})
     with pytest.raises(ManagerError) as e:
         run(m.start("cam"))
-    assert e.value.status == 409 and "already in use" in e.value.detail
+    assert e.value.status == 409 and "already running outside" in e.value.detail
     assert m.runner.calls == []                 # never started, never stopped anything
     st = run(m.status("cam"))
-    assert st["port_in_use"] and st["managed"]["state"] == "stopped"
+    assert st["listening"] and st["managed"]["state"] == "stopped" and st["socket"].endswith("/robot/cam.sock")
+
+
+def test_instance_up_uses_the_socket_then_the_debug_port():
+    import socket as so
+    from robot_utils.nodes.common.serve import bind_uds, socket_path
+    node = NodeEntry("probe")
+    assert not instance_up(node)
+    s = bind_uds(socket_path("probe"))
+    try:
+        assert instance_up(node)
+    finally:
+        s.close()
+    with so.socket() as t:
+        t.bind(("127.0.0.1", 0)); t.listen()
+        assert instance_up(NodeEntry("other", t.getsockname()[1]))   # debug port in use
 
 
 def test_no_recipe_or_unknown_node():
@@ -177,29 +193,43 @@ def test_systemd_status_parsing(show, state, result):
 
 # --- subprocess runner: a real child process (python -m http.server as a stand-in node) -----
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+STAND_IN = """
+import argparse
+from fastapi import FastAPI
+from robot_utils.nodes.common.serve import add_serve_args, serve
+from robot_utils.nodes.common.server import add_page_routes, node_meta
+p = argparse.ArgumentParser(); add_serve_args(p, "standin"); a = p.parse_args()
+app = FastAPI(); add_page_routes(app, node_meta("standin", "Stand-in", "0", "standin", actuated=False))
+serve(app, a)
+"""
 
 
-def test_subprocess_runner_end_to_end(tmp_path):
-    port = free_port()
-    node = NodeEntry("web", port, start=StartRecipe("http.server", (str(port), "--bind", "127.0.0.1")))
+def test_subprocess_runner_end_to_end(tmp_path, monkeypatch):
+    """A real child through the real serve() helper: --name -> socket, up, stop, socket gone."""
+    import os
+    import httpx
+    from robot_utils.nodes.common.serve import socket_path
+    (tmp_path / "standin_node.py").write_text(STAND_IN)
+    src = os.path.join(os.path.dirname(__file__), os.pardir, "src")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(tmp_path), os.path.abspath(src),
+                                                      os.environ.get("PYTHONPATH", "")]))
+    node = NodeEntry("web", start=StartRecipe("standin_node"))
 
     async def scenario():
         m = NodeManager([node], SubprocessRunner(), cwd=str(tmp_path), python=sys.executable)
         st = await m.start("web")
         assert st["managed"]["state"] == "running"
-        for _ in range(50):
-            if port_in_use(port):
+        for _ in range(100):
+            if instance_up(node):
                 break
             await asyncio.sleep(0.1)
-        assert port_in_use(port)
+        assert instance_up(node)
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(socket_path("web")))) as c:
+            assert c.get("http://web/meta").json()["name"] == "web"     # --name reached /meta
         with pytest.raises(ManagerError):
             await m.start("web")                       # already running
         st = await m.stop("web")
         assert st["managed"]["state"] == "stopped"
         await asyncio.sleep(0.2)
-        assert not port_in_use(port)
+        assert not instance_up(node) and not socket_path("web").exists()
     asyncio.run(scenario())
