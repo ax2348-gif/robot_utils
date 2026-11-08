@@ -10,6 +10,7 @@ endpoints. There is no ROS and no message broker; clients talk to nodes directly
 | swerve base | `robot_utils.nodes.swerve` | 8102 | yes | [swerve_node.md](swerve_node.md) |
 | arm (planned) | | 8103 | yes | |
 | estimator (pose: wheel odometry + IMU heading) | `robot_utils.nodes.estimator` | 8110 | no | [estimator_node.md](estimator_node.md) |
+| description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | 8104 | yes | [description_node.md](description_node.md) |
 
 Ports: nodes use **81xx**; **80xx** (and 80) is left for a frontend dashboard. Port 8081 on
 the Pi is taken by the UPS dashboard. Every node binds `0.0.0.0` by default.

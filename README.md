@@ -50,6 +50,7 @@ landing page that indexes them. Start each on the robot from this checkout, with
 | camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | 8101 | [docs/orbbec_node.md](docs/orbbec_node.md) |
 | swerve base | `python -m robot_utils.nodes.swerve` | 8102 | [docs/swerve_node.md](docs/swerve_node.md) |
 | estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | 8110 | [docs/estimator_node.md](docs/estimator_node.md) |
+| robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | 8104 | [docs/description_node.md](docs/description_node.md) |
 | landing page | `python -m robot_utils.frontend` | 80 | [docs/frontend.md](docs/frontend.md) |
 
 Then open `http://<robot>/` (on the robot's Wi-Fi, `botcore/`): a tile per node linking to

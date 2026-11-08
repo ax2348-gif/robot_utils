@@ -30,3 +30,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "robot_utils.frontend" = ["nodes.yaml", "page.html", "tools/*.html"]
+"robot_utils.nodes.description" = ["default_description.yaml"]

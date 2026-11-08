@@ -177,6 +177,48 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         with owner.lock:
             return dict(owner.calibration)
 
+    @app.get("/description", tags=["state"], summary="The camera's frames, conventions and intrinsics (for a robot description)")
+    async def description():
+        """A small frame tree for this camera. Every frame is in **metres**, optical convention
+        **x right, y down, z out of the lens**. ``root`` is ``depth_optical`` (the frame depth
+        pixels unproject into, and the one a robot description attaches to its body); every
+        other frame gives its pose in its parent: ``p_parent = rotation · p_child + translation``
+        (rotation row-major 3x3, translation in m). Factory values; the IMU frame equals the depth
+        frame's axes on this camera. ``intrinsics`` are pinhole parameters of the active profiles
+        (pixels of that profile's size), as ``/calibration``. Changes when the profiles change
+        (``settings_version``)."""
+        import numpy as np
+        with owner.lock:
+            cal = dict(owner.calibration)
+            info = owner.info
+        frames = {"depth_optical": {"parent": None}}
+
+        def child(ext, invert):
+            if not ext:
+                return None
+            R = np.asarray(ext["rotation"], dtype=float)
+            t = np.asarray(ext["translation_mm"], dtype=float) / 1000.0
+            if invert:   # ext maps parent -> child; we want child's pose in the parent
+                R, t = R.T, -R.T @ t
+            return {"rotation": np.round(R, 9).tolist(), "translation": np.round(t, 6).tolist()}
+
+        c = child(cal.get("depth_to_color"), invert=True)
+        if c:
+            frames["color_optical"] = {"parent": "depth_optical", **c}
+        imu = child((cal.get("imu") or {}).get("accel_to_depth"), invert=False)
+        if imu:
+            frames["imu"] = {"parent": "depth_optical", **imu}
+        return {
+            "kind": "orbbec", "root": "depth_optical",
+            "device": None if info is None else {"name": info.name, "serial": info.serial, "firmware": info.firmware},
+            "conventions": {"optical": "x right, y down, z out of the lens", "units": "m",
+                            "transform": "p_parent = rotation @ p_child + translation"},
+            "frames": frames,
+            "intrinsics": {k: cal[k] for k in ("depth", "color") if k in cal},
+            "aligned_depth": bool(cal.get("aligned_depth")),
+            "settings_version": cal.get("settings_version"),
+        }
+
     @app.get("/state", response_model=State, tags=["state"], summary="Node, device, stream and IMU status")
     async def get_state():
         return owner.status()

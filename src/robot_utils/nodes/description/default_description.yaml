@@ -1,0 +1,22 @@
+# Default (nominal) robot description, shipped with the code. The node's live state (measured
+# poses you set through the API, calibrations) lives in ~/.local/share/robot_utils/description/
+# (--data-dir), never in this checkout.
+#
+# Frames: a flat map, each naming its parent. A frame's pose in its parent: p_parent = R p_child + t,
+# with rpy = fixed-axis X, Y, Z (as URDF: R = Rz(yaw) Ry(pitch) Rx(roll)), radians, xyz in metres.
+frames:
+  base:
+    parent: null
+    doc: floor level, centre of the wheels; x forward, y left, z up
+
+# Cameras: one entry per camera node instance. Its frames (depth_optical, color_optical, imu)
+# come from that node's GET /description and hang under "<name>/depth_optical", whose pose in
+# base is: the nominal pose below, refined by the active calibrations (ground plane: roll, pitch,
+# height; motion: yaw). x and y are never calibrated: measure them and set them with
+# POST /cameras/<name>/nominal.
+cameras:
+  camera:
+    url: http://127.0.0.1:8101
+    nominal:
+      xyz: [0.0, 0.0, 0.5]                    # measure (tape)
+      rpy: [-1.5707963, 0.0, -1.5707963]      # optical axis forward, image up = base up

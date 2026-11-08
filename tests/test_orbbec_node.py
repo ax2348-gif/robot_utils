@@ -251,6 +251,10 @@ def test_end_to_end_fake(fake_node, tmp_path):
     from robot_utils.nodes.orbbec.client import OrbbecClient, OrbbecError, read_recording, record
     with OrbbecClient(fake_node) as c:
         est = c.sync()
+        desc = c.get("/description")
+        assert desc["root"] == "depth_optical" and desc["device"]["serial"] and "color_optical" in desc["frames"]
+        col = desc["frames"]["color_optical"]
+        assert col["parent"] == "depth_optical" and col["translation"] == pytest.approx([0.025, 0.0, 0.0])
         cal = c.get("/calibration")
         assert {"depth", "color", "depth_to_color"} <= set(cal) and cal["depth"]["fx"] > 0 and cal["aligned_depth"] is False
         page = c.http.get("/").text
