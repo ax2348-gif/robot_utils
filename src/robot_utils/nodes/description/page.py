@@ -148,9 +148,13 @@ async function loadCals(){
   $("#cals").innerHTML = "<tr><th>type</th><th>id</th><th>camera</th><th>summary</th><th></th></tr>" + cals.map(c =>
     `<tr><td>${c.type}</td><td>${c.id}${c.active ? ' <span class="ru-pill ru-ok">active</span>' : ""}</td><td>${c.serial}</td><td>${c.summary || ""}${c.quality && !c.quality.ok ? '<div class="ru-err">not activated: ' + c.quality.problems.join("; ") + '</div>' : ""}</td>
      <td><button class="ru" data-act='${JSON.stringify({type: c.type, serial: c.serial, id: c.active ? null : c.id})}'>${c.active ? "Deactivate" : "Activate"}</button>
+     ${c.type === "yaw" && c.has_raw ? `<button class="ru" title="solve again from the raw data with the current solver (nothing moves); saves a new record" data-resolve='${JSON.stringify({serial: c.serial, id: c.id})}'>Re-solve</button>` : ""}
      <a href="calibrations/${c.type}/${c.serial}/${c.id}" target="_blank">json</a> ${c.has_raw ? `<a href="calibrations/${c.type}/${c.serial}/${c.id}/raw.npz">raw</a>` : ""}</td></tr>`).join("");
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => { const a = JSON.parse(b.dataset.act);
     await call(`calibrations/${a.type}/activate`, {serial: a.serial, id: a.id}); loadCals(); loadDesc(); });
+  document.querySelectorAll("[data-resolve]").forEach(b => b.onclick = async () => { const a = JSON.parse(b.dataset.resolve);
+    b.disabled = true; try { await call(`calibrations/yaw/${a.serial}/${a.id}/resolve`, {}); } finally { b.disabled = false; }
+    loadCals(); loadDesc(); });
 }
 
 // ---------- state ----------

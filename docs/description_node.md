@@ -83,6 +83,13 @@ with the ground calibration's.
   Safety aborts also **latch the swerve e-stop**; a requested abort only stops, disables and releases.
   The rate is averaged because single gyro samples spike past 10°/s from vibration and the
   reversals while the base doesn't turn; the heading limit bounds any real rotation.
+- The solver low-passes the accelerometer (zero-phase Gaussian, `accel_lowpass_hz`, default 2 × the
+  frequency) before the line fit: on the robot ~75% of the accelerometer's power during the motion
+  is vibration above 3.5 Hz (rms ~3.5 m/s², more than the 1.9 m/s² motion signal), which made the
+  unfiltered fit useless (linearity 0.8, the two directions 116° apart; filtered: 0.01-0.04, 90.5°).
+  Each vector reports `linearity_unfiltered` and `vibration_rms`.
+- `POST /calibrations/yaw/{serial}/{id}/resolve` (page: Re-solve) solves a stored run again from its
+  raw data with the current solver (optionally another `accel_lowpass_hz`): a new record, nothing moves.
 - An aborted run keeps what it recorded (IMU and swerve rows, phase marks): `GET /jobs/{id}/raw.npz`
   (the page links it), also in `<data dir>/aborted/` (newest 5).
 

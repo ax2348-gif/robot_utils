@@ -85,8 +85,10 @@ class FakeSwerve:
 class FakeCamera:
     """IMU (= depth frame) seeing the fake base's acceleration through R_TRUE, plus gravity, noise, gyro bias."""
 
-    def __init__(self, base: FakeSwerve, yaw_rate_dps: float = 0.0, noise=0.02, spikes_dps: float = 0.0):
+    def __init__(self, base: FakeSwerve, yaw_rate_dps: float = 0.0, noise=0.02, spikes_dps: float = 0.0,
+                 vibration: float = 0.0):
         self.base, self.yaw_rate, self.noise, self.spikes = base, yaw_rate_dps, noise, spikes_dps
+        self.vibration = vibration          # m/s^2 rms of broadband shaking while the base moves (robot: ~3.5)
         self.rng = np.random.default_rng(0)
 
     def description(self):
@@ -104,6 +106,8 @@ class FakeCamera:
                 a_base = np.array([*self.base.acc, 0.0])
             f = R_TRUE.T @ a_base + 9.81 * up_cam
             A = f + self.rng.normal(0, self.noise, (10, 3))
+            if self.vibration and self.base.controlled:
+                A += self.rng.normal(0, self.vibration / np.sqrt(3), (10, 3))
             turning = self.yaw_rate if self.base.controlled else 0.0     # starts once the base moves
             G = bias + np.radians(turning) * up_cam + self.rng.normal(0, 0.001, (10, 3))
             if self.spikes and self.base.controlled:      # vibration: single-sample spikes, no net rotation
@@ -159,6 +163,17 @@ def test_yaw_aborts_and_estops_on_rotation(rig):
     assert base.estops and not base.controlled
     raw = e.value.raw                                         # the recording, for diagnosis
     assert len(raw["imu_gz"]) > 100 and "swerve_t_tick" in raw and any("aborted" in m for m in raw["marks"])
+
+
+def test_yaw_fit_survives_vibration(rig):
+    base, _ = rig
+    cam = FakeCamera(base, vibration=3.5)                     # as measured on the robot (75% of the power)
+    p = YawParams(vectors=[[1, 0], [0, 1]], amplitude=0.06, frequency=1.5, cycles=5, settle_s=0.4, confirm=True)
+    meta, _ = run_yaw(cam, base, p)
+    for v in meta["vectors"]:
+        assert angle_deg(v["direction_depth"], R_TRUE.T @ np.array(v["vector"] + [0.0])) < 2.5, v
+        assert v["linearity"] < 0.3 < v["linearity_unfiltered"], v
+    assert meta["accel_lowpass_hz"] == 3.0
 
 
 def test_yaw_ignores_gyro_spikes_without_rotation(rig):

@@ -97,6 +97,12 @@ def test_yaw_refused_without_confirm_then_runs_on_the_sim(nodes):
     assert j["result"]["activated"] is False and j["result"]["quality"]["problems"]
     st = httpx.get(nodes["swerve"] + "/state").json()
     assert not st["lease"]["held"] and not st["enabled"] and not st["estop"]["latched"]
+    # re-solve from the stored raw data (nothing moves): a new record, linked to the old one
+    c = cals[0]
+    r = httpx.post(u + f"/calibrations/yaw/{c['serial']}/{c['id']}/resolve", json={"accel_lowpass_hz": 3.0, "activate": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["accel_lowpass_hz"] == 3.0 and r.json()["id"] != c["id"] and "re-solved" in r.json()["summary"]
+    assert httpx.post(u + f"/calibrations/yaw/{c['serial']}/nope/resolve").status_code == 404
 
 
 def test_estop_aborts_a_running_yaw_job(nodes):

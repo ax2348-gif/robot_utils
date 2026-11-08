@@ -32,7 +32,7 @@ from ..common.client import NodeClient
 from ..common.protocol import RowsDecoder
 from ..swerve.constants import MODULES
 from . import __version__
-from .solvers import angle_deg, fit_ground_plane, fit_motion_line, polygon_mask, unproject
+from .solvers import angle_deg, fit_ground_plane, fit_motion_line, lowpass, polygon_mask, unproject
 
 log = logging.getLogger("description.routines")
 
@@ -186,6 +186,12 @@ class YawParams:
     align_s: float = 0.4
     settle_s: float = 0.8
     confirm: bool = False
+    # the accelerometer is low-passed before the line fit (on the robot ~75% of its power is
+    # vibration above 3.5 Hz); None = 2 x frequency
+    accel_lowpass_hz: Optional[float] = None
+
+    def lowpass_hz(self) -> float:
+        return float(self.accel_lowpass_hz or 2.0 * self.frequency)
 
 
 def validate_yaw(p: YawParams) -> list[list[float]]:
@@ -421,15 +427,23 @@ def run_yaw(cam, swerve, p: YawParams, *, should_abort: Callable[[], Optional[st
 
 def solve_yaw(I: dict, T: dict, windows, vecs, p: YawParams, desc: dict, R_di: np.ndarray,
               up_imu: Optional[np.ndarray]) -> tuple[dict, dict]:
-    """Fit each vector's window; returns (meta, raw)."""
+    """Fit each vector's window; returns (meta, raw). ``T`` holds the swerve tick columns, or
+    ``base_vel`` directly (re-solving a stored run)."""
     half = 0.5 / p.frequency
     tick_t = T["t_tick"]
-    vel = base_velocity(T)
+    vel = np.asarray(T["base_vel"]) if "base_vel" in T else base_velocity(T)
+    fc = p.lowpass_hz()
+    order = np.argsort(I["t_sensor"], kind="stable")
+    I = {k: np.asarray(v)[order] for k, v in I.items()}
+    A_all = np.column_stack([I["ax"], I["ay"], I["az"]])
+    A_lp = lowpass(A_all, I["t_sensor"], fc)              # whole stream first: no edge effects in the windows
+    G_lp = lowpass(np.column_stack([I["gx"], I["gy"], I["gz"]]), I["t_sensor"], fc)
     per = []
     dot = lambda M, v: (M * np.asarray(v)).sum(-1)    # noqa: E731  (matmul warns spuriously on macOS)
     for v, ts, te in windows:
+        v = [float(x) for x in v]
         sel = (I["t_sensor"] >= ts + half) & (I["t_sensor"] <= te - half)
-        A = np.column_stack([I["ax"][sel], I["ay"][sel], I["az"][sel]])
+        A = A_lp[sel]
         G = np.column_stack([I["gx"][sel], I["gy"][sel], I["gz"][sel]])
         # label: sign of the measured base acceleration along v (smoothed over 5 ticks)
         va = dot(vel, v)
@@ -438,10 +452,15 @@ def solve_yaw(I: dict, T: dict, windows, vecs, p: YawParams, desc: dict, R_di: n
         acc = np.gradient(va_s, tick_t) if len(tick_t) > 2 else np.zeros_like(va_s)
         lab = np.sign(np.interp(I["t_sensor"][sel], tick_t, acc))
         fit = fit_motion_line(A, lab)
+        unfiltered = fit_motion_line(A_all[sel], lab)
         d_depth = dot(R_di, fit["direction"]).tolist()
-        yaw_rate = np.degrees((G * up_imu).sum(1)) if up_imu is not None and len(G) else np.array([0.0])
-        per.append({"vector": v, "t_start": ts, "t_end": te, "n": int(sel.sum()), **fit,
+        up = np.zeros(3) if up_imu is None else np.asarray(up_imu)
+        yaw_rate = np.degrees((G_lp[sel] * up).sum(1)) if len(G) else np.array([0.0])
+        vib = A_all[sel] - A
+        per.append({"vector": v, "t_start": float(ts), "t_end": float(te), "n": int(sel.sum()), **fit,
                     "direction_depth": d_depth,
+                    "linearity_unfiltered": unfiltered["linearity"],
+                    "vibration_rms": float(np.sqrt((vib ** 2).sum(1).mean())) if len(vib) else 0.0,
                     "yaw_rate_max_dps": float(np.max(np.abs(yaw_rate))),
                     "gyro_rms_dps": float(np.degrees(np.sqrt(np.mean(G ** 2)))) if len(G) else 0.0})
     checks = {}
@@ -461,8 +480,8 @@ def solve_yaw(I: dict, T: dict, windows, vecs, p: YawParams, desc: dict, R_di: n
     worst_lin = max(x["linearity"] for x in per)
     worst_sign = min((x["sign_corr"] or 0) for x in per)
     meta = {"params": {**p.__dict__, "vectors": vecs}, "vectors": per, "checks": checks,
-            "floor_normal_depth": normal, "gravity_up_imu": None if up_imu is None else up_imu.tolist(),
-            "camera": desc, "limits": LIMITS, "version": __version__,
+            "floor_normal_depth": normal, "gravity_up_imu": None if up_imu is None else np.asarray(up_imu, float).tolist(),
+            "camera": desc, "limits": LIMITS, "version": __version__, "accel_lowpass_hz": fc,
             "summary": f"{len(per)} vectors, worst linearity {worst_lin:.3f}, worst sign corr {worst_sign:.2f}"
                        + "".join(f", {k} err {c['error_deg']:+.2f}°" for k, c in checks.items())}
     raw = {k: v for k, v in I.items()}

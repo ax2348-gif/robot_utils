@@ -307,19 +307,49 @@ class DescriptionNode:
             cam = self._camera(camera)
             swerve = self.swerve_io(self.swerve_url)
             meta, raw = run_yaw(cam, swerve, params, should_abort=lambda: job.abort_reason, progress=progress)
-            serial = meta["camera"]["device"]["serial"]
-            self.store.set_override(["cameras", camera, "last_serial"], serial)
-            ground = self.active_calibrations(serial).get("ground")
-            if ground and meta.get("floor_normal_depth"):
-                meta["checks"]["floor_normal_vs_ground_deg"] = angle_deg(meta["floor_normal_depth"], ground["result"]["normal"])
-            bad = yaw_quality(meta)
-            meta["quality"] = {"ok": not bad, "problems": bad}
-            cid = self.store.save("yaw", serial, {**meta, "camera_name": camera}, raw, activate=activate and not bad)
-            return {"id": cid, "serial": serial, "summary": meta["summary"], "activated": activate and not bad,
-                    "quality": meta["quality"], "checks": meta["checks"],
-                    "vectors": [{k: v[k] for k in ("vector", "direction_depth", "linearity", "sign_corr", "amplitude",
-                                                   "yaw_rate_max_dps", "n")} for v in meta["vectors"]]}
+            self.store.set_override(["cameras", camera, "last_serial"], meta["camera"]["device"]["serial"])
+            return self._save_yaw(camera, meta, raw, activate)
         return self._start_job("yaw", {"camera": camera, **{k: v for k, v in params.__dict__.items()}}, fn)
+
+    def _save_yaw(self, camera: str, meta: dict, raw: dict, activate: bool) -> dict:
+        serial = meta["camera"]["device"]["serial"]
+        ground = self.active_calibrations(serial).get("ground")
+        if ground and meta.get("floor_normal_depth"):
+            meta["checks"]["floor_normal_vs_ground_deg"] = angle_deg(meta["floor_normal_depth"], ground["result"]["normal"])
+        bad = yaw_quality(meta)
+        meta["quality"] = {"ok": not bad, "problems": bad}
+        cid = self.store.save("yaw", serial, {**meta, "camera_name": camera}, raw, activate=activate and not bad)
+        return {"id": cid, "serial": serial, "summary": meta["summary"], "activated": activate and not bad,
+                "quality": meta["quality"], "checks": meta["checks"], "accel_lowpass_hz": meta.get("accel_lowpass_hz"),
+                "vectors": [{k: v.get(k) for k in ("vector", "direction_depth", "linearity", "linearity_unfiltered",
+                                                   "sign_corr", "amplitude", "vibration_rms", "yaw_rate_max_dps", "n")}
+                            for v in meta["vectors"]]}
+
+    def resolve_yaw(self, serial: str, cid: str, accel_lowpass_hz: Optional[float] = None,
+                    activate: bool = True) -> dict:
+        """Solve a stored yaw run again from its raw data (current solver; nothing moves): a new record."""
+        from .routines import depth_to_imu_rotation, solve_yaw
+        old = self.store.get("yaw", serial, cid)
+        path = self.store.raw_path("yaw", serial, cid)
+        if not path.exists():
+            raise KeyError(f"yaw calibration {cid!r} has no raw data")
+        with np.load(path) as z:
+            raw = {k: z[k] for k in z.files}
+        I = {k[4:]: v for k, v in raw.items() if k.startswith("imu_")}
+        T = {k[7:]: v for k, v in raw.items() if k.startswith("swerve_")}
+        prm = {k: v for k, v in old["params"].items() if k in YawParams.__dataclass_fields__}
+        prm["accel_lowpass_hz"] = accel_lowpass_hz
+        p = YawParams(**prm)
+        vecs = [[float(x) for x in v] for v in p.vectors]
+        windows = [(vecs[i], float(ts), float(te)) for i, (ts, te) in enumerate(raw["windows"])]
+        desc = old["camera"]
+        meta, raw2 = solve_yaw(I, T, windows, vecs, p, desc, depth_to_imu_rotation(desc), old.get("gravity_up_imu"))
+        meta["resolved_from"] = cid
+        meta["summary"] += f" (re-solved from {cid})"
+        res = self._save_yaw(old.get("camera_name", "camera"), meta, raw2, activate)
+        self.events.add(f"yaw {cid} re-solved as {res['id']}: {meta['summary']}"
+                        + ("" if res["activated"] else " (not activated: " + "; ".join(res["quality"]["problems"]) + ")"))
+        return res
 
     def abort(self, reason: str = "abort requested") -> Optional[dict]:
         with self.lock:

@@ -47,11 +47,18 @@ class YawIn(BaseModel):
     amplitude: float = Field(0.08, gt=0, le=LIMITS["amplitude_max"], description="m; the base swings 0..2A along each vector.")
     frequency: float = Field(1.0, ge=LIMITS["frequency_min"], le=LIMITS["frequency_max"], description="Hz")
     cycles: int = Field(5, ge=LIMITS["cycles_min"], le=LIMITS["cycles_max"])
+    accel_lowpass_hz: Optional[float] = Field(None, gt=0, le=50, description="Accelerometer low-pass before the "
+                                              "line fit (default 2 × frequency; removes the base's vibration).")
     confirm: bool = Field(False, description="Must be true: this drives the robot.")
     activate: bool = True
     model_config = ConfigDict(json_schema_extra={"examples": [{"confirm": True},
                                                               {"vectors": [[1, 0], [0, 1], [1, 1]], "amplitude": 0.06,
                                                                "frequency": 1.2, "cycles": 6, "confirm": True}]})
+
+
+class ResolveIn(BaseModel):
+    accel_lowpass_hz: Optional[float] = Field(None, gt=0, le=50, description="Default 2 × the run's frequency.")
+    activate: bool = Field(True, description="Activate the new record if it passes the quality gate.")
 
 
 class ActivateIn(BaseModel):
@@ -163,7 +170,8 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
         A·2πf ≤ 0.8 m/s, total travel ≤ 12 m."""
         try:
             return node.start_yaw(body.camera, YawParams(body.vectors, body.amplitude, body.frequency, body.cycles,
-                                                         confirm=body.confirm), body.activate)
+                                                         confirm=body.confirm, accel_lowpass_hz=body.accel_lowpass_hz),
+                                  body.activate)
         except (KeyError, RuntimeError, ValueError) as e:
             raise bad(e, 409 if isinstance(e, RuntimeError) else 400)
 
@@ -208,6 +216,14 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
         if not p.exists():
             raise bad(KeyError("no raw data"), 404)
         return FileResponse(p, media_type="application/octet-stream", filename=f"{kind}-{cid}.npz")
+
+    @app.post("/calibrations/yaw/{serial}/{cid}/resolve", tags=["calibration"],
+              summary="Solve a stored yaw run again from its raw data (nothing moves); saves a new record")
+    async def resolve_yaw(serial: str, cid: str, body: ResolveIn = ResolveIn()):
+        try:
+            return await asyncio.to_thread(node.resolve_yaw, serial, cid, body.accel_lowpass_hz, body.activate)
+        except KeyError as e:
+            raise bad(e, 404)
 
     @app.post("/calibrations/{kind}/activate", tags=["calibration"], summary="Choose the active calibration of a type for a camera")
     async def activate(kind: str, body: ActivateIn):

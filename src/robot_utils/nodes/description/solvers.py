@@ -119,6 +119,24 @@ def fit_ground_plane(P: np.ndarray, *, gravity_up: Optional[np.ndarray] = None, 
 
 # -- motion line (accelerometer) ------------------------------------------------------------------
 
+def lowpass(x: np.ndarray, t: np.ndarray, fc: float) -> np.ndarray:
+    """Zero-phase Gaussian low-pass of (N, ...) samples at times ``t`` (s; ~uniform), -3 dB near ``fc`` Hz.
+
+    sigma = 1 / (2 pi fc): gain exp(-(f/fc)^2 / 2), so 0.88 at fc/2 and 0.61 at fc. Edges are
+    normalised by the kernel weight inside the data (no zero-padding bias)."""
+    x = np.asarray(x, dtype=float)
+    if len(x) < 3 or fc <= 0:
+        return x.copy()
+    dt = float(np.median(np.diff(t)))
+    s = 1.0 / (2 * np.pi * fc) / dt                       # sigma in samples
+    h = max(1, int(np.ceil(3 * s)))
+    w = np.exp(-0.5 * (np.arange(-h, h + 1) / s) ** 2)
+    norm = np.convolve(np.ones(len(x)), w, mode="same")
+    flat = x.reshape(len(x), -1)
+    out = np.column_stack([np.convolve(flat[:, j], w, mode="same") / norm for j in range(flat.shape[1])])
+    return out.reshape(x.shape)
+
+
 def fit_motion_line(accel: np.ndarray, label: Optional[np.ndarray] = None) -> dict:
     """Principal axis of (N, 3) accelerometer samples (m/s^2, IMU frame).
 
