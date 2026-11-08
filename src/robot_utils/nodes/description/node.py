@@ -100,10 +100,12 @@ class Job:
         self.t_start = time.monotonic()
         self.t_end: Optional[float] = None
         self.abort_reason: Optional[str] = None
+        self.raw_path = None            # an aborted run's recording (Path), if any
 
     def info(self) -> dict:
         return {"id": self.id, "kind": self.kind, "state": self.state, "params": self.params,
                 "progress": [m for _, m in self.progress[-20:]], "result": self.result, "error": self.error,
+                "raw": f"jobs/{self.id}/raw.npz" if self.raw_path is not None and self.raw_path.exists() else None,
                 "elapsed": round((self.t_end or time.monotonic()) - self.t_start, 2)}
 
 
@@ -250,7 +252,13 @@ class DescriptionNode:
                 self.events.add(f"job {job.id} ({kind}) done: {job.result.get('summary', '')}")
             except Aborted as e:
                 job.state, job.error = "aborted", str(e)
-                self.events.add(f"job {job.id} ({kind}) aborted: {e}", "warn")
+                if e.raw:
+                    try:
+                        job.raw_path = self.store.save_aborted(kind, job.id, e.raw)
+                    except Exception:
+                        log.exception("could not save the aborted run's recording")
+                self.events.add(f"job {job.id} ({kind}) aborted: {e}"
+                                + (f" (recording: {job.raw_path.name})" if job.raw_path else ""), "warn")
             except Exception as e:
                 job.state, job.error = "failed", f"{type(e).__name__}: {e}"
                 log.error("job %s failed\n%s", job.id, traceback.format_exc())

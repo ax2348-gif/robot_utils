@@ -85,8 +85,8 @@ class FakeSwerve:
 class FakeCamera:
     """IMU (= depth frame) seeing the fake base's acceleration through R_TRUE, plus gravity, noise, gyro bias."""
 
-    def __init__(self, base: FakeSwerve, yaw_rate_dps: float = 0.0, noise=0.02):
-        self.base, self.yaw_rate, self.noise = base, yaw_rate_dps, noise
+    def __init__(self, base: FakeSwerve, yaw_rate_dps: float = 0.0, noise=0.02, spikes_dps: float = 0.0):
+        self.base, self.yaw_rate, self.noise, self.spikes = base, yaw_rate_dps, noise, spikes_dps
         self.rng = np.random.default_rng(0)
 
     def description(self):
@@ -106,6 +106,8 @@ class FakeCamera:
             A = f + self.rng.normal(0, self.noise, (10, 3))
             turning = self.yaw_rate if self.base.controlled else 0.0     # starts once the base moves
             G = bias + np.radians(turning) * up_cam + self.rng.normal(0, 0.001, (10, 3))
+            if self.spikes and self.base.controlled:      # vibration: single-sample spikes, no net rotation
+                G[::5] += np.radians(self.spikes) * up_cam * self.rng.choice([-1, 1], (2, 1))
             yield np.rec.fromarrays([t, A[:, 0], A[:, 1], A[:, 2], G[:, 0], G[:, 1], G[:, 2]],
                                     names=["t_sensor", "ax", "ay", "az", "gx", "gy", "gz"]), 0.0
 
@@ -151,9 +153,27 @@ def test_yaw_recovers_directions_and_floor_normal(rig):
 
 def test_yaw_aborts_and_estops_on_rotation(rig):
     base, _ = rig
-    cam = FakeCamera(base, yaw_rate_dps=15.0)                 # the base is turning (e.g. tether pull)
-    with pytest.raises(Aborted, match="yaw rate"):
+    cam = FakeCamera(base, yaw_rate_dps=25.0)                 # the base is turning (e.g. tether pull)
+    with pytest.raises(Aborted, match="yaw rate") as e:
         run_yaw(cam, base, YawParams(amplitude=0.05, frequency=1.0, cycles=2, confirm=True))
+    assert base.estops and not base.controlled
+    raw = e.value.raw                                         # the recording, for diagnosis
+    assert len(raw["imu_gz"]) > 100 and "swerve_t_tick" in raw and any("aborted" in m for m in raw["marks"])
+
+
+def test_yaw_ignores_gyro_spikes_without_rotation(rig):
+    base, _ = rig
+    cam = FakeCamera(base, spikes_dps=14.0)                   # like the robot: raw samples > 10 °/s
+    meta, _ = run_yaw(cam, base, YawParams(vectors=[[1, 0]], amplitude=0.05, frequency=1.0, cycles=2,
+                                           settle_s=0.3, confirm=True))
+    assert not base.estops and len(meta["vectors"]) == 1
+
+
+def test_yaw_aborts_on_slow_heading_drift(rig):
+    base, _ = rig
+    cam = FakeCamera(base, yaw_rate_dps=6.0)                  # under the rate limit; the heading limit catches it
+    with pytest.raises(Aborted, match="heading drifted"):
+        run_yaw(cam, base, YawParams(amplitude=0.05, frequency=1.0, cycles=5, confirm=True))
     assert base.estops and not base.controlled
 
 

@@ -158,7 +158,7 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
     @app.post("/calibrate/yaw", tags=["calibration"], summary="Camera-yaw calibration: DRIVES THE BASE; starts a job")
     async def calibrate_yaw(body: YawIn):
         """Translates the base back and forth along each vector (omega always 0) while recording the
-        camera IMU; aborts on yaw rate > 10°/s or heading drift > 5° (the robot may be tethered), lost
+        camera IMU; aborts on yaw rate > 15°/s (0.1 s mean) or heading drift > 5° (the robot may be tethered), lost
         streams, or `POST /estop` / `POST /jobs/abort`. Limits: amplitude ≤ 0.15 m, peak speed
         A·2πf ≤ 0.8 m/s, total travel ≤ 12 m."""
         try:
@@ -177,6 +177,15 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
         if j is None:
             raise bad(KeyError(f"no job {jid}"), 404)
         return j.info()
+
+    @app.get("/jobs/{jid}/raw.npz", tags=["calibration"], summary="What an aborted job recorded (numpy .npz)")
+    async def job_raw(jid: int):
+        """IMU (``imu_*``) and swerve tick (``swerve_*``) rows, phase marks (``marks``, ``marks_t``, local
+        monotonic s), the monitor's gravity/bias reference and limits. Also kept in the data directory."""
+        j = node.jobs.get(jid)
+        if j is None or j.raw_path is None or not j.raw_path.exists():
+            raise bad(KeyError(f"no recording for job {jid}"), 404)
+        return FileResponse(j.raw_path, media_type="application/octet-stream", filename=j.raw_path.name)
 
     @app.post("/jobs/abort", tags=["control"], summary="Abort the running job (stops and releases the base)")
     async def abort():

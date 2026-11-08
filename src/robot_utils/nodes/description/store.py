@@ -7,6 +7,7 @@ Layout under ``data_dir`` (default ``~/.local/share/robot_utils/description``):
     calibrations/<type>/<serial>/<id>/      one directory per run:
         meta.json                           inputs, results, quality, camera description, version
         raw.npz                             raw data (compressed)
+    aborted/<time>-<type>-job<n>.npz        what an aborted run recorded (newest ``keep``), for diagnosis
 
 Calibrations are kept per (type, camera serial): the newest ``keep`` plus the active one; older
 ones are deleted when a new one is saved (FIFO). The active one is never deleted.
@@ -148,6 +149,17 @@ class Store:
 
     def raw_path(self, kind: str, serial: str, cid: str) -> Path:
         return self.dir / "calibrations" / kind / serial / cid / "raw.npz"
+
+    def save_aborted(self, kind: str, job_id: int, raw: dict) -> Path:
+        """Keep an aborted run's recording (newest ``keep`` of them)."""
+        d = self.dir / "aborted"
+        with self.lock:
+            d.mkdir(parents=True, exist_ok=True)
+            p = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{kind}-job{job_id}.npz"
+            np.savez_compressed(p, **raw)
+            for old in sorted(d.glob("*.npz"), key=lambda f: f.stat().st_mtime)[:-self.keep]:
+                old.unlink(missing_ok=True)
+        return p
 
     def activate(self, kind: str, serial: str, cid: Optional[str]) -> None:
         """Make ``cid`` the active calibration of its type for this camera (None: none active)."""

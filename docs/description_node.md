@@ -78,9 +78,13 @@ with the ground calibration's.
 - Refuses to start if the swerve lease is held, its e-stop is latched, or the robot is not still
   (gyro > 2°/s before the run). It takes the swerve lease for the run and always disables and
   releases it at the end.
-- **Aborts** on: yaw rate > 10°/s or heading drift > 5° (bias-corrected gyro about gravity), a lost or
-  stalled camera/swerve stream (> 0.5 s), `POST /jobs/abort`, or `POST /estop`. Safety aborts also
-  **latch the swerve e-stop**; a requested abort only stops, disables and releases.
+- **Aborts** on: yaw rate > 15°/s averaged over 0.1 s, or heading drift > 5° (bias-corrected gyro
+  about gravity), a lost or stalled camera/swerve stream (> 0.5 s), `POST /jobs/abort`, or `POST /estop`.
+  Safety aborts also **latch the swerve e-stop**; a requested abort only stops, disables and releases.
+  The rate is averaged because single gyro samples spike past 10°/s from vibration and the
+  reversals while the base doesn't turn; the heading limit bounds any real rotation.
+- An aborted run keeps what it recorded (IMU and swerve rows, phase marks): `GET /jobs/{id}/raw.npz`
+  (the page links it), also in `<data dir>/aborted/` (newest 5).
 
 ### Jobs and records
 

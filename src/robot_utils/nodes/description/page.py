@@ -50,10 +50,10 @@ table.ru-table td,table.ru-table th{font-size:12px}
     <div class="ru-muted" id="yawinfo"></div>
     <label class="ru-row"><input type="checkbox" id="confirm"> clear space around the robot, tether slack, e-stop at hand</label>
     <div class="ru-row"><button class="ru" id="yaw">Run yaw calibration</button><button id="abort">ABORT</button></div>
-    <div class="ru-muted">Aborts by itself on yaw rate &gt; 10°/s, heading drift &gt; 5°, or a lost stream (and then latches the swerve e-stop).</div>
+    <div class="ru-muted">Aborts by itself on yaw rate &gt; 15°/s (0.1 s mean), heading drift &gt; 5°, or a lost stream (and then latches the swerve e-stop).</div>
   </div>
 </div>
-<div class="ru-card"><b>Job</b> <span id="jobstate" class="ru-pill"></span><div class="job" id="job">no job yet</div></div>
+<div class="ru-card"><b>Job</b> <span id="jobstate" class="ru-pill"></span> <a id="jobraw" class="ru-muted" hidden>recording (.npz)</a><div class="job" id="job">no job yet</div></div>
 <div class="ru-card"><b>Calibrations</b> <span class="ru-muted">(newest first; 5 kept per type and camera, plus the active one)</span>
   <table class="ru-table" id="cals"></table></div>
 <div class="ru-card"><b>Events</b><div id="events"></div></div>
@@ -161,6 +161,7 @@ RU.sse("events", st => { ST = st; estop.update(st);
   if (j){ $("#jobstate").textContent = `#${j.id} ${j.kind}: ${j.state} (${j.elapsed} s)`;
     $("#jobstate").className = "ru-pill " + ({done: "ru-ok", running: "ru-warn"}[j.state] || "ru-err");
     $("#job").textContent = j.progress.join("\n") + (j.error ? "\n" + j.error : "") + (j.result ? "\n" + JSON.stringify(j.result, null, 1) : "");
+    $("#jobraw").hidden = !j.raw; if (j.raw) $("#jobraw").href = j.raw;
     if (lastJob && lastJob !== j.state && j.state !== "running"){ loadCals(); loadDesc(); } lastJob = j.state; }
   $("#yaw").disabled = st.state !== "ready" || (st.estop && st.estop.latched);
   $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level !== "info" ? "ru-err" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
