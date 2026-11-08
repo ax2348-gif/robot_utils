@@ -9,14 +9,15 @@ frames:
     parent: null
     doc: floor level, centre of the wheels; x forward, y left, z up
 
-# Cameras: one entry per camera node instance. Its frames (depth_optical, color_optical, imu)
+# Cameras: one entry per camera node instance (`node`: its instance name on this machine, reached
+# through its unix socket; or `url` for a remote / debug one). Its frames (depth_optical, color_optical, imu)
 # come from that node's GET /description and hang under "<name>/depth_optical", whose pose in
 # base is: the nominal pose below, refined by the active calibrations (ground plane: roll, pitch,
 # height; motion: yaw). x and y are never calibrated: measure them and set them with
 # POST /cameras/<name>/nominal.
 cameras:
   camera:
-    url: http://127.0.0.1:8101
+    node: camera
     nominal:
       xyz: [0.0, 0.0, 0.5]                    # measure (tape)
       rpy: [-1.5707963, 0.0, -1.5707963]      # optical axis forward, image up = base up

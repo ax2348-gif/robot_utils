@@ -11,7 +11,7 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 | swerve base | `robot_utils.nodes.swerve` | `swerve` → `/nodes/swerve/` | yes | [swerve_node.md](swerve_node.md) |
 | arm (planned) | | `arm` | yes | |
 | estimator (pose: wheel odometry + IMU heading) | `robot_utils.nodes.estimator` | `estimator` → `/nodes/estimator/` | no | [estimator_node.md](estimator_node.md) |
-| description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` (TCP 8104 until it moves to `serve`) | yes | [description_node.md](description_node.md) |
+| description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` → `/nodes/description/` | yes | [description_node.md](description_node.md) |
 
 ## Routing: one origin on port 80
 

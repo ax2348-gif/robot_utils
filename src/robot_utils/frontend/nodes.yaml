@@ -21,6 +21,4 @@ nodes:
   - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve}}
   - {name: arm, kind: arm, enabled: false}        # future
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
-  # port 8104: the description node listens on TCP until it moves to the serve helper (--name);
-  # the landing page and proxy reach it on 127.0.0.1:8104 while its socket doesn't exist.
-  - {name: description, kind: description, port: 8104, start: {module: robot_utils.nodes.description}}
+  - {name: description, kind: description, start: {module: robot_utils.nodes.description}}

@@ -33,6 +33,11 @@ log = logging.getLogger("description")
 
 W_GROUND, W_LINE, W_PRIOR = 10.0, 1.0, 1e-3
 
+
+def target(cam: dict) -> str:
+    """Where a camera node is: ``url`` if given (remote / debugging), else its instance name ``node``."""
+    return cam.get("url") or cam.get("node") or "camera"
+
 # A run is always saved; it only becomes active (with activate=true) if it passes these.
 QUALITY = {"ground_rms_max": 0.02, "ground_inliers_min": 2000,
            "yaw_linearity_max": 0.3, "yaw_sign_corr_min": 0.5, "yaw_angle_error_max_deg": 3.0}
@@ -103,7 +108,7 @@ class Job:
 
 
 class DescriptionNode:
-    def __init__(self, data_dir: str, swerve_url: Optional[str] = "http://127.0.0.1:8102",
+    def __init__(self, data_dir: str, swerve_url: Optional[str] = "swerve",
                  camera_io: Optional[Callable[[str], object]] = None,
                  swerve_io: Optional[Callable[[str], object]] = None):
         self.store = Store(data_dir)
@@ -135,7 +140,8 @@ class DescriptionNode:
         while not self._stop.is_set():
             for name, cam in (self.store.description().get("cameras") or {}).items():
                 try:
-                    d = NodeClient(cam["url"], timeout=2.0).get("/description")
+                    with NodeClient(target(cam), timeout=2.0) as c:
+                        d = c.get("/description")
                     with self.lock:
                         prev = self.cams.get(name, {}).get("description")
                         self.cams[name] = {"description": d, "error": None, "t": time.monotonic()}
@@ -195,7 +201,7 @@ class DescriptionNode:
             T, used = self.camera_pose(name)
             with self.lock:
                 c = dict(self.cams.get(name) or {})
-            cams[name] = {"url": cam["url"], "serial": self.serial(name), "nominal": cam["nominal"],
+            cams[name] = {"node": target(cam), "serial": self.serial(name), "nominal": cam["nominal"],
                           "pose_in_base": describe_T(T), "from": used, "reachable": c.get("error") is None and bool(c.get("description")),
                           "error": c.get("error"), "intrinsics": (c.get("description") or {}).get("intrinsics")}
         return {"frames": self.frames(), "cameras": cams,
@@ -261,7 +267,7 @@ class DescriptionNode:
         cams = self.store.description().get("cameras") or {}
         if name not in cams:
             raise KeyError(f"unknown camera {name!r}")
-        return self.camera_io(cams[name]["url"])
+        return self.camera_io(target(cams[name]))
 
     def start_ground(self, camera: str, params: GroundParams, activate: bool = True) -> dict:
         def fn(job, progress):
@@ -320,8 +326,8 @@ class DescriptionNode:
         self.events.add(f"E-STOP ({info.source}): {info.reason}", "error")
         if self.swerve_url:
             try:                               # belt and braces: stop the base directly too
-                NodeClient(self.swerve_url, timeout=1.0).post("/estop", {"reason": f"via description node: {info.reason}",
-                                                                         "source": "description node"})
+                with NodeClient(self.swerve_url, timeout=1.0) as c:
+                    c.post("/estop", {"reason": f"via description node: {info.reason}", "source": "description node"})
             except Exception as e:
                 self.events.add(f"could not forward the e-stop to the swerve node: {e}", "error")
 

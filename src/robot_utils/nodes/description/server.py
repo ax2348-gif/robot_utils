@@ -88,7 +88,7 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
     setup_app(app)
     add_base_routes(app, lambda: {"node": "description", "state": node.state()["state"]})
     add_page_routes(app, node_meta("description", "Robot description", __version__, "description", actuated=True,
-                                   port_default=8104, moves="swerve base (yaw calibration only)"))
+                                   moves="swerve base (yaw calibration only)"))
 
     def bad(e: Exception, code: int = 400):
         return HTTPException(code, str(e))
@@ -130,12 +130,16 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
 
     @app.get("/cameras/{name}/depth.jpg", tags=["description"], summary="The camera's current depth image (for drawing ground polygons)")
     async def depth_jpg(name: str):
-        import httpx
+        from ..common.client import NodeClient
+        from .node import target
         cams = node.store.description().get("cameras") or {}
         if name not in cams:
             raise bad(KeyError(name), 404)
-        async with httpx.AsyncClient(timeout=5.0) as c:
-            r = await c.get(cams[name]["url"].rstrip("/") + "/snapshot/depth", params={"format": "jpg"})
+
+        def fetch():
+            with NodeClient(target(cams[name]), timeout=5.0) as c:
+                return c.http.get("/snapshot/depth", params={"format": "jpg"})
+        r = await asyncio.to_thread(fetch)
         if r.status_code >= 400:
             raise HTTPException(503, f"camera: {r.text[:200]}")
         return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "no-store",

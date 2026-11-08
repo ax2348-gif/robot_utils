@@ -75,7 +75,7 @@ nodes:
   - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve}}
   - {name: arm, kind: arm, enabled: false}        # future
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
-  - {name: description, kind: description, port: 8104, start: {module: robot_utils.nodes.description}}
+  - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   # a second camera would be e.g.
   # - {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 ```
@@ -84,7 +84,7 @@ nodes:
 |---|---|---|
 | `name` | required | instance name: socket `<runtime dir>/robot/<name>.sock`, URL `/nodes/<name>/`, tile title until `/meta` answers |
 | `kind` | optional, default = `name` | what the node is (camera, swerve, ...) |
-| `port` | optional | a local instance's TCP port, used only while its socket doesn't exist (a node not yet on the `serve` helper, e.g. description on 8104), and as an "already up" check |
+| `port` | optional | a local instance's TCP port, used only while its socket doesn't exist (a node not on the `serve` helper), and as an "already up" check |
 | `host` | optional, with `port` | a node on another machine, reached through the frontend's own proxy |
 | `enabled` | optional, default `true` | `false`: listed under "Planned", not polled, not e-stopped |
 | `start` | optional | `{module: ..., args: [...]}`: the landing page can start/stop this node (below). Local nodes only (no `host`) |

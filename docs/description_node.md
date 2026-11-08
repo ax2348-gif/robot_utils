@@ -5,16 +5,16 @@ internal frames) and **calibrates** where the camera sits on the base. It runs t
 routines itself (so a human on the page and an agent on the API get the same procedure and the same
 stored records) and saves the results on the robot. Shared conventions: [nodes.md](nodes.md).
 
-- Page: `http://<pi>:8104/`: robot drawing from the active calibration, camera pose, ground-plane
+- Page: `http://<pi>/nodes/description/`: robot drawing from the active calibration, camera pose, ground-plane
   polygon editor, yaw calibration form with ABORT, calibration records, e-stop
-- Interactive API docs: `http://<pi>:8104/docs`
+- Interactive API docs: `http://<pi>/nodes/description/docs`
 
 ```bash
-cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.description      # port 8104
+cd ~/robot_utils && .venv/bin/python -m robot_utils.nodes.description      # socket <runtime dir>/robot/description.sock
 ```
 
-Options: `--swerve URL` (default `http://127.0.0.1:8102`; `none` disables the yaw routine),
-`--data-dir` (default `~/.local/share/robot_utils/description`), `--host`, `--port`.
+Options: `--swerve NAME|URL` (default the instance `swerve`; `none` disables the yaw routine),
+`--data-dir` (default `~/.local/share/robot_utils/description`), `--name` (instance), `--port` (debug: TCP).
 
 ## Frames and conventions
 

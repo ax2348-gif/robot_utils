@@ -160,6 +160,9 @@ def serve(app, args: argparse.Namespace, *, banner: Optional[str] = None, public
     if args.port:
         print(f"  debug  http://{args.host}:{args.port}/", flush=True)
     uvicorn_kwargs.setdefault("log_level", "warning")
+    # SSE (/events) and binary /stream responses never end on their own; without a bound uvicorn's
+    # graceful shutdown waits on them forever, so SIGTERM never reaches the lifespan's close().
+    uvicorn_kwargs.setdefault("timeout_graceful_shutdown", 2)
     config = uvicorn.Config(PrefixMiddleware(app), workers=1, lifespan="on", **uvicorn_kwargs)
 
     def remove_socket():

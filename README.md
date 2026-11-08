@@ -50,7 +50,7 @@ landing page that indexes them. Start each on the robot from this checkout, with
 | camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | `/nodes/camera/` | [docs/orbbec_node.md](docs/orbbec_node.md) |
 | swerve base | `python -m robot_utils.nodes.swerve` | `/nodes/swerve/` | [docs/swerve_node.md](docs/swerve_node.md) |
 | estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | `/nodes/estimator/` | [docs/estimator_node.md](docs/estimator_node.md) |
-| robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | port 8104 (for now) | [docs/description_node.md](docs/description_node.md) |
+| robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | `/nodes/description/` | [docs/description_node.md](docs/description_node.md) |
 | landing page | `python -m robot_utils.frontend` | `/` | [docs/frontend.md](docs/frontend.md) |
 
 Everything is one origin on port 80: nginx (`robot-proxy.service`) serves the landing page at `/`
