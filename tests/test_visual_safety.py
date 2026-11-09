@@ -24,7 +24,8 @@ def page_html(f: str) -> str:
 LAYOUT_PAGES = {"nodes/swerve/page.py": "swerve", "nodes/pose_servo/page.py": "pose_servo",
                 "nodes/agent_nav/page.py": "agent_nav", "nodes/description/page.py": "description",
                 "nodes/estimator/page.py": "estimator", "nodes/perception3d/page.py": "perception3d",
-                "nodes/orbbec/page.py": "camera", "frontend/page.html": "landing"}
+                "nodes/orbbec/page.py": "camera", "nodes/power/page.py": "power",
+                "frontend/page.html": "landing"}
 
 
 @pytest.mark.parametrize("f,kind", LAYOUT_PAGES.items())

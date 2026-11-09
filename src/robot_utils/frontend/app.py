@@ -430,6 +430,12 @@ def create_app(
         url = urljoin(node_base_url(node), path)
         headers = {k: v for k, v in request.headers.items() if k.lower() in PROXY_REQUEST_HEADERS}
         headers["x-forwarded-prefix"] = f"/nodes/{name}"
+        # who is asking, like nginx's $proxy_add_x_forwarded_for: the peer goes last (the only hop a
+        # client can't forge); behind nginx the peer is nginx's socket and nginx already added it
+        hops = [h for h in [request.headers.get("x-forwarded-for", "").strip(),
+                            request.client.host if request.client and request.client.host else ""] if h]
+        if hops:
+            headers["x-forwarded-for"] = ", ".join(hops)
         client: httpx.AsyncClient = app.state.links.client(node)
         upstream = client.build_request(request.method, url, params=request.query_params,
                                         headers=headers, content=await request.body(),

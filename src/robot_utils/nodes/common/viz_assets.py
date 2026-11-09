@@ -50,6 +50,20 @@ Components
   (``<M>_steer_angle``, ``<M>_drive_vel``, ``<M>_steer_sp``, ``<M>_drive_sp``, ``<M>_drive_current``,
   ``<M>_steer_current``, ``<M>_t_steer`` / ``t_drive`` vs ``t_tick`` for staleness, ``cmd_*``,
   ``enabled``, ``motors_enabled``, ``estop``).
+``RU.viz.Battery(el, opts)``: a battery gauge: level fill, charging bolt, input plug, per-cell bars.
+  opts: ``low`` (%, 25: caution colour at or below), ``critical`` (%, 10: stop colour at or below),
+  ``cellMin`` / ``cellMax`` (V, 3.0 / 4.2: the cell bars' range), ``staleAfter`` (s without update()
+  before it greys out, 10), ``caption`` (true: status line under the canvas), ``label`` (aria label),
+  ``compact`` (false; true: a ~24 px tall strip for tiles and overviews: no caption, no cells, the
+  percentage drawn inside the gauge, the charging bolt and an input plug kept).
+  data: ``{percent, charging, full, input, volts, current, cells: [V, ...], runtime_min, stale, low}``;
+  percent 0-100 (null = unknown), ``current`` A (+ = charging), ``input`` true when external power is
+  present, ``stale`` true when the reading is old, ``low`` true to force the stop colour (e.g. a
+  low-voltage alarm). Colours: ``--live`` healthy, ``--caution`` low, ``--stop`` critical / low
+  alarm, ``--signal`` charging, ``--muted`` stale or unknown.
+  ``RU.viz.Battery.fromSource(src)``: data from one entry of the power node's ``/state`` ``sources``
+  (``percent``, ``pack_v``, ``current_a``, ``cells_v``, ``charge_state``, ``input_present``,
+  ``runtime_min``, ``ok``, ``stale``); every battery source shares those fields (power/sources.py).
 """
 
 VIZ_JS = r"""
@@ -71,7 +85,8 @@ function palette(){
   const fg = token("--fg", "#1d1f23", "#e8eaed");
   return {fg, signal: token("--signal", "#1F5FBF", "#6EA0F0"), ink: token("--ink", fg, fg),
           muted: token("--muted", "#6b7280", "#9aa0a6"), live: token("--live", "#157A45", "#3FBF7A"),
-          stop: token("--stop", "#C41E17", "#F0625C"), rule: token("--rule", "#c9ccd1", "#3a3f46")};
+          stop: token("--stop", "#C41E17", "#F0625C"), rule: token("--rule", "#c9ccd1", "#3a3f46"),
+          panel: token("--panel", "#FFFFFF", "#1E242B")};
 }
 function injectCss(id, css){
   if (document.getElementById(id)) return;
@@ -282,6 +297,160 @@ class Swerve {
 }
 Swerve.defaults = SWERVE_DEFAULTS;
 viz.Swerve = Swerve;
+
+// -- Battery: level gauge ----------------------------------------------------------------------------
+const BATTERY_DEFAULTS = {low: 25, critical: 10, cellMin: 3.0, cellMax: 4.2, staleAfter: 10, caption: true,
+                          label: "Battery level", compact: false};
+const BATTERY_CSS = `
+.ru-battery{position:relative;max-width:420px}
+.ru-battery canvas{display:block;width:100%;aspect-ratio:7/2}
+.ru-battery .cap{font-size:12px;color:var(--muted,#6b7280);min-height:1.2em}
+.ru-battery.compact{max-width:140px}
+.ru-battery.compact canvas{aspect-ratio:auto;height:24px}`;
+
+class Battery {
+  constructor(el, opts){
+    this.o = Object.assign({}, BATTERY_DEFAULTS, opts || {});
+    injectCss("ru-viz-battery-css", BATTERY_CSS);
+    if (el.tagName === "CANVAS"){ this.cv = el; this.note = null; }
+    else {
+      el.classList.add("ru-battery"); el.classList.toggle("compact", !!this.o.compact);
+      el.innerHTML = '<canvas role="img"></canvas>' + (this.o.caption && !this.o.compact ? '<div class="cap" data-k="note"></div>' : "");
+      this.cv = el.querySelector("canvas"); this.note = el.querySelector('[data-k="note"]');
+    }
+    this.cv.setAttribute("aria-label", this.o.label);
+    this.ctx = this.cv.getContext("2d");
+    this.data = null; this.at = 0; this.col = null; this.colAt = 0; this.raf = 0; this.timer = 0;
+    this.ro = window.ResizeObserver ? new ResizeObserver(() => this.schedule()) : null;
+    if (this.ro) this.ro.observe(this.cv);
+    this.schedule();
+  }
+  update(data){
+    this.data = data; this.at = performance.now(); this.schedule();
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.schedule(), this.o.staleAfter * 1000 + 50);
+  }
+  schedule(){ if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.draw(); }); }
+  destroy(){ if (this.ro) this.ro.disconnect(); clearTimeout(this.timer); cancelAnimationFrame(this.raf); }
+
+  // the level colour and a one-line status, from data (also used for the caption / aria label)
+  assess(){
+    const D = this.data || {}, o = this.o, col = this.col || palette();
+    const live = !!this.data && (performance.now() - this.at) / 1000 < o.staleAfter && !D.stale;
+    const p = fin(D.percent) ? Math.max(0, Math.min(100, D.percent)) : null;
+    let c = col.muted, status;
+    if (!this.data) status = "waiting for data";
+    else if (!live) status = "stale reading";
+    else if (p === null) status = "level unknown";
+    else {
+      const caution = token("--caution", "#A86400", "#F2B33D");
+      c = D.low || p <= o.critical ? col.stop : p <= o.low ? caution : D.charging ? col.signal : col.live;
+      status = D.full ? "full" : D.charging ? "charging" : fin(D.current) && D.current < -0.02 ? "discharging" : D.input ? "on input" : "idle";
+      if (D.low) status += ", LOW";
+      if (fin(D.runtime_min) && !D.charging) status += ` · ~${D.runtime_min >= 90 ? (D.runtime_min / 60).toFixed(1) + " h" : Math.round(D.runtime_min) + " min"} left`;
+    }
+    return {live, p, c, status};
+  }
+
+  draw(){
+    const cv = this.cv, ctx = this.ctx, o = this.o, dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+    if (!W || !H) return;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)){ cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    const now = performance.now();
+    if (!this.col || now - this.colAt > 500){ this.col = palette(); this.colAt = now; }
+    const col = this.col, D = this.data || {}, {live, p, c, status} = this.assess();
+    if (o.compact){ this.drawCompact(W, H, col, D, live, p, c); this.finish(p, status); return; }
+    const cells = live && Array.isArray(D.cells) ? D.cells : [];
+    const cellH = cells.length ? Math.max(10, H * 0.2) : 0, gap = cells.length ? 6 : 0;
+    const bw = Math.min(W * 0.55, (H - cellH - gap - 4) * 2.6), bh = H - cellH - gap - 4, x0 = 2, y0 = 2;
+    const nubW = Math.max(4, bw * 0.05), nubH = bh * 0.4, r = Math.min(6, bh * 0.12);
+    // body + terminal nub (outline), then the level fill inset
+    ctx.lineWidth = 2; ctx.strokeStyle = live ? col.ink : col.muted; ctx.setLineDash(live ? [] : [4, 3]);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x0, y0, bw - nubW, bh, r); else ctx.rect(x0, y0, bw - nubW, bh); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = live ? col.ink : col.muted; ctx.fillRect(x0 + bw - nubW + 1, y0 + (bh - nubH) / 2, nubW - 1, nubH);
+    const ins = 4, fw = (bw - nubW - 2 * ins) * (p === null ? 0 : p / 100);
+    if (fw > 0){ ctx.fillStyle = c; ctx.globalAlpha = live ? 0.85 : 0.35; ctx.fillRect(x0 + ins, y0 + ins, fw, bh - 2 * ins); ctx.globalAlpha = 1; }
+    // tick marks at 25 / 50 / 75 %
+    ctx.strokeStyle = col.rule; ctx.lineWidth = 1;
+    for (const f of [0.25, 0.5, 0.75]){ const x = x0 + ins + (bw - nubW - 2 * ins) * f; ctx.beginPath(); ctx.moveTo(x, y0 + bh - ins - 5); ctx.lineTo(x, y0 + bh - ins); ctx.stroke(); }
+    if (live && D.charging) this.bolt(x0 + (bw - nubW) / 2, y0 + bh / 2, bh * 0.36, col);
+    // readout right of the body
+    const tx = x0 + bw + 12, big = Math.max(16, Math.min(34, bh * 0.55)), small = Math.max(11, Math.min(13, bh * 0.22));
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = live ? col.fg : col.muted; ctx.font = `600 ${big}px ${token("--font", "system-ui")}`;
+    ctx.fillText(p === null ? "–" : Math.round(p) + "%", tx, y0 + bh * 0.55);
+    ctx.font = `${small}px ${token("--mono", "ui-monospace,monospace")}`; ctx.fillStyle = col.muted;
+    const bits = [fin(D.volts) ? D.volts.toFixed(2) + " V" : null, fin(D.current) ? (D.current > 0 ? "+" : "") + D.current.toFixed(2) + " A" : null].filter(Boolean);
+    ctx.fillText(bits.join("  "), tx, y0 + bh * 0.55 + small + 4);
+    if (D.input !== undefined && D.input !== null){ const iy = y0 + bh * 0.55 + 2 * small + 8;
+      if (D.input && live){ this.plug(tx, iy - small * 0.35, small, col.fg); ctx.fillStyle = col.fg; ctx.fillText("input", tx + small + 4, iy); }
+      else { ctx.fillStyle = col.muted; ctx.fillText("no input", tx, iy); } }
+    // cells: one bar each, cellMin..cellMax, under the body
+    if (cells.length){
+      const n = cells.length, cy = y0 + bh + gap, cw = (bw - nubW) / n, lo = Math.min(...cells.filter(fin)), hi = Math.max(...cells.filter(fin));
+      ctx.font = `${Math.max(9, Math.min(11, cellH * 0.6))}px ${token("--mono", "ui-monospace,monospace")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      cells.forEach((v, i) => {
+        const x = x0 + i * cw + 1, w = cw - 3, f = fin(v) ? Math.max(0, Math.min(1, (v - o.cellMin) / (o.cellMax - o.cellMin))) : 0;
+        ctx.strokeStyle = col.rule; ctx.lineWidth = 1; ctx.strokeRect(x, cy, w, cellH);
+        ctx.fillStyle = c; ctx.globalAlpha = 0.25; ctx.fillRect(x, cy, w * f, cellH); ctx.globalAlpha = 1;
+        const odd = n > 1 && hi - lo > 0.05 && (v === lo || v === hi);       // imbalance: mark the extremes
+        ctx.fillStyle = odd ? col.fg : col.muted; ctx.fillText(fin(v) ? v.toFixed(2) : "–", x + w / 2, cy + cellH / 2 + 0.5);
+      });
+    }
+    this.finish(p, status);
+  }
+
+  bolt(cx, cy, s, col){                // charging bolt, outlined so it reads on any fill
+    const ctx = this.ctx, pts = [[0.15, -1], [-0.45, 0.12], [-0.02, 0.12], [-0.15, 1], [0.45, -0.12], [0.02, -0.12]];
+    ctx.beginPath(); pts.forEach(([u, v], i) => { const X = cx + u * s, Y = cy + v * s; i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); }); ctx.closePath();
+    ctx.fillStyle = col.panel; ctx.fill(); ctx.strokeStyle = col.ink; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+
+  plug(x, cy, h, colour){              // input power present: a two-pin plug
+    const ctx = this.ctx, w = h * 0.7;
+    ctx.strokeStyle = ctx.fillStyle = colour; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, cy); ctx.lineTo(x + w * 0.3, cy); ctx.stroke();                       // cord
+    ctx.strokeRect(x + w * 0.3, cy - h * 0.3, w * 0.4, h * 0.6);                                         // body
+    ctx.beginPath(); ctx.moveTo(x + w * 0.7, cy - h * 0.18); ctx.lineTo(x + w, cy - h * 0.18);           // pins
+    ctx.moveTo(x + w * 0.7, cy + h * 0.18); ctx.lineTo(x + w, cy + h * 0.18); ctx.stroke();
+  }
+
+  drawCompact(W, H, col, D, live, p, c){
+    const ctx = this.ctx, plugW = D.input && live ? H * 0.8 : 0, nubW = 3, x0 = 1, y0 = 2, bh = H - 4;
+    const bw = W - plugW - nubW - 3;
+    ctx.lineWidth = 1.5; ctx.strokeStyle = live ? col.ink : col.muted; ctx.setLineDash(live ? [] : [3, 2]);
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x0, y0, bw, bh, 3); else ctx.rect(x0, y0, bw, bh); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = live ? col.ink : col.muted; ctx.fillRect(x0 + bw, y0 + bh * 0.3, nubW, bh * 0.4);
+    const fw = (bw - 4) * (p === null ? 0 : p / 100);
+    if (fw > 0){ ctx.fillStyle = c; ctx.globalAlpha = live ? 0.85 : 0.35; ctx.fillRect(x0 + 2, y0 + 2, fw, bh - 4); ctx.globalAlpha = 1; }
+    const txt = p === null ? "–" : Math.round(p) + "%", fs = Math.max(10, Math.min(14, bh * 0.62));
+    ctx.font = `600 ${fs}px ${token("--font", "system-ui")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const tx = x0 + bw / 2 - (live && D.charging ? bh * 0.3 : 0), ty = y0 + bh / 2 + 0.5;
+    ctx.lineWidth = 3; ctx.strokeStyle = col.panel; ctx.strokeText(txt, tx, ty);        // halo: readable on any fill
+    ctx.fillStyle = live ? col.fg : col.muted; ctx.fillText(txt, tx, ty);
+    if (live && D.charging) this.bolt(tx + ctx.measureText(txt).width / 2 + bh * 0.3, ty, bh * 0.3, col);
+    if (plugW) this.plug(x0 + bw + nubW + 3, y0 + bh / 2, bh * 0.8, col.ink);
+  }
+
+  finish(p, status){
+    const o = this.o;
+    this.status = status;
+    const aria = o.label + ": " + (p === null ? "" : Math.round(p) + "%, ") + status;
+    if (this.cv.getAttribute("aria-label") !== aria) this.cv.setAttribute("aria-label", aria);
+    if (this.note && this.note.textContent !== status) this.note.textContent = status;
+  }
+
+  static fromSource(s){
+    s = s || {};
+    return {percent: s.percent, volts: s.pack_v, current: s.current_a, cells: s.cells_v,
+            charging: s.charge_state === "charging", full: s.charge_state === "full", input: s.input_present,
+            runtime_min: s.runtime_min, stale: s.ok === false || !!s.stale, low: !!s.low};
+  }
+}
+Battery.defaults = BATTERY_DEFAULTS;
+viz.Battery = Battery;
 })();
 """
 

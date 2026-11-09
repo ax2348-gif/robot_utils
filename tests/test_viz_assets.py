@@ -80,3 +80,24 @@ def test_swerve_page_uses_the_component():
     assert '<script src="common/viz.js"></script>' in PAGE and 'id="swv"' in PAGE
     assert "new RU.viz.Swerve(" in PAGE and "RU.viz.Swerve.fromRow(" in PAGE
     assert PAGE.count('RU.rows("stream"') == 1          # no second telemetry connection
+
+
+@needs_node
+def test_battery_from_power_source(tmp_path):
+    """RU.viz.Battery.fromSource reads the power node's common battery fields (power/sources.py)."""
+    from robot_utils.nodes.power.sources import UpsSource
+    from robot_utils.nodes.power.ups import CAPTURED, decode, flatten
+    src = dict(UpsSource.readings(decode(flatten(CAPTURED))), ok=True, stale=False)
+    d = json.loads(run_js(tmp_path, f"console.log(JSON.stringify(RU.viz.Battery.fromSource({json.dumps(src)})));"))
+    assert d == {"percent": 59, "volts": 15.587, "current": 0.512, "cells": [3.92, 3.874, 3.877, 3.916],
+                 "charging": True, "full": False, "input": True, "runtime_min": None, "stale": False, "low": False}
+    stale = json.loads(run_js(tmp_path, "console.log(JSON.stringify(RU.viz.Battery.fromSource({ok: false})));"))
+    assert stale["stale"] is True
+    d = json.loads(run_js(tmp_path, "console.log(JSON.stringify(RU.viz.Battery.defaults));"))
+    assert d["cellMin"] == 3.0 and d["cellMax"] == 4.2 and d["critical"] < d["low"] and d["compact"] is False
+
+
+def test_power_page_uses_the_battery_component():
+    from robot_utils.nodes.power.page import PAGE as POWER
+    assert '<script src="common/viz.js"></script>' in POWER and "new RU.viz.Battery(" in POWER
+    assert "RU.viz.Battery.fromSource(" in POWER and "compact: true" in POWER

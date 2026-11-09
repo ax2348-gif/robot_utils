@@ -44,6 +44,7 @@ from .visual_safety import PAGES, Result, check_page
 NODES = [  # (instance name, module, extra args): everything in simulation
     ("swerve", "robot_utils.nodes.swerve", ["--sim"]),
     ("camera", "robot_utils.nodes.orbbec", ["--fake"]),
+    ("power", "robot_utils.nodes.power", ["--fake"]),
     ("estimator", "robot_utils.nodes.estimator", []),
     ("description", "robot_utils.nodes.description", []),
     ("pose_servo", "robot_utils.nodes.pose_servo", []),
