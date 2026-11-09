@@ -202,3 +202,282 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live);
 }
 :root[data-theme="glasswire"] .ru-band.nominal { background: var(--rule); }
+
+
+/* == lens tokens (palette addendum) == -------------------------------------------------------
+   Liquid glass for controls only. A lens = the sheet's own dot tile magnified 1.4x (168px instead
+   of 120px) with background-attachment: fixed, so the dots stay registered to the viewport like
+   the sheet and slide, magnified, inside a lens as it scrolls past: fake refraction, no
+   backdrop-filter. Over the dots: a veil (keeps labels >= 4.5:1 against the darkest dot, the
+   120px cross) and a specular radial near the top. Coloured lenses use a stronger veil. */
+:root[data-theme="glasswire"] {
+  --lens-veil: rgba(255, 255, 255, 0.72);
+  --lens-veil-strong: rgba(255, 255, 255, 0.86);
+  --lens-spec: rgba(255, 255, 255, 0.85);
+  --lens-spec-hi: rgba(255, 255, 255, 1);
+  --lens-rim-top: rgba(255, 255, 255, 0.95);
+  --lens-rim-lead: rgba(255, 255, 255, 0.5);
+  --lens-rim-bottom: rgba(0, 0, 0, 0.22);
+  --lens-rim-trail: rgba(0, 0, 0, 0.08);
+  --lens-glow: rgba(255, 255, 255, 0.6);
+  --lens-edge: #9C9C98;
+  --lens-edge-low: #5E5E5A;
+  --lens-edge-hi: #3A3A3A;
+  --lens-contact: 0 1px 0 rgba(0, 0, 0, 0.06), 0 2px 5px -2px rgba(0, 0, 0, 0.22);
+  --lens-contact-hi: 0 1px 0 rgba(0, 0, 0, 0.08), 0 4px 10px -3px rgba(0, 0, 0, 0.30);
+  --lens-press: inset 0 2px 5px rgba(0, 0, 0, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.7);
+  --lens-focus: #0E7490;
+  --lens-focus-glow: rgba(14, 116, 144, 0.35);
+  --lens-matte: #EFEFED;
+  --lens-mag: 168px;
+  --lens-mag-press: 204px;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="glasswire"] {
+    --lens-veil: rgba(15, 16, 16, 0.70);
+    --lens-veil-strong: rgba(15, 16, 16, 0.80);
+    --lens-spec: rgba(255, 255, 255, 0.14);
+    --lens-spec-hi: rgba(255, 255, 255, 0.24);
+    --lens-rim-top: rgba(255, 255, 255, 0.32);
+    --lens-rim-lead: rgba(255, 255, 255, 0.12);
+    --lens-rim-bottom: rgba(0, 0, 0, 0.6);
+    --lens-rim-trail: rgba(0, 0, 0, 0.3);
+    --lens-glow: rgba(255, 255, 255, 0.06);
+    --lens-edge: #5A5D5B;
+    --lens-edge-low: #2A2C2B;
+    --lens-edge-hi: #C9CCC9;
+    --lens-contact: 0 1px 0 rgba(0, 0, 0, 0.5), 0 2px 6px -2px rgba(0, 0, 0, 0.7);
+    --lens-contact-hi: 0 1px 0 rgba(0, 0, 0, 0.5), 0 4px 12px -3px rgba(0, 0, 0, 0.85);
+    --lens-press: inset 0 2px 6px rgba(0, 0, 0, 0.6), inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+    --lens-focus: #22D3EE;
+    --lens-focus-glow: rgba(34, 211, 238, 0.35);
+    --lens-matte: #1A1C1B;
+  }
+}
+
+/* == lens surfaces == ------------------------------------------------------------------------ */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill {
+  background-color: var(--ground);
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(var(--lens-veil), var(--lens-veil)),
+    var(--grid-tile);
+  background-size: 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, fixed;
+  border: 1px solid var(--lens-edge);
+  border-bottom-color: var(--lens-edge-low);
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-lead),
+    inset 0 -1px 0 var(--lens-rim-bottom), inset -1px 0 0 var(--lens-rim-trail),
+    inset 0 0 6px var(--lens-glow), var(--lens-contact);
+  color: var(--ink);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a {
+  font-family: var(--mono); letter-spacing: .04em;
+  transition: background-position .15s ease-out, background-size .15s ease-out, box-shadow .15s ease-out;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link) { padding-left: 14px; padding-right: 14px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick { padding: 2px 10px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a { border-radius: 22px; padding: 12px 18px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill { font-family: var(--mono); letter-spacing: .03em; }
+
+/* hover: the highlight brightens and drifts toward the pointer side, the rim strengthens */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:hover:not(:disabled) {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
+    linear-gradient(var(--lens-veil), var(--lens-veil)),
+    var(--grid-tile);
+  background-size: 135% 120%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 30% 0, 0 0, -6px -8px;  /* the lens "tilts": magnified dots shift */
+  border-color: var(--lens-edge-hi);
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-top),
+    inset 0 -1px 0 var(--lens-rim-bottom), inset -1px 0 0 var(--lens-rim-trail),
+    inset 0 0 10px var(--lens-glow), var(--lens-contact-hi);
+}
+/* press: the lens compresses: the inner shadow deepens, the highlight flattens, magnification grows */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:active:not(:disabled) {
+  background-size: 100% 45%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
+  background-position: 50% 0, 0 0, -1px -1px;
+  box-shadow: var(--lens-press);
+}
+/* focus: a cyan rim and glow (the outline alone is >= 3:1 against the sheet) */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:focus-visible {
+  outline: 2px solid var(--lens-focus); outline-offset: 2px;
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom),
+    0 0 0 5px var(--lens-focus-glow);
+}
+/* disabled: a matte lens, no highlight, no dots */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:disabled {
+  background-image: none; background-color: var(--lens-matte);
+  border-color: var(--line-soft);
+  box-shadow: inset 0 1px 0 var(--lens-rim-top);
+}
+
+/* coloured lenses: a stronger veil plus a thin liquid tint, and a coloured rim */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--grid-tile);
+  background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, fixed;
+  border: 1.5px solid var(--signal); color: var(--signal); font-weight: 600;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:hover:not(:disabled) {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--grid-tile);
+  background-size: 135% 120%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 30% 0, 0 0, 0 0, -6px -8px;
+  border-color: var(--signal);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:active:not(:disabled) {
+  background-size: 100% 45%, 100% 100%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.hazard { border-color: var(--stop); color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.live { border-color: var(--live); color: var(--live); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.hazard:hover:not(:disabled) { border-color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.live:hover:not(:disabled) { border-color: var(--live); }
+
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:disabled {
+  background-image: none; background-color: var(--lens-matte); border-color: var(--line-soft); color: var(--muted);
+}
+
+/* status pills: tint + coloured rim, no dots (they are small and often in dense rows);
+   ok solid rim, error heavier rim, warning dashed rim: readable without colour */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.streaming,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.bad,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.busy,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.covered {
+  background-image: none;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.streaming { background-color: color-mix(in srgb, var(--live) 12%, var(--ground)); border: 1px solid var(--live); color: var(--live); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.bad,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.err { background-color: color-mix(in srgb, var(--stop) 12%, var(--ground)); border: 1.5px solid var(--stop); color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.busy,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.covered { background-color: color-mix(in srgb, var(--caution) 12%, var(--ground)); border: 1px dashed var(--caution); color: var(--caution); }
+
+/* who holds control: free = a clear lens with a dashed edge (an empty slot); yours = the lens
+   fills with a liquid live tint and a solid 2px rim; someone else's = caution tint, dashed 2px rim */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"] {
+  padding: 2px 12px; border: 1px dashed var(--lens-edge-low); color: var(--muted);
+  transition: background-size .15s ease-out, box-shadow .15s ease-out;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
+  background-color: var(--ground);
+  background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, fixed;
+  border-width: 2px; font-weight: 600;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom), inset 0 0 8px var(--lens-glow);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--live) 14%, transparent), color-mix(in srgb, var(--live) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--grid-tile);
+  border-style: solid; border-color: var(--live); color: var(--live);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--caution) 14%, transparent), color-mix(in srgb, var(--caution) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--grid-tile);
+  border-style: dashed; border-color: var(--caution); color: var(--caution);
+}
+
+/* == motion == -------------------------------------------------------------------------------
+   Only in answer to the pointer: 150ms ease-out on background position/size and box-shadow. */
+@media (prefers-reduced-motion: reduce) {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"] { transition: none; }
+}
+/* less transparency asked for: solid lenses (no dots, no highlight), rims kept */
+@media (prefers-reduced-transparency: reduce) {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill { background-image: none; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn { background-image: none; background-color: var(--ground); }
+}
