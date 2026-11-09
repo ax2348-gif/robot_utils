@@ -1,4 +1,6 @@
-"""The description node's page (served at the node root). Relative URLs only."""
+"""The description node's page (served at the node root). Relative URLs only.
+The robot/camera views are in page_viz.py."""
+from .page_viz import VIZ_CSS, VIZ_HTML, VIZ_JS
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -17,23 +19,24 @@ input[type=number]{width:72px}
 #abort{font-size:18px;font-weight:700;color:var(--err);border:3px solid var(--err);background:transparent;padding:8px 18px}
 table.ru-table td,table.ru-table th{font-size:12px}
 #events{max-height:150px;overflow:auto;font-size:12px}
+.camhead{display:flex;flex-wrap:wrap;gap:6px 24px;align-items:flex-start}
+/*VIZ_CSS*/
 </style></head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Robot description <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><div id="estop"></div><button class="ru" id="clear">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="grid">
-  <div class="ru-card"><b>Robot</b> <span class="ru-muted">top view (x up, y left) · grid 0.1 m</span>
-    <canvas class="view" id="top"></canvas>
-    <b>Side</b> <span class="ru-muted">(x right, z up)</span><canvas class="view" id="side" style="height:200px"></canvas></div>
-  <div class="ru-card"><b>Camera</b> <select id="cam"></select> <span id="reach" class="ru-pill"></span>
-    <div class="kv" id="pose"></div>
-    <details style="margin-top:8px"><summary>Measured / nominal pose (x, y are never calibrated)</summary>
+<div class="ru-card">
+  <div class="camhead">
+    <div><b>Robot and cameras</b> <select id="cam"></select> <span id="reach" class="ru-pill"></span>
+      <div class="kv" id="pose" style="margin-top:4px"></div></div>
+    <details><summary>Measured / nominal pose (x, y are never calibrated)</summary>
       <div class="ru-row">xyz m <input type="number" step="0.001" id="nx"><input type="number" step="0.001" id="ny"><input type="number" step="0.001" id="nz"></div>
       <div class="ru-row">rpy ° <input type="number" step="0.1" id="nr"><input type="number" step="0.1" id="np"><input type="number" step="0.1" id="nyw">
         <button class="ru" id="setnom">Save</button></div></details>
   </div>
+  /*VIZ_HTML*/
 </div>
 <div class="grid">
   <div class="ru-card"><b>Ground plane</b> <span class="ru-muted">(never moves) roll, pitch, height</span>
@@ -82,35 +85,10 @@ async function loadDesc(){
   if (document.activeElement.tagName !== "INPUT"){ const n = c.nominal;
     ["nx","ny","nz"].forEach((id, i) => $("#" + id).value = (+n.xyz[i]).toFixed(3));
     ["nr","np","nyw"].forEach((id, i) => $("#" + id).value = (n.rpy[i] * D).toFixed(1)); }
-  draw();
+  drawViews();
 }
-function draw(){
-  if (!DESC) return; const c = DESC.cameras[cam()]; if (!c) return;
-  const T = c.pose_in_base.matrix, R = [0,1,2].map(i => T[i].slice(0, 3)), t = [T[0][3], T[1][3], T[2][3]];
-  const axis = (k, L) => [t[0] + R[0][k] * L, t[1] + R[1][k] * L, t[2] + R[2][k] * L];
-  const H = 0.1656 + 0.04;   // half footprint (m), approx
-  for (const [id, proj] of [["top", p => [-p[1], p[0]]], ["side", p => [p[0], p[2]]]]){
-    const cv = $("#" + id), dpr = devicePixelRatio || 1, W = cv.clientWidth, Hh = cv.clientHeight;
-    cv.width = W * dpr; cv.height = Hh * dpr; const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, Hh);
-    const s = Math.min(W, Hh) / 1.2, cx = W / 2, cy = id === "top" ? Hh / 2 : Hh * 0.85;
-    const P = p => { const q = proj(p); return [cx + q[0] * s, cy - q[1] * s]; };
-    const css = n => getComputedStyle(document.body).getPropertyValue(n).trim();
-    g.strokeStyle = css("--line"); g.lineWidth = 1;
-    for (let v = -0.6; v <= 0.6001; v += 0.1){ let a = P(id === "top" ? [v, -0.6, 0] : [v, 0, 0]), b = P(id === "top" ? [v, 0.6, 0] : [v, 0, 0.9]); g.beginPath(); g.moveTo(...a); g.lineTo(...b); g.stroke();
-      a = P(id === "top" ? [-0.6, v, 0] : [-0.6, 0, v + 0.6]); b = P(id === "top" ? [0.6, v, 0] : [0.6, 0, v + 0.6]); g.beginPath(); g.moveTo(...a); g.lineTo(...b); g.stroke(); }
-    g.lineWidth = 2; g.strokeStyle = css("--muted");
-    const box = id === "top" ? [[H, H, 0], [H, -H, 0], [-H, -H, 0], [-H, H, 0]] : [[H, 0, 0], [H, 0, 0.12], [-H, 0, 0.12], [-H, 0, 0]];
-    g.beginPath(); box.forEach((p, i) => i ? g.lineTo(...P(p)) : g.moveTo(...P(p))); g.closePath(); g.stroke();
-    const o = P([0, 0, 0]); g.strokeStyle = "#dc2626"; g.beginPath(); g.moveTo(...o); g.lineTo(...P([0.15, 0, 0])); g.stroke();
-    g.strokeStyle = "#16a34a"; g.beginPath(); g.moveTo(...o); g.lineTo(...P(id === "top" ? [0, 0.15, 0] : [0, 0, 0.15])); g.stroke();
-    // camera: optical axes (x red, y green, z blue = view direction) and a small frustum
-    const pc = P(t); g.lineWidth = 2.5;
-    [["#dc2626", 0], ["#16a34a", 1], ["#2563eb", 2]].forEach(([col, k]) => { g.strokeStyle = col; g.beginPath(); g.moveTo(...pc); g.lineTo(...P(axis(k, k === 2 ? 0.25 : 0.08))); g.stroke(); });
-    g.fillStyle = "#2563eb"; g.beginPath(); g.arc(pc[0], pc[1], 4, 0, 7); g.fill();
-    g.fillStyle = css("--muted"); g.font = "11px system-ui"; g.fillText(id === "top" ? "camera (blue = view direction)" : `height ${t[2].toFixed(3)} m`, 6, 14);
-  }
-}
-$("#cam").onchange = loadDesc; addEventListener("resize", draw);
+$("#cam").onchange = loadDesc;
+/*VIZ_JS*/
 $("#setnom").onclick = () => call(`cameras/${cam()}/nominal`, {xyz: ["nx","ny","nz"].map(i => +$("#" + i).value), rpy: ["nr","np","nyw"].map(i => +$("#" + i).value / D)}).then(loadDesc);
 
 // ---------- ground polygons on the depth image ----------
@@ -173,3 +151,4 @@ RU.sse("events", st => { ST = st; estop.update(st);
 loadDesc().then(refreshImg); loadCals(); setInterval(loadDesc, 5000);
 </script></body></html>
 """
+PAGE = PAGE.replace("/*VIZ_CSS*/", VIZ_CSS).replace("/*VIZ_HTML*/", VIZ_HTML).replace("/*VIZ_JS*/", VIZ_JS)

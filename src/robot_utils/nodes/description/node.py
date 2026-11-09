@@ -206,7 +206,17 @@ class DescriptionNode:
             cams[name] = {"node": target(cam), "serial": self.serial(name), "nominal": cam["nominal"],
                           "pose_in_base": describe_T(T), "from": used, "reachable": c.get("error") is None and bool(c.get("description")),
                           "error": c.get("error"), "intrinsics": (c.get("description") or {}).get("intrinsics")}
-        return {"frames": self.frames(), "cameras": cams,
+        frames = self.frames()
+        tree = FrameTree(frames)
+        in_base = {}
+        for f in frames:
+            try:
+                in_base[f] = np.round(tree.T("base", f), 9).tolist()
+            except (KeyError, ValueError):        # a frame not under base (bad override): skip
+                pass
+        from ..swerve.constants import FRAME, MODULES
+        robot = {"frame_size": FRAME, "modules": [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES]}
+        return {"frames": frames, "frames_in_base": in_base, "robot": robot, "cameras": cams,
                 "conventions": {"base": "floor level, centre of the wheels; x forward, y left, z up",
                                 "optical": "x right, y down, z out of the lens",
                                 "transform": "p_parent = R p_child + t; rpy = fixed-axis X, Y, Z (URDF), rad"}}

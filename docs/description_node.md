@@ -5,7 +5,9 @@ internal frames) and **calibrates** where the camera sits on the base. It runs t
 routines itself (so a human on the page and an agent on the API get the same procedure and the same
 stored records) and saves the results on the robot. Shared conventions: [nodes.md](nodes.md).
 
-- Page: `http://<pi>/nodes/description/`: robot drawing from the active calibration, camera pose, ground-plane
+- Page: `http://<pi>/nodes/description/`: 3D (orbit) + top / side / front views of the robot and each
+  camera from the active calibration (camera body, depth frustum from the intrinsics, optical / colour /
+  IMU frames, where the image and the optical axis meet the floor, the nominal pose as a ghost), camera pose, ground-plane
   polygon editor, yaw calibration form with ABORT, calibration records, e-stop
 - Interactive API docs: `http://<pi>/nodes/description/docs`
 
