@@ -77,6 +77,7 @@ nodes:
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
+  - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d}}
   # a second camera would be e.g.
   # - {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 ```
