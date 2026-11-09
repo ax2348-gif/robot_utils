@@ -35,6 +35,7 @@ class Page:
 PAGES = [
     Page("landing", "/", estop="#estop", band=False),
     Page("swerve", "/nodes/swerve/", estop="#estop button.ru-estop"),
+    Page("power", "/nodes/power/"),
     Page("pose_servo", "/nodes/pose_servo/", estop="#estop button.ru-estop"),
     Page("description", "/nodes/description/", estop="#estop button.ru-estop"),
     Page("agent_nav", "/nodes/agent_nav/", estop="#estop button.ru-estop"),

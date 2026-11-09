@@ -28,6 +28,9 @@ dependencies = [
 [project.optional-dependencies]
 # page previews and visual safety checks (robot_utils.dev.preview); then: python -m playwright install chromium
 dev = ["playwright>=1.40"]
+# the power node's UPS HAT on I2C (robot_utils.nodes.power); optional: the node reports the HAT as
+# unavailable without it, and --fake never needs it
+power = ["smbus2>=0.4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

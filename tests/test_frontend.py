@@ -264,6 +264,9 @@ def test_proxy_forwards_to_the_node_same_origin():
         assert "cookie" not in {k.lower() for k in echo.seen[-1].headers}       # only allow-listed headers
         assert str(echo.seen[-1].url).startswith("http://swerve/")              # its unix socket
         assert echo.seen[-1].headers["x-forwarded-prefix"] == "/nodes/swerve"
+        assert echo.seen[-1].headers["x-forwarded-for"] == "testclient"           # the peer, for identities
+        c.get("/nodes/swerve/state", headers={"X-Forwarded-For": "1.2.3.4"})
+        assert echo.seen[-1].headers["x-forwarded-for"] == "1.2.3.4, testclient"  # appended, like nginx
         assert c.delete("/nodes/swerve/lease").json()["method"] == "DELETE"
         r = c.get("/nodes/camera/state")                                         # node down
         assert r.status_code == 502 and "not running" in r.json()["detail"]

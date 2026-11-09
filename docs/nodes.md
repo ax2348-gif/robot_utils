@@ -9,6 +9,7 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 |---|---|---|---|---|
 | camera (Orbbec Gemini 336L + IMU) | `robot_utils.nodes.orbbec` | `camera` → `/nodes/camera/` | no | [orbbec_node.md](orbbec_node.md) |
 | swerve base | `robot_utils.nodes.swerve` | `swerve` → `/nodes/swerve/` | yes | [swerve_node.md](swerve_node.md) |
+| power (Pi UPS HAT: battery, input; remote shutdown; later main / aux batteries) | `robot_utils.nodes.power` | `power` → `/nodes/power/` | no (e-stops the others before powering off) | [power.md](power.md) |
 | arm (planned) | | `arm` | yes | |
 | estimator (pose: wheel odometry + IMU heading) | `robot_utils.nodes.estimator` | `estimator` → `/nodes/estimator/` | no | [estimator_node.md](estimator_node.md) |
 | pose_servo (pose goals → jerk-limited swerve twists, from the estimator's pose) | `robot_utils.nodes.pose_servo` | `pose_servo` → `/nodes/pose_servo/` | yes (via the swerve lease) | [pose_servo_node.md](pose_servo_node.md) |
