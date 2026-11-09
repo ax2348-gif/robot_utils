@@ -11,7 +11,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
    it as a fill and as text colour).
    Extra tokens: --stop-fill / --on-stop (e-stop surfaces), --caution-fill / --on-caution / --caution-hatch
    (covered band), --stop-latched, --signal-ink, --line-soft (dashed construction lines),
-   --tick (corner registration ticks), --eye (camera / map frame), --grid-minor / --grid-major (ground). */
+   --tick (corner registration ticks), --eye (camera / map frame), --grid-dot (ground). */
 :root[data-theme="wireframe"] {
   color-scheme: light dark;
   --ground: #F8F8F7; --panel: #F8F8F7; --ink: #1A1A1A; --muted: #545454; --rule: #3A3A3A;
@@ -21,7 +21,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
   --caution-fill: #E0A030; --on-caution: #1B1200; --caution-hatch: #C88A1E; --caution-ink: #1B1200;
   --signal-ink: #FFFFFF;
   --line-soft: #B4B4B2; --tick: #1A1A1A; --eye: #1A1A1A;
-  --grid-minor: #EFEFEE; --grid-major: #E4E4E2;
+  --grid-dot: #BDBDB9;
   --plot-1: #262626; --plot-2: #4C68B0; --plot-3: #7A7A7A; --plot-4: #A0457E; --plot-5: #7D6A3A;
   --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -36,7 +36,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
     --caution-fill: #F2B33D; --on-caution: #1B1200; --caution-hatch: #D99A2B; --caution-ink: #1B1200;
     --signal-ink: #0F1010;
     --line-soft: #4A4D4B; --tick: #E8EAE8; --eye: #E8EAE8;
-    --grid-minor: #181A19; --grid-major: #232524;
+    --grid-dot: #3D403E;
     --plot-1: #E8EAE8; --plot-2: #8FA6E8; --plot-3: #7E827F; --plot-4: #E08CC0; --plot-5: #CDB88E;
   }
 }
@@ -87,7 +87,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 :root[data-theme="wireframe"] .ru-card, :root[data-theme="wireframe"] .tile:not(.latched),
 :root[data-theme="wireframe"] section.box, :root[data-theme="wireframe"] #who,
 :root[data-theme="wireframe"] #estop-result:not(.bad), :root[data-theme="wireframe"] #tools a {
-  background-color: transparent;
+  background-color: var(--ground);   /* same colour as the sheet: still reads unfilled, but the dots stop at the outline */
 }
 :root[data-theme="wireframe"] .ru-card:not(.tile), :root[data-theme="wireframe"] section.box,
 :root[data-theme="wireframe"] #who { border-left-color: var(--rule); }
@@ -174,19 +174,14 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 :root[data-theme="wireframe"] .slider { border-radius: 0; background-size: 1px 100%, 0 0; }
 
 /* == ground == -------------------------------------------------------------------------------
-   Graph paper (light) / blueprint grid (dark): an 8px minor and 40px major grid drawn with four
-   1px linear gradients. Reusable on its own: it needs only --ground, --grid-minor, --grid-major.
-   Colours are opaque and very close to the ground, so ink and muted text stay >= 4.5:1 over the
-   darkest line. */
+   Engineering dot paper: one 1.5px dot every 24px. Sparse dots, not lines, so nothing strikes
+   through text and nothing aliases into uneven lines; panels are filled with the ground colour, so
+   the dots stop at each outline. Reusable on its own: it needs only --ground and --grid-dot. */
 :root[data-theme="wireframe"] body {
   background-color: var(--ground);
-  background-image:
-    linear-gradient(var(--grid-major) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-major) 1px, transparent 1px),
-    linear-gradient(var(--grid-minor) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-minor) 1px, transparent 1px);
-  background-size: 40px 40px, 40px 40px, 8px 8px, 8px 8px;
-  background-position: -1px -1px, -1px -1px, -1px -1px, -1px -1px;
+  background-image: radial-gradient(circle at 1px 1px, var(--grid-dot) 0 1px, transparent 1.5px);
+  background-size: 24px 24px;
+  background-position: 11px 11px;
 }
 /* main header of the landing page reads as a drawing's title block: a ruled line beneath */
 :root[data-theme="wireframe"] main > header { border-bottom: 1px solid var(--rule); padding-bottom: 12px; }
