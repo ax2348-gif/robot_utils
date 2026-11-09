@@ -375,7 +375,7 @@ def create_app(
     async def theme_loader() -> Response:
         return Response(LOADER_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
-    # the shared token sheet, toolkit and font (nodes/common/ui_assets.py), same as every node serves
+    # the shared token sheet, toolkit, font and viz components (nodes/common/), same as every node serves
     from ..nodes.common.server import font_response
     from ..nodes.common.ui_assets import UI_CSS, UI_JS
 
@@ -390,6 +390,12 @@ def create_app(
     @app.get("/common/fonts/{name}", include_in_schema=False)
     async def common_font(name: str):
         return font_response(name)
+
+    from ..nodes.common.viz_assets import VIZ_JS
+
+    @app.get("/common/viz.js", include_in_schema=False)
+    async def common_viz_js() -> Response:
+        return Response(VIZ_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
     @app.get("/themes/{name}.css")
     async def theme_css(name: str) -> Response:

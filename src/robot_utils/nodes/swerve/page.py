@@ -41,17 +41,20 @@ input[type=number]{width:70px}
     <canvas class="ru-plot" id="plot"></canvas>
     <div class="ru-muted" id="lat"></div>
   </div>
+  <div class="ru-card"><b>Modules</b> <span class="ru-muted">top view, to scale (x forward is up)</span><div id="swv"></div></div>
 </div>
 <div class="ru-card"><table class="ru-table" id="mods"></table></div>
 <div class="ru-card"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
+<script src="common/viz.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const lease = RU.leaseWidget($("#lease"), {});
 const estop = RU.estopButton($("#estop"));
 const band = RU.stateBand($("#band"));
 const ts = new RU.TimeSync();
+const swv = new RU.viz.Swerve($("#swv"));
 const MODS = ["FL", "FR", "RR", "RL"];
 const plot = new RU.Plot($("#plot"), {seconds: 5, series: MODS.map(m => ({name: m})).concat([{name: "cmd vx", color: "--muted"}])});
 const err = m => $("#err").textContent = m || "";
@@ -98,7 +101,7 @@ ts.sync().then(() => setInterval(() => ts.sync(), 30000));
 RU.rows("stream", (d) => { const n = d.n;
   for (let i = 0; i < n; i++){ const g = name => d.raw[i*d.fields.length + d.idx[name]];
     plot.push(g("t_tick"), MODS.map(m => g(m + "_drive_vel")).concat([g("cmd_vx")])); }
-  last = d; });
+  last = d; swv.update(RU.viz.Swerve.fromRow(n => d.last(n))); });
 const f = (v, k) => (v === null || !isFinite(v)) ? "–" : v.toFixed(k);
 function frame(){
   plot.draw();

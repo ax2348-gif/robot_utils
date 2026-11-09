@@ -160,6 +160,17 @@ def font_response(name: str):
                     headers={"Cache-Control": "public, max-age=604800"})
 
 
+def add_viz_routes(app: FastAPI) -> None:
+    """The shared visualisation components at ``common/viz.js`` (viz_assets.py; ``RU.viz``)."""
+    from fastapi.responses import Response
+
+    from .viz_assets import VIZ_JS
+
+    @app.get("/common/viz.js", include_in_schema=False)
+    async def viz_js():
+        return Response(VIZ_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+
 def add_page_routes(app: FastAPI, meta: dict) -> None:
     """``GET /meta`` plus the shared browser toolkit at ``common/ui.js`` and ``common/ui.css``."""
     from fastapi.responses import Response
@@ -167,6 +178,7 @@ def add_page_routes(app: FastAPI, meta: dict) -> None:
     from .ui_assets import UI_CSS, UI_JS
 
     app.state.node_meta = meta   # serve() sets meta["name"] to the instance name
+    add_viz_routes(app)
 
     @app.get("/meta", tags=["state"], summary="What this node is (for dashboards)")
     async def get_meta():
