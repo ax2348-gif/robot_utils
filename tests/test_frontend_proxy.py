@@ -31,7 +31,8 @@ def test_routes_and_streaming_settings(tmp_path):
     assert f"pid {tmp_path}/nginx.pid;" in conf and f"error_log {tmp_path}/error.log" in conf
     assert f"proxy_temp_path {tmp_path}/tmp/proxy;" in conf
     # JSON access log (tailed by the observer), the node from the URL
-    assert f"access_log {tmp_path}/access.log robot_json buffer=16k flush=2s;" in conf
+    assert f"access_log {tmp_path}/access.log robot_json buffer=16k flush=2s if=$robot_log;" in conf
+    assert '"~^GET:2[0-9][0-9]:/nodes/[^/]+/(state|health|meta|time|fields|calibration)$" 0;' in conf
     assert "log_format robot_json escape=json" in conf and '"node":"$robot_node"' in conf
     assert "~^/nodes/(?<n>[A-Za-z0-9_.-]+) $n;" in conf
 

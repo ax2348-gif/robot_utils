@@ -13,7 +13,9 @@ direction, no gzip, HTTP/1.1 keep-alive to the sockets, day-long timeouts (SSE, 
 streams). nginx runs as the user: pid, logs and temp files live under ``state_dir``.
 
 Access log: one JSON object per request in ``state_dir/access.log`` (time, client address, method,
-URI, status, bytes, duration, node, user agent), buffered and flushed every 2 s. A request is
+URI, status, bytes, duration, node, user agent), buffered and flushed every 2 s. Successful status
+polls (GET .../state, health, meta, time, fields, calibration, and the landing page's own /api polls)
+are not logged. A request is
 logged when it ends, so an open stream appears when it closes. The landing page's observer
 (frontend/observe.py) tails it, resolves Tailscale addresses to devices and users, and rotates it
 (7 days kept).
@@ -69,7 +71,14 @@ http {{
         '{{"t":"$time_iso8601","ts":$msec,"ip":"$remote_addr","method":"$request_method",'
         '"uri":"$request_uri","status":$status,"bytes":$bytes_sent,"req_bytes":$request_length,'
         '"dur":$request_time,"node":"$robot_node","ua":"$http_user_agent","conn":$connection}}';
-    access_log {state_dir}/access.log robot_json buffer=16k flush=2s;
+    # skip successful status polls (pages poll /state etc. every second): who is connected and what they
+    # pull is already visible live; streams, pages, every POST and every error stay in the log
+    map "$request_method:$status:$uri" $robot_log {{
+        "~^GET:2[0-9][0-9]:/nodes/[^/]+/(state|health|meta|time|fields|calibration)$" 0;
+        "~^GET:2[0-9][0-9]:/api/(nodes|managed|health|frontend|observe|observe/requests)$" 0;
+        default 1;
+    }}
+    access_log {state_dir}/access.log robot_json buffer=16k flush=2s if=$robot_log;
     client_body_temp_path {tmp}/body;
     proxy_temp_path {tmp}/proxy;
     fastcgi_temp_path {tmp}/fastcgi;

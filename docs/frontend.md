@@ -232,6 +232,10 @@ The landing page has a **Who's here** panel and a matching API; admin stays on S
   `~/.local/state/robot_utils/nginx/access.log`: time, client address, method, URI, status, bytes,
   duration, the node, and the user agent. Requests are logged when they *end*, so a stream that's
   still open shows up in the live columns below.
+- **Not logged:** successful status polls (`GET .../state`, `health`, `meta`, `time`, `fields`,
+  `calibration`, and the landing page's own `/api/...` polls). Pages make these every second, and
+  they were about 80 % of the volume (about 385 MB/day). Who is connected and how much they pull
+  still shows live, and streams, pages, every POST and every error are logged.
 - **Identity:** Tailscale addresses can't be forged over the tailnet, and `tailscale whois` maps them
   to the device and its owner (cached 10 min). LAN addresses are shown as they are, with no
   identity.
