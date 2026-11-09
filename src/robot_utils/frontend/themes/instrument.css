@@ -1,0 +1,283 @@
+/*
+title: Instrument
+description: Wireframe line art with glass-cockpit conventions: cyan marks what you can set, readouts are tabular mono, control and mode are boxed annunciators, and the e-stop is a guarded master switch. Colour always means something.
+*/
+
+/* Fusion of wireframe (structure: neutral sheet, line panels, ticks, alarms the only fills) and glass
+   cockpit (meaning: EICAS provenance colours, instrument readouts, annunciators, a guarded master
+   switch). Cockpit's surfaces (lit glass, tinted fills, black bezels) are deliberately not taken.
+   Colour vocabulary: ink = measured; cyan (--signal) = selectable / operator-entered;
+   green = engaged; amber = caution; red = warning. --command (magenta) is defined for pages that
+   adopt it; today only the plot palette carries it. */
+
+/* == palette == ------------------------------------------------------------------------------
+   Monochrome line work. Light = near-white neutral sheet, charcoal ink and lines.
+   Dark = near-black vector display, pale grey-white lines. One restrained accent (--signal) marks
+   what you can interact with; red / amber / green are reserved for stop / caution / live.
+   --panel equals --ground (panels are drawn as outlines; the token stays opaque because pages use
+   it as a fill and as text colour).
+   Extra tokens: --stop-fill / --on-stop (e-stop surfaces), --caution-fill / --on-caution / --caution-hatch
+   (covered band), --stop-latched, --signal-ink, --line-soft (dashed construction lines),
+   --tick (corner registration ticks), --eye (camera / map frame), --grid-dot (ground). */
+:root[data-theme="instrument"] {
+  color-scheme: light dark;
+  --ground: #F8F8F7; --panel: #F8F8F7; --ink: #1A1A1A; --muted: #545454; --rule: #3A3A3A;
+  --signal: #00707F; --stop: #B5150E; --caution: #8C5200; --live: #12683D;
+  --stop-bg: #FBE3E0; --caution-bg: #F8EBD2; --live-bg: #DDF0E4; --signal-bg: #E2F1F3; --command: #A8237F;
+  --stop-fill: #B5150E; --on-stop: #FFFFFF; --stop-latched: #6B0E0A;
+  --caution-fill: #E0A030; --on-caution: #1B1200; --caution-hatch: #C88A1E; --caution-ink: #1B1200;
+  --signal-ink: #FFFFFF;
+  --line-soft: #B4B4B2; --tick: #1A1A1A; --eye: #1A1A1A;
+  --grid-dot: #BDBDB9;
+  --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23C2C2BE'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%238A8A86' stroke-width='1'/%3E%3C/svg%3E");
+  --plot-1: #262626; --plot-2: #A8237F; --plot-3: #7A7A7A; --plot-4: #4C68B0; --plot-5: #7D6A3A;
+  --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 0px;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="instrument"] {
+    --ground: #0F1010; --panel: #0F1010; --ink: #E8EAE8; --muted: #A2A6A3; --rule: #C9CCC9;
+    --signal: #4FD3E3; --stop: #FF7468; --caution: #F2B33D; --live: #55D597;
+    --stop-bg: #3A1512; --caution-bg: #33270F; --live-bg: #0F3020; --signal-bg: #0C2A2E; --command: #F27AD6;
+    --stop-fill: #C8261F; --on-stop: #FFFFFF; --stop-latched: #7A120D;
+    --caution-fill: #F2B33D; --on-caution: #1B1200; --caution-hatch: #D99A2B; --caution-ink: #1B1200;
+    --signal-ink: #0F1010;
+    --line-soft: #4A4D4B; --tick: #E8EAE8; --eye: #E8EAE8;
+    --grid-dot: #3D403E;
+    --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%233A3D3B'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%23686C69' stroke-width='1'/%3E%3C/svg%3E");
+    --plot-1: #E8EAE8; --plot-2: #F27AD6; --plot-3: #7E827F; --plot-4: #8FA6E8; --plot-5: #CDB88E;
+  }
+}
+
+/* == type == ---------------------------------------------------------------------------------
+   Body copy stays in Plex for reading; the drawing's "title block" voice (headings, card titles,
+   controls, tags, table heads, the band) is monospace, capitals, letter-spaced like stencilled
+   lettering on a drawing sheet. Numbers are tabular mono. */
+:root[data-theme="instrument"] h1, :root[data-theme="instrument"] h2, :root[data-theme="instrument"] h3,
+:root[data-theme="instrument"] .ru-card > b:first-child,
+:root[data-theme="instrument"] .tile .title, :root[data-theme="instrument"] .tile .hd b,
+:root[data-theme="instrument"] #tools strong {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: .09em; font-weight: 600;
+}
+:root[data-theme="instrument"] header .sub, :root[data-theme="instrument"] .tile .kind {
+  font-family: var(--mono); letter-spacing: .03em;
+}
+:root[data-theme="instrument"] .ru-num, :root[data-theme="instrument"] .ru-table td,
+:root[data-theme="instrument"] #who td.num, :root[data-theme="instrument"] .kv,
+:root[data-theme="instrument"] .tile dd, :root[data-theme="instrument"] .tile .foot .age,
+:root[data-theme="instrument"] .ro, :root[data-theme="instrument"] input, :root[data-theme="instrument"] select {
+  font-family: var(--mono); font-variant-numeric: tabular-nums slashed-zero;   /* instrument readouts */
+}
+:root[data-theme="instrument"] .ru-table th, :root[data-theme="instrument"] #who th,
+:root[data-theme="instrument"] .tile dt {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: .06em; font-weight: 500;
+  color: var(--muted);
+}
+:root[data-theme="instrument"] a { color: var(--signal); text-underline-offset: 3px; }
+
+/* == surfaces == -----------------------------------------------------------------------------
+   Every panel is a drawn outline: square corners, 1px drafting line, no shadow, and four
+   registration ticks inside the corners. Inner divisions are dashed construction lines. */
+:root[data-theme="instrument"] .ru-card, :root[data-theme="instrument"] .tile,
+:root[data-theme="instrument"] section.box, :root[data-theme="instrument"] #who,
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop-result{
+  border-radius: 0; box-shadow: none; border-top-color: var(--rule); border-right-color: var(--rule);
+  border-bottom-color: var(--rule);
+  background-image:
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
+  background-size: 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px;
+  background-position: left 3px top 3px, left 3px top 3px, right 3px top 3px, right 3px top 3px,
+                       left 3px bottom 3px, left 3px bottom 3px, right 3px bottom 3px, right 3px bottom 3px;
+  background-repeat: no-repeat;
+}
+:root[data-theme="instrument"] .ru-card, :root[data-theme="instrument"] .tile:not(.latched),
+:root[data-theme="instrument"] section.box, :root[data-theme="instrument"] #who,
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop-result:not(.bad), :root[data-theme="instrument"] #tools a {
+  background-color: var(--ground);   /* same colour as the sheet: still reads unfilled, but the dots stop at the outline */
+}
+:root[data-theme="instrument"] .ru-card:not(.tile), :root[data-theme="instrument"] section.box,
+:root[data-theme="instrument"] #who { border-left-color: var(--rule); }
+:root[data-theme="instrument"] #tools a, :root[data-theme="instrument"] #locks .lock,
+:root[data-theme="instrument"] .tile pre.logs, :root[data-theme="instrument"] #uplink-banner,
+:root[data-theme="instrument"] #map {
+  border-radius: 0;
+}
+:root[data-theme="instrument"] #tools a { border-color: var(--rule); border-style: dashed; }
+:root[data-theme="instrument"] #tools a:hover { border-style: solid; border-color: var(--signal); background-color: var(--signal-bg); }
+
+/* dashed construction lines inside panels */
+:root[data-theme="instrument"] .ru-table td, :root[data-theme="instrument"] #who td {
+  border-bottom: 1px dashed var(--line-soft);
+}
+:root[data-theme="instrument"] .ru-table th, :root[data-theme="instrument"] #who th { border-bottom: 1px solid var(--rule); }
+:root[data-theme="instrument"] .tile .foot { border-top: 1px dashed var(--line-soft); }
+:root[data-theme="instrument"] .tile .hd { border-bottom: 1px dashed var(--line-soft); }
+
+/* buttons: outlined drawing symbols on the paper; a fill only for the primary action */
+:root[data-theme="instrument"] button.ru, :root[data-theme="instrument"] .ru-btn,
+:root[data-theme="instrument"] #restart, :root[data-theme="instrument"] #lock-ctl button,
+:root[data-theme="instrument"] .tile .ctl button {
+  border-radius: 0; border: 1px solid var(--rule); background: var(--ground); color: var(--signal);
+  font-family: var(--mono); letter-spacing: .04em; box-shadow: none;
+}
+:root[data-theme="instrument"] button.ru:hover:not(:disabled), :root[data-theme="instrument"] #restart:hover:not(:disabled),
+:root[data-theme="instrument"] #lock-ctl button:hover, :root[data-theme="instrument"] .tile .ctl button:hover:not(:disabled) {
+  border-color: var(--signal); background: var(--signal-bg);
+}
+:root[data-theme="instrument"] button.ru:active:not(:disabled), :root[data-theme="instrument"] #restart:active:not(:disabled),
+:root[data-theme="instrument"] #lock-ctl button:active, :root[data-theme="instrument"] .tile .ctl button:active:not(:disabled) {
+  background: var(--signal); border-color: var(--signal); color: var(--signal-ink);   /* soft key: momentary invert */
+}
+:root[data-theme="instrument"] .tile .ctl button.link { border-color: transparent; background: none; color: var(--signal); }
+:root[data-theme="instrument"] button.ru.primary {
+  background: var(--ground); border-color: var(--signal); color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); font-weight: 600;
+}
+:root[data-theme="instrument"] button.ru.primary:hover:not(:disabled) { background: var(--signal-bg); }
+:root[data-theme="instrument"] button.ru.hazard { border-color: var(--stop); color: var(--stop); border-width: 1px; }
+:root[data-theme="instrument"] button.ru.live { border-color: var(--live); color: var(--live); }
+:root[data-theme="instrument"] button.ru.hazard:hover:not(:disabled) { background: var(--stop-bg); border-color: var(--stop); }
+:root[data-theme="instrument"] button.ru.live:hover:not(:disabled) { background: var(--live-bg); border-color: var(--live); }
+
+/* inputs: a box drawn for a value */
+:root[data-theme="instrument"] select, :root[data-theme="instrument"] input[type=number],
+:root[data-theme="instrument"] input[type=text], :root[data-theme="instrument"] input:not([type]),
+:root[data-theme="instrument"] #theme-pick {
+  border-radius: 0; border: 1px solid var(--rule); background: var(--panel); color: var(--signal);
+  font-family: var(--mono);   /* operator-entered values are cyan, as on a flight deck */
+}
+:root[data-theme="instrument"] input[type=checkbox], :root[data-theme="instrument"] input[type=range],
+:root[data-theme="instrument"] input[type=radio] { accent-color: var(--signal); }
+:root[data-theme="instrument"] :focus-visible { outline: 2px dashed var(--signal); outline-offset: 2px; }
+
+/* the robot's eye: camera tiles and the map get a double drafting line (a viewfinder frame),
+   distinct from the single line of an ordinary panel. Plain box-shadow, no blur. */
+:root[data-theme="instrument"] .tile:has(.wrap), :root[data-theme="instrument"] [data-role="view"] {
+  border: 1px solid var(--eye);
+  box-shadow: 0 0 0 3px var(--panel), 0 0 0 4px var(--eye);
+}
+:root[data-theme="instrument"] .tile:has(.wrap) .hd {
+  border-bottom: 1px solid var(--eye);
+  background-image:
+    linear-gradient(var(--eye), var(--eye)), linear-gradient(var(--eye), var(--eye)),
+    linear-gradient(var(--eye), var(--eye)), linear-gradient(var(--eye), var(--eye));
+  background-size: 14px 2px, 2px 8px, 14px 2px, 2px 8px;
+  background-position: left 0 bottom 0, left 0 bottom 0, right 0 bottom 0, right 0 bottom 0;
+  background-repeat: no-repeat;
+}
+:root[data-theme="instrument"] .ro { border-radius: 0; font-family: var(--mono); }
+:root[data-theme="instrument"] #map {
+  box-shadow: 0 0 0 1px var(--eye), 0 0 0 4px var(--panel), 0 0 0 5px var(--eye);
+}
+
+/* swerve teleop tool: square controls, crosshair construction lines through the pads */
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .panel button{ border-radius: 0; }
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .panel > #state{ border-radius: 0; font-family: var(--mono); letter-spacing: .08em; }
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .panel > #state:not(.on):not(.off){
+  background: var(--signal-bg); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule);
+}
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .panel > #state.off{ color: var(--on-stop); background: var(--stop-fill); }
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .pad, :root[data-theme="instrument"] :where(body:not(:has(#veil))) .slider{
+  border-color: var(--rule);
+  background-image: linear-gradient(var(--line-soft), var(--line-soft)), linear-gradient(var(--line-soft), var(--line-soft));
+  background-size: 1px 100%, 100% 1px; background-position: center, center; background-repeat: no-repeat;
+}
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) .slider{ border-radius: 0; background-size: 1px 100%, 0 0; }
+
+/* == ground == -------------------------------------------------------------------------------
+   Engineering dot paper with two scales: a faint dot every 24px and a small, slightly stronger
+   cross every 120px (one 120px SVG tile per scheme, --grid-tile: crisp at any zoom, no aliasing
+   lines). Nothing strikes through text: panels take the ground fill, so the sheet only shows
+   between outlines. Reusable on its own: it needs only --ground and --grid-tile. */
+:root[data-theme="instrument"] .ru-pill:not(.ru-ok):not(.ru-err):not(.ru-warn) { background-color: var(--ground); }
+:root[data-theme="instrument"] .ru-head, :root[data-theme="instrument"] main > header,
+:root[data-theme="instrument"] h1, :root[data-theme="instrument"] h2, :root[data-theme="instrument"] .ru-wrap > .ru-row:first-of-type, :root[data-theme="instrument"] body > header {
+  background-color: var(--ground);   /* header text sits on clean sheet, like text inside panels */
+}
+:root[data-theme="instrument"] body {
+  background-color: var(--ground);
+  background-image: var(--grid-tile);
+  background-size: 120px 120px;
+  background-position: -1px -1px;
+  background-attachment: fixed;   /* the sheet stays put; content scrolls over it (nothing blurred on top, so cheap) */
+}
+/* main header of the landing page reads as a drawing's title block: a ruled line beneath */
+:root[data-theme="instrument"] main > header { border-bottom: 1px solid var(--rule); padding-bottom: 12px; }
+
+/* == alerting == -----------------------------------------------------------------------------
+   Alarms are the only solid ink on the sheet. E-stops: a full opaque --stop-fill block with
+   --on-stop lettering and one thin inner rule (a drafted double border). */
+:root[data-theme="instrument"] button.ru-estop, :root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop{
+  background: var(--stop-fill); color: var(--on-stop); border-radius: 0;
+  font-family: var(--mono); letter-spacing: .1em;
+}
+:root[data-theme="instrument"] button.ru-estop {
+  /* a guarded master switch, drawn: inner rule, then a sheet-coloured gap and an ink guard ring */
+  box-shadow: inset 0 0 0 3px var(--stop-fill), inset 0 0 0 4px var(--on-stop), 0 0 0 3px var(--ground), 0 0 0 4px var(--ink);
+}
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop:not(.ru-estop) {
+  box-shadow: inset 0 0 0 4px var(--stop-fill), inset 0 0 0 5px var(--on-stop), 0 0 0 4px var(--ground), 0 0 0 5px var(--ink);
+}
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop:hover{ background: color-mix(in srgb, var(--stop-fill) 86%, #000); }
+:root[data-theme="instrument"] :where(body:not(:has(#veil))) #estop small{ font-family: var(--font); letter-spacing: 0; }
+:root[data-theme="instrument"] button.ru-estop.latched {
+  background: var(--stop-latched); color: var(--on-stop);
+  box-shadow: inset 0 0 0 3px var(--stop-latched), inset 0 0 0 5px var(--on-stop);
+  outline: 2px dashed var(--stop); outline-offset: 2px;
+}
+/* tiles: keep the coloured status edge; a latched tile is tinted by the page */
+:root[data-theme="instrument"] #locks .lock b { font-family: var(--mono); letter-spacing: .08em; }
+
+/* the state band: the robot's voice, lettered in the title-block face */
+:root[data-theme="instrument"] .ru-band b { font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+:root[data-theme="instrument"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop); }
+:root[data-theme="instrument"] .ru-band.chocked {
+  color: var(--on-stop);
+  background: var(--stop-fill) repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--stop-latched) 14px 28px);
+}
+:root[data-theme="instrument"] .ru-band.covered {
+  color: var(--on-caution);
+  background: var(--caution-fill) repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-hatch) 14px 28px);
+}
+:root[data-theme="instrument"] .ru-band.live {
+  background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live);
+}
+:root[data-theme="instrument"] .ru-band.nominal { background: var(--rule); }
+
+/* tags: square, outlined, lettered */
+:root[data-theme="instrument"] .ru-pill, :root[data-theme="instrument"] .pill {
+  border-radius: 0; font-family: var(--mono); letter-spacing: .03em;
+}
+/* annunciators: state is a coloured box and legend on the sheet, never a filled chip */
+:root[data-theme="instrument"] .ru-pill.ru-ok, :root[data-theme="instrument"] .pill.ok, :root[data-theme="instrument"] .pill.streaming {
+  background: var(--ground); border: 1px solid var(--live); color: var(--live);
+}
+:root[data-theme="instrument"] .ru-pill.ru-err, :root[data-theme="instrument"] .pill.bad, :root[data-theme="instrument"] .pill.err {
+  background: var(--ground); border: 2px solid var(--stop); color: var(--stop); font-weight: 700;
+}
+:root[data-theme="instrument"] .ru-pill.ru-warn, :root[data-theme="instrument"] .pill.warn, :root[data-theme="instrument"] .pill.busy, :root[data-theme="instrument"] .pill.covered {
+  background: var(--ground); border: 1px solid var(--caution); color: var(--caution);
+}
+:root[data-theme="instrument"] .pill:not(.ok):not(.bad):not(.warn):not(.streaming):not(.err):not(.busy):not(.covered) {
+  background: var(--signal-bg); color: var(--ink);
+}
+/* who holds control: vacant = dashed outline (an empty slot on the drawing), yours = solid
+   live outline with a heavy left bar, someone else's = amber outline with a hatched fill. */
+:root[data-theme="instrument"] .ru-pill[data-k="who"] {
+  /* who has the controls, as a flight-mode annunciator: a lettered box */
+  padding: 2px 9px; border: 1px dashed var(--rule); color: var(--muted); background: var(--panel);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+:root[data-theme="instrument"] .ru-pill[data-k="who"].ru-ok {
+  border: 2px solid var(--live); color: var(--live); background: var(--ground); font-weight: 700;
+}
+:root[data-theme="instrument"] .ru-pill[data-k="who"].ru-warn {
+  border: 2px solid var(--caution); color: var(--caution); font-weight: 700;
+  background: repeating-linear-gradient(135deg, var(--caution-bg) 0 5px, var(--panel) 5px 10px);
+}
+
+/* == motion == -------------------------------------------------------------------------------
+   None. Feedback is immediate state (the soft-key invert), not animation. */

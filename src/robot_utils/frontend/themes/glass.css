@@ -1,0 +1,478 @@
+/*
+title: Liquid glass
+description: Clear, lens-like capsules for everything you touch (buttons, pills, the lease, tool links, header controls) floating over solid, legible content panels and a soft colour mesh. The e-stop, the state band and the robot's camera frames stay solid.
+*/
+/* How this theme is built
+   - Glass is for what you touch, not what you read. Content (cards, tiles, tables, plots, camera)
+     sits on solid --panel slabs with only a faint top rim. Controls are a thin, mostly clear lens:
+     a light tint, a static specular highlight near the top, a caustic near the bottom, bright
+     top/leading rims, a darker bottom/trailing rim, a soft inner glow and a small contact shadow.
+   - Real refraction (backdrop-filter: url(#svg)) is not used. backdrop-filter is only a small
+     blur(6px) saturate(1.8), and only on the few controls that sit straight on the mesh (landing
+     header controls, lock buttons, tool links, the node-page state pill, the camera header). Controls
+     inside solid cards get the same lens with no blur: there is nothing behind them to blur.
+   - The mesh scrolls with the page (no background-attachment: fixed), so a blurred element only
+     re-blurs when it moves.
+   - Tokens stay OPAQUE (--panel is also a text colour and a fill). The "surfaces" section reads only
+     --glass-* / --lens-* tokens so it can be reused over another ground.
+   - --glass-behind is the worst mesh point behind a control (darkest by day, brightest by night);
+     control text was hand-checked against --lens-tint composited over it.
+   - Concentric shapes: controls are capsules (32px tall, radius 16) inside cards whose radius is
+     about capsule radius + card padding (26px). The robot's eye is a tighter 10px bezel. */
+
+/* == palette == */
+:root[data-theme="glass"] {
+  color-scheme: light dark;
+  --ground: #E6ECF5;
+  --panel: #FAFBFE;
+  --ink: #141B33;
+  --muted: #4A5570;
+  --rule: #CDD5E4;
+  --signal: #2F4FD0;
+  --stop: #C3122F;
+  --caution: #8F5300;
+  --live: #0B7556;
+  --stop-bg: #FBE3E6;
+  --caution-bg: #FBEED6;
+  --live-bg: #DDF3EA;
+  --signal-bg: #E4E9FB;
+  --stop-fill: #C3122F;
+  --on-stop: #FFFFFF;
+  --stop-ink: var(--on-stop);
+  --live-ink: var(--live);
+  --caution-ink: #1B1200;
+  --caution-fill: #E8A317;
+  --caution-fill-2: #C98A0E;
+  --on-caution: #1B1200;
+  /* data series: validated (OKLCH band, chroma floor, adjacent CVD dE >= 14, contrast >= 4.3 on --panel) */
+  --plot-1: #2F4FD0;
+  --plot-2: #00809A;
+  --plot-3: #C2410C;
+  --plot-4: #B0279E;
+  --plot-5: #4D7C0F;
+  --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  --radius: 16px;
+  /* solid content slabs */
+  --slab-rim: rgba(255, 255, 255, 1);
+  --slab-top: #FDFDFF;
+  --slab-bottom: #F2F4FB;
+  --slab-line: #D3DAE8;
+  --slab-shadow: 0 1px 2px rgba(30, 40, 90, 0.06), 0 8px 20px -14px rgba(30, 40, 90, 0.22);
+  /* the lens (controls) */
+  --glass-behind: #B9D6F5;
+  --lens-tint: rgba(255, 255, 255, 0.30);
+  --lens-spec: rgba(255, 255, 255, 0.70);
+  --lens-caustic: rgba(255, 255, 255, 0.45);
+  --lens-rim-top: rgba(255, 255, 255, 0.95);
+  --lens-rim-lead: rgba(255, 255, 255, 0.45);
+  --lens-rim-bottom: rgba(24, 34, 80, 0.26);
+  --lens-rim-trail: rgba(24, 34, 80, 0.07);
+  --lens-glow: rgba(255, 255, 255, 0.40);
+  --lens-edge: rgba(255, 255, 255, 0.75);
+  --lens-edge-low: rgba(52, 64, 110, 0.48);
+  --lens-contact: 0 1px 1px rgba(24, 34, 80, 0.14), 0 3px 8px -3px rgba(24, 34, 80, 0.26);
+  --lens-blur: blur(6px) saturate(1.8);
+  --lens-solid: #F1F4FA;
+  /* the robot's eye */
+  --eye-bezel: #0A1022;
+  --eye-rim: rgba(47, 79, 208, 0.45);
+  /* ground */
+  --mesh-base: #E6ECF5;
+  --mesh-a: rgba(176, 210, 245, 0.85);
+  --mesh-b: rgba(213, 200, 244, 0.85);
+  --mesh-c: rgba(190, 236, 218, 0.8);
+  --mesh-d: rgba(246, 248, 253, 0.9);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="glass"] {
+    --ground: #0C1122;
+    --panel: #171D36;
+    --ink: #E8ECF8;
+    --muted: #A6B0CA;
+    --rule: #2E3859;
+    --signal: #93B6FF;
+    --stop: #FF7B7F;
+    --caution: #F4B740;
+    --live: #4CD4A6;
+    --stop-bg: #3D1624;
+    --caution-bg: #352812;
+    --live-bg: #0F3330;
+    --signal-bg: #1B2A55;
+    --stop-fill: #D42A3A;
+    --on-stop: #FFFFFF;
+    --stop-ink: var(--on-stop);
+    --live-ink: var(--live);
+    --caution-ink: #1B1200;
+    --caution-fill: #E8A317;
+    --caution-fill-2: #C98A0E;
+    --on-caution: #1B1200;
+    --plot-1: #6A88F0;
+    --plot-2: #13A193;
+    --plot-3: #E0712A;
+    --plot-4: #C366D2;
+    --plot-5: #7EA22A;
+    --slab-rim: rgba(255, 255, 255, 0.08);
+    --slab-top: #1B2242;
+    --slab-bottom: #141A31;
+    --slab-line: #262F4E;
+    --slab-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 24px -16px rgba(0, 0, 0, 0.7);
+    --glass-behind: #123A4A;
+    --lens-tint: rgba(14, 20, 44, 0.32);
+    --lens-spec: rgba(255, 255, 255, 0.13);
+    --lens-caustic: rgba(150, 190, 255, 0.10);
+    --lens-rim-top: rgba(255, 255, 255, 0.30);
+    --lens-rim-lead: rgba(255, 255, 255, 0.12);
+    --lens-rim-bottom: rgba(0, 0, 0, 0.50);
+    --lens-rim-trail: rgba(0, 0, 0, 0.25);
+    --lens-glow: rgba(140, 170, 255, 0.10);
+    --lens-edge: rgba(255, 255, 255, 0.22);
+    --lens-edge-low: rgba(0, 0, 0, 0.45);
+    --lens-contact: 0 1px 1px rgba(0, 0, 0, 0.40), 0 3px 8px -3px rgba(0, 0, 0, 0.55);
+    --lens-solid: #222A48;
+    --eye-bezel: #03050C;
+    --eye-rim: rgba(147, 182, 255, 0.35);
+    --mesh-base: #0C1122;
+    --mesh-a: rgba(36, 70, 140, 0.55);
+    --mesh-b: rgba(82, 50, 150, 0.5);
+    --mesh-c: rgba(20, 110, 118, 0.45);
+    --mesh-d: rgba(50, 40, 110, 0.35);
+  }
+}
+
+/* == type == */
+:root[data-theme="glass"] body { font-family: var(--font); }
+:root[data-theme="glass"] h1 { font-weight: 450; letter-spacing: -0.012em; }
+:root[data-theme="glass"] h2 { font-weight: 480; letter-spacing: -0.006em; }
+:root[data-theme="glass"] h3 { font-weight: 500; }
+:root[data-theme="glass"] .tile .title { font-weight: 560; letter-spacing: -0.005em; }
+:root[data-theme="glass"] .ru-card > b:first-child,
+:root[data-theme="glass"] section.box h2 { font-weight: 600; }
+:root[data-theme="glass"] button.ru,
+:root[data-theme="glass"] #tools strong { font-weight: 500; }
+
+/* == surfaces == */
+/* -- content: opaque slabs with a quiet material: a slight vertical tonal falloff (tinted toward
+      the mesh's lavender), an inset top rim, no blur ------------------------------------------- */
+:root[data-theme="glass"] .ru-card,
+:root[data-theme="glass"] .tile,
+:root[data-theme="glass"] #who,
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop-result,
+:root[data-theme="glass"] section.box {
+  background-color: var(--panel);
+  background-image: linear-gradient(180deg, var(--slab-top), var(--slab-bottom));
+  border: 1px solid var(--slab-line);
+  box-shadow: inset 0 1px 0 var(--slab-rim), var(--slab-shadow);
+}
+:root[data-theme="glass"] .ru-card,
+:root[data-theme="glass"] .tile,
+:root[data-theme="glass"] #who { border-radius: 26px; }
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop-result,
+:root[data-theme="glass"] section.box { border-radius: 20px; }
+/* landing tiles keep their coloured status edge */
+:root[data-theme="glass"] .tile { border-left-width: 6px; border-left-color: var(--muted); }
+:root[data-theme="glass"] .tile.up { border-left-color: var(--live); }
+:root[data-theme="glass"] .tile.down,
+:root[data-theme="glass"] .tile.chocked { border-left-color: var(--stop); }
+:root[data-theme="glass"] .tile.covered { border-left-color: var(--caution); }
+:root[data-theme="glass"] .tile.latched {
+  background-image: linear-gradient(180deg, var(--stop-bg), var(--slab-bottom) 70%);
+  border-color: var(--stop); border-left-color: var(--stop);
+}
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop-result.good{ border-color: var(--live); }
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop-result.bad{
+  border-color: var(--stop);
+  background-image: linear-gradient(180deg, var(--stop-bg), var(--slab-bottom) 70%);
+}
+:root[data-theme="glass"] .tile .foot,
+:root[data-theme="glass"] .tile .hd,
+:root[data-theme="glass"] .ru-table td,
+:root[data-theme="glass"] .ru-table th,
+:root[data-theme="glass"] #who th,
+:root[data-theme="glass"] #who td { border-color: var(--slab-line); }
+:root[data-theme="glass"] .tile pre.logs { border-radius: 14px; }
+:root[data-theme="glass"] #locks .lock { border-radius: 16px; }
+:root[data-theme="glass"] aside { border-right-color: var(--slab-line); }
+
+/* -- the lens: controls, chrome, pills ---------------------------------------------------------- */
+:root[data-theme="glass"] button.ru,
+:root[data-theme="glass"] .ru-btn,
+:root[data-theme="glass"] .tile .ctl button:not(.link),
+:root[data-theme="glass"] #lock-ctl button,
+:root[data-theme="glass"] #restart,
+:root[data-theme="glass"] #theme-pick,
+:root[data-theme="glass"] #tools a,
+:root[data-theme="glass"] .ru-pill,
+:root[data-theme="glass"] body > header {
+  background-color: var(--lens-tint);
+  background-image:
+    radial-gradient(90% 70% at 50% -10%, var(--lens-spec), transparent 60%),
+    radial-gradient(70% 50% at 50% 115%, var(--lens-caustic), transparent 70%);
+  border: 1px solid var(--lens-edge);
+  border-bottom-color: var(--lens-edge-low);
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top),
+    inset 1px 0 0 var(--lens-rim-lead),
+    inset 0 -1px 0 var(--lens-rim-bottom),
+    inset -1px 0 0 var(--lens-rim-trail),
+    inset 0 0 8px var(--lens-glow),
+    var(--lens-contact);
+  color: var(--ink);
+}
+/* capsules */
+:root[data-theme="glass"] button.ru,
+:root[data-theme="glass"] .ru-btn,
+:root[data-theme="glass"] .tile .ctl button:not(.link),
+:root[data-theme="glass"] #lock-ctl button,
+:root[data-theme="glass"] #restart,
+:root[data-theme="glass"] #theme-pick,
+:root[data-theme="glass"] .ru-pill { border-radius: 999px; }
+:root[data-theme="glass"] button.ru,
+:root[data-theme="glass"] .ru-btn,
+:root[data-theme="glass"] .tile .ctl button:not(.link) { padding-left: 14px; padding-right: 14px; }
+:root[data-theme="glass"] #theme-pick { padding: 2px 8px; }
+/* tool links: wide lenses, radius concentric with the grid gap */
+:root[data-theme="glass"] #tools a { border-radius: 22px; padding: 12px 18px; }
+/* camera page header: a lens strip, square ends */
+:root[data-theme="glass"] body > header {
+  border-width: 0 0 1px 0;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom), var(--lens-contact);
+}
+/* blur only where the control sits straight on the mesh (kept few and small) */
+:root[data-theme="glass"] #restart,
+:root[data-theme="glass"] #theme-pick,
+:root[data-theme="glass"] #lock-ctl button,
+:root[data-theme="glass"] #tools a,
+:root[data-theme="glass"] h2 > .ru-pill,
+:root[data-theme="glass"] body > header {
+  -webkit-backdrop-filter: var(--lens-blur);
+  backdrop-filter: var(--lens-blur);
+}
+/* hover: the rim picks up the signal colour */
+:root[data-theme="glass"] button.ru:hover,
+:root[data-theme="glass"] .tile .ctl button:not(.link):hover,
+:root[data-theme="glass"] #lock-ctl button:hover,
+:root[data-theme="glass"] #restart:hover,
+:root[data-theme="glass"] #tools a:hover { border-color: var(--signal); }
+:root[data-theme="glass"] #tools a:hover { border-bottom-color: var(--signal); }
+/* tinted lenses: primary, hazard, live keep their meaning */
+:root[data-theme="glass"] button.ru.primary {
+  background-color: color-mix(in srgb, var(--signal) 12%, var(--panel));
+  background-image: none;
+  border: 1.5px solid var(--signal);
+  color: var(--signal);
+  font-weight: 600;
+}
+:root[data-theme="glass"] button.ru.hazard { border-color: var(--stop); color: var(--stop); }
+:root[data-theme="glass"] button.ru.live { border-color: var(--live); color: var(--live); }
+/* status: tinted lens capsules (a thin tint of the state colour + a coloured rim); no fill
+   highlight, so the label keeps its contrast; err is a heavier rim, warn a dashed one */
+:root[data-theme="glass"] .ru-pill.ru-ok,
+:root[data-theme="glass"] .ru-pill.ru-err,
+:root[data-theme="glass"] .ru-pill.ru-warn,
+:root[data-theme="glass"] .pill.ok,
+:root[data-theme="glass"] .pill.bad,
+:root[data-theme="glass"] .pill.warn,
+:root[data-theme="glass"] .pill.streaming,
+:root[data-theme="glass"] .pill.err,
+:root[data-theme="glass"] .pill.busy,
+:root[data-theme="glass"] .pill.covered {
+  background-image: none;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom);
+}
+:root[data-theme="glass"] .ru-pill.ru-ok,
+:root[data-theme="glass"] .pill.ok,
+:root[data-theme="glass"] .pill.streaming {
+  background-color: color-mix(in srgb, var(--live) 10%, var(--panel)); border: 1px solid var(--live); color: var(--live);
+}
+:root[data-theme="glass"] .ru-pill.ru-err,
+:root[data-theme="glass"] .pill.bad,
+:root[data-theme="glass"] .pill.err {
+  background-color: color-mix(in srgb, var(--stop) 10%, var(--panel)); border: 1.5px solid var(--stop); color: var(--stop);
+}
+:root[data-theme="glass"] .ru-pill.ru-warn,
+:root[data-theme="glass"] .pill.warn,
+:root[data-theme="glass"] .pill.busy,
+:root[data-theme="glass"] .pill.covered {
+  background-color: color-mix(in srgb, var(--caution) 10%, var(--panel)); border: 1px dashed var(--caution); color: var(--caution);
+}
+/* inputs: inset wells (the inverse of a lens) */
+:root[data-theme="glass"] input[type=number],
+:root[data-theme="glass"] input[type=text],
+:root[data-theme="glass"] input:not([type]),
+:root[data-theme="glass"] select:not(#theme-pick) {
+  border-radius: 999px;
+  border: 1px solid var(--slab-line);
+  background: var(--ground);
+  color: var(--ink);
+  box-shadow: inset 0 1px 2px rgba(20, 27, 51, 0.16), inset 0 -1px 0 var(--slab-rim);
+  padding: 2px 6px;
+}
+
+/* -- the robot's eye: camera frames and maps sit in an opaque dark bezel with a cool rim ------- */
+:root[data-theme="glass"] .wrap,
+:root[data-theme="glass"] #poly,
+:root[data-theme="glass"] #view,
+:root[data-theme="glass"] .live img {
+  background-color: var(--eye-bezel);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 40%);
+}
+:root[data-theme="glass"] .wrap img,
+:root[data-theme="glass"] #poly img,
+:root[data-theme="glass"] #view,
+:root[data-theme="glass"] .live img,
+:root[data-theme="glass"] #map,
+:root[data-theme="glass"] canvas.view,
+:root[data-theme="glass"] .views canvas {
+  border-radius: 10px;
+  outline: 1px solid var(--eye-rim);
+  outline-offset: -1px;
+}
+:root[data-theme="glass"] .tile:has(.wrap) { border-color: var(--eye-rim); }
+
+/* == ground == */
+/* Static mesh, scrolling with the page (no fixed attachment: see the header comment). */
+:root[data-theme="glass"] body {
+  background-color: var(--mesh-base);
+  background-image:
+    radial-gradient(60vmax 50vmax at 8% 4%, var(--mesh-a), transparent 70%),
+    radial-gradient(55vmax 45vmax at 96% 12%, var(--mesh-b), transparent 70%),
+    radial-gradient(60vmax 50vmax at 70% 100%, var(--mesh-c), transparent 70%),
+    radial-gradient(45vmax 40vmax at 20% 85%, var(--mesh-d), transparent 70%);
+}
+
+/* == alerting == */
+/* E-STOP: solid and opaque, never glass. Fill falls from --stop-fill (its lightest point, which
+   carries the >= 4.5:1 label) to a deeper red. The liquid rims are 1-2px lines at the edges only. */
+:root[data-theme="glass"] button.ru-estop,
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop,
+:root[data-theme="glass"] .ru-band.estop {
+  background-color: var(--stop-fill);
+  color: var(--on-stop);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-theme="glass"] button.ru-estop,
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop{
+  background-image: linear-gradient(180deg, var(--stop-fill) 35%, color-mix(in srgb, var(--stop-fill) 80%, #000));
+}
+:root[data-theme="glass"] button.ru-estop {
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 1px 0 0 rgba(255, 255, 255, 0.2),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.30),
+    0 0 0 1px color-mix(in srgb, var(--stop-fill) 60%, #000),
+    0 2px 0 color-mix(in srgb, var(--stop-fill) 50%, #000),
+    0 4px 8px -3px rgba(80, 0, 10, 0.45);
+}
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop{
+  border-radius: 28px;
+  border-color: color-mix(in srgb, var(--stop-fill) 60%, #000);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 1px 0 0 rgba(255, 255, 255, 0.2),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.30),
+    0 3px 0 color-mix(in srgb, var(--stop-fill) 50%, #000),
+    0 6px 10px -4px rgba(80, 0, 10, 0.45);
+}
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop:hover{ background-image: none; background-color: var(--stop-fill); }
+:root[data-theme="glass"] button.ru-estop.latched,
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #estop.latched{
+  background: #7A1220;
+  color: #FFFFFF;
+  background-image: linear-gradient(180deg, #8A1626, #6A0F1C);
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.5), inset 0 -3px 0 rgba(0, 0, 0, 0.3);
+}
+
+/* state band: opaque, hatches kept; a hairline highlight on top and a darker lip below give the
+   fills material. The estop band falls from --stop-fill (lightest point carries the label). */
+:root[data-theme="glass"] .ru-band.estop,
+:root[data-theme="glass"] .ru-band.chocked,
+:root[data-theme="glass"] .ru-band.covered {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -2px 0 rgba(0, 0, 0, 0.25);
+}
+:root[data-theme="glass"] .ru-band.estop {
+  background-image: linear-gradient(180deg, var(--stop-fill) 40%, color-mix(in srgb, var(--stop-fill) 85%, #000));
+}
+:root[data-theme="glass"] .ru-band.nominal { background: var(--rule); }
+:root[data-theme="glass"] .ru-band.live {
+  background: var(--live-bg);
+  color: var(--live);
+  box-shadow: inset 0 -3px 0 var(--live);
+}
+:root[data-theme="glass"] .ru-band.chocked {
+  color: var(--on-stop);
+  background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, color-mix(in srgb, var(--stop-fill) 62%, #000) 14px 28px);
+}
+:root[data-theme="glass"] .ru-band.covered {
+  color: var(--on-caution);
+  background: repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-fill-2) 14px 28px);
+}
+
+/* who holds control (the lease pill): you = a green-tinted lens with a solid 2px rim; someone else
+   = an amber-tinted lens with a dashed 2px rim (reads without colour); free = the plain clear lens */
+:root[data-theme="glass"] .ru-pill[data-k="who"] { font-weight: 500; padding: 2px 12px; }
+:root[data-theme="glass"] .ru-pill[data-k="who"].ru-ok {
+  border-width: 2px;
+  font-weight: 650;
+}
+:root[data-theme="glass"] .ru-pill[data-k="who"].ru-warn {
+  border-width: 2px;
+  font-weight: 650;
+}
+
+/* remote teleop tool: the control-state banner becomes a tinted lens with a strong line */
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #state{
+  background-color: var(--lens-tint);
+  background-image: radial-gradient(90% 70% at 50% -10%, var(--lens-spec), transparent 60%);
+  border: 2px solid var(--lens-edge-low);
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom);
+  color: var(--ink);
+}
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #state.on{
+  background-color: color-mix(in srgb, var(--live) 10%, var(--panel)); background-image: none;
+  border: 2px solid var(--live); color: var(--live);
+}
+:root[data-theme="glass"] :where(body:not(:has(#veil))) #state.off{
+  background-color: color-mix(in srgb, var(--stop) 10%, var(--panel)); background-image: none;
+  border: 2px dashed var(--stop); color: var(--stop);
+}
+
+/* == motion == */
+/* Nothing moves on its own; highlights are static. Only user-triggered border colour eases in. */
+:root[data-theme="glass"] button.ru,
+:root[data-theme="glass"] #tools a,
+:root[data-theme="glass"] #restart,
+:root[data-theme="glass"] #lock-ctl button { transition: border-color 0.15s ease; }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="glass"] button.ru,
+  :root[data-theme="glass"] #tools a,
+  :root[data-theme="glass"] #restart,
+  :root[data-theme="glass"] #lock-ctl button { transition: none; }
+}
+
+/* == fallbacks: no blur, or the viewer asked for less transparency -> solid lenses == */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-theme="glass"] #restart,
+  :root[data-theme="glass"] #theme-pick,
+  :root[data-theme="glass"] #lock-ctl button,
+  :root[data-theme="glass"] #tools a,
+  :root[data-theme="glass"] .ru-pill:not(.ru-ok):not(.ru-err):not(.ru-warn),
+  :root[data-theme="glass"] body > header { background-color: var(--lens-solid); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="glass"] button.ru:not(.primary),
+  :root[data-theme="glass"] .ru-btn,
+  :root[data-theme="glass"] .tile .ctl button:not(.link),
+  :root[data-theme="glass"] #lock-ctl button,
+  :root[data-theme="glass"] #restart,
+  :root[data-theme="glass"] #theme-pick,
+  :root[data-theme="glass"] #tools a,
+  :root[data-theme="glass"] .ru-pill:not(.ru-ok):not(.ru-err):not(.ru-warn),
+  :root[data-theme="glass"] body > header {
+    background-color: var(--lens-solid);
+    background-image: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

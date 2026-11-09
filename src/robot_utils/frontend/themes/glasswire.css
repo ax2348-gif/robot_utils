@@ -1,0 +1,587 @@
+/*
+title: Glass on wire
+description: Wireframe line art on dot paper, with liquid-glass capsules for everything you touch: the dots magnify and slide inside each lens as the page scrolls, and lenses brighten, press and glow as you use them.
+*/
+
+/* == palette == ------------------------------------------------------------------------------
+   Monochrome line work. Light = near-white neutral sheet, charcoal ink and lines.
+   Dark = near-black vector display, pale grey-white lines. One restrained accent (--signal) marks
+   what you can interact with; red / amber / green are reserved for stop / caution / live.
+   --panel equals --ground (panels are drawn as outlines; the token stays opaque because pages use
+   it as a fill and as text colour).
+   Extra tokens: --stop-fill / --on-stop (e-stop surfaces), --caution-fill / --on-caution / --caution-hatch
+   (covered band), --stop-latched, --signal-ink, --line-soft (dashed construction lines),
+   --tick (corner registration ticks), --eye (camera / map frame), --grid-dot (ground). */
+:root[data-theme="glasswire"] {
+  color-scheme: light dark;
+  --ground: #F8F8F7; --panel: #F8F8F7; --ink: #1A1A1A; --muted: #545454; --rule: #3A3A3A;
+  --signal: #2F4BA8; --stop: #B5150E; --caution: #8C5200; --live: #12683D;
+  --stop-bg: #FBE3E0; --caution-bg: #F8EBD2; --live-bg: #DDF0E4; --signal-bg: #ECEEF5;
+  --stop-fill: #B5150E; --on-stop: #FFFFFF; --stop-latched: #6B0E0A;
+  --caution-fill: #E0A030; --on-caution: #1B1200; --caution-hatch: #C88A1E; --caution-ink: #1B1200;
+  --signal-ink: #FFFFFF;
+  --line-soft: #B4B4B2; --tick: #1A1A1A; --eye: #1A1A1A;
+  --grid-dot: #BDBDB9;
+  --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23C2C2BE'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%238A8A86' stroke-width='1'/%3E%3C/svg%3E");
+  --plot-1: #262626; --plot-2: #4C68B0; --plot-3: #7A7A7A; --plot-4: #A0457E; --plot-5: #7D6A3A;
+  --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 0px;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="glasswire"] {
+    --ground: #0F1010; --panel: #0F1010; --ink: #E8EAE8; --muted: #A2A6A3; --rule: #C9CCC9;
+    --signal: #A3B6FF; --stop: #FF7468; --caution: #F2B33D; --live: #55D597;
+    --stop-bg: #3A1512; --caution-bg: #33270F; --live-bg: #0F3020; --signal-bg: #1E2333;
+    --stop-fill: #C8261F; --on-stop: #FFFFFF; --stop-latched: #7A120D;
+    --caution-fill: #F2B33D; --on-caution: #1B1200; --caution-hatch: #D99A2B; --caution-ink: #1B1200;
+    --signal-ink: #0F1010;
+    --line-soft: #4A4D4B; --tick: #E8EAE8; --eye: #E8EAE8;
+    --grid-dot: #3D403E;
+    --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%233A3D3B'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%23686C69' stroke-width='1'/%3E%3C/svg%3E");
+    --plot-1: #E8EAE8; --plot-2: #8FA6E8; --plot-3: #7E827F; --plot-4: #E08CC0; --plot-5: #CDB88E;
+  }
+}
+
+/* == type == ---------------------------------------------------------------------------------
+   Body copy stays in Plex for reading; the drawing's "title block" voice (headings, card titles,
+   controls, tags, table heads, the band) is monospace, capitals, letter-spaced like stencilled
+   lettering on a drawing sheet. Numbers are tabular mono. */
+:root[data-theme="glasswire"] h1, :root[data-theme="glasswire"] h2, :root[data-theme="glasswire"] h3,
+:root[data-theme="glasswire"] .ru-card > b:first-child,
+:root[data-theme="glasswire"] .tile .title, :root[data-theme="glasswire"] .tile .hd b,
+:root[data-theme="glasswire"] #tools strong {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: .09em; font-weight: 600;
+}
+:root[data-theme="glasswire"] header .sub, :root[data-theme="glasswire"] .tile .kind {
+  font-family: var(--mono); letter-spacing: .03em;
+}
+:root[data-theme="glasswire"] .ru-num, :root[data-theme="glasswire"] .ru-table td,
+:root[data-theme="glasswire"] #who td.num, :root[data-theme="glasswire"] .kv,
+:root[data-theme="glasswire"] .tile dd, :root[data-theme="glasswire"] .tile .foot .age {
+  font-family: var(--mono);
+}
+:root[data-theme="glasswire"] .ru-table th, :root[data-theme="glasswire"] #who th,
+:root[data-theme="glasswire"] .tile dt {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: .06em; font-weight: 500;
+  color: var(--muted);
+}
+:root[data-theme="glasswire"] a { color: var(--signal); text-underline-offset: 3px; }
+
+/* == surfaces == -----------------------------------------------------------------------------
+   Every panel is a drawn outline: square corners, 1px drafting line, no shadow, and four
+   registration ticks inside the corners. Inner divisions are dashed construction lines. */
+:root[data-theme="glasswire"] .ru-card, :root[data-theme="glasswire"] .tile,
+:root[data-theme="glasswire"] section.box, :root[data-theme="glasswire"] #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result{
+  border-radius: 0; box-shadow: none; border-top-color: var(--rule); border-right-color: var(--rule);
+  border-bottom-color: var(--rule);
+  background-image:
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
+  background-size: 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px;
+  background-position: left 3px top 3px, left 3px top 3px, right 3px top 3px, right 3px top 3px,
+                       left 3px bottom 3px, left 3px bottom 3px, right 3px bottom 3px, right 3px bottom 3px;
+  background-repeat: no-repeat;
+}
+:root[data-theme="glasswire"] .ru-card, :root[data-theme="glasswire"] .tile:not(.latched),
+:root[data-theme="glasswire"] section.box, :root[data-theme="glasswire"] #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad) {
+  background-color: var(--ground);   /* same colour as the sheet: still reads unfilled, but the dots stop at the outline */
+}
+:root[data-theme="glasswire"] .ru-card:not(.tile), :root[data-theme="glasswire"] section.box,
+:root[data-theme="glasswire"] #who { border-left-color: var(--rule); }
+:root[data-theme="glasswire"] #locks .lock,
+:root[data-theme="glasswire"] .tile pre.logs, :root[data-theme="glasswire"] #uplink-banner,
+:root[data-theme="glasswire"] #map {
+  border-radius: 0;
+}
+
+/* dashed construction lines inside panels */
+:root[data-theme="glasswire"] .ru-table td, :root[data-theme="glasswire"] #who td {
+  border-bottom: 1px dashed var(--line-soft);
+}
+:root[data-theme="glasswire"] .ru-table th, :root[data-theme="glasswire"] #who th { border-bottom: 1px solid var(--rule); }
+:root[data-theme="glasswire"] .tile .foot { border-top: 1px dashed var(--line-soft); }
+:root[data-theme="glasswire"] .tile .hd { border-bottom: 1px dashed var(--line-soft); }
+
+/* inputs: a box drawn for a value */
+:root[data-theme="glasswire"] select, :root[data-theme="glasswire"] input[type=number],
+:root[data-theme="glasswire"] input[type=text], :root[data-theme="glasswire"] input:not([type]) {
+  border-radius: 0; border: 1px solid var(--rule); background: var(--panel); color: var(--ink);
+  font-family: var(--mono);
+}
+:root[data-theme="glasswire"] input[type=checkbox], :root[data-theme="glasswire"] input[type=range],
+:root[data-theme="glasswire"] input[type=radio] { accent-color: var(--signal); }
+:root[data-theme="glasswire"] :focus-visible { outline: 2px dashed var(--signal); outline-offset: 2px; }
+
+/* the robot's eye: camera tiles and the map get a double drafting line (a viewfinder frame),
+   distinct from the single line of an ordinary panel. Plain box-shadow, no blur. */
+:root[data-theme="glasswire"] .tile:has(.wrap) {
+  border: 1px solid var(--eye);
+  box-shadow: 0 0 0 3px var(--panel), 0 0 0 4px var(--eye);
+}
+:root[data-theme="glasswire"] .tile:has(.wrap) .hd {
+  border-bottom: 1px solid var(--eye);
+  background-image:
+    linear-gradient(var(--eye), var(--eye)), linear-gradient(var(--eye), var(--eye)),
+    linear-gradient(var(--eye), var(--eye)), linear-gradient(var(--eye), var(--eye));
+  background-size: 14px 2px, 2px 8px, 14px 2px, 2px 8px;
+  background-position: left 0 bottom 0, left 0 bottom 0, right 0 bottom 0, right 0 bottom 0;
+  background-repeat: no-repeat;
+}
+:root[data-theme="glasswire"] .ro { border-radius: 0; font-family: var(--mono); }
+:root[data-theme="glasswire"] #map {
+  box-shadow: 0 0 0 1px var(--eye), 0 0 0 4px var(--panel), 0 0 0 5px var(--eye);
+}
+
+/* swerve teleop tool: square controls, crosshair construction lines through the pads */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .panel button{ border-radius: 0; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .panel > #state{ border-radius: 0; font-family: var(--mono); letter-spacing: .08em; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .panel > #state:not(.on):not(.off){
+  background: var(--signal-bg); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .panel > #state.off{ color: var(--on-stop); background: var(--stop-fill); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pad, :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .slider{
+  border-color: var(--rule);
+  background-image: linear-gradient(var(--line-soft), var(--line-soft)), linear-gradient(var(--line-soft), var(--line-soft));
+  background-size: 1px 100%, 100% 1px; background-position: center, center; background-repeat: no-repeat;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .slider{ border-radius: 0; background-size: 1px 100%, 0 0; }
+
+/* == ground == -------------------------------------------------------------------------------
+   Engineering dot paper with two scales: a faint dot every 24px and a small, slightly stronger
+   cross every 120px (one 120px SVG tile per scheme, --grid-tile: crisp at any zoom, no aliasing
+   lines). Nothing strikes through text: panels take the ground fill, so the sheet only shows
+   between outlines. Reusable on its own: it needs only --ground and --grid-tile. */
+:root[data-theme="glasswire"] .ru-head, :root[data-theme="glasswire"] main > header {
+  background-color: var(--ground);   /* header text sits on clean sheet, like text inside panels */
+}
+:root[data-theme="glasswire"] body {
+  background-color: var(--ground);
+  background-image: var(--grid-tile);
+  background-size: 120px 120px;
+  background-position: -1px -1px;
+  background-attachment: fixed;   /* the sheet stays put; content scrolls over it (nothing blurred on top, so cheap) */
+}
+/* main header of the landing page reads as a drawing's title block: a ruled line beneath */
+:root[data-theme="glasswire"] main > header { border-bottom: 1px solid var(--rule); padding-bottom: 12px; }
+
+/* == alerting == -----------------------------------------------------------------------------
+   Alarms are the only solid ink on the sheet. E-stops: a full opaque --stop-fill block with
+   --on-stop lettering and one thin inner rule (a drafted double border). */
+:root[data-theme="glasswire"] button.ru-estop, :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop{
+  background: var(--stop-fill); color: var(--on-stop); border-radius: 0;
+  font-family: var(--mono); letter-spacing: .1em;
+}
+:root[data-theme="glasswire"] button.ru-estop { box-shadow: inset 0 0 0 3px var(--stop-fill), inset 0 0 0 4px var(--on-stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop:hover{ background: color-mix(in srgb, var(--stop-fill) 86%, #000); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop small{ font-family: var(--font); letter-spacing: 0; }
+:root[data-theme="glasswire"] button.ru-estop.latched {
+  background: var(--stop-latched); color: var(--on-stop);
+  box-shadow: inset 0 0 0 3px var(--stop-latched), inset 0 0 0 5px var(--on-stop);
+  outline: 2px dashed var(--stop); outline-offset: 2px;
+}
+/* tiles: keep the coloured status edge; a latched tile is tinted by the page */
+:root[data-theme="glasswire"] #locks .lock b { font-family: var(--mono); letter-spacing: .08em; }
+
+/* the state band: the robot's voice, lettered in the title-block face */
+:root[data-theme="glasswire"] .ru-band b { font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+:root[data-theme="glasswire"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop); }
+:root[data-theme="glasswire"] .ru-band.chocked {
+  color: var(--on-stop);
+  background: var(--stop-fill) repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--stop-latched) 14px 28px);
+}
+:root[data-theme="glasswire"] .ru-band.covered {
+  color: var(--on-caution);
+  background: var(--caution-fill) repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-hatch) 14px 28px);
+}
+:root[data-theme="glasswire"] .ru-band.live {
+  background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live);
+}
+:root[data-theme="glasswire"] .ru-band.nominal { background: var(--rule); }
+
+
+/* == lens tokens (palette addendum) == -------------------------------------------------------
+   Liquid glass for controls only. A lens = the sheet's own dot tile magnified 1.4x (168px instead
+   of 120px) with background-attachment: fixed, so the dots stay registered to the viewport like
+   the sheet and slide, magnified, inside a lens as it scrolls past: fake refraction, no
+   backdrop-filter. Over the dots: a veil (keeps labels >= 4.5:1 against the darkest dot, the
+   120px cross; inside a lens the tile is dots only, so the veil can be light) and a specular radial near the top. Coloured lenses use a stronger veil. */
+:root[data-theme="glasswire"] {
+  --lens-veil: rgba(255, 255, 255, 0.50);
+  --lens-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23A8A8A4'%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='12' cy='36' r='1'/%3E%3Ccircle cx='12' cy='60' r='1'/%3E%3Ccircle cx='12' cy='84' r='1'/%3E%3Ccircle cx='12' cy='108' r='1'/%3E%3Ccircle cx='36' cy='12' r='1'/%3E%3Ccircle cx='36' cy='36' r='1'/%3E%3Ccircle cx='36' cy='60' r='1'/%3E%3Ccircle cx='36' cy='84' r='1'/%3E%3Ccircle cx='36' cy='108' r='1'/%3E%3Ccircle cx='60' cy='12' r='1'/%3E%3Ccircle cx='60' cy='36' r='1'/%3E%3Ccircle cx='60' cy='60' r='1'/%3E%3Ccircle cx='60' cy='84' r='1'/%3E%3Ccircle cx='60' cy='108' r='1'/%3E%3Ccircle cx='84' cy='12' r='1'/%3E%3Ccircle cx='84' cy='36' r='1'/%3E%3Ccircle cx='84' cy='60' r='1'/%3E%3Ccircle cx='84' cy='84' r='1'/%3E%3Ccircle cx='84' cy='108' r='1'/%3E%3Ccircle cx='108' cy='12' r='1'/%3E%3Ccircle cx='108' cy='36' r='1'/%3E%3Ccircle cx='108' cy='60' r='1'/%3E%3Ccircle cx='108' cy='84' r='1'/%3E%3Ccircle cx='108' cy='108' r='1'/%3E%3C/g%3E%3C/svg%3E");   /* inside a lens: dots only (no crosses), a step darker, under a lighter veil */
+  --lens-veil-strong: rgba(255, 255, 255, 0.86);
+  --lens-spec: rgba(255, 255, 255, 0.85);
+  --lens-spec-hi: rgba(255, 255, 255, 1);
+  --lens-rim-top: rgba(255, 255, 255, 0.95);
+  --lens-rim-lead: rgba(255, 255, 255, 0.5);
+  --lens-rim-bottom: rgba(0, 0, 0, 0.22);
+  --lens-rim-trail: rgba(0, 0, 0, 0.08);
+  --lens-glow: rgba(255, 255, 255, 0.6);
+  --lens-edge: #9C9C98;
+  --lens-edge-low: #5E5E5A;
+  --lens-edge-hi: #3A3A3A;
+  --lens-contact: 0 1px 0 rgba(0, 0, 0, 0.06), 0 2px 5px -2px rgba(0, 0, 0, 0.22);
+  --lens-contact-hi: 0 1px 0 rgba(0, 0, 0, 0.08), 0 4px 10px -3px rgba(0, 0, 0, 0.30);
+  --lens-press: inset 0 2px 5px rgba(0, 0, 0, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.7);
+  --lens-focus: #0E7490;
+  --lens-focus-glow: rgba(14, 116, 144, 0.35);
+  --lens-matte: #EFEFED;
+  /* thick glass (panels): softened, magnified dots under a heavier veil */
+  --panel-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23C4C4C0'%3E%3Ccircle cx='12' cy='12' r='1.6'/%3E%3Ccircle cx='12' cy='36' r='1.6'/%3E%3Ccircle cx='12' cy='60' r='1.6'/%3E%3Ccircle cx='12' cy='84' r='1.6'/%3E%3Ccircle cx='12' cy='108' r='1.6'/%3E%3Ccircle cx='36' cy='12' r='1.6'/%3E%3Ccircle cx='36' cy='36' r='1.6'/%3E%3Ccircle cx='36' cy='60' r='1.6'/%3E%3Ccircle cx='36' cy='84' r='1.6'/%3E%3Ccircle cx='36' cy='108' r='1.6'/%3E%3Ccircle cx='60' cy='12' r='1.6'/%3E%3Ccircle cx='60' cy='36' r='1.6'/%3E%3Ccircle cx='60' cy='60' r='1.6'/%3E%3Ccircle cx='60' cy='84' r='1.6'/%3E%3Ccircle cx='60' cy='108' r='1.6'/%3E%3Ccircle cx='84' cy='12' r='1.6'/%3E%3Ccircle cx='84' cy='36' r='1.6'/%3E%3Ccircle cx='84' cy='60' r='1.6'/%3E%3Ccircle cx='84' cy='84' r='1.6'/%3E%3Ccircle cx='84' cy='108' r='1.6'/%3E%3Ccircle cx='108' cy='12' r='1.6'/%3E%3Ccircle cx='108' cy='36' r='1.6'/%3E%3Ccircle cx='108' cy='60' r='1.6'/%3E%3Ccircle cx='108' cy='84' r='1.6'/%3E%3Ccircle cx='108' cy='108' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+  --panel-veil: rgba(248, 248, 247, 0.50);
+  --panel-mag: 156px;
+  --panel-spec: rgba(255, 255, 255, 0.95);
+  --panel-rim: rgba(255, 255, 255, 0.55);
+  --panel-depth: rgba(0, 0, 0, 0.05);
+  --tick-layers: linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
+  --lens-mag: 168px;
+  --lens-mag-press: 204px;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="glasswire"] {
+    --lens-veil: rgba(15, 16, 16, 0.55);
+    --lens-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%234A4D4B'%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='12' cy='36' r='1'/%3E%3Ccircle cx='12' cy='60' r='1'/%3E%3Ccircle cx='12' cy='84' r='1'/%3E%3Ccircle cx='12' cy='108' r='1'/%3E%3Ccircle cx='36' cy='12' r='1'/%3E%3Ccircle cx='36' cy='36' r='1'/%3E%3Ccircle cx='36' cy='60' r='1'/%3E%3Ccircle cx='36' cy='84' r='1'/%3E%3Ccircle cx='36' cy='108' r='1'/%3E%3Ccircle cx='60' cy='12' r='1'/%3E%3Ccircle cx='60' cy='36' r='1'/%3E%3Ccircle cx='60' cy='60' r='1'/%3E%3Ccircle cx='60' cy='84' r='1'/%3E%3Ccircle cx='60' cy='108' r='1'/%3E%3Ccircle cx='84' cy='12' r='1'/%3E%3Ccircle cx='84' cy='36' r='1'/%3E%3Ccircle cx='84' cy='60' r='1'/%3E%3Ccircle cx='84' cy='84' r='1'/%3E%3Ccircle cx='84' cy='108' r='1'/%3E%3Ccircle cx='108' cy='12' r='1'/%3E%3Ccircle cx='108' cy='36' r='1'/%3E%3Ccircle cx='108' cy='60' r='1'/%3E%3Ccircle cx='108' cy='84' r='1'/%3E%3Ccircle cx='108' cy='108' r='1'/%3E%3C/g%3E%3C/svg%3E");
+    --lens-veil-strong: rgba(15, 16, 16, 0.80);
+    --lens-spec: rgba(255, 255, 255, 0.14);
+    --lens-spec-hi: rgba(255, 255, 255, 0.24);
+    --lens-rim-top: rgba(255, 255, 255, 0.32);
+    --lens-rim-lead: rgba(255, 255, 255, 0.12);
+    --lens-rim-bottom: rgba(0, 0, 0, 0.6);
+    --lens-rim-trail: rgba(0, 0, 0, 0.3);
+    --lens-glow: rgba(255, 255, 255, 0.06);
+    --lens-edge: #5A5D5B;
+    --lens-edge-low: #2A2C2B;
+    --lens-edge-hi: #C9CCC9;
+    --lens-contact: 0 1px 0 rgba(0, 0, 0, 0.5), 0 2px 6px -2px rgba(0, 0, 0, 0.7);
+    --lens-contact-hi: 0 1px 0 rgba(0, 0, 0, 0.5), 0 4px 12px -3px rgba(0, 0, 0, 0.85);
+    --lens-press: inset 0 2px 6px rgba(0, 0, 0, 0.6), inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+    --lens-focus: #22D3EE;
+    --lens-focus-glow: rgba(34, 211, 238, 0.35);
+    --panel-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23363937'%3E%3Ccircle cx='12' cy='12' r='1.6'/%3E%3Ccircle cx='12' cy='36' r='1.6'/%3E%3Ccircle cx='12' cy='60' r='1.6'/%3E%3Ccircle cx='12' cy='84' r='1.6'/%3E%3Ccircle cx='12' cy='108' r='1.6'/%3E%3Ccircle cx='36' cy='12' r='1.6'/%3E%3Ccircle cx='36' cy='36' r='1.6'/%3E%3Ccircle cx='36' cy='60' r='1.6'/%3E%3Ccircle cx='36' cy='84' r='1.6'/%3E%3Ccircle cx='36' cy='108' r='1.6'/%3E%3Ccircle cx='60' cy='12' r='1.6'/%3E%3Ccircle cx='60' cy='36' r='1.6'/%3E%3Ccircle cx='60' cy='60' r='1.6'/%3E%3Ccircle cx='60' cy='84' r='1.6'/%3E%3Ccircle cx='60' cy='108' r='1.6'/%3E%3Ccircle cx='84' cy='12' r='1.6'/%3E%3Ccircle cx='84' cy='36' r='1.6'/%3E%3Ccircle cx='84' cy='60' r='1.6'/%3E%3Ccircle cx='84' cy='84' r='1.6'/%3E%3Ccircle cx='84' cy='108' r='1.6'/%3E%3Ccircle cx='108' cy='12' r='1.6'/%3E%3Ccircle cx='108' cy='36' r='1.6'/%3E%3Ccircle cx='108' cy='60' r='1.6'/%3E%3Ccircle cx='108' cy='84' r='1.6'/%3E%3Ccircle cx='108' cy='108' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+    --panel-veil: rgba(15, 16, 16, 0.50);
+    --panel-spec: rgba(255, 255, 255, 0.16);
+    --panel-rim: rgba(255, 255, 255, 0.05);
+    --panel-depth: rgba(0, 0, 0, 0.35);
+    --tick-layers: linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
+    --lens-matte: #1A1C1B;
+  }
+}
+
+/* == lens surfaces == ------------------------------------------------------------------------ */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=number],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=text],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input:not([type]),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) select:not(#theme-pick) {
+  background-color: var(--ground);
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(var(--lens-veil), var(--lens-veil)),
+    var(--lens-tile);
+  background-size: 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, fixed;
+  border: 1px solid var(--lens-edge);
+  border-bottom-color: var(--lens-edge-low);
+  border-radius: 0;
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-lead),
+    inset 0 -1px 0 var(--lens-rim-bottom), inset -1px 0 0 var(--lens-rim-trail),
+    inset 0 0 6px var(--lens-glow), var(--lens-contact);
+  color: var(--ink);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a {
+  font-family: var(--mono); letter-spacing: .04em;
+  transition: background-position .15s ease-out, background-size .15s ease-out, box-shadow .15s ease-out;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link) { padding-left: 12px; padding-right: 12px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick { padding: 2px 10px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a { border-radius: 0; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill { font-family: var(--mono); letter-spacing: .03em; }
+
+/* hover: the highlight brightens and drifts toward the pointer side, the rim strengthens */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:hover:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:hover:not(:disabled) {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
+    linear-gradient(var(--lens-veil), var(--lens-veil)),
+    var(--lens-tile);
+  background-size: 135% 120%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 30% 0, 0 0, -6px -8px;  /* the lens "tilts": magnified dots shift */
+  border-color: var(--lens-edge-hi);
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-top),
+    inset 0 -1px 0 var(--lens-rim-bottom), inset -1px 0 0 var(--lens-rim-trail),
+    inset 0 0 10px var(--lens-glow), var(--lens-contact-hi);
+}
+/* press: the lens compresses: the inner shadow deepens, the highlight flattens, magnification grows */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:active:not(:disabled),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:active:not(:disabled) {
+  background-size: 100% 45%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
+  background-position: 50% 0, 0 0, -1px -1px;
+  box-shadow: var(--lens-press);
+}
+/* focus: a cyan rim and glow (the outline alone is >= 3:1 against the sheet) */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:focus-visible,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:focus-visible {
+  outline: 2px solid var(--lens-focus); outline-offset: 2px;
+  box-shadow:
+    inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom),
+    0 0 0 5px var(--lens-focus-glow);
+}
+/* disabled: a matte lens, no highlight, no dots */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop):disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link):disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:disabled,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:disabled {
+  background-image: none; background-color: var(--lens-matte);
+  border-color: var(--line-soft);
+  box-shadow: inset 0 1px 0 var(--lens-rim-top);
+}
+
+/* coloured lenses: a stronger veil plus a thin liquid tint, and a coloured rim */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--lens-tile);
+  background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, fixed;
+  border: 1.5px solid var(--signal); color: var(--signal); font-weight: 600;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:hover:not(:disabled) {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--lens-tile);
+  background-size: 135% 120%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 30% 0, 0 0, 0 0, -6px -8px;
+  border-color: var(--signal);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:active:not(:disabled) {
+  background-size: 100% 45%, 100% 100%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.hazard { border-color: var(--stop); color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.live { border-color: var(--live); color: var(--live); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.hazard:hover:not(:disabled) { border-color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.live:hover:not(:disabled) { border-color: var(--live); }
+
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:disabled {
+  background-image: none; background-color: var(--lens-matte); border-color: var(--line-soft); color: var(--muted);
+}
+
+/* status pills: tint + coloured rim, no dots (they are small and often in dense rows);
+   ok solid rim, error heavier rim, warning dashed rim: readable without colour */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.streaming,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.bad,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.busy,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.covered {
+  background-image: none;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.streaming { background-color: color-mix(in srgb, var(--live) 12%, var(--ground)); border: 1px solid var(--live); color: var(--live); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-err,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.bad,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.err { background-color: color-mix(in srgb, var(--stop) 12%, var(--ground)); border: 1.5px solid var(--stop); color: var(--stop); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill.ru-warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.warn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.busy,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill.covered { background-color: color-mix(in srgb, var(--caution) 12%, var(--ground)); border: 1px dashed var(--caution); color: var(--caution); }
+
+/* who holds control: free = a clear lens with a dashed edge (an empty slot); yours = the lens
+   fills with a liquid live tint and a solid 2px rim; someone else's = caution tint, dashed 2px rim */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"] {
+  padding: 2px 12px; border: 1px dashed var(--lens-edge-low); color: var(--muted);
+  transition: background-size .15s ease-out, box-shadow .15s ease-out;
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
+  background-color: var(--ground);
+  background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
+  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, fixed;
+  border-width: 2px; font-weight: 600;
+  box-shadow: inset 0 1px 0 var(--lens-rim-top), inset 0 -1px 0 var(--lens-rim-bottom), inset 0 0 8px var(--lens-glow);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--live) 14%, transparent), color-mix(in srgb, var(--live) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--lens-tile);
+  border-style: solid; border-color: var(--live); color: var(--live);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
+  background-image:
+    radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
+    linear-gradient(color-mix(in srgb, var(--caution) 14%, transparent), color-mix(in srgb, var(--caution) 14%, transparent)),
+    linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
+    var(--lens-tile);
+  border-style: dashed; border-color: var(--caution); color: var(--caution);
+}
+
+
+/* == thick glass: panels == ------------------------------------------------------------------
+   Every panel is a box drawn in 1px line with corner ticks (wireframe), filled with thick glass:
+   the sheet's dots softened (r 1.6, half contrast) and magnified 1.3x, registered to the sheet
+   (attachment: fixed), under a heavier veil; a specular line under the top edge and a faint inner
+   rim. The ticks are the top layers, so the drawing stays crisp above the material.
+   Panels holding canvas / video / img use attachment: scroll for their tile (same look at rest,
+   no full-viewport repaint while a 100 Hz plot or the camera is on screen). */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad) {
+  background-color: var(--ground);
+  background-image: var(--tick-layers),
+    linear-gradient(var(--panel-veil), var(--panel-veil)),
+    var(--panel-tile);
+  background-size: 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px,
+    100% 100%, var(--panel-mag) var(--panel-mag);
+  background-position: left 3px top 3px, left 3px top 3px, right 3px top 3px, right 3px top 3px,
+    left 3px bottom 3px, left 3px bottom 3px, right 3px bottom 3px, right 3px bottom 3px,
+    0 0, -1px -1px;
+  background-repeat: no-repeat;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, scroll, scroll, scroll, scroll, scroll, scroll, fixed;
+  box-shadow: inset 0 1px 0 var(--panel-spec), inset 0 0 0 1px var(--panel-rim), inset 0 -1px 0 var(--panel-depth);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(img) {
+  background-attachment: scroll;
+}
+/* the robot's eye keeps wireframe's double viewfinder line, with the glass highlight inside */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:has(.wrap) {
+  box-shadow: 0 0 0 3px var(--panel), 0 0 0 4px var(--eye), inset 0 1px 0 var(--panel-spec);
+}
+/* camera page chrome and the landing title block: the same thick glass, no ticks */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) body > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) main > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-head {
+  background-color: var(--ground);
+  background-image: linear-gradient(var(--panel-veil), var(--panel-veil)), var(--panel-tile);
+  background-size: 100% 100%, var(--panel-mag) var(--panel-mag);
+  background-position: 0 0, -1px -1px;
+  background-repeat: no-repeat, repeat;
+  background-attachment: scroll, fixed;
+  box-shadow: inset 0 1px 0 var(--panel-spec);
+}
+/* inputs: square wells cut into the glass */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=number],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=text],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input:not([type]),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) select:not(#theme-pick) {
+  border: 1px solid var(--rule);
+  box-shadow: var(--lens-press);
+  font-family: var(--mono);
+}
+
+/* == motion == -------------------------------------------------------------------------------
+   Only in answer to the pointer: 150ms ease-out on background position/size and box-shadow. */
+@media (prefers-reduced-motion: reduce) {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"] { transition: none; }
+}
+/* less transparency asked for: solid lenses and panels (no dots, no highlight), lines and ticks kept */
+@media (prefers-reduced-transparency: reduce) {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad) { background-image: var(--tick-layers); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) body > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) main > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-head { background-image: none; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #lock-ctl button,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill { background-image: none; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-ok,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn { background-image: none; background-color: var(--ground); }
+}

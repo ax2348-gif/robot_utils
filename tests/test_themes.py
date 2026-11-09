@@ -21,8 +21,10 @@ def themes(tmp_path):
 
 
 def test_registry_default_and_admin_overrides(themes, tmp_path):
-    assert [t["name"] for t in themes.list()] == ["contrast"] and themes.default() is None
-    assert themes.list()[0]["title"] == "High contrast" and themes.list()[0]["source"] == "repo"
+    packaged = {t["name"]: t for t in themes.list()}
+    assert "contrast" in packaged and themes.default() is None
+    assert packaged["contrast"]["title"] == "High contrast" and packaged["contrast"]["source"] == "repo"
+    assert all(t["source"] == "repo" and t["title"] != t["name"] and t["description"] for t in packaged.values())
     themes.set_default("contrast")
     assert themes.default() == "contrast" and json.loads((tmp_path / "frontend.json").read_text())["default_theme"] == "contrast"
     with pytest.raises(ValueError):
@@ -51,7 +53,7 @@ def test_routes(tmp_path):
     t.set_default("contrast")
     with TestClient(create_app([], themes=t)) as c:
         idx = c.get("/themes/").json()
-        assert idx["default"] == "contrast" and idx["themes"][0]["name"] == "contrast"
+        assert idx["default"] == "contrast" and "contrast" in [x["name"] for x in idx["themes"]]
         js = c.get("/themes/theme.js")
         assert js.status_code == 200 and "text/javascript" in js.headers["content-type"] and "RUTheme" in js.text
         css = c.get("/themes/contrast.css")
