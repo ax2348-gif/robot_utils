@@ -110,19 +110,28 @@ def key_identity(line: str) -> tuple[str, str]:
     return (p[0], p[1]) if len(p) >= 2 else ("", line)
 
 
-def fetch_github(user: str, timeout: float = 10.0) -> list[str]:
+def fetch_github(user: str, timeout: float = 30.0, attempts: int = 2) -> list[str]:
+    """Keys from github.com/<user>.keys. Retries once on timeouts / 5xx; any final failure raises
+    (the sync then aborts with nothing written)."""
     url = f"https://github.com/{user}.keys"
     req = urllib.request.Request(url, headers={"User-Agent": "robot_utils-ssh_access"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            if r.status != 200:
-                raise AccessError(f"{url}: HTTP {r.status}")
-            text = r.read(1_000_000).decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        raise AccessError(f"{url}: HTTP {e.code} (no such user?)") from e
-    except (urllib.error.URLError, OSError) as e:
-        raise AccessError(f"{url}: {e}") from e
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+    last = None
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                if r.status != 200:
+                    raise AccessError(f"{url}: HTTP {r.status}")
+                text = r.read(1_000_000).decode("utf-8", "replace")
+            return [ln.strip() for ln in text.splitlines() if ln.strip()]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise AccessError(f"{url}: HTTP 404 (no such GitHub user?)") from e
+            last = AccessError(f"{url}: HTTP {e.code}")
+        except (urllib.error.URLError, OSError) as e:
+            last = AccessError(f"{url}: {e}")
+        if i + 1 < attempts:
+            time.sleep(2)
+    raise last
 
 
 # ----------------------------------------------------------------------------------------------
