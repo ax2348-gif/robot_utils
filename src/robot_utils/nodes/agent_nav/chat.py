@@ -3,7 +3,7 @@
     look [scale] [grid]            region <shape> [exclude <shape>...] [on <snapshot>]
     plane <shape> [exclude ...]    approach <query> [standoff]
     check <x> <y> [theta] [frame]  goal <x> <y> [theta] [frame] [key=value ...]
-    stop | enable | disable | release | estop [reason]
+    robot                          stop | enable | disable | release | estop [reason]
     note <text>                    place <name> [x y theta [frame]]
     help
 
@@ -50,6 +50,8 @@ def parse(text: str) -> tuple[str, dict]:
     cmd, a = tok[0].lower(), tok[1:]
     if cmd == "help":
         return "help", {}
+    if cmd == "robot":
+        return "describe_robot", {}
     if cmd == "look":
         kw = {"grid": "grid" in a, "scale": None}
         for t in a:

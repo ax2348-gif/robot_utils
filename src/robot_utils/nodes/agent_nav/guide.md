@@ -11,7 +11,7 @@ this node's base URL, e.g. `http://botcore/nodes/agent_nav` (all paths in replie
    perception into motion by itself.
 2. **Stopping is the only automatic action.** The stop reflex brakes if depth shows an
    obstacle within the braking distance ahead of the motion. It only sees what the camera sees
-   (forward, beyond ~0.7–0.9 m). It is a guardrail, not your obstacle avoidance: **you** avoid
+   (forward, beyond the blind zone: `GET /robot`, about 0.8 m from the base centre). It is a guardrail, not your obstacle avoidance: **you** avoid
    obstacles.
 3. **Look before you move, and look at the images.** Every perception and planning reply has an
    overlay image and a bird's-eye view (BEV). Fetch and inspect them. They show what the tool
@@ -20,7 +20,8 @@ this node's base URL, e.g. `http://botcore/nodes/agent_nav` (all paths in replie
    swept footprint, clearance and the share of the path that was never seen. Read the `warnings`.
    An `UNVERIFIED` part of the path, such as the blind zone in front of the robot, is unknown, not clear.
 5. **Move in legs you have verified.** Prefer legs of ≲1–1.5 m, then look again. The camera can't
-   see the floor within ~0.7–0.9 m of the robot's front: rely on what you saw from earlier positions.
+   see the floor within about 0.8 m of the base centre (about 0.6 m beyond the front edge): rely on
+   what you saw from earlier positions.
 6. **Work asynchronously.** `POST /goal` returns at once. Wait for it in the background
    (`GET /goals/{id}/wait`), and meanwhile look, think, or stop / replace the goal.
 7. **Explain yourself.** Every POST accepts an optional `"comment"`. It goes into the transcript
@@ -36,6 +37,15 @@ N=http://botcore/nodes/agent_nav
 curl -s $N/guide.md                                                    # this file
 curl -s -X POST $N/session -H 'content-type: application/json' -d '{"agent": "Claude", "avatar": "🦉"}'
 curl -s -X POST $N/enable  -H 'content-type: application/json' -d '{"comment": "starting the task"}'
+```
+
+**0. Know your body.** `GET $N/robot` returns the footprint, the wheels, the frames, the limits
+and the camera: where it is (about 1.13 m up), where it points (pitch and yaw), its field of view,
+and the floor it can and cannot see. It also returns `diagram`, a side and top view to scale.
+Read it once per session: it is what you look *from*.
+
+```bash
+curl -s $N/robot                                    # JSON; then: curl -s -o robot.png $N/images/<diagram>
 ```
 
 **1. Look.** It returns a snapshot id, the colour image, a BEV and the pose at capture.
@@ -123,7 +133,8 @@ then `GET /memory`. Places are lost when the estimator resets.
   never raise them.
 - **Rejected goals:** too far or turning too much → `422`. Not enabled → `409`. Human hold → `423`.
   Estimator unusable → `503`.
-- **What the camera sees:** forward only, about 82°x66°, with the floor visible from ~0.7–0.9 m out.
+- **What the camera sees:** forward only, about 93°x61°, pitched about 23° down, with the floor
+  visible from about 0.8 m out (exact numbers: `GET /robot`).
   The reflex and the path checks see nothing beside or behind the robot, so turn and look.
 - **Depth:** unreliable on glass, mirrors, black or shiny surfaces and thin legs or cables.
   Treat thin things you see in the image as real even when depth misses them.
@@ -136,6 +147,7 @@ then `GET /memory`. Places are lost when the estimator resets.
 |---|---|
 | `GET /guide.md` | this guide |
 | `POST /session {agent, avatar, comment}` / `DELETE /session` | open / close (closing disables) |
+| `GET /robot` | body, wheels, frames, limits, camera pose / field of view / blind zone, diagram |
 | `POST /enable {caps?, comment}` / `POST /disable` | motion on (pose_servo + swerve lease) / off at once |
 | `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture |
 | `POST /query/region`, `POST /query/plane` `{snapshot?, select, exclude?}` | read-only geometry with overlays |

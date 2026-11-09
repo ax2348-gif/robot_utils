@@ -100,8 +100,9 @@ class GoalRec:
 class AgentNav:
     def __init__(self, pose_servo: str = "pose_servo", perception: str = "3d_perception",
                  estimator: str = "estimator", data_dir: str = DATA_DIR, profile: str = "cautious",
-                 require_imu: bool = True):
-        self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator}
+                 require_imu: bool = True, description: Optional[str] = "description"):
+        self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator,
+                        "description": description}
         self.data_dir = data_dir
         self.events = EventLog()
         self.lock = threading.RLock()
@@ -276,7 +277,14 @@ class AgentNav:
             with open(os.path.join(d, "session.json"), "w") as f:
                 json.dump(self.session, f)
         out = {"session": self.session, "profile": self.profile, "caps": PROFILES[self.profile],
-               "guide": "guide.md"}
+               "guide": "guide.md", "robot": "GET robot (body, camera pose and field of view, blind zone, diagram)"}
+        try:
+            c = self.describe_robot(actor, log_turn=False)["camera"]
+            out["camera_summary"] = (f"camera {c.get('height_m')} m up, pitched {c.get('pitch_down_deg')}° down, "
+                                     f"fov {c.get('hfov_deg')}°x{c.get('vfov_deg')}°, nearest visible floor "
+                                     f"{c.get('nearest_visible_floor_m')} m from the base centre")
+        except Exception:
+            pass
         self.turn(actor, "session", {"agent": agent, "avatar": avatar[:16]}, out, comment)
         return out
 
@@ -354,6 +362,61 @@ class AgentNav:
             if actor == "human":
                 self.latch = {"why": "e-stop from the page", "t": time.time()}
         self.turn(actor, "estop", {"reason": reason}, out, comment, level="warn")
+        return out
+
+    # -- robot description (read-only) --------------------------------------------------------------
+
+    def describe_robot(self, actor: str = "agent", comment: str = "", log_turn: bool = True) -> dict:
+        """The body, the camera (where it is, where it points, what it sees), frames and limits."""
+        from ..swerve.constants import MODULES
+        from ..pose_servo.planner import STEER_RATE_MAX, WHEEL_SPEED_MAX
+        cal = self._call("perception", "GET", "/calibration")
+        desc, desc_err = None, None
+        try:
+            desc = self._call("description", "GET", "/description", timeout=3)
+        except RequestError as e:
+            desc_err = str(e)
+        wheels = (desc or {}).get("robot", {}).get("modules") or [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES]
+        T_bc = np.array(cal["base_to_color"]) if cal.get("base_to_color") else None
+        camera = {"calibrated": T_bc is not None}
+        img = None
+        if T_bc is not None:
+            cam = G.Camera.from_color(cal["color"], cal["color"]["width"] // 2, cal["color"]["height"] // 2)
+            facts = G.camera_facts(cam, T_bc)
+            img = self.store_image(G.robot_diagram(cam, T_bc, wheels, facts), "robot", "png")
+            camera.update({k: v for k, v in facts.items() if not k.startswith("_")})
+            camera["base_to_color"] = [[round(float(v), 6) for v in row] for row in T_bc]
+        dc = ((desc or {}).get("cameras") or {}).get("camera") or {}
+        if dc:
+            camera["calibration"] = {"source": dc.get("from"), "serial": dc.get("serial")}
+        caps = self.caps or PROFILES[self.profile]
+        out = {
+            "frames": {
+                "base": "floor level at the centre of the wheels; x forward, y left, z up (m); angles CCW from x",
+                "world": "the estimator's frame: the base pose at its last reset; drifts slowly (odometry + IMU heading)",
+                "image": f"colour pixels (u right, v down), {cal['color']['width']}x{cal['color']['height']}, origin top left",
+                "color_optical": "x right, y down, z forward (m), at the camera",
+                "snapshot:<id>": "the base frame at that snapshot's capture time",
+            },
+            "body": {"footprint_m": [round(2 * G.HALF, 3), round(2 * G.HALF, 3)], "shape": "square, centred on the base origin",
+                     "drive": "swerve (holonomic): it can translate in any direction while turning, and turn in place",
+                     "wheels": [{"name": w["name"], "x": round(w["x"], 4), "y": round(w["y"], 4)} for w in wheels],
+                     "turn_in_place_sweep_radius_m": round(math.hypot(G.HALF, G.HALF), 3),
+                     "height_note": "low base (~0.17 m) with a camera mast; the mast is the tallest part"},
+            "camera": camera,
+            "limits": {"profile": self.profile, "caps": caps, "wheel_speed_max_m_s": WHEEL_SPEED_MAX,
+                       "steer_rate_max_rad_s": round(STEER_RATE_MAX, 3)},
+            "sensing_notes": [
+                "only the forward camera: nothing beside or behind the robot is seen; turn to look",
+                "depth is weak on glass, mirrors, black / shiny surfaces and thin legs or cables",
+                "the stop reflex sees only what the camera sees, beyond the blind zone",
+            ],
+            "diagram": f"images/{img}" if img else None,
+        }
+        if desc_err:
+            out["warnings"] = [f"description node unavailable ({desc_err}); body from built-in constants"]
+        if log_turn:
+            self.turn(actor, "robot", {}, {k: out[k] for k in ("body", "camera", "diagram")}, comment, [img] if img else [])
         return out
 
     # -- perception (read-only) -------------------------------------------------------------------

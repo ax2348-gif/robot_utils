@@ -15,6 +15,7 @@ def main() -> None:
     p.add_argument("--pose-servo", default="pose_servo")
     p.add_argument("--perception", default="3d_perception")
     p.add_argument("--estimator", default="estimator")
+    p.add_argument("--description", default="description", help="robot description node ('none' to skip)")
     p.add_argument("--profile", default="cautious", choices=["cautious", "normal"])
     p.add_argument("--no-require-imu", action="store_true", help="allow goals without IMU heading (simulation)")
     p.add_argument("--data-dir", default=None, help="transcripts (default ~/.local/share/robot_utils/agent_nav)")
@@ -27,7 +28,8 @@ def main() -> None:
     from .node import DATA_DIR, AgentNav
     from .server import create_app
     node = AgentNav(a.pose_servo, a.perception, a.estimator, a.data_dir or DATA_DIR, a.profile,
-                    require_imu=not a.no_require_imu)
+                    require_imu=not a.no_require_imu,
+                    description=None if a.description.lower() == "none" else a.description)
     serve(create_app(node), a, banner=f"agent_nav {a.name!r} (profile {a.profile})")
 
 

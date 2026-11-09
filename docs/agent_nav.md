@@ -42,11 +42,26 @@ human can watch, and take part in, the exchange on the node's page.
    until the human releases it. The human picks the safety profile, and the agent can only
    lower caps.
 
+## Robot description (`GET /robot`)
+
+Read-only. It combines the description node (footprint, wheel modules, camera calibration source)
+with the calibration 3d_perception uses (`base_to_color`), and derives:
+- the camera's position, optical axis, pitch, yaw and roll in the base frame;
+- the field of view at the colour resolution;
+- the nearest visible floor (the blind zone) and where the image centre meets the floor;
+- the active caps and hard limits.
+
+`diagram` is a PNG with a side view (camera, vertical field of view, blind floor in red) and a
+top view (footprint, wheels, visible floor to the horizon, blind wedge), to scale. The session's
+opening reply includes a one-line camera summary. Without the description node the body falls
+back to built-in constants, with a warning. The chat command is `robot`.
+
 ## Architecture
 
 ```
 agent (curl) ──HTTP──► agent_nav ──► 3d_perception  /frame, /calibration, /settings   (snapshots)
                           │     ──► estimator      /stream                          (pose at capture)
+                          │     ──► description    /description                     (body, camera calibration)
                           │     ──► pose_servo     /enable /goal /stop /estop /state (motion)
                           │                         └─► swerve (lease, twists)
                           └── data dir: <session>/session.json, log.jsonl, thumbs/*.jpg
@@ -156,7 +171,7 @@ stopping before a box.
 
 ## Known limits
 
-- The reflex and path checks see only the camera's forward view, beyond about 0.7–0.9 m.
+- The reflex and path checks see only the camera's forward view, beyond the blind zone (about 0.8 m from the base centre; `GET /robot`).
   Depth misses glass, black or shiny surfaces and thin objects.
 - Images other than the session thumbnails live in memory only (the last 200 renders); a
   restart keeps only the transcript and thumbnails.

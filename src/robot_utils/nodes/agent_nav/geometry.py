@@ -616,3 +616,135 @@ def _convex_hull(pts: np.ndarray) -> np.ndarray:
 
     lower, upper = half(p), half(p[::-1])
     return np.array(lower[:-1] + upper[:-1])
+
+
+# ----------------------------------------------------------------------------------------------
+# Robot description (for the agent's situational awareness)
+# ----------------------------------------------------------------------------------------------
+
+def _floor_hit(T_bc: np.ndarray, ray_c: np.ndarray) -> Optional[np.ndarray]:
+    """Where a colour-optical ray from the camera meets the floor (base frame), or None."""
+    R, t = T_bc[:3, :3], T_bc[:3, 3]
+    d = R @ ray_c
+    if d[2] >= -1e-6:
+        return None
+    return t - d * t[2] / d[2]
+
+
+@_quiet
+def camera_facts(cam: Camera, T_bc: np.ndarray) -> dict:
+    """Derived camera facts in the base frame: position, viewing direction, field of view, the floor it sees."""
+    R, t = T_bc[:3, :3], T_bc[:3, 3]
+    fwd = R @ np.array([0, 0, 1.0])
+    right = R @ np.array([1.0, 0, 0])
+    r = rays(cam)
+    H, W = cam.height, cam.width
+    hfov = math.degrees(math.atan2(r[H // 2, -1, 0], 1) - math.atan2(r[H // 2, 0, 0], 1))
+    vfov = math.degrees(math.atan2(r[-1, W // 2, 1], 1) - math.atan2(r[0, W // 2, 1], 1))
+    bottom = [_floor_hit(T_bc, r[-1, u]) for u in (0, W // 2, W - 1)]
+    centre = _floor_hit(T_bc, r[H // 2, W // 2])
+    top = _floor_hit(T_bc, r[0, W // 2])
+    out = {
+        "position_base_m": [round(float(v), 3) for v in t],
+        "height_m": round(float(t[2]), 3),
+        "optical_axis_base": [round(float(v), 3) for v in fwd],
+        "pitch_down_deg": round(float(math.degrees(math.asin(-fwd[2]))), 1),
+        "yaw_deg": round(float(math.degrees(math.atan2(fwd[1], fwd[0]))), 1),
+        "roll_deg": round(float(math.degrees(math.asin(max(-1, min(1, right[2]))))), 1),
+        "hfov_deg": round(hfov, 1), "vfov_deg": round(vfov, 1),
+        "image_size": [cam.color_w, cam.color_h],
+        "nearest_visible_floor_m": None if bottom[1] is None else round(float(bottom[1][0]), 3),
+        "nearest_visible_floor_width_m": None if bottom[0] is None or bottom[2] is None else round(float(abs(bottom[0][1] - bottom[2][1])), 3),
+        "image_centre_hits_floor_at_m": None if centre is None else round(float(centre[0]), 3),
+        "top_of_image": "above the horizon (sees walls and tall objects)" if top is None else f"floor at {top[0]:.2f} m",
+    }
+    out["blind_zone"] = (f"the floor within ~{out['nearest_visible_floor_m']:.2f} m of the base centre "
+                         f"(~{out['nearest_visible_floor_m'] - HALF:.2f} m beyond the front edge) is never visible, nor "
+                         "anything beside or behind the robot" if out["nearest_visible_floor_m"] else "unknown")
+    out["_bottom"], out["_top"] = bottom, top
+    return out
+
+
+def robot_diagram(cam: Camera, T_bc: np.ndarray, wheels: Sequence[dict], facts: dict) -> bytes:
+    """Side view (x-z) and top view (x-y) of the base, the camera and what it sees, to scale."""
+    Wd, Hd = 1100, 520
+    img = Image.new("RGB", (Wd, Hd), (24, 26, 30))
+    dr = ImageDraw.Draw(img, "RGBA")
+    f, fb = _font(13), _font(16)
+    R, t = T_bc[:3, :3], T_bc[:3, 3]
+    r = rays(cam)
+    H, W = cam.height, cam.width
+    # ---- side view: x forward (right), z up; 0 .. 4 m, -0.1 .. 1.6 m
+    ox, oy, k = 40, 330, 105.0
+
+    def S(x, z):
+        return (ox + (x + 0.35) * k, oy - z * k)
+
+    dr.text((ox, 12), "side view, from the robot's left: x forward = right, z up", fill=(230, 230, 230), font=fb)
+    for x in np.arange(0, 4.01, 0.5):
+        dr.line([S(x, -0.05), S(x, 1.55)], fill=(255, 255, 255, 30 if x % 1 else 60))
+        dr.text(S(x, -0.08), f"{x:.1f} m" if x % 1 == 0 else "", fill=(170, 170, 170), font=f, anchor="mt")
+    for z in (0.5, 1.0, 1.5):
+        dr.line([S(-0.35, z), S(4.0, z)], fill=(255, 255, 255, 30))
+        dr.text(S(-0.35, z), f"{z:.1f}", fill=(150, 150, 150), font=f, anchor="rm")
+    dr.line([S(-0.35, 0), S(4.0, 0)], fill=(200, 200, 200), width=2)                       # floor
+    dr.rectangle([S(-HALF, 0.17), S(HALF, 0.03)], outline=(90, 160, 255), width=3)            # base
+    for wx in (-0.1656, 0.1656):
+        c = S(wx, 0.038)
+        dr.ellipse([c[0] - 4, c[1] - 4, c[0] + 4, c[1] + 4], fill=(90, 160, 255))
+    dr.line([S(t[0], 0.17), S(t[0], t[2])], fill=(90, 160, 255), width=3)                     # mast
+    cam_px = S(t[0], t[2])
+    # vertical fov in the camera's central vertical plane
+    for v, col in ((0, (120, 170, 255, 220)), (H // 2, (255, 255, 255, 120)), (H - 1, (120, 170, 255, 220))):
+        d = R @ r[v, W // 2]
+        hit = _floor_hit(T_bc, r[v, W // 2])
+        end = hit if hit is not None and hit[0] < 4.0 else t + d / np.linalg.norm(d[[0, 2]]) * 4.0
+        dr.line([cam_px, S(end[0], end[2])], fill=col, width=2)
+    b = facts["_bottom"][1]
+    if b is not None:
+        dr.line([S(0, 0), S(b[0], 0)], fill=(255, 60, 40, 220), width=6)                        # blind floor
+        dr.text(S(b[0] / 2, 0.06), f"blind: {b[0]:.2f} m", fill=(255, 120, 100), font=f, anchor="mb")
+    dr.ellipse([cam_px[0] - 6, cam_px[1] - 6, cam_px[0] + 6, cam_px[1] + 6], fill=(255, 210, 60))
+    dr.text((cam_px[0] + 10, cam_px[1] - 18), f"camera {t[2]:.2f} m up, pitched {facts['pitch_down_deg']:.0f}° down, "
+            f"vertical fov {facts['vfov_deg']:.0f}°", fill=(255, 220, 120), font=f)
+    # ---- top view: x up, y left; robot near the bottom
+    tx0, ty0, kt = 820, 470, 62.0
+
+    def T(x, y):
+        return (tx0 - y * kt, ty0 - x * kt)
+
+    dr.text((560, 12), "top view: x forward = up, y left = left", fill=(230, 230, 230), font=fb)
+    for x in np.arange(-0.5, 7.01, 0.5):
+        dr.line([T(x, 3.6), T(x, -3.6)], fill=(255, 255, 255, 30 if x % 1 else 60))
+        if x % 1 == 0 and x >= 0:
+            dr.text(T(x, 3.6), f"{x:.0f} m", fill=(150, 150, 150), font=f, anchor="lm")
+    for y in np.arange(-3.5, 3.51, 0.5):
+        dr.line([T(-0.5, y), T(7.0, y)], fill=(255, 255, 255, 30 if y % 1 else 60))
+    # visible floor polygon: bottom edge hits + far edge at the image's horizon (clipped at 6 m)
+    far = []
+    for u in (0, W - 1):
+        d = R @ r[0, u]
+        dh = d[:2] / (np.linalg.norm(d[:2]) or 1)
+        far.append(t[:2] + dh * 6.0)
+    bl, _, br = facts["_bottom"]
+    if bl is not None and br is not None:
+        poly = [T(*bl[:2]), T(*br[:2]), T(*far[1]), T(*far[0])]
+        dr.polygon(poly, fill=(120, 170, 255, 45), outline=(120, 170, 255, 200))
+        dr.polygon([T(*t[:2]), T(*bl[:2]), T(*br[:2])], fill=(255, 60, 40, 70))
+        dr.text(T(bl[0] + 0.15, 0), "visible floor (to the horizon)", fill=(150, 190, 255), font=f, anchor="ms")
+        dr.text(T(bl[0] * 0.45, 0), "blind", fill=(255, 140, 120), font=f, anchor="mm")
+    corners = [T(a, b) for a, b in ((HALF, HALF), (HALF, -HALF), (-HALF, -HALF), (-HALF, HALF))]
+    dr.line(corners + [corners[0]], fill=(90, 160, 255), width=3)
+    dr.line([T(0, 0), T(HALF * 1.7, 0)], fill=(90, 160, 255), width=3)
+    for w in wheels:
+        c = T(w["x"], w["y"])
+        dr.rectangle([c[0] - 4, c[1] - 7, c[0] + 4, c[1] + 7], fill=(90, 160, 255))
+        dr.text((c[0] + 7, c[1]), w["name"], fill=(150, 190, 255), font=f, anchor="lm")
+    cp = T(*t[:2])
+    dr.ellipse([cp[0] - 5, cp[1] - 5, cp[0] + 5, cp[1] + 5], fill=(255, 210, 60))
+    dr.text((560, 36), f"footprint {2 * HALF:.2f} m square · horizontal fov {facts['hfov_deg']:.0f}° · camera yaw "
+            f"{facts['yaw_deg']:+.1f}° · nearest visible floor {facts['nearest_visible_floor_m']} m",
+            fill=(220, 220, 220), font=f)
+    b = io.BytesIO()
+    img.save(b, "PNG")
+    return b.getvalue()

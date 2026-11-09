@@ -276,6 +276,13 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
         node.turn("human", "reflex", {"enabled": enabled}, {"reflex": enabled})
         return {"reflex": enabled}
 
+    # -- robot ------------------------------------------------------------------------------------------
+
+    @app.get("/robot", tags=["perception"], summary="The robot: body, camera pose / view / blind zone, frames, limits, diagram")
+    async def robot(comment: str = "", x_operator: Optional[str] = Operator):
+        """Read-only. `diagram` is a side + top view of the base and what the camera sees."""
+        return await run(node.describe_robot, actor(x_operator), comment)
+
     # -- perception -------------------------------------------------------------------------------------
 
     @app.post("/look", tags=["perception"], summary="Capture a snapshot (colour + registered depth + pose)")

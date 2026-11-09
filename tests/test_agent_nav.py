@@ -142,7 +142,7 @@ def stack(tmp_path, request):
     per_url, *s = serve(fake_perception_app(scene, pose)); servers.append(s)
     ps = PoseServoNode(sw_url, est_url)
     ps_url, *s = serve(ps_app(ps)); servers.append(s)
-    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False)
+    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False, description=None)
     url, *s = serve(nav_app(nav)); servers.append(s)
     wait_for(lambda: nav.pose_now() is not None, 15)
     yield {"url": url, "nav": nav, "swerve": sw_url, "est": est_url, "data": str(tmp_path / "nav")}
@@ -307,3 +307,19 @@ def test_session_management(stack):
     assert httpx.delete(st["url"] + f"/sessions/{first}", headers={"X-Operator": "human"}).json()["deleted"] == first
     assert get(st, f"/sessions/{first}").status_code == 404
     assert get(st, "/sessions/..%2Fetc").status_code == 404
+
+
+def test_robot_description(stack):
+    st = stack
+    r = post(st, "/session", {"agent": "T"}).json()
+    assert "camera" in r["camera_summary"] and "nearest visible floor" in r["camera_summary"]
+    d = get(st, "/robot").json()
+    cam = d["camera"]
+    assert cam["calibrated"] and cam["height_m"] == pytest.approx(1.127, abs=0.01)
+    assert cam["pitch_down_deg"] == pytest.approx(22.7, abs=0.5) and cam["hfov_deg"] == pytest.approx(93, abs=1.5)
+    assert 0.7 < cam["nearest_visible_floor_m"] < 0.95 and "blind" in cam["blind_zone"] or "never visible" in cam["blind_zone"]
+    assert len(d["body"]["wheels"]) == 4 and d["body"]["footprint_m"][0] == pytest.approx(0.432, abs=0.01)
+    assert d["warnings"] and "description node" in d["warnings"][0]          # none configured: built-in body
+    assert get(st, "/" + d["diagram"]).content[:4] == b"\x89PNG"
+    assert any(t["kind"] == "robot" for t in get(st, "/log").json()["turns"])
+    assert post(st, "/chat", {"text": "robot"}).json()["camera"]["calibrated"]
