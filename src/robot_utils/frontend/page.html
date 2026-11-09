@@ -147,6 +147,7 @@
                     border: 1px solid var(--line); background: var(--panel); color: var(--muted); }
   .rv-vbtn button:first-child { border-radius: 5px 0 0 5px; } .rv-vbtn button:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
   .rv-vbtn button:disabled { opacity: .45; cursor: not-allowed; }
+  .rv-vbtn button:only-child { border-radius: 5px; border-left: 1px solid var(--line); }   /* a lone toggle keeps all four edges */
   .rv-vbtn + .rv-vbtn { margin-left: 6px; }
   .rv-vbtn button[aria-pressed="true"] { background: var(--signal-bg); color: var(--text); border-color: var(--link); }
   .rv-side { display: grid; gap: 12px; align-content: start; min-width: 0; }
