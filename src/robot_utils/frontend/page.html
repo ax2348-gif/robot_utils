@@ -812,9 +812,11 @@ start();
         kids.push(bar, t);
       }
     });
-    const sd = s.shutdown || {};
-    if (sd.pending) kids.push(tag(isFinite(sd.in_s) ? "SHUTDOWN in " + Math.max(0, Math.round(sd.in_s)) + " s" : "SHUTDOWN pending", "ru-err",
-      [sd.reason, sd.by && "by " + sd.by].filter(Boolean).join(" · ")));
+    // a shutdown in any phase but idle is an alarm: it cuts power to the whole robot
+    const sd = s.shutdown || {}, ph = sd.phase || (sd.pending ? "countdown" : "idle");
+    if (ph !== "idle") kids.push(tag(ph === "countdown" && isFinite(sd.in_s) ? "SHUTDOWN in " + Math.max(0, Math.round(sd.in_s)) + " s"
+      : ph === "countdown" ? "SHUTDOWN pending" : "SHUTTING DOWN", "ru-err",
+      [sd.reason, sd.by && "by " + sd.by, sd.error].filter(Boolean).join(" · ")));
     box.replaceChildren(...kids);
   }
   const camView = v => { scene.setView(v); $("rv-iso").setAttribute("aria-pressed", String(v === "iso")); $("rv-top").setAttribute("aria-pressed", String(v === "top")); };
