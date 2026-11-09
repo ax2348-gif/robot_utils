@@ -85,9 +85,10 @@ def create_app(node: EstimatorNode, start: bool = True) -> FastAPI:
     @app.get("/stream", tags=["stream"], response_class=StreamingResponse,
              summary="Every fused pose as binary float64 rows (schema record first)")
     async def stream(batch_ms: float = Query(0.0, ge=0, le=1000, description="Collect rows this long per record (0 = every pose)."),
+                     max_hz: float = Query(0.0, ge=0, le=100, description="At most this many rows per second, the latest each time (0 = all; e.g. 10 for an overview)."),
                      max_backlog_s: float = Query(20.0, gt=0, le=600, description="Drop the oldest rows beyond this backlog.")):
         gen = rows_stream(node.hub, FIELDS, UNITS, channel="pose", kind="pose", batch_ms=batch_ms,
-                          max_rows=int(max_backlog_s * 100), schema_extra={"node": "estimator", "rate_hz": 100})
+                          max_rows=int(max_backlog_s * 100), schema_extra={"node": "estimator", "rate_hz": 100}, max_hz=max_hz)
         return StreamingResponse(gen, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
 
     @app.post("/reset", tags=["control"], summary="Set the pose (default: the origin)")

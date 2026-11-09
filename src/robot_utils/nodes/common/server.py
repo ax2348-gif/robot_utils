@@ -88,13 +88,14 @@ def add_base_routes(app: FastAPI, health: Callable[[], dict]) -> None:
 async def rows_stream(hub: RowHub, fields: Sequence[str], units: Sequence[str], *,
                       channel: Optional[str] = None, kind: Optional[str] = None,
                       batch_ms: float = 0.0, max_rows: int = 2000, schema_id: int = 1,
-                      schema_extra: Optional[dict] = None):
+                      schema_extra: Optional[dict] = None, max_hz: float = 0.0):
     """Every row published on a hub channel, as a schema record and then rows records.
 
     ``batch_ms`` > 0 coalesces each client's rows for that long before sending (fewer, larger
     records; per client). ``kind`` (e.g. "tick") goes into every schema/rows header. A client
     more than ``max_rows`` behind loses the oldest rows; the next record's ``dropped`` says how
-    many.
+    many. ``max_hz`` > 0 thins the stream for overviews: at most that many rows per second, each the
+    latest row (the skipped ones are not counted as ``dropped``).
     """
     sub = hub.subscribe(max_rows, channel)
     k = {"kind": kind} if kind else {}
@@ -108,13 +109,16 @@ async def rows_stream(hub: RowHub, fields: Sequence[str], units: Sequence[str], 
                 yield pack_record({"type": "ping", "t_send": time.monotonic()})
                 last_send = time.monotonic()
                 continue
-            if batch_ms > 0:
-                wait = batch_ms / 1000.0 - (time.monotonic() - last_send)
+            gap = max(batch_ms / 1000.0, 1.0 / max_hz if max_hz > 0 else 0.0)
+            if gap > 0:
+                wait = gap - (time.monotonic() - last_send)
                 if wait > 0:
                     await asyncio.sleep(wait)
             rows, dropped = sub.take()
             if rows is None:
                 continue
+            if max_hz > 0:
+                rows = rows[-1:]
             yield rows_record(rows, schema_id, dropped=dropped, t_send=time.monotonic(), **k)
             last_send = time.monotonic()
     finally:
