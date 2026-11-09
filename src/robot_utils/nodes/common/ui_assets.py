@@ -29,6 +29,8 @@ UI_CSS = r"""
   --ground:#EEF1F4;--panel:#FFFFFF;--ink:#15202B;--muted:#5B6672;--rule:#D3DAE1;
   --signal:#1F5FBF;--stop:#C41E17;--caution:#A86400;--live:#157A45;
   --stop-bg:#FBE4E2;--caution-bg:#FCEFD9;--live-bg:#E2F3EA;--signal-bg:#E3ECFA;
+  --stop-fill:#C41E17;--on-stop:#FFFFFF;   /* e-stop buttons and the e-stop / chocked bands: solid fill + its text (>= 4.5:1) */
+  --caution-fill:#F2B33D;--on-caution:#1B1200;   /* the covered band */
   --plot-1:#1F5FBF;--plot-2:#C2410C;--plot-3:#0E7490;--plot-4:#9D174D;--plot-5:#4D7C0F;
   --font:"Plex",system-ui,-apple-system,"Segoe UI",Roboto,Cantarell,sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -40,11 +42,20 @@ UI_CSS = r"""
   --ground:#161A1F;--panel:#1E242B;--ink:#E3E8ED;--muted:#98A3AE;--rule:#2E363F;
   --signal:#78AEFF;--stop:#FF5B50;--caution:#F2B33D;--live:#4CC88A;
   --stop-bg:#3A1714;--caution-bg:#33270F;--live-bg:#12301F;--signal-bg:#16263D;
+  --stop-fill:#D42A20;--on-stop:#FFFFFF;
   --plot-1:#78AEFF;--plot-2:#FB923C;--plot-3:#22D3EE;--plot-4:#F472B6;--plot-5:#A3E635}}
 body{margin:0;font:14px/1.45 var(--font);background:var(--ground);color:var(--ink)}
 .ru-wrap{max-width:1100px;margin:0 auto;padding:16px}
 .ru-card{background:var(--panel);border:1px solid var(--rule);border-radius:var(--radius);padding:12px 14px;margin:0 0 12px}
 .ru-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+/* -- layout contract (docs/frontend.md "Layouts"): hooks themes may target to rearrange a page ------
+   body[data-page="<kind>"]   which page this is (swerve, pose_servo, camera, landing, ...)
+   .ru-head                   the header row: title, status, e-stop. Must stay visible (tests/test_visual_safety.py)
+   .ru-body                   the main grid of panels; .ru-side its side column, where a page has one
+   [data-panel="<name>"]      one panel, unique within its page (map, jog, events, ...)
+   [data-role="..."]          what it holds: view | control | telemetry | config | log
+   #band                      the state band. Must stay visible. */
+.ru-row.ru-head,.ru-row.ru-spread{justify-content:space-between}
 .ru-muted{color:var(--muted)} .ru-ok{color:var(--live)} .ru-err{color:var(--stop)} .ru-warn{color:var(--caution)}
 .ru-num{font-variant-numeric:tabular-nums}
 code,pre,.ru-mono{font-family:var(--mono)}
@@ -54,7 +65,7 @@ button.ru,.ru-btn{font:inherit;min-height:32px;padding:5px 12px;border-radius:va
 button.ru:hover{border-color:var(--signal)} button.ru:disabled{opacity:.45;cursor:not-allowed}
 button.ru.primary{background:var(--signal);border-color:var(--signal);color:#fff}
 button.ru.hazard{border-color:var(--stop);color:var(--stop)} button.ru.live{border-color:var(--live);color:var(--live)}
-button.ru-estop{min-height:44px;min-width:110px;background:var(--stop);color:#fff;border:0;font-weight:700;font-size:16px;padding:8px 18px;letter-spacing:.04em}
+button.ru-estop{min-height:44px;min-width:110px;background:var(--stop-fill);color:var(--on-stop);border:0;font-weight:700;font-size:16px;padding:8px 18px;letter-spacing:.04em}
 button.ru-estop.latched{background:#7f1d1d;box-shadow:inset 0 0 0 3px #fff3}
 .ru-pill{display:inline-block;padding:1px 8px;border-radius:999px;border:1px solid var(--rule);font-size:12px}
 .ru-pill.ru-ok{border-color:var(--live);background:var(--live-bg)} .ru-pill.ru-err{border-color:var(--stop);background:var(--stop-bg)}
@@ -68,11 +79,10 @@ table.ru-table{border-collapse:collapse;width:100%} .ru-table td,.ru-table th{pa
 .ru-band .in{max-width:1100px;margin:0 auto;padding:8px 16px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
 .ru-band b{font-weight:700;letter-spacing:.02em} .ru-band small{opacity:.85}
 .ru-band.nominal{height:3px;background:var(--rule)} .ru-band.nominal .in{display:none}
-.ru-band.live{background:var(--live);color:#fff}
-.ru-band.estop{background:var(--stop);color:#fff}
-.ru-band.chocked{color:#fff;background:repeating-linear-gradient(135deg,var(--stop) 0 14px,#7f1d1d 14px 28px)}
-.ru-band.covered{color:#1b1200;background:repeating-linear-gradient(135deg,var(--caution) 0 14px,#d99a2b 14px 28px)}
-@media (prefers-color-scheme:dark){.ru-band.covered{color:#1b1200}}
+.ru-band.live{background:var(--live-bg);color:var(--live);box-shadow:inset 0 -3px 0 var(--live)}
+.ru-band.estop{background:var(--stop-fill);color:var(--on-stop)}
+.ru-band.chocked{color:var(--on-stop);background:var(--stop-fill) repeating-linear-gradient(135deg,var(--stop-fill) 0 14px,#7f1d1d 14px 28px)}
+.ru-band.covered{color:var(--on-caution);background:var(--caution-fill) repeating-linear-gradient(135deg,var(--caution-fill) 0 14px,#d99a2b 14px 28px)}
 """
 
 UI_JS = r"""

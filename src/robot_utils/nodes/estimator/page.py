@@ -21,14 +21,14 @@ canvas.ru-plot{width:100%;height:110px}
 #events{max-height:150px;overflow:auto;font-size:12px}
 .sw{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:4px}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="estimator"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">State estimator <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="mode" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="layout">
-  <div class="ru-card">
+<div class="layout ru-body">
+  <div class="ru-card" data-panel="map" data-role="view">
     <b>Trajectory</b> <span class="ru-muted">(kept in this page only; grid 1 m)</span>
     <span class="ru-muted" style="float:right"><span class="sw" style="background:var(--plot-1)"></span>fused
       <span class="sw" style="background:var(--muted)"></span>odometry only</span>
@@ -47,15 +47,15 @@ canvas.ru-plot{width:100%;height:110px}
     </div>
     <div class="ru-muted">Drag to pan (turns off follow), wheel to zoom about the cursor, double-click to recentre.</div>
   </div>
-  <div>
-    <div class="ru-card"><b>Pose</b><div class="kv" id="pose"></div></div>
-    <div class="ru-card"><b>Inputs</b><div class="kv" id="inputs"></div></div>
-    <div class="ru-card"><b>Heading</b> <span class="ru-muted">deg, 20 s</span><canvas class="ru-plot" id="ph"></canvas>
+  <div class="ru-side">
+    <div class="ru-card" data-panel="pose" data-role="telemetry"><b>Pose</b><div class="kv" id="pose"></div></div>
+    <div class="ru-card" data-panel="inputs" data-role="telemetry"><b>Inputs</b><div class="kv" id="inputs"></div></div>
+    <div class="ru-card" data-panel="plots" data-role="telemetry"><b>Heading</b> <span class="ru-muted">deg, 20 s</span><canvas class="ru-plot" id="ph"></canvas>
       <b>Yaw rate</b> <span class="ru-muted">rad/s: IMU vs wheels (difference = slip)</span><canvas class="ru-plot" id="pw"></canvas>
       <b>Speed</b> <span class="ru-muted">m/s</span><canvas class="ru-plot" id="pv"></canvas></div>
   </div>
 </div>
-<div class="ru-card"><b>Events</b><div id="events"></div></div>
+<div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
 <script>

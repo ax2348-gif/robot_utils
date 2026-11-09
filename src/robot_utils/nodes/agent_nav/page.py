@@ -38,14 +38,14 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 #sessions table{width:100%;border-collapse:collapse;font-size:13px}
 #sessions td,#sessions th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="agent_nav"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span></h2>
-  <div class="ru-row"><span id="status" class="ru-muted"></span><a class="ru-muted" href="guide.md">guide.md</a><a class="ru-muted" href="docs">API docs</a></div>
+  <div class="ru-row"><span id="status" class="ru-muted"></span><a class="ru-muted" href="guide.md">guide.md</a><a class="ru-muted" href="docs">API docs</a><span id="estop"></span></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="layout">
-  <div class="ru-card">
+<div class="layout ru-body">
+  <div class="ru-card" data-panel="dialogue" data-role="control">
     <div class="sbar"><span class="info" id="sinfo">no session</span>
       <button class="ru" id="snew" title="Open a session as the human operator">New session</button>
       <button class="ru" id="send_s" title="End the live session (disables motion)">End session</button>
@@ -58,18 +58,17 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
     <div class="ctl"><input id="cmd" placeholder="command as a human, e.g. look grid · region box 400 20 700 160 · goal 0.5 0 90d · help">
       <button class="ru" id="send">Send</button></div>
   </div>
-  <div>
-    <div class="ru-card">
+  <div class="ru-side">
+    <div class="ru-card" data-panel="state" data-role="control">
       <div class="ctl">
         <button class="ru" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
         <button class="ru" id="stop">Stop</button><button class="ru" id="release">Release hold</button>
-        <span id="estop"></span>
         <label>profile <select id="profile"></select></label>
         <label><input type="checkbox" id="reflex" checked> stop reflex</label>
       </div>
       <div class="kv" id="state"></div>
     </div>
-    <div class="ru-card live"><b>Latest view</b> <span class="ru-muted" id="snapinfo"></span>
+    <div class="ru-card live" data-panel="view" data-role="view"><b>Latest view</b> <span class="ru-muted" id="snapinfo"></span>
       <div class="row2"><img id="liveimg" alt=""><img id="livebev" alt=""></div>
     </div>
   </div>

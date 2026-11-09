@@ -17,14 +17,14 @@ canvas.ru-plot{width:100%;height:100px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 .ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="pose_servo"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">Pose servo <span id="status" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="estop"></span><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="layout">
-  <div class="ru-card">
+<div class="layout ru-body">
+  <div class="ru-card" data-panel="map" data-role="view">
     <b>Map</b> <span class="ru-muted">(estimator world frame, grid 0.5 m; click to place a global goal; trail kept in this page)</span>
     <canvas id="map"></canvas>
     <div class="ctl">
@@ -36,14 +36,14 @@ canvas.ru-plot{width:100%;height:100px}
     <b>Twist rate</b> <span class="ru-muted">|a| m/s² · alpha rad/s²</span><canvas class="ru-plot" id="pa"></canvas>
     <b>Error</b> <span class="ru-muted">distance m · heading rad</span><canvas class="ru-plot" id="pe"></canvas>
   </div>
-  <div>
-    <div class="ru-card"><b>Control</b>
+  <div class="ru-side">
+    <div class="ru-card" data-panel="control" data-role="control"><b>Control</b>
       <div class="ctl"><input id="client" size="10" placeholder="your name">
         <button class="ru live" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
         <button class="ru" id="stop">Stop (brake)</button></div>
       <div class="ru-muted">Enable takes the swerve lease (with the caps below); Disable stops at once and releases it.</div>
     </div>
-    <div class="ru-card"><b>Goal</b>
+    <div class="ru-card" data-panel="goal" data-role="control"><b>Goal</b>
       <div class="form">
         <span>frame</span><select id="g_frame"><option>local</option><option>global</option></select>
         <span>mode</span><select id="g_mode"><option value="">(config)</option><option>synchronized</option><option>independent</option></select>
@@ -56,14 +56,14 @@ canvas.ru-plot{width:100%;height:100px}
       </div>
       <div class="ctl"><button class="ru primary" id="go">Go</button><span class="ru-muted" id="goalinfo"></span></div>
     </div>
-    <div class="ru-card"><b>Config</b> <span class="ru-muted">(per enable; changeable when idle)</span>
+    <div class="ru-card" data-panel="config" data-role="config"><b>Config</b> <span class="ru-muted">(per enable; changeable when idle)</span>
       <div class="form" id="cfg"></div>
       <div class="ctl"><button class="ru" id="apply">Apply</button><span class="ru-muted" id="hard"></span></div>
     </div>
-    <div class="ru-card"><b>State</b><div class="kv" id="kv"></div></div>
+    <div class="ru-card" data-panel="state" data-role="telemetry"><b>State</b><div class="kv" id="kv"></div></div>
   </div>
 </div>
-<div class="ru-card"><b>Events</b><div id="events"></div></div>
+<div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
 <script>

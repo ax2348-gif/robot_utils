@@ -301,6 +301,8 @@ every node and by the landing page. A theme only has to redefine these to restyl
 | `--ground`, `--panel`, `--ink`, `--muted`, `--rule` | page background, cards, text, secondary text, borders |
 | `--signal` (`-bg`) | interactive elements, primary data |
 | `--stop` (`-bg`) | e-stop, latched, chocked, errors |
+| `--stop-fill`, `--on-stop` | the solid fill of e-stop buttons and the e-stop / chocked bands, and its text (>= 4.5:1) |
+| `--caution-fill`, `--on-caution` | the covered band's fill and its text |
 | `--caution` (`-bg`) | covers, warnings, a lease held by someone else |
 | `--live` (`-bg`) | motors enabled, healthy |
 | `--plot-1` … `--plot-5` | data series (plots, maps, the teleop knob and ring) |
@@ -310,7 +312,54 @@ Older names (`--bg`, `--fg`, `--acc`, `--ok`, `--err`, `--warn`, …) are aliase
 token has a light and a dark value (`prefers-color-scheme`). Node pages also show a **state band**
 at the top (`RU.stateBand`): e-stop latched, chocked (red hatch), camera covered (amber hatch),
 live (motors enabled), or a thin rule when nominal. It reads the node's own `/state`. The remote
-teleop tool keeps its own light-on-video palette: it is drawn over the camera image.
+teleop tool keeps its own light-on-video palette: it is drawn over the camera image (its e-stop
+is solid red with white text, readable over any video).
+
+### Layouts
+
+Pages carry stable hooks that a theme may target, without renamed ids or classes (so behaviour and
+the page contracts are untouched):
+
+| Hook | What |
+|---|---|
+| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_nav`, `description`, `estimator`, `perception3d`, `camera`, `landing` |
+| `.ru-head` | the header row: title, status, e-stop (every e-stop lives here, so it is above the fold on a phone) |
+| `.ru-body`, `.ru-side` | the main grid of panels, and its side column where the page has one |
+| `[data-panel="<name>"]` | one panel, unique within its page (`map`, `jog`, `events`, ...) |
+| `[data-role="..."]` | what the panel holds: `view`, `control`, `telemetry`, `config` or `log` |
+| `#band` | the state band |
+
+`tests/test_visual_safety.py` checks that every page keeps these.
+
+### Previewing and visual safety
+
+`robot_utils.dev.preview` runs the whole robot in simulation (swerve `--sim`, camera `--fake`, the
+rest pointed at them) with the landing page on `127.0.0.1`, isolated in a temp folder (its own
+sockets, config, state and locks). It never talks to the real robot: the screenshot and check
+commands refuse any address that isn't local.
+
+```bash
+python -m robot_utils.dev.preview up --themes ~/my-themes        # browse it: http://127.0.0.1:8090/
+python -m robot_utils.dev.preview shots --themes ~/my-themes --out preview-out   # + contact sheet
+python -m robot_utils.dev.preview check --themes ~/my-themes     # exit 1 on any problem
+```
+
+`--themes DIR` adds candidate `*.css` themes to the packaged ones; `--theme a,b`, `--widths`,
+`--schemes` and `--pages` narrow the run. Screenshots and checks need Playwright
+(`pip install playwright && python -m playwright install chromium`).
+
+The checks (`dev/visual_safety.py`) cover what a theme must never break. They run on every page,
+theme, colour scheme (light, dark) and width (1280, 390 px):
+- **E-stop:** visible without scrolling, not covered, not translucent, at least 44 x 44 px, a
+  solid red-family fill, and text contrast of at least 4.5:1.
+- **State band:** at the top and visible; its e-stop, chocked, covered and live states render with
+  text contrast of at least 4.5:1, worst case over hatch stripes.
+- **Header row:** visible.
+- **Text:** body and muted text in panels at 4.5:1 or more against the nearest solid background.
+  Background images such as grids aren't sampled, so check those by eye.
+
+`tests/test_visual_safety.py` runs them for every packaged theme. A new theme lands only when they
+pass.
 
 ## Editing pages
 

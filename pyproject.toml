@@ -25,6 +25,10 @@ dependencies = [
     "pillow",
 ]
 
+[project.optional-dependencies]
+# page previews and visual safety checks (robot_utils.dev.preview); then: python -m playwright install chromium
+dev = ["playwright>=1.40"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -40,21 +40,21 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 #log div{margin:2px 0}#log .e{color:var(--err)}
 @media (max-width:760px){#main{flex-direction:column}aside{width:100%;min-height:0;border-right:none}#tiles{width:100%;grid-template-columns:1fr}}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div>
-<header><h1>Orbbec node</h1><span id="dev">connecting...</span><span id="pill" class="pill">...</span>
+</head><body data-page="camera"><div id="band"></div>
+<header class="ru-head"><h1>Orbbec node</h1><span id="dev">connecting...</span><span id="pill" class="pill">...</span>
 <span id="sync" class="small"></span><span id="msg" class="small"></span><a href="docs" class="small">API docs</a></header>
 <div id="banner"></div>
-<div id="main">
-<aside>
-<section class="box"><h2>Streams</h2><div id="streams"></div>
+<div id="main" class="ru-body">
+<aside class="ru-side">
+<section class="box" data-panel="streams" data-role="control"><h2>Streams</h2><div id="streams"></div>
 <div class="small">Settings are global: every client sees the same camera.</div></section>
-<section class="box"><h2>Profiles</h2>
+<section class="box" data-panel="profiles" data-role="config"><h2>Profiles</h2>
 <label class="row"><span class="k">Color</span><select id="color_profile"></select></label>
 <label class="row"><span class="k">Depth / IR</span><select id="stereo_mode"></select></label>
 <label class="row"><span class="k">Align depth to color</span><input type="checkbox" id="align"></label>
 <label class="row"><span class="k">Frame sync</span><input type="checkbox" id="frame_sync"></label>
 <div class="small">Depth and IR share one mode. Aligned depth has the color resolution. Frame sync pairs color+depth (adds latency).</div></section>
-<section class="box"><h2>Depth display</h2>
+<section class="box" data-panel="depth-display" data-role="config"><h2>Depth display</h2>
 <label class="row"><span class="k">Colormap</span><select id="colormap"></select></label>
 <div class="bar" id="cmapbar"></div>
 <label class="row"><span class="k">Invert</span><input type="checkbox" id="invert"></label>
@@ -64,16 +64,16 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 <label class="row"><span class="k">Invalid pixels</span><input type="color" id="invalid_color"></label>
 <label class="row"><span class="k">JPEG quality</span><input type="number" id="jpeg_quality" min="30" max="95" step="5"></label>
 <div class="small">Hover depth to read mm; click to pin a point.</div></section>
-<section class="box"><h2>IMU</h2>
+<section class="box" data-panel="imu" data-role="telemetry"><h2>IMU</h2>
 <label class="row"><span class="k">Enabled</span><input type="checkbox" id="imu_enabled"></label>
 <label class="row"><span class="k">Sample rate</span><select id="imu_rate"></select></label>
 <div id="imu" class="mono">-</div>
 <div class="row"><button id="imu_cal" title="Keep the camera still">Calibrate (keep still)</button>
 <button id="imu_reset" title="Roll/pitch from gravity, yaw 0">Reset orientation</button></div></section>
-<section class="box"><h2>Device controls <a href="#" id="propsref" class="small" style="float:right">refresh</a></h2><div id="props" class="small">-</div></section>
-<section class="box"><h2>Log</h2><div id="log" class="small"></div></section>
+<section class="box" data-panel="device" data-role="config"><h2>Device controls <a href="#" id="propsref" class="small" style="float:right">refresh</a></h2><div id="props" class="small">-</div></section>
+<section class="box" data-panel="log" data-role="log"><h2>Log</h2><div id="log" class="small"></div></section>
 </aside>
-<div id="tiles"></div>
+<div id="tiles" data-panel="tiles" data-role="view"></div>
 </div>
 <script src="common/ui.js"></script>
 <script>
@@ -247,7 +247,7 @@ function events(){
 from .page_viz import VIZ_CSS, VIZ_HTML, VIZ_JS  # noqa: E402
 
 for _old, _new in (("</style>", VIZ_CSS + "</style>"),
-                   ('<section class="box"><h2>Device controls', VIZ_HTML + '<section class="box"><h2>Device controls'),
+                   ('<section class="box" data-panel="device"', VIZ_HTML + '<section class="box" data-panel="device"'),
                    ("</script></body>", "</script><script>\n\"use strict\";\n" + VIZ_JS + "</script></body>")):
     assert PAGE.count(_old) == 1, _old
     PAGE = PAGE.replace(_old, _new)

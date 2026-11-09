@@ -11,19 +11,19 @@ PAGE = r"""<!doctype html>
 input[type=number]{width:70px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="swerve"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">Swerve base <span id="state" class="ru-pill">…</span></h2>
   <div id="estop"></div>
 </div>
-<div class="ru-card ru-row" style="justify-content:space-between">
+<div class="ru-card ru-row ru-spread" data-panel="control" data-role="control">
   <div id="lease"></div>
   <div class="ru-row"><button class="ru live" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
     <button class="ru hazard" id="clear" hidden>Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="grid">
-  <div class="ru-card">
+<div class="grid ru-body">
+  <div class="ru-card" data-panel="jog" data-role="control">
     <b>Jog</b> <span class="ru-muted">(hold; keys W A S D, Q E rotate, space stops)</span>
     <div class="ru-row" style="margin:8px 0">speed <input type="number" id="spd" value="0.2" step="0.05" min="0" max="2"> m/s
       turn <input type="number" id="trn" value="0.5" step="0.1" min="0" max="4"> rad/s</div>
@@ -36,15 +36,15 @@ input[type=number]{width:70px}
       <input type="number" id="lw" step="0.1" min="0" max="4"> rad/s <button class="ru" id="setlim">Set</button></div>
     <div class="ru-muted" id="lim"></div>
   </div>
-  <div class="ru-card">
+  <div class="ru-card" data-panel="velocity" data-role="telemetry">
     <b>Drive velocity</b> <span class="ru-muted">m/s, last 5 s</span>
     <canvas class="ru-plot" id="plot"></canvas>
     <div class="ru-muted" id="lat"></div>
   </div>
-  <div class="ru-card"><b>Modules</b> <span class="ru-muted">top view, to scale (x forward is up)</span><div id="swv"></div></div>
+  <div class="ru-card" data-panel="modules" data-role="view"><b>Modules</b> <span class="ru-muted">top view, to scale (x forward is up)</span><div id="swv"></div></div>
 </div>
-<div class="ru-card"><table class="ru-table" id="mods"></table></div>
-<div class="ru-card"><b>Events</b><div id="events"></div></div>
+<div class="ru-card" data-panel="table" data-role="telemetry"><table class="ru-table" id="mods"></table></div>
+<div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
 <script src="common/viz.js"></script>

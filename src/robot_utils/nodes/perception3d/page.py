@@ -23,14 +23,14 @@ PAGE = r"""<!doctype html>
 #bar{height:10px;border-radius:3px;margin-top:4px}
 .mode-full{color:var(--ok)} .mode-rotation,.mode-base{color:var(--warn)} .mode-none,.mode-no_depth{color:var(--err)}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="perception3d"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">3D perception <span id="state" class="ru-pill">…</span> <span id="mode" class="ru-pill"></span></h2>
   <div class="ru-row"><span id="lat" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="layout">
-  <div class="ru-card">
+<div class="layout ru-body">
+  <div class="ru-card" data-panel="view" data-role="view">
     <canvas id="view" width="1280" height="720"></canvas>
     <div id="readout" class="ru-muted">hover the image for depth and the 3D point (colour camera frame); click to query the node</div>
     <div class="ctl">
@@ -54,13 +54,13 @@ PAGE = r"""<!doctype html>
     <div id="bar"></div><div class="ru-row" style="justify-content:space-between"><span id="blo" class="ru-muted"></span><span id="bhi" class="ru-muted"></span></div>
     <div id="clicked" class="ru-muted"></div>
   </div>
-  <div>
-    <div class="ru-card"><b>Latest frame</b><div class="kv" id="frame"></div></div>
-    <div class="ru-card"><b>Timing</b> <span class="ru-muted">last 5 s</span><div class="kv" id="timing"></div></div>
-    <div class="ru-card"><b>Inputs</b><div class="kv" id="inputs"></div></div>
+  <div class="ru-side">
+    <div class="ru-card" data-panel="frame" data-role="telemetry"><b>Latest frame</b><div class="kv" id="frame"></div></div>
+    <div class="ru-card" data-panel="timing" data-role="telemetry"><b>Timing</b> <span class="ru-muted">last 5 s</span><div class="kv" id="timing"></div></div>
+    <div class="ru-card" data-panel="inputs" data-role="telemetry"><b>Inputs</b><div class="kv" id="inputs"></div></div>
   </div>
 </div>
-<div class="ru-card"><b>Events</b><div id="events"></div></div>
+<div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
 <script>

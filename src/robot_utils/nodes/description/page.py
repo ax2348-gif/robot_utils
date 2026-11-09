@@ -24,13 +24,13 @@ table.ru-table td,table.ru-table th{font-size:12px}
 .camhead{display:flex;flex-wrap:wrap;gap:6px 24px;align-items:flex-start}
 /*VIZ_CSS*/
 </style><script src="../../themes/theme.js"></script>
-</head><body><div id="band"></div><div class="ru-wrap">
-<div class="ru-row" style="justify-content:space-between">
+</head><body data-page="description"><div id="band"></div><div class="ru-wrap">
+<div class="ru-row ru-head">
   <h2 style="margin:6px 0">Robot description <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><div id="estop"></div><button class="ru" id="clear" hidden title="Clears this node's e-stop (the swerve node's is separate)">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
-<div class="ru-card">
+<div class="ru-card" data-panel="cameras" data-role="view">
   <div class="camhead">
     <div><b>Robot and cameras</b> <select id="cam"></select> <span id="reach" class="ru-pill"></span>
       <div class="kv" id="pose" style="margin-top:4px"></div></div>
@@ -41,15 +41,15 @@ table.ru-table td,table.ru-table th{font-size:12px}
   </div>
   /*VIZ_HTML*/
 </div>
-<div class="grid">
-  <div class="ru-card"><b>Ground plane</b> <span class="ru-muted">(never moves) roll, pitch, height</span>
+<div class="grid ru-body">
+  <div class="ru-card" data-panel="ground" data-role="control"><b>Ground plane</b> <span class="ru-muted">(never moves) roll, pitch, height</span>
     <div class="ru-muted">Click on the depth image to outline floor regions; "Close" ends a polygon. No polygon = automatic (largest near-horizontal plane, using gravity).</div>
     <div id="poly"><img id="depth" alt="depth image"><svg id="svg"></svg></div>
     <div class="ru-row" style="margin-top:6px"><button class="ru" id="close">Close polygon</button><button class="ru" id="undo">Undo point</button>
       <button class="ru" id="clr">Clear</button><button class="ru" id="refresh">Refresh image</button>
       frames <input type="number" id="gframes" value="10" min="1" max="60"><button class="ru" id="ground">Run ground calibration</button></div>
   </div>
-  <div class="ru-card"><b>Camera yaw</b> <div class="caution"><b>Drives the base</b>: back and forth along the given vectors, no rotation. Keep the area clear.</div>
+  <div class="ru-card" data-panel="yaw" data-role="control"><b>Camera yaw</b> <div class="caution"><b>Drives the base</b>: back and forth along the given vectors, no rotation. Keep the area clear.</div>
     <div class="ru-row">vectors <input id="vecs" value="1,0; 0,1" style="width:140px"> <span class="ru-muted">base frame [vx, vy]; …</span></div>
     <div class="ru-row">amplitude <input type="number" id="amp" value="0.08" step="0.01" min="0.01" max="0.15"> m
       frequency <input type="number" id="freq" value="1.0" step="0.1" min="0.3" max="2"> Hz cycles <input type="number" id="cyc" value="5" min="2" max="20"></div>
@@ -59,10 +59,10 @@ table.ru-table td,table.ru-table th{font-size:12px}
     <div class="ru-muted">Aborts by itself on yaw rate &gt; 15°/s (0.1 s mean), heading drift &gt; 5°, or a lost stream (and then latches the swerve e-stop).</div>
   </div>
 </div>
-<div class="ru-card"><b>Job</b> <span id="jobstate" class="ru-pill"></span> <a id="jobraw" class="ru-muted" hidden>recording (.npz)</a><div class="job" id="job">no job yet</div></div>
-<div class="ru-card"><b>Calibrations</b> <span class="ru-muted">(newest first; 5 kept per type and camera, plus the active one)</span>
+<div class="ru-card" data-panel="job" data-role="telemetry"><b>Job</b> <span id="jobstate" class="ru-pill"></span> <a id="jobraw" class="ru-muted" hidden>recording (.npz)</a><div class="job" id="job">no job yet</div></div>
+<div class="ru-card" data-panel="calibrations" data-role="config"><b>Calibrations</b> <span class="ru-muted">(newest first; 5 kept per type and camera, plus the active one)</span>
   <table class="ru-table" id="cals"></table></div>
-<div class="ru-card"><b>Events</b><div id="events"></div></div>
+<div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
 <script>

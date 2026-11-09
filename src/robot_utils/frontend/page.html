@@ -28,12 +28,12 @@
   #theme-pick { font: 12px var(--font); border: 1px solid var(--line); border-radius: 6px;
                 background: var(--panel); color: var(--text); padding: 1px 4px; }
 
-  #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid color-mix(in srgb, var(--stop) 60%, #000);
-           border-radius: 12px; background: var(--stop); color: #fff; cursor: pointer;
+  #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid color-mix(in srgb, var(--stop-fill) 60%, #000);
+           border-radius: 12px; background: var(--stop-fill); color: var(--on-stop); cursor: pointer;
            font: 700 24px/1 var(--font); letter-spacing: .06em;
-           box-shadow: 0 3px 0 color-mix(in srgb, var(--stop) 60%, #000); }
-  #estop:hover { background: color-mix(in srgb, var(--stop) 88%, #fff); }
-  #estop:active { transform: translateY(2px); box-shadow: 0 1px 0 color-mix(in srgb, var(--stop) 60%, #000); }
+           box-shadow: 0 3px 0 color-mix(in srgb, var(--stop-fill) 60%, #000); }
+  #estop:hover { background: color-mix(in srgb, var(--stop-fill) 90%, #fff); }
+  #estop:active { transform: translateY(2px); box-shadow: 0 1px 0 color-mix(in srgb, var(--stop-fill) 60%, #000); }
   #estop:focus-visible { outline: 4px solid var(--caution); outline-offset: 2px; }
   #estop small { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0; margin-top: 6px; opacity: .9; }
 
@@ -123,9 +123,9 @@
 </style>
 <script src="themes/theme.js"></script>
 </head>
-<body>
+<body data-page="landing">
 <main>
-  <header>
+  <header class="ru-head">
     <h1>Robot nodes <span class="sub"><span id="where"></span>
       · <button id="restart" type="button" title="Restart this landing page (robot-frontend.service): reloads nodes.yaml and the code. Running nodes keep running.">Restart landing page</button>
       <span id="restart-msg"></span>
@@ -136,7 +136,7 @@
     </button>
   </header>
   <section id="estop-result" aria-live="assertive"></section>
-  <section id="locks" aria-live="polite">
+  <section id="locks" aria-live="polite" data-panel="locks" data-role="control">
     <div id="lock-list"></div>
     <div id="lock-ctl">
       <button id="chock-all" type="button" title="Chock every actuator: they stop and refuse to enable until an admin removes it over SSH">Chock all actuators</button>
@@ -144,13 +144,13 @@
       <span id="lock-msg">Anyone can place a lock; only an admin removes it, on the robot over SSH.</span>
     </div>
   </section>
-  <section id="grid" aria-live="polite"><p id="empty">Loading node list…</p></section>
+  <section id="grid" class="ru-body" aria-live="polite" data-panel="nodes" data-role="telemetry"><p id="empty">Loading node list…</p></section>
   <p id="planned"></p>
-  <section id="tools-section" hidden>
+  <section id="tools-section" hidden data-panel="tools" data-role="control">
     <h2>Tools</h2>
     <ul id="tools"></ul>
   </section>
-  <section id="who" hidden>
+  <section id="who" hidden data-panel="who" data-role="telemetry">
     <h2>Who's here</h2>
     <div id="uplink-banner"></div>
     <div id="uplink">uplink: measuring…</div>

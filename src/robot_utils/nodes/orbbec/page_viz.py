@@ -12,7 +12,7 @@ VIZ_CSS = r"""
 """
 
 VIZ_HTML = r"""
-<section class="box"><h2>Visualisation</h2>
+<section class="box" data-panel="visualisation" data-role="config"><h2>Visualisation</h2>
 <label class="row"><span class="k">Orientation (IMU filter)</span><input type="checkbox" id="v_att" checked></label>
 <label class="row"><span class="k">Point cloud</span><input type="checkbox" id="v_pc"></label>
 <label class="row"><span class="k">Cloud colour</span><select id="pc_color"><option value="0">camera colour</option><option value="1">height</option><option value="2">distance</option></select></label>
