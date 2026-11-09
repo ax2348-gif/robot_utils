@@ -220,7 +220,8 @@ class AgentNav:
         """Log one exchange (caller request + robot reply); thumbnails of its images are stored."""
         with self.lock:
             self.n_turn += 1
-            t = {"n": self.n_turn, "t": time.monotonic(), "wall": time.time(), "actor": actor, "kind": kind,
+            t = {"n": self.n_turn, "session": (self.session or {}).get("id"), "t": time.monotonic(), "wall": time.time(),
+                 "actor": actor, "kind": kind,
                  "request": request, "reply": reply, "comment": comment or "", "images": images or [],
                  "level": level}
             d = self._session_dir()
@@ -288,6 +289,11 @@ class AgentNav:
             self.disable(actor, comment="session closed")
         self.turn(actor, "session_end", {"reason": reason}, {"closed": s["id"]}, comment)
         with self.lock:
+            try:
+                with open(os.path.join(self.data_dir, s["id"], "session.json"), "w") as f:
+                    json.dump({**s, "ended": time.time(), "turns": sum(1 for t in self.turns if t.get("session") == s["id"])}, f)
+            except OSError as e:
+                log.warning("session.json: %s", e)
             self.session = None
         return {"closed": s["id"]}
 
@@ -742,6 +748,73 @@ class AgentNav:
             self.memory["places"][name] = p
         self.turn(actor, "place", {"name": name, "frame": frame, "x": x, "y": y, "theta": theta}, {"place": name, **p}, comment)
         return {"place": name, **p}
+
+    # -- stored sessions ---------------------------------------------------------------------------
+
+    def _sdir(self, sid: str) -> str:
+        if not sid or "/" in sid or sid.startswith("."):
+            raise RequestError(404, "no such session")
+        d = os.path.join(self.data_dir, sid)
+        if not os.path.isfile(os.path.join(d, "session.json")):
+            raise RequestError(404, f"no session {sid!r}")
+        return d
+
+    def list_sessions(self) -> list:
+        out = []
+        if os.path.isdir(self.data_dir):
+            for sid in sorted(os.listdir(self.data_dir), reverse=True):
+                f = os.path.join(self.data_dir, sid, "session.json")
+                if not os.path.isfile(f):
+                    continue
+                try:
+                    with open(f) as fh:
+                        s = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                lf = os.path.join(self.data_dir, sid, "log.jsonl")
+                s["bytes"] = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(os.path.join(self.data_dir, sid)) for fn in fns)
+                if "turns" not in s and os.path.isfile(lf):
+                    with open(lf) as fh:
+                        s["turns"] = sum(1 for _ in fh)
+                s["live"] = self.session is not None and self.session["id"] == sid
+                out.append(s)
+        return out
+
+    def read_session(self, sid: str) -> dict:
+        d = self._sdir(sid)
+        with open(os.path.join(d, "session.json")) as f:
+            s = json.load(f)
+        turns = []
+        lf = os.path.join(d, "log.jsonl")
+        if os.path.isfile(lf):
+            with open(lf) as f:
+                for line in f:
+                    try:
+                        turns.append(json.loads(line))
+                    except ValueError:
+                        pass
+        return {"session": s, "turns": turns}
+
+    def export_session(self, sid: str) -> bytes:
+        """A zip: session.json, log.jsonl, thumbs/*.jpg (the stored transcript)."""
+        import zipfile
+        d = self._sdir(sid)
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
+            for dp, _, fns in os.walk(d):
+                for fn in sorted(fns):
+                    p = os.path.join(dp, fn)
+                    z.write(p, os.path.join(f"agent_nav_{sid}", os.path.relpath(p, d)))
+        return b.getvalue()
+
+    def delete_session(self, sid: str) -> dict:
+        import shutil
+        d = self._sdir(sid)
+        if self.session is not None and self.session["id"] == sid:
+            raise RequestError(409, "end the live session before deleting it")
+        shutil.rmtree(d)
+        self.events.add(f"session {sid} deleted")
+        return {"deleted": sid}
 
     # -- state ------------------------------------------------------------------------------------
 

@@ -279,3 +279,31 @@ def test_page_meta_and_refusals(stack):
     assert post(st, "/query/plane", {"snapshot": "s9", "select": {"box": [0, 0, 10, 10]}}).status_code == 404
     assert post(st, "/query/region", {"select": {"triangle": [1]}}).status_code == 422
     assert post(st, "/session", {"agent": "T", "avatar": "x" * 40}).status_code == 422
+
+
+def test_session_management(stack):
+    import io
+    import zipfile
+    st = stack
+    post(st, "/session", {"agent": "First", "avatar": "🦉"})
+    post(st, "/look")
+    first = get(st, "/state").json()["session"]["id"]
+    time.sleep(1.1)                                                      # session ids are per second
+    post(st, "/session", {"agent": "operator", "avatar": "🧑"}, human=True)      # replaces (ends) the first
+    second = get(st, "/state").json()["session"]["id"]
+    assert second != first
+    turns = get(st, "/log").json()["turns"]
+    assert {t["session"] for t in turns if t["kind"] == "look"} == {first}
+    rows = get(st, "/sessions").json()
+    assert [r["id"] for r in rows][:2] == [second, first] and rows[0]["live"] and not rows[1]["live"]
+    assert rows[1]["ended"] and rows[1]["turns"] >= 3
+    stored = get(st, f"/sessions/{first}").json()
+    assert stored["session"]["agent"] == "First" and any(t["kind"] == "look" for t in stored["turns"])
+    z = zipfile.ZipFile(io.BytesIO(get(st, f"/sessions/{first}/export.zip").content))
+    names = z.namelist()
+    assert f"agent_nav_{first}/log.jsonl" in names and any("/thumbs/" in n for n in names)
+    assert httpx.delete(st["url"] + f"/sessions/{first}").status_code == 403                 # agents cannot delete
+    assert httpx.delete(st["url"] + f"/sessions/{second}", headers={"X-Operator": "human"}).status_code == 409  # live
+    assert httpx.delete(st["url"] + f"/sessions/{first}", headers={"X-Operator": "human"}).json()["deleted"] == first
+    assert get(st, f"/sessions/{first}").status_code == 404
+    assert get(st, "/sessions/..%2Fetc").status_code == 404

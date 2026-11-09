@@ -31,6 +31,12 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 .ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0}
 #zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9}
 #zoom img{max-width:96vw;max-height:94vh}
+.sbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 6px}
+.sbar .info{flex:1;min-width:180px;font-size:13px}
+.banner{background:#f59e0b22;border:1px solid #f59e0b;border-radius:6px;padding:4px 8px;margin-bottom:6px;font-size:13px;display:none}
+#sessions{display:none;max-height:300px;overflow:auto;margin-bottom:6px}
+#sessions table{width:100%;border-collapse:collapse;font-size:13px}
+#sessions td,#sessions th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left}
 </style></head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span></h2>
@@ -39,7 +45,14 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 <div id="err" class="ru-err"></div>
 <div class="layout">
   <div class="ru-card">
-    <b>Dialogue</b> <span class="ru-muted">(every call at the API boundary; thumbnails are stored with the session)</span>
+    <div class="sbar"><span class="info" id="sinfo">no session</span>
+      <button class="ru" id="snew" title="Open a session as the human operator">New session</button>
+      <button class="ru" id="send_s" title="End the live session (disables motion)">End session</button>
+      <button class="ru" id="sclear" title="Hide the turns shown so far (nothing is deleted)">Clear view</button>
+      <a class="ru" id="sexport" href="#" title="Download the session: log.jsonl, thumbnails, metadata">Export</a>
+      <button class="ru" id="slist">Sessions ▾</button></div>
+    <div id="sessions" class="ru-card"></div>
+    <div class="banner" id="banner"></div>
     <div id="dialogue"></div>
     <div class="ctl"><input id="cmd" placeholder="command as a human, e.g. look grid · region box 400 20 700 160 · goal 0.5 0 90d · help">
       <button class="ru" id="send">Send</button></div>
@@ -81,7 +94,44 @@ $("#send").onclick = sendCmd; $("#cmd").addEventListener("keydown", e => { if (e
 $("#zoom").onclick = () => $("#zoom").style.display = "none";
 function zoom(src){ $("#zoom img").src = src; $("#zoom").style.display = "flex"; }
 
-let session = null, last = 0;
+let session = null, last = 0, viewing = null, hideBefore = 0;
+function fmtTime(w){ return w ? new Date(w * 1000).toLocaleString() : "–"; }
+function sessionInfo(){
+  const s = session;
+  $("#sinfo").textContent = s ? `live: ${s.avatar && !s.avatar.startsWith("data:") ? s.avatar + " " : ""}${s.agent} · ${s.id} · started ${new Date(s.started * 1000).toLocaleTimeString()}` : "no live session";
+  const ex = $("#sexport"), sid = viewing ? viewing.id : s && s.id;
+  ex.href = sid ? "sessions/" + sid + "/export.zip" : "#"; ex.style.opacity = sid ? 1 : 0.4;
+}
+function resetDialogue(){ $("#dialogue").innerHTML = ""; }
+$("#snew").onclick = async () => { const name = prompt("Session name (who is driving)?", "operator"); if (name === null) return;
+  await human("session", {agent: name || "operator", avatar: "🧑"}); };
+$("#send_s").onclick = async () => { if (!confirm("End the live session? (motion is disabled)")) return;
+  try { err(""); await RU.api("session", {method: "DELETE", headers: H}); } catch(e){ err(e.message); } };
+$("#sclear").onclick = () => { hideBefore = last; resetDialogue(); };
+$("#slist").onclick = () => { const p = $("#sessions"); p.style.display = p.style.display === "block" ? "none" : "block"; if (p.style.display === "block") listSessions(); };
+async function listSessions(){
+  const rows = await RU.api("sessions"), p = $("#sessions"); p.innerHTML = "";
+  const t = el("table"), hr = el("tr"); ["", "session", "agent", "started", "turns", "size", ""].forEach(h => hr.appendChild(el("th", "", h))); t.appendChild(hr);
+  for (const s of rows){ const r = el("tr");
+    r.appendChild(el("td", "", s.live ? "● live" : ""));
+    r.appendChild(el("td", "", s.id)); r.appendChild(el("td", "", (s.avatar && !s.avatar.startsWith("data:") ? s.avatar + " " : "") + s.agent));
+    r.appendChild(el("td", "", fmtTime(s.started))); r.appendChild(el("td", "", s.turns ?? "?")); r.appendChild(el("td", "", ((s.bytes || 0) / 1024).toFixed(0) + " KB"));
+    const a = el("td"); const v = el("button", "ru", s.live ? "Live" : "View"); v.onclick = () => s.live ? backToLive() : viewSession(s.id); a.appendChild(v);
+    const x = el("a", "ru", "Export"); x.href = "sessions/" + s.id + "/export.zip"; a.appendChild(x);
+    if (!s.live){ const d = el("button", "ru", "Delete"); d.onclick = async () => { if (!confirm("Delete session " + s.id + " permanently (transcript and thumbnails)? This cannot be undone.")) return;
+      try { await RU.api("sessions/" + s.id, {method: "DELETE", headers: H}); listSessions(); } catch(e){ err(e.message); } }; a.appendChild(d); }
+    r.appendChild(a); t.appendChild(r); }
+  if (!rows.length) p.appendChild(el("div", "ru-muted", "no stored sessions")); else p.appendChild(t);
+}
+async function viewSession(sid){
+  const r = await RU.api("sessions/" + sid); viewing = r.session; resetDialogue();
+  const b = $("#banner"); b.style.display = "block"; b.textContent = "";
+  b.appendChild(el("span", "", `Viewing stored session ${sid} (${r.turns.length} turns, thumbnails only). `));
+  const back = el("a", "", "Back to live"); back.href = "#"; back.onclick = e => { e.preventDefault(); backToLive(); }; b.appendChild(back);
+  const keep = session; session = r.session; r.turns.forEach(t => renderTurn(t, true)); session = keep; sessionInfo();
+  $("#sessions").style.display = "none";
+}
+function backToLive(){ viewing = null; $("#banner").style.display = "none"; resetDialogue(); last = 0; $("#sessions").style.display = "none"; sessionInfo(); pull(); }
 function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function avatar(actor){
   const a = el("div", "av");
@@ -99,12 +149,12 @@ const SUM = {look: ["snapshot", "pose_world", "depth_fraction", "mode", "moving"
 function short(o, keys){ const out = {}; for (const k of keys) if (o[k] !== undefined) out[k] = o[k]; return out; }
 function fmt(o){ return JSON.stringify(o, (k, v) => v === null || v === false && k === "grid" ? undefined : typeof v === "number" ? Math.round(v * 1000) / 1000 : v, 1)
   .replace(/\n\s*/g, " ").replace(/^\{ ?|\}$/g, ""); }
-function renderTurn(t){
+function renderTurn(t, stored){
   const box = $("#dialogue");
   const caller = t.actor === "robot" ? null : t.actor;
-  const sid = session && session.id;
+  const sid = t.session || (session && session.id);
   const imgs = (t.thumbs && t.thumbs.length && sid) ? t.thumbs.map(f => ["sessions/" + sid + "/thumbs/" + f, null]) : [];
-  (t.images || []).forEach((n, i) => { if (imgs[i]) imgs[i][1] = "images/" + n; else imgs.push(["images/" + n, "images/" + n]); });
+  if (!stored) (t.images || []).forEach((n, i) => { if (imgs[i]) imgs[i][1] = "images/" + n; else imgs.push(["images/" + n, "images/" + n]); });
   const time = new Date(t.wall * 1000).toLocaleTimeString();
   if (caller){                                            // the call
     const row = el("div", "turn " + caller), b = el("div", "bub");
@@ -130,29 +180,39 @@ function renderTurn(t){
   const d = document.createElement("details"); d.appendChild(el("summary", "", "full reply"));
   d.appendChild(el("div", "kv", JSON.stringify(r, null, 1))); b.appendChild(d);
   row.appendChild(b); box.appendChild(row);
+  if (stored) return;
   if (t.kind === "look" && r.image){ $("#liveimg").src = r.image; $("#livebev").src = r.bev;
     $("#snapinfo").textContent = r.snapshot + " · pose " + fmt(r.pose_world || "–"); }
   else if (r.overlay){ $("#liveimg").src = r.overlay; if (r.bev) $("#livebev").src = r.bev; }
   else if (r.bev){ $("#livebev").src = r.bev; }
 }
 async function pull(){
+  if (viewing) return;
   const r = await RU.api("log?since=" + last);
-  if (r.session && (!session || session.id !== r.session.id)){ session = r.session; }
+  const sid = r.session ? r.session.id : null;
+  if ((session ? session.id : null) !== sid && sid){ session = r.session; resetDialogue(); }
+  else if (!sid) session = null;
+  sessionInfo();
   const box = $("#dialogue"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  for (const t of r.turns){ if (t.n > last){ renderTurn(t); last = t.n; } }
+  for (const t of r.turns){
+    if (t.n <= last) continue;
+    last = t.n;
+    // the live view shows the live session's turns (and, without a session, the unattached ones)
+    if (t.n <= hideBefore || (sid ? t.session !== sid : t.session)) continue;
+    renderTurn(t);
+  }
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 RU.api("state").then(s => { const p = $("#profile");
   for (const n of Object.keys(s.profiles)){ const o = el("option", "", n); o.value = n; p.appendChild(o); } p.value = s.profile;
   $("#reflex").checked = s.reflex.enabled; });
 RU.sse("events", s => {
-  session = s.session || session;
   $("#who").textContent = s.session ? (s.session.avatar && !s.session.avatar.startsWith("data:") ? s.session.avatar + " " : "") + s.session.agent : "no session";
   const L = s.latest || {}, f = v => v === null || v === undefined ? "–" : Number(v).toFixed(3);
   $("#status").textContent = `servo ${s.servo || "?"}${s.enabled_by ? " · enabled by " + s.enabled_by : ""}${s.latch ? " · HELD by human" : ""}`;
   $("#state").textContent = `pose ${s.pose_world ? s.pose_world.map(f).join(", ") : "–"}   twist ${f(L.vx)}, ${f(L.vy)}, ${f(L.omega)}` +
     (s.reflex ? `\n⚠ ${s.reflex}` : "");
-  if (s.turns > last) pull();
+  if (s.turns > last || ((s.session && s.session.id) !== (session && session.id))) pull();
 });
 pull();
 </script></body></html>

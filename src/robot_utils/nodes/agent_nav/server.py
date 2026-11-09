@@ -197,18 +197,25 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
         turns = [t for t in list(node.turns) if t["n"] > since][-limit:]
         return {"turns": turns, "last": node.n_turn, "session": node.session}
 
-    @app.get("/sessions", tags=["log"], summary="Stored session transcripts")
+    @app.get("/sessions", tags=["log"], summary="Stored session transcripts (newest first)")
     async def sessions():
-        d = node.data_dir
-        out = []
-        if os.path.isdir(d):
-            for sid in sorted(os.listdir(d), reverse=True):
-                f = os.path.join(d, sid, "session.json")
-                if os.path.exists(f):
-                    import json
-                    with open(f) as fh:
-                        out.append(json.load(fh))
-        return out
+        return await run(node.list_sessions)
+
+    @app.get("/sessions/{sid}", tags=["log"], summary="A stored session: metadata + all its turns")
+    async def session_read(sid: str):
+        return await run(node.read_session, sid)
+
+    @app.get("/sessions/{sid}/export.zip", tags=["log"], summary="Download a session (log.jsonl, thumbnails, metadata)")
+    async def session_export(sid: str):
+        data = await run(node.export_session, sid)
+        return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="agent_nav_{sid}.zip"'})
+
+    @app.delete("/sessions/{sid}", tags=["log"], summary="(human) Delete a stored session (not the live one)")
+    async def session_delete(sid: str, x_operator: Optional[str] = Operator):
+        if actor(x_operator) != "human":
+            raise RequestError(403, "only the human operator deletes sessions")
+        return await run(node.delete_session, sid)
 
     @app.get("/sessions/{sid}/log.jsonl", tags=["log"], summary="A session's transcript (JSON lines)")
     async def session_log(sid: str):

@@ -101,6 +101,20 @@ agent (curl) ──HTTP──► agent_nav ──► 3d_perception  /frame, /cal
   trusted network: the guide tells agents never to send it. It is not an authentication
   mechanism.
 
+## Sessions on the page
+
+The bar above the dialogue shows the live session and offers:
+- **New session** (the human drives, avatar 🧑) and **End session**;
+- **Clear view**: hides the turns shown so far, deleting nothing;
+- **Export**: a zip of `session.json`, `log.jsonl` and `thumbs/`;
+- **Sessions ▾**: the stored transcripts, newest first, with turns and size, each with **View**
+  (read-only replay from the thumbnails, with a "Back to live" banner), **Export** and
+  **Delete** (human only, confirmed, never the live session).
+
+Every turn carries its `session` id, so a new session starts a fresh dialogue. The API side is
+`GET /sessions`, `GET /sessions/{id}` (metadata + turns), `GET /sessions/{id}/export.zip`, and
+`DELETE /sessions/{id}` (human).
+
 ## Chat commands (page, human)
 
 `help` lists them:
