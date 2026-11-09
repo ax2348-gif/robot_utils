@@ -117,6 +117,46 @@
   #who .sub2 { color: var(--muted); font-size: 12px; }
   #who .heavy { color: var(--warn); font-weight: 600; }
   #who-note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  /* view toggle: the robot (default) or the node tiles */
+  main[data-view="robot"] :is(#grid, #planned, #tools-section, #who, #note) { display: none !important; }
+  main:not([data-view="robot"]) #robot-view { display: none; }
+  #views { display: flex; gap: 0; margin: 0 0 12px; }
+  #views button { font: 600 13px var(--font); min-height: 32px; padding: 4px 14px; cursor: pointer;
+                  border: 1px solid var(--line); background: var(--panel); color: var(--muted); }
+  #views button:first-child { border-radius: 6px 0 0 6px; }
+  #views button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  #views button[aria-pressed="true"] { background: var(--signal-bg); color: var(--text); border-color: var(--link); }
+  /* the robot view: view only; everything drawn from the nodes' own streams and /state */
+  #rv-band { margin: 0 0 8px; }
+  #rv-strip { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 10px; font-size: 12px; }
+  #rv-strip .ru-pill { white-space: nowrap; }
+  #rv-nodes { display: inline-flex; gap: 4px; align-items: center; margin-left: auto; }
+  #rv-nodes i { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; }
+  #rv-nodes i.up { border-color: var(--ok); background: var(--ok); }
+  #rv-nodes i.down { border-color: var(--bad); }
+  #rv-power { display: inline-flex; gap: 6px; align-items: center; }
+  #rv-power .gauge { width: 96px; }
+  #rv-power .bar { width: 44px; height: 14px; border: 1.5px solid var(--muted); border-radius: 3px; position: relative; display: inline-block; }
+  #rv-power .bar b { position: absolute; left: 1px; top: 1px; bottom: 1px; background: var(--ok); border-radius: 1px; }
+  #rv-power .bar.low b { background: var(--warn); } #rv-power .bar.crit b { background: var(--bad); }
+  .rv-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; }
+  .rv-grid > .ru-card { margin: 0; padding: 8px; min-width: 0; }
+  .rv-grid .cap { font-size: 12px; color: var(--muted); margin: 0 0 4px; display: flex; justify-content: space-between; gap: 8px; }
+  #rv-scene { height: 560px; }
+  .rv-vbtn button { font: 600 11px var(--font); min-height: 24px; padding: 2px 10px; cursor: pointer;
+                    border: 1px solid var(--line); background: var(--panel); color: var(--muted); }
+  .rv-vbtn button:first-child { border-radius: 5px 0 0 5px; } .rv-vbtn button:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+  .rv-vbtn button[aria-pressed="true"] { background: var(--signal-bg); color: var(--text); border-color: var(--link); }
+  .rv-side { display: grid; gap: 12px; align-content: start; min-width: 0; }
+  .rv-side > .ru-card { margin: 0; padding: 8px; }
+  #rv-swerve { max-width: 260px; margin: 0 auto; }
+  .rv-charts { display: grid; gap: 8px; }
+  .rv-charts canvas.ru-plot { height: 86px; }
+  @media (max-width: 820px) {
+    .rv-grid { grid-template-columns: 1fr; }
+    #rv-scene { height: 380px; }
+    #rv-nodes { margin-left: 0; }
+  }
   @media (max-width: 520px) {
     #estop { width: 100%; }
   }
@@ -124,7 +164,7 @@
 <script src="themes/theme.js"></script>
 </head>
 <body data-page="landing">
-<main>
+<main data-view="robot">
   <header class="ru-head">
     <h1>Robot nodes <span class="sub"><span id="where"></span>
       · <button id="restart" type="button" title="Restart this landing page (robot-frontend.service): reloads nodes.yaml and the code. Running nodes keep running.">Restart landing page</button>
@@ -142,6 +182,35 @@
       <button id="chock-all" type="button" title="Chock every actuator: they stop and refuse to enable until an admin removes it over SSH">Chock all actuators</button>
       <button id="cover-cam" type="button" title="Cover the camera: it captures nothing and serves procedural frames until an admin removes it over SSH">Cover camera</button>
       <span id="lock-msg">Anyone can place a lock; only an admin removes it, on the robot over SSH.</span>
+    </div>
+  </section>
+  <nav id="views" aria-label="View">
+    <button type="button" id="view-robot" aria-pressed="true">Robot</button><button type="button" id="view-nodes" aria-pressed="false">Nodes</button>
+  </nav>
+  <section id="robot-view" data-panel="robot" data-role="telemetry" aria-label="Robot (view only)">
+    <div id="rv-band"></div>
+    <div id="rv-strip">
+      <span class="ru-pill" id="rv-ctl" title="Who holds control of the base (the swerve lease)">control: …</span>
+      <span class="ru-pill" id="rv-motors" title="Base motors">motors</span>
+      <span class="ru-pill" id="rv-imu" title="Estimator: share of ticks using the IMU">IMU</span>
+      <span class="ru-pill" id="rv-cam" title="Camera">camera</span>
+      <span id="rv-power" hidden title="Power"></span>
+      <span id="rv-nodes" title="Nodes: filled = up"></span>
+    </div>
+    <div class="rv-grid">
+      <div class="ru-card" data-panel="scene" data-role="view">
+        <div class="cap"><span>fused <span aria-hidden="true">━</span> odometry <span aria-hidden="true">╍</span> · camera view <span aria-hidden="true">▱</span> · <span id="rv-pose"></span></span>
+          <span class="rv-vbtn"><button type="button" id="rv-iso" aria-pressed="true">3D</button><button type="button" id="rv-top" aria-pressed="false">Top</button></span></div>
+        <div id="rv-scene"></div>
+      </div>
+      <div class="rv-side">
+        <div class="ru-card" data-panel="modules" data-role="telemetry"><div class="cap"><span>swerve modules</span></div><div id="rv-swerve"></div></div>
+        <div class="ru-card rv-charts" data-panel="charts" data-role="telemetry">
+          <div><div class="cap"><span>speed m/s</span></div><canvas class="ru-plot" id="rv-p-speed"></canvas></div>
+          <div><div class="cap"><span>turn rate rad/s</span></div><canvas class="ru-plot" id="rv-p-omega"></canvas></div>
+          <div><div class="cap"><span>heading °</span></div><canvas class="ru-plot" id="rv-p-head"></canvas></div>
+        </div>
+      </div>
     </div>
   </section>
   <section id="grid" class="ru-body" aria-live="polite" data-panel="nodes" data-role="telemetry"><p id="empty">Loading node list…</p></section>
@@ -163,6 +232,8 @@
   <p id="note">This page only indexes the nodes. Each node keeps running, and keeps its own page
     and e-stop, without it.</p>
 </main>
+<script src="common/ui.js"></script>
+<script src="common/viz.js"></script>
 <script>
 "use strict";
 const POLL_MS = 1000, POLL_TIMEOUT_MS = 900, ESTOP_TIMEOUT_MS = 1500;
@@ -577,6 +648,141 @@ async function loadTools() {
   } catch (_) { /* no tools section */ }
 }
 start();
+</script>
+
+<script>
+"use strict";
+// -- the robot view (default): one view-only picture of the robot, drawn from the nodes' own streams
+//    and the /state this page already polls. No lease, no commands: the e-stop and locks above are
+//    the only controls, in both views.
+(function(){
+  const $ = id => document.getElementById(id), KEY = "ru-landing-view";
+  const main = document.querySelector("main");
+  const byKind = k => nodes.find(n => (n.cfg.kind || n.cfg.name) === k);
+  const base = n => "nodes/" + encodeURIComponent(n.cfg.name) + "/";
+  let on = false, ctl = null, raf = 0, cmd = [NaN, NaN, NaN], driving = false, gauges = {};
+  const scene = new RU.viz.Scene($("rv-scene"));
+  const swv = new RU.viz.Swerve($("rv-swerve"), {caption: false});
+  const band = RU.stateBand($("rv-band"));
+  const plots = {
+    speed: new RU.Plot($("rv-p-speed"), {seconds: 20, ymin: 0, ymax: 1.5, series: [{name: "measured"}, {name: "command", color: "--muted"}]}),
+    omega: new RU.Plot($("rv-p-omega"), {seconds: 20, ymin: -2, ymax: 2, series: [{name: "measured"}, {name: "command", color: "--muted"}]}),
+    head: new RU.Plot($("rv-p-head"), {seconds: 20, series: [{name: "fused"}, {name: "odometry", color: "--muted"}]}),
+  };
+  const D = 180 / Math.PI, f = (v, k) => v === null || v === undefined || !isFinite(v) ? "–" : (+v).toFixed(k);
+
+  function setView(v){
+    v = v === "nodes" ? "nodes" : "robot";
+    main.dataset.view = v;
+    $("view-robot").setAttribute("aria-pressed", String(v === "robot"));
+    $("view-nodes").setAttribute("aria-pressed", String(v === "nodes"));
+    try { localStorage.setItem(KEY, v); } catch (_) {}
+    on = v === "robot"; sync();
+  }
+  // streams run only while the robot view is showing and the tab is visible
+  function sync(){
+    const want = on && document.visibilityState !== "hidden";
+    if (want && !ctl) start(); else if (!want && ctl) stop();
+  }
+  function stop(){ ctl.abort(); ctl = null; cancelAnimationFrame(raf); raf = 0; }
+  function start(){
+    ctl = new AbortController();
+    const sw = byKind("swerve"), es = byKind("estimator");
+    if (sw) RU.rows(base(sw) + "stream?batch_ms=100", d => {
+      const s = RU.viz.Swerve.fromRow(n => d.last(n)), mods = {};
+      for (const k of ["FL", "FR", "RR", "RL"]) if (s[k]) mods[k] = {angle: s[k].angle, speed: s[k].speed};
+      cmd = s.twist || cmd; driving = !!s.driving;
+      swv.update(s); scene.update({modules: mods, driving});
+    }, {signal: ctl.signal});
+    if (es) RU.rows(base(es) + "stream?batch_ms=100", d => {
+      const F = d.fields, cols = {}; for (const k of F) cols[k] = d.col(k);
+      let p = null;
+      for (let i = 0; i < d.n; i++){
+        p = {}; for (const k of F) p[k] = cols[k][i];
+        scene.push(p);
+        plots.speed.push(p.t, [p.speed, Math.hypot(cmd[0], cmd[1])]);
+        plots.omega.push(p.t, [p.omega, cmd[2]]);
+        plots.head.push(p.t, [p.theta * D, p.theta_odom * D]);
+      }
+      if (p){ scene.update({velocity: [p.vx_world, p.vy_world]});
+        $("rv-pose").textContent = `${f(p.x, 2)}, ${f(p.y, 2)} m · ${f(p.theta * D, 0)}°`; }
+    }, {signal: ctl.signal});
+    const frame = () => { for (const k in plots) plots[k].draw(); raf = requestAnimationFrame(frame); };
+    raf = requestAnimationFrame(frame);
+  }
+  async function loadDescription(){
+    const n = byKind("description"); if (!n) return;
+    try {
+      const desc = await RU.api(base(n) + "description");
+      scene.update({desc});
+    } catch (_) { /* the 3D view says it is waiting */ }
+  }
+  // the status strip, from the /state every tile already polls once a second
+  const pill = (el, text, cls) => { el.textContent = text; el.className = "ru-pill" + (cls ? " " + cls : ""); };
+  function strip(){
+    const sw = byKind("swerve"), es = byKind("estimator"), cam = byKind("camera"), pw = byKind("power");
+    const st = n => (n && n.up && n.state) || null;
+    // the band: any latched e-stop, every lock, motors live
+    const locks = [], seen = new Set(); let estop = null;
+    for (const n of nodes){ const s = st(n); if (!s) continue;
+      if (s.estop && s.estop.latched && !estop) estop = s.estop;
+      for (const l of s.locks || []){ const k = l.kind + "|" + (l.target || "") + "|" + l.by; if (!seen.has(k)){ seen.add(k); locks.push(l); } } }
+    const s = st(sw), lease = s && s.lease;
+    band.update({estop: estop || {}, locks}, {live: !!(s && s.enabled), liveText: lease && lease.held ? "control: " + lease.holder : ""});
+    if (!sw) $("rv-ctl").hidden = $("rv-motors").hidden = true;
+    else if (!s) { pill($("rv-ctl"), "control: ?", ""); pill($("rv-motors"), "base down", "ru-err"); }
+    else {
+      pill($("rv-ctl"), lease && lease.held ? "control: " + lease.holder : "control: free", lease && lease.held ? "ru-warn" : "");
+      pill($("rv-motors"), s.enabled ? (driving ? "motors live" : "motors enabled") : "motors off", s.enabled ? "ru-ok" : "");
+    }
+    const e = st(es);
+    if (!es) $("rv-imu").hidden = true;
+    else if (!e) pill($("rv-imu"), "estimator down", "ru-err");
+    else { const c = e.imu_coverage; pill($("rv-imu"), c === null || c === undefined ? "IMU –" : "IMU " + Math.round(c * 100) + "%", c >= 0.5 ? "ru-ok" : "ru-warn"); }
+    const c = st(cam);
+    if (!cam) $("rv-cam").hidden = true;
+    else if (!c) pill($("rv-cam"), "camera down", "ru-err");
+    else pill($("rv-cam"), (c.locks || []).some(l => l.kind === "cover") ? "camera covered" : "camera", (c.locks || []).some(l => l.kind === "cover") ? "ru-warn" : "ru-ok");
+    power(pw, st(pw));
+    $("rv-nodes").replaceChildren(...nodes.map(n => { const i = document.createElement("i");
+      i.className = n.up === true ? "up" : n.up === false ? "down" : ""; i.title = ((n.meta && n.meta.title) || n.cfg.name) + (n.up === false ? ": down" : "");
+      return i; }));
+  }
+  // power: one compact gauge per source (RU.viz.Battery when this build has it, else a bar)
+  function power(n, s){
+    const box = $("rv-power"); box.hidden = !n; if (!n) return;
+    if (!s){ box.replaceChildren(Object.assign(document.createElement("span"), {className: "ru-pill ru-err", textContent: "power down"})); gauges = {}; return; }
+    const src = Array.isArray(s.sources) ? s.sources : Object.entries(s.sources || {}).map(([k, v]) => Object.assign({name: k}, v));
+    const kids = [];
+    src.forEach((x, i) => {
+      const key = x.name || x.id || String(i);
+      if (RU.viz.Battery){
+        if (!gauges[key]){ const el = document.createElement("span"); el.className = "gauge"; gauges[key] = {el, g: new RU.viz.Battery(el, {caption: false, compact: true, label: key})}; }
+        gauges[key].g.update(RU.viz.Battery.fromSource(x)); kids.push(gauges[key].el);
+      } else {
+        const p = x.percent, bar = document.createElement("span"), fill = document.createElement("b");
+        bar.className = "bar" + (p <= 10 ? " crit" : p <= 25 ? " low" : ""); fill.style.width = (isFinite(p) ? Math.max(0, Math.min(100, p)) : 0) * 0.42 + "px";
+        bar.append(fill); bar.title = key;
+        const t = document.createElement("span"); t.textContent = (isFinite(p) ? Math.round(p) + "%" : "?") + (x.input_present ? " ⚡" : "");
+        kids.push(bar, t);
+      }
+    });
+    if (s.shutdown && s.shutdown.pending) kids.push(Object.assign(document.createElement("span"), {className: "ru-pill ru-err", textContent: "shutdown pending"}));
+    box.replaceChildren(...kids);
+  }
+  const camView = v => { scene.setView(v); $("rv-iso").setAttribute("aria-pressed", String(v === "iso")); $("rv-top").setAttribute("aria-pressed", String(v === "top")); };
+  $("rv-iso").onclick = () => camView("iso"); $("rv-top").onclick = () => camView("top");
+  $("view-robot").onclick = () => setView("robot");
+  $("view-nodes").onclick = () => setView("nodes");
+  document.addEventListener("visibilitychange", sync);
+  let v = "robot"; try { v = localStorage.getItem(KEY) || "robot"; } catch (_) {}
+  main.dataset.view = v === "nodes" ? "nodes" : "robot";      // at once, before the node list loads
+  // nodes[] is filled by start() once /api/nodes answers; wait for it, then begin
+  const ready = setInterval(() => {
+    if (!nodes.length) return;
+    clearInterval(ready); setView(v); loadDescription(); setInterval(loadDescription, 30000); strip(); setInterval(strip, 1000);
+  }, 200);
+})();
 </script>
 </body>
 </html>

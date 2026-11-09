@@ -284,3 +284,8 @@ Swerve.defaults = SWERVE_DEFAULTS;
 viz.Swerve = Swerve;
 })();
 """
+
+# scene components (World, Robot3D, cameraFloor) live in their own module and ride along in viz.js
+from .viz_scene import SCENE_JS  # noqa: E402
+
+VIZ_JS = VIZ_JS + SCENE_JS
