@@ -12,6 +12,7 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 | arm (planned) | | `arm` | yes | |
 | estimator (pose: wheel odometry + IMU heading) | `robot_utils.nodes.estimator` | `estimator` → `/nodes/estimator/` | no | [estimator_node.md](estimator_node.md) |
 | description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` → `/nodes/description/` | yes | [description_node.md](description_node.md) |
+| 3d_perception (colour + registered depth, motion-compensated; pixel → 3D point) | `robot_utils.nodes.perception3d` | `3d_perception` → `/nodes/3d_perception/` | no | [perception3d_node.md](perception3d_node.md) |
 
 ## Routing: one origin on port 80
 
