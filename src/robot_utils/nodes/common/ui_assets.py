@@ -60,6 +60,8 @@ body{margin:0;font:14px/1.45 var(--font);background:var(--ground);color:var(--in
 .ru-num{font-variant-numeric:tabular-nums}
 code,pre,.ru-mono{font-family:var(--mono)}
 :focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+/* the hidden attribute always hides, even on elements a rule gives a display (.ru-pill, .ru-row ...) */
+[hidden]{display:none!important}
 /* buttons: neutral by default; .primary (main action), .hazard (stops / irreversible), .live (starts motion) */
 button.ru,.ru-btn{font:inherit;min-height:32px;padding:5px 12px;border-radius:var(--radius);border:1px solid var(--rule);background:var(--panel);color:var(--ink);cursor:pointer}
 button.ru:hover{border-color:var(--signal)} button.ru:disabled{opacity:.45;cursor:not-allowed}
