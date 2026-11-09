@@ -37,7 +37,8 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 #sessions{display:none;max-height:300px;overflow:auto;margin-bottom:6px}
 #sessions table{width:100%;border-collapse:collapse;font-size:13px}
 #sessions td,#sessions th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left}
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span></h2>
   <div class="ru-row"><span id="status" class="ru-muted"></span><a class="ru-muted" href="guide.md">guide.md</a><a class="ru-muted" href="docs">API docs</a></div>

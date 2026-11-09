@@ -261,6 +261,35 @@ tail -f ~/.local/state/robot_utils/nginx/access.log | jq -c '{t, ip, uri, status
 
 `--no-observe` starts the frontend without the observer.
 
+## Themes
+
+Every page can be restyled with a **theme**, a CSS file, without touching any behaviour.
+- **Who chooses:** an admin sets a **robot-wide default**, and each **viewer can choose their own**
+  on top, from the theme picker in the landing page header: "robot default", "built-in look", or
+  any theme. The viewer's choice lives in their browser (all pages share the origin), so it applies
+  to every page and affects nobody else.
+- **The built-in look** (today's design) is the default and the fallback. It's used whenever no
+  theme applies, a theme file is missing, or the loader can't be reached (a node opened on its
+  debug port).
+- **Where themes live:** packaged ones in `src/robot_utils/frontend/themes/<name>.css`, and
+  admin-added ones on the robot in `~/.config/robot_utils/themes/<name>.css` (same name overrides a
+  packaged theme). The first comment can carry `title:` and `description:` lines.
+- **Theme rules must be scoped to `:root[data-theme="<name>"]`.** Then they win over each page's own
+  variables, and never leak into another theme (a test checks this). Themes restyle through
+  variables and selectors only; markup, ids and handlers are the same under every theme, so the page
+  contracts hold for all of them.
+- **How it works:** every page loads the theme loader in its `<head>` by a relative path (`../../themes/theme.js` from node pages). It applies the last theme at
+  once, then reconciles with the robot default from `GET /themes/`. Themes are served at
+  `GET /themes/<name>.css`.
+
+```bash
+.venv/bin/python -m robot_utils.admin.theme list
+.venv/bin/python -m robot_utils.admin.theme default contrast    # robot-wide default
+.venv/bin/python -m robot_utils.admin.theme default --clear     # back to the built-in look
+```
+
+Packaged: `contrast`: high contrast, heavier borders, visible focus.
+
 ## Editing pages
 
 Pages are HTML and JavaScript strings, isolated from the nodes' logic:

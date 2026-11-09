@@ -21,7 +21,8 @@ table.ru-table td,table.ru-table th{font-size:12px}
 #events{max-height:150px;overflow:auto;font-size:12px}
 .camhead{display:flex;flex-wrap:wrap;gap:6px 24px;align-items:flex-start}
 /*VIZ_CSS*/
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Robot description <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><div id="estop"></div><button class="ru" id="clear">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>

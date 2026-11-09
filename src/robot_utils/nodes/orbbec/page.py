@@ -36,7 +36,8 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 .cb{display:flex;align-items:center;gap:6px;padding:4px 8px}.cb .bar{flex:1;margin:0}
 #log div{margin:2px 0}#log .e{color:var(--err)}
 @media (max-width:760px){#main{flex-direction:column}aside{width:100%;min-height:0;border-right:none}#tiles{width:100%;grid-template-columns:1fr}}
-</style></head><body>
+</style><script src="../../themes/theme.js"></script>
+</head><body>
 <header><h1>Orbbec node</h1><span id="dev">connecting...</span><span id="pill" class="pill">...</span>
 <span id="sync" class="small"></span><span id="msg" class="small"></span><a href="docs" class="small">API docs</a></header>
 <div id="banner"></div>

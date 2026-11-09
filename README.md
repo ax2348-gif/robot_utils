@@ -90,6 +90,8 @@ and extra keys): `python -m robot_utils.admin.ssh_access`, see [docs/ssh_access.
 Chocks (actuators stop and can't be enabled) and covers (the camera captures nothing and serves
 procedural frames) are placed from the landing page or over SSH and removed only over SSH:
 `python -m robot_utils.admin.locks`, see [docs/locks.md](docs/locks.md).
+Page themes: a robot-wide default (`python -m robot_utils.admin.theme default <name>`) that each viewer
+can override from the landing page; see [docs/frontend.md](docs/frontend.md#themes).
 
 ## The environment
 

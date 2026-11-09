@@ -28,6 +28,8 @@
              border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   #restart:disabled { opacity: .5; cursor: default; }
   #restart-msg.err { color: var(--bad); font-weight: 600; }
+  #theme-pick { font: 12px system-ui, sans-serif; border: 1px solid var(--line); border-radius: 6px;
+                background: var(--panel); color: var(--text); padding: 1px 4px; }
 
   #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid #7a0d08;
            border-radius: 12px; background: #d7261e; color: #fff; cursor: pointer;
@@ -122,13 +124,16 @@
     #estop { width: 100%; }
   }
 </style>
+<script src="themes/theme.js"></script>
 </head>
 <body>
 <main>
   <header>
     <h1>Robot nodes <span class="sub"><span id="where"></span>
       · <button id="restart" type="button" title="Restart this landing page (robot-frontend.service): reloads nodes.yaml and the code. Running nodes keep running.">Restart landing page</button>
-      <span id="restart-msg"></span></span></h1>
+      <span id="restart-msg"></span>
+      · <label id="theme-label" title="Page theme for this browser. 'Robot default' follows the theme an admin set for the robot.">theme
+        <select id="theme-pick"><option value="">robot default</option></select></label></span></h1>
     <button id="estop" type="button" aria-label="E-STOP ALL" title="POST estop to every actuated node, in parallel">
       E-STOP ALL<small>every actuated node</small>
     </button>
@@ -441,6 +446,7 @@ async function start() {
   setInterval(tick, POLL_MS);
   pollWho(); setInterval(pollWho, 3000);
   pollLocks(); setInterval(pollLocks, 3000);
+  loadThemes();
   document.getElementById("chock-all").onclick = () => placeLock("chock", "all");
   document.getElementById("cover-cam").onclick = () => placeLock("cover", "camera");
 }
@@ -537,6 +543,21 @@ async function placeLock(kind, target) {
                            : "Refused: " + ((r.body && r.body.error) || r.status);
   } catch (e) { msg.textContent = "Failed: " + e; }
   pollLocks();
+}
+
+// -- theme picker (frontend/themes.py; the loader in <head> applies it on every page) -----------------
+async function loadThemes() {
+  const sel = document.getElementById("theme-pick");
+  let r;
+  try { r = await fetchJson("themes/", {}, 3000); } catch (e) { return; }
+  if (!r.ok || !r.body || !window.RUTheme) { document.getElementById("theme-label").hidden = true; return; }
+  const d = r.body, def = (d.themes || []).find(t => t.name === d.default);
+  sel.textContent = "";
+  sel.append(h("option", {value: "", textContent: `robot default (${def ? def.title : "built-in"})`}),
+             h("option", {value: "builtin", textContent: "built-in look"}),
+             ...(d.themes || []).map(t => h("option", {value: t.name, textContent: t.title, title: t.description})));
+  sel.value = RUTheme.choice() || "";
+  sel.onchange = () => RUTheme.set(sel.value || null);
 }
 
 async function loadTools() {

@@ -196,6 +196,7 @@ def create_app(
     restart=restart_service,
     observer=None,
     locks=None,
+    themes=None,
 ) -> FastAPI:
     """``transport``: one transport for every node (tests); otherwise unix sockets for local
     nodes and TCP for nodes with a ``host``."""
@@ -360,6 +361,26 @@ def create_app(
             return JSONResponse({"error": "observability is not running"}, status_code=503, headers=no_cache)
         limit = max(1, min(limit, 1000))
         return JSONResponse(await asyncio.to_thread(observer.requests, limit, ip, node), headers=no_cache)
+
+    # -- themes (frontend/themes.py): CSS-only, robot-wide default + per-viewer choice ---------------
+    from fastapi.responses import Response
+    from .themes import LOADER_JS, Themes
+    theme_store = themes if themes is not None else Themes()
+
+    @app.get("/themes/")
+    async def themes_index() -> JSONResponse:
+        return JSONResponse(await asyncio.to_thread(theme_store.index), headers=no_cache)
+
+    @app.get("/themes/theme.js")
+    async def theme_loader() -> Response:
+        return Response(LOADER_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/themes/{name}.css")
+    async def theme_css(name: str) -> Response:
+        css = await asyncio.to_thread(theme_store.css, name)
+        if css is None:
+            return Response("/* no such theme */", status_code=404, media_type="text/css")
+        return Response(css, media_type="text/css", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:

@@ -1,0 +1,30 @@
+/*
+title: High contrast
+description: Maximum legibility: pure black on white (white on black in dark mode), heavier borders, unmistakable focus.
+*/
+/* Overrides only variables the pages already use: the node pages' ui.css (--fg, --card, --acc, --err)
+   and the landing page's (--text, --panel, --link, --bad). Scoped to the theme so it wins over each
+   page's own :root variables regardless of stylesheet order. */
+:root[data-theme="contrast"] {
+  --bg: #ffffff; --fg: #000000; --text: #000000; --muted: #333333;
+  --card: #ffffff; --panel: #ffffff; --line: #000000;
+  --acc: #0033cc; --link: #0033cc;
+  --ok: #006b2b; --ok-bg: #d9f7e3; --err: #b00000; --bad: #b00000; --bad-bg: #ffe0e0;
+  --warn: #7a4500; --warn-bg: #fff0c2; --off: #444444; --off-bg: #eeeeee;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="contrast"] {
+    --bg: #000000; --fg: #ffffff; --text: #ffffff; --muted: #d0d0d0;
+    --card: #000000; --panel: #000000; --line: #ffffff;
+    --acc: #7fb3ff; --link: #7fb3ff;
+    --ok: #5dff9a; --ok-bg: #003314; --err: #ff6b6b; --bad: #ff6b6b; --bad-bg: #3a0000;
+    --warn: #ffd166; --warn-bg: #332400; --off: #bbbbbb; --off-bg: #1a1a1a;
+  }
+}
+:root[data-theme="contrast"] body { font-size: 15.5px; }
+:root[data-theme="contrast"] .ru-card, :root[data-theme="contrast"] #who,
+:root[data-theme="contrast"] .tile, :root[data-theme="contrast"] .box { border-width: 2px; }
+:root[data-theme="contrast"] :focus-visible { outline: 3px solid var(--acc, #0033cc); outline-offset: 2px; }
+:root[data-theme="contrast"] button.ru-estop, :root[data-theme="contrast"] #estop {
+  outline: 3px solid var(--fg, #000); outline-offset: 2px;
+}

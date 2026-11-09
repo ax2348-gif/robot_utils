@@ -20,7 +20,8 @@ PAGE = r"""<!doctype html>
 canvas.ru-plot{width:100%;height:110px}
 #events{max-height:150px;overflow:auto;font-size:12px}
 .sw{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:4px}
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">State estimator <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="mode" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>

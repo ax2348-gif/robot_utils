@@ -22,7 +22,8 @@ PAGE = r"""<!doctype html>
 #events{max-height:160px;overflow:auto;font-size:12px}
 #bar{height:10px;border-radius:3px;margin-top:4px}
 .mode-full{color:var(--ok)} .mode-rotation,.mode-base{color:var(--warn)} .mode-none,.mode-no_depth{color:var(--err)}
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">3D perception <span id="state" class="ru-pill">…</span> <span id="mode" class="ru-pill"></span></h2>
   <div class="ru-row"><span id="lat" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>

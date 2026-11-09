@@ -10,7 +10,8 @@ PAGE = r"""<!doctype html>
 .pad button{height:44px} .pad .on{border-color:var(--acc);outline:2px solid var(--acc)}
 input[type=number]{width:70px}
 #events{max-height:160px;overflow:auto;font-size:12px}
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Swerve base <span id="state" class="ru-pill">…</span></h2>
   <div id="estop"></div>

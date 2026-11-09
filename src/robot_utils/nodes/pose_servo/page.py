@@ -16,7 +16,8 @@ PAGE = r"""<!doctype html>
 canvas.ru-plot{width:100%;height:100px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 .ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
-</style></head><body><div class="ru-wrap">
+</style><script src="../../themes/theme.js"></script>
+</head><body><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Pose servo <span id="status" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="estop"></span><a class="ru-muted" href="docs">API docs</a></div>
