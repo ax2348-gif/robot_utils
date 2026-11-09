@@ -323,3 +323,22 @@ def test_robot_description(stack):
     assert get(st, "/" + d["diagram"]).content[:4] == b"\x89PNG"
     assert any(t["kind"] == "robot" for t in get(st, "/log").json()["turns"])
     assert post(st, "/chat", {"text": "robot"}).json()["camera"]["calibrated"]
+
+
+def test_loose_boxes_are_flagged_as_mixed():
+    """A box around the board that also takes in the wall-less background / floor: loud MIXED warnings;
+    a polygon inside the board: clean."""
+    sc = demo_scene()
+    dm, _ = sc.render((0, 0, 0))
+    cl = G.Cloud(dm, CAM, T_BC, (0, 0, 0))
+    u, v = board_px(sc.rects[0])
+    loose = G.selection_mask({"box": [u - 260, v - 60, u + 260, v + 160]}, [], CAM)    # spills onto the floor
+    tight = G.selection_mask({"polygon": [[u - 150, v - 45], [u + 150, v - 45], [u + 150, v + 45], [u - 150, v + 45]]}, [], CAM)
+    r_loose, r_tight = G.region_stats(cl, loose), G.region_stats(cl, tight)
+    assert any("MIXED" in w for w in r_loose.get("warnings", [])) and not r_tight.get("warnings")
+    # the median centroid is robust, but the nearest point and the extent are not
+    # (here the spill is the floor seen under and beyond the board: the far percentile jumps)
+    assert r_tight["base"]["x"][2] < 3.05 and r_loose["base"]["x"][2] > 3.3
+    assert r_loose["range_spread_m"] > 0.4 > r_tight["range_spread_m"]
+    p_loose, p_tight = G.fit_plane(cl, loose), G.fit_plane(cl, tight)
+    assert "MIXED" in p_loose.get("warning", "") and "warning" not in p_tight

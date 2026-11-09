@@ -42,6 +42,16 @@ human can watch, and take part in, the exchange on the node's page.
    until the human releases it. The human picks the safety profile, and the agent can only
    lower caps.
 
+## Lessons folded into the guide
+
+- **Selection purity (remote trial, 2026-11-08).** An agent watched by a collaborator reached for
+  loose bounding boxes and got badly skewed 3D measurements. Floor and background pixels inside
+  the box dominate centroids, extents and plane fits, especially for surfaces seen at an angle.
+  The guide now tells agents to accept a box only when it contains just the desired pixels, and
+  to prefer polygons, small inner boxes or disks, sequences of point / disk queries and
+  exclusions. It also lists the sanity checks (`depth_fraction`, `inlier_fraction` / `rms_m`, the
+  5–95 % spread, the overlay and BEV outline).
+
 ## Robot description (`GET /robot`)
 
 Read-only. It combines the description node (footprint, wheel modules, camera calibration source)

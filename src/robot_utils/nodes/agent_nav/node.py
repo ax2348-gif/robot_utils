@@ -541,7 +541,7 @@ class AgentNav:
         with self.lock:
             self.queries[qid] = {"snapshot": s.sid, "kind": kind, "select": select, "exclude": exclude, "result": res}
         self.turn(actor, f"query_{kind}", {"snapshot": s.sid, "select": select, "exclude": exclude}, out, comment,
-                  [ov, bev], level="warn" if res.get("warning") else "info")
+                  [ov, bev], level="warn" if (res.get("warning") or res.get("warnings")) else "info")
         return out
 
     # -- planning (read-only) ---------------------------------------------------------------------

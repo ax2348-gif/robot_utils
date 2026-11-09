@@ -232,6 +232,12 @@ def region_stats(cloud: Cloud, mask: np.ndarray) -> dict:
     pc = cloud.p_c[valid]
     rng = np.linalg.norm(pc, axis=1)
     out["range_m"] = _pct(rng)
+    spread = float(np.percentile(rng, 95) - np.percentile(rng, 5))
+    out["range_spread_m"] = round(spread, 3)
+    if spread > 0.4:
+        out.setdefault("warnings", []).append(
+            f"MIXED: the selection's distances span {spread:.2f} m (5-95%): it likely includes floor or background "
+            "pixels. Use a polygon or a smaller selection inside the object, or exclude the rest")
     out["touches_image_edge"] = bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any())
     pb = cloud.p_b
     if pb is not None:
@@ -311,9 +317,16 @@ def fit_plane(cloud: Cloud, mask: np.ndarray, iters: int = 200, thresh: float = 
                          for a1, a2 in (((lo1 - hi1) / 2, (lo2 - hi2) / 2), ((hi1 - lo1) / 2, (lo2 - hi2) / 2),
                                         ((hi1 - lo1) / 2, (hi2 - lo2) / 2), ((lo1 - hi1) / 2, (hi2 - lo2) / 2))],
     }
+    warns = []
     if touches:
-        out["warning"] = ("the fitted surface reaches the image edge: it may extend beyond the view, so its "
-                          "centre and width may be biased")
+        warns.append("the fitted surface reaches the image edge: it may extend beyond the view, so its centre "
+                     "and width may be biased")
+    if inl.mean() < 0.8 or out["rms_m"] > 0.015:
+        warns.append(f"MIXED: only {100 * inl.mean():.0f}% of the selected points lie on the plane (rms "
+                     f"{out['rms_m'] * 100:.1f} cm): the selection likely includes other surfaces. Trace a polygon "
+                     "inside the surface, or exclude the rest")
+    if warns:
+        out["warning"] = "; ".join(warns)
     if cloud.pose is not None:
         w = cloud.to_world(centre[None])[0]
         th = cloud.pose[2]

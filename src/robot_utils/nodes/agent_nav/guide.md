@@ -16,6 +16,7 @@ this node's base URL, e.g. `http://botcore/nodes/agent_nav` (all paths in replie
 3. **Look before you move, and look at the images.** Every perception and planning reply has an
    overlay image and a bird's-eye view (BEV). Fetch and inspect them. They show what the tool
    actually selected, fitted or checked. If the overlay is not what you meant, your numbers are wrong.
+   **Select only the pixels you mean** (step 2): a 3D measurement is only as good as its selection.
 4. **Path checks are loud, not binding.** `/goal` and `/plan/check` report obstacle points in the
    swept footprint, clearance and the share of the path that was never seen. Read the `warnings`.
    An `UNVERIFIED` part of the path, such as the blind zone in front of the robot, is unknown, not clear.
@@ -78,6 +79,29 @@ curl -s -X POST $N/query/plane -H 'content-type: application/json' -d '{
 
 Check the overlay: magenta is your selection, red your exclusions, green the fitted plane. In
 the BEV, the selection's footprint has a thick magenta border.
+
+**Selections must contain only the thing you are measuring.** This is not 2D object detection:
+a loose bounding box that "contains" the object is fine for a 2D detector, but in 3D every stray
+pixel is a real point somewhere else.
+- **Why it matters:** the floor below an object, the wall behind it and the edge of a neighbour
+  lie at very different distances. A few of them pull a centroid, a nearest point, an extent or a
+  plane far off, worst when the surface is seen at an angle.
+- **The rule:** accept a box measurement only if the box contains *only* desired pixels. Check
+  the overlay and the BEV footprint: a selection that spills onto the floor or the background
+  shows up as a smeared or oversized magenta outline.
+- **What to use instead**, in order of preference:
+  - **A polygon** traced just inside the object's outline. This is the tool for anything that
+    isn't a screen-aligned rectangle: a tilted board, a chair, a doorway.
+  - **A small box or disk well inside** the object, when you only need its distance or its plane.
+  - **A sequence of point or disk queries** on distinct parts (corners, edges, legs). You combine
+    the points yourself: for example, two points on a doorframe give its width and position.
+  - **`exclude`** shapes to cut out what doesn't belong (a curtain, a cable, a person).
+- **Sanity checks:**
+  - `depth_fraction` well below 1 means much of the selection has no depth (glass, black surfaces,
+    the image edge).
+  - For a plane, a low `inlier_fraction` or a high `rms_m` means the selection mixes surfaces.
+  - A region's 5–95 % spread much larger than the object means outliers. Shrink the selection
+    and query again.
 
 **3. Plan.** Read-only.
 
