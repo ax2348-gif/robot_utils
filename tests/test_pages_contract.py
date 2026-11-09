@@ -33,6 +33,7 @@ PAGES = {
     "camera": lambda: node_page("orbbec"),
     "estimator": lambda: node_page("estimator"),
     "3d_perception": lambda: node_page("perception3d"),
+    "power": lambda: node_page("power"),
 }
 
 
