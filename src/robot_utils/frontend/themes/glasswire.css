@@ -209,9 +209,10 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
    of 120px) with background-attachment: fixed, so the dots stay registered to the viewport like
    the sheet and slide, magnified, inside a lens as it scrolls past: fake refraction, no
    backdrop-filter. Over the dots: a veil (keeps labels >= 4.5:1 against the darkest dot, the
-   120px cross) and a specular radial near the top. Coloured lenses use a stronger veil. */
+   120px cross; inside a lens the tile is dots only, so the veil can be light) and a specular radial near the top. Coloured lenses use a stronger veil. */
 :root[data-theme="glasswire"] {
-  --lens-veil: rgba(255, 255, 255, 0.72);
+  --lens-veil: rgba(255, 255, 255, 0.50);
+  --lens-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23A8A8A4'%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='12' cy='36' r='1'/%3E%3Ccircle cx='12' cy='60' r='1'/%3E%3Ccircle cx='12' cy='84' r='1'/%3E%3Ccircle cx='12' cy='108' r='1'/%3E%3Ccircle cx='36' cy='12' r='1'/%3E%3Ccircle cx='36' cy='36' r='1'/%3E%3Ccircle cx='36' cy='60' r='1'/%3E%3Ccircle cx='36' cy='84' r='1'/%3E%3Ccircle cx='36' cy='108' r='1'/%3E%3Ccircle cx='60' cy='12' r='1'/%3E%3Ccircle cx='60' cy='36' r='1'/%3E%3Ccircle cx='60' cy='60' r='1'/%3E%3Ccircle cx='60' cy='84' r='1'/%3E%3Ccircle cx='60' cy='108' r='1'/%3E%3Ccircle cx='84' cy='12' r='1'/%3E%3Ccircle cx='84' cy='36' r='1'/%3E%3Ccircle cx='84' cy='60' r='1'/%3E%3Ccircle cx='84' cy='84' r='1'/%3E%3Ccircle cx='84' cy='108' r='1'/%3E%3Ccircle cx='108' cy='12' r='1'/%3E%3Ccircle cx='108' cy='36' r='1'/%3E%3Ccircle cx='108' cy='60' r='1'/%3E%3Ccircle cx='108' cy='84' r='1'/%3E%3Ccircle cx='108' cy='108' r='1'/%3E%3C/g%3E%3C/svg%3E");   /* inside a lens: dots only (no crosses), a step darker, under a lighter veil */
   --lens-veil-strong: rgba(255, 255, 255, 0.86);
   --lens-spec: rgba(255, 255, 255, 0.85);
   --lens-spec-hi: rgba(255, 255, 255, 1);
@@ -234,7 +235,8 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="glasswire"] {
-    --lens-veil: rgba(15, 16, 16, 0.70);
+    --lens-veil: rgba(15, 16, 16, 0.55);
+    --lens-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%234A4D4B'%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='12' cy='36' r='1'/%3E%3Ccircle cx='12' cy='60' r='1'/%3E%3Ccircle cx='12' cy='84' r='1'/%3E%3Ccircle cx='12' cy='108' r='1'/%3E%3Ccircle cx='36' cy='12' r='1'/%3E%3Ccircle cx='36' cy='36' r='1'/%3E%3Ccircle cx='36' cy='60' r='1'/%3E%3Ccircle cx='36' cy='84' r='1'/%3E%3Ccircle cx='36' cy='108' r='1'/%3E%3Ccircle cx='60' cy='12' r='1'/%3E%3Ccircle cx='60' cy='36' r='1'/%3E%3Ccircle cx='60' cy='60' r='1'/%3E%3Ccircle cx='60' cy='84' r='1'/%3E%3Ccircle cx='60' cy='108' r='1'/%3E%3Ccircle cx='84' cy='12' r='1'/%3E%3Ccircle cx='84' cy='36' r='1'/%3E%3Ccircle cx='84' cy='60' r='1'/%3E%3Ccircle cx='84' cy='84' r='1'/%3E%3Ccircle cx='84' cy='108' r='1'/%3E%3Ccircle cx='108' cy='12' r='1'/%3E%3Ccircle cx='108' cy='36' r='1'/%3E%3Ccircle cx='108' cy='60' r='1'/%3E%3Ccircle cx='108' cy='84' r='1'/%3E%3Ccircle cx='108' cy='108' r='1'/%3E%3C/g%3E%3C/svg%3E");
     --lens-veil-strong: rgba(15, 16, 16, 0.80);
     --lens-spec: rgba(255, 255, 255, 0.14);
     --lens-spec-hi: rgba(255, 255, 255, 0.24);
@@ -269,7 +271,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background-image:
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
     linear-gradient(var(--lens-veil), var(--lens-veil)),
-    var(--grid-tile);
+    var(--lens-tile);
   background-size: 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
   background-position: 50% 0, 0 0, -1px -1px;
   background-repeat: no-repeat, no-repeat, repeat;
@@ -312,7 +314,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background-image:
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
     linear-gradient(var(--lens-veil), var(--lens-veil)),
-    var(--grid-tile);
+    var(--lens-tile);
   background-size: 135% 120%, 100% 100%, var(--lens-mag) var(--lens-mag);
   background-position: 30% 0, 0 0, -6px -8px;  /* the lens "tilts": magnified dots shift */
   border-color: var(--lens-edge-hi);
@@ -365,7 +367,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
     linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
-    var(--grid-tile);
+    var(--lens-tile);
   background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
   background-position: 50% 0, 0 0, 0 0, -1px -1px;
   background-repeat: no-repeat, no-repeat, no-repeat, repeat;
@@ -377,7 +379,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec-hi), transparent 68%),
     linear-gradient(color-mix(in srgb, var(--signal) 14%, transparent), color-mix(in srgb, var(--signal) 14%, transparent)),
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
-    var(--grid-tile);
+    var(--lens-tile);
   background-size: 135% 120%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
   background-position: 30% 0, 0 0, 0 0, -6px -8px;
   border-color: var(--signal);
@@ -442,7 +444,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
     linear-gradient(color-mix(in srgb, var(--live) 14%, transparent), color-mix(in srgb, var(--live) 14%, transparent)),
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
-    var(--grid-tile);
+    var(--lens-tile);
   border-style: solid; border-color: var(--live); color: var(--live);
 }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
@@ -450,7 +452,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
     linear-gradient(color-mix(in srgb, var(--caution) 14%, transparent), color-mix(in srgb, var(--caution) 14%, transparent)),
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
-    var(--grid-tile);
+    var(--lens-tile);
   border-style: dashed; border-color: var(--caution); color: var(--caution);
 }
 
