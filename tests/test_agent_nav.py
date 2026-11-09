@@ -1,0 +1,281 @@
+"""agent_nav: geometry on a synthetic scene, chat parsing, and end to end with the simulated swerve,
+estimator (odometry only), pose_servo, a fake 3d_perception rendering the scene from the estimated
+pose, and agent_nav itself (real servers)."""
+import json
+import math
+import os
+import socket
+import threading
+import time
+
+import httpx
+import numpy as np
+import pytest
+import uvicorn
+
+from robot_utils.nodes.agent_nav import chat
+from robot_utils.nodes.agent_nav import geometry as G
+from robot_utils.nodes.agent_nav.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_perception_app
+
+CAM = G.Camera.from_calibration(CALIBRATION)
+T_BC = np.array(CALIBRATION["base_to_color"])
+
+
+def board_px(scene_rect, pose=(0, 0, 0), z=None):
+    T = G.pose_matrix(*pose)
+    pw = np.array([scene_rect.x, scene_rect.y, z if z is not None else (scene_rect.z0 + scene_rect.z1) / 2, 1.0])
+    pb = np.linalg.inv(T) @ pw
+    return G.project(CAM, ((pb[:3] - T_BC[:3, 3]) @ T_BC[:3, :3])[None])[0]
+
+
+# -- geometry ------------------------------------------------------------------------------------------
+
+def test_from_color_matches_the_live_grid_intrinsics():
+    c = G.Camera.from_color(CALIBRATION["color"], 640, 360)
+    g = CALIBRATION["depth_grid"]
+    assert (c.fx, c.cx, c.cy) == pytest.approx((g["fx"], g["cx"], g["cy"]), abs=1e-6)
+
+
+def test_plane_fit_recovers_the_board_and_flags_the_image_edge():
+    sc = demo_scene()
+    dm, _ = sc.render((0, 0, 0))
+    cl = G.Cloud(dm, CAM, T_BC, (0, 0, 0))
+    u, v = board_px(sc.rects[0])
+    p = G.fit_plane(cl, G.selection_mask({"box": [u - 150, v - 50, u + 150, v + 50]}, [], CAM))
+    assert p["base"]["centre"][:2] == pytest.approx([3.0, 0.3], abs=0.03)
+    assert p["base"]["normal"][0] < -0.99 and p["orientation"] == "vertical"
+    assert p["world"]["facing_heading"] == pytest.approx(math.pi, abs=0.02) or \
+        p["world"]["facing_heading"] == pytest.approx(-math.pi, abs=0.02)
+    assert not p["touches_image_edge"]
+    # a board running off the image edge is flagged
+    sc2 = Scene(rects=[Rect(2.0, 1.2, math.pi, 1.9, 0.75, 1.75)])
+    dm2, _ = sc2.render((0, 0, 0))
+    cl2 = G.Cloud(dm2, CAM, T_BC, (0, 0, 0))
+    p2 = G.fit_plane(cl2, G.selection_mask({"box": [0, 0, 400, 360]}, [], CAM))
+    assert p2["touches_image_edge"] and "warning" in p2
+
+
+def test_exclusion_and_polygon_selections():
+    m_box = G.selection_mask({"box": [100, 100, 300, 300]}, [], CAM)
+    m_ex = G.selection_mask({"box": [100, 100, 300, 300]}, [{"disk": [200, 200, 50]}], CAM)
+    m_poly = G.selection_mask({"polygon": [[100, 100], [300, 100], [100, 300]]}, [], CAM)
+    assert m_ex.sum() < m_box.sum() and abs(m_poly.sum() - m_box.sum() / 2) < 0.05 * m_box.sum()
+    with pytest.raises(ValueError):
+        G.check_shape({"box": [1, 2, 3]}, CAM)
+    with pytest.raises(ValueError):
+        G.check_shape({"box": [1, 2, 3, 4], "point": [1, 2]}, CAM)
+
+
+def test_path_check_is_loud_about_obstacles_and_the_blind_zone():
+    sc = demo_scene()
+    dm, _ = sc.render((0, 0, 0))
+    cl = G.Cloud(dm, CAM, T_BC, (0, 0, 0))
+    clear = G.path_check(cl, (0, 0, 0), (2.0, 0.3, 0))
+    assert clear["obstacle_points_in_path"] == 0 and clear["min_clearance_m"] > 0.2
+    assert clear["verified_fraction"] < 0.95 and any("UNVERIFIED" in w for w in clear["warnings"])
+    blocked = G.path_check(cl, (0, 0, 0), (1.8, -0.75, 0))
+    assert blocked["obstacle_points_in_path"] > 100 and any("OBSTACLE" in w for w in blocked["warnings"])
+    png = G.bev_image(cl, path=blocked, goal_base=(1.8, -0.75, 0))
+    assert png[:4] == b"\x89PNG"
+
+
+def test_chat_parsing():
+    assert chat.parse("look grid 1.0") == ("look", {"grid": True, "scale": 1.0})
+    m, kw = chat.parse("plane poly 10,10 100,10 50,90 exclude disk 50 40 5 on s2")
+    assert m == "query" and kw["select"]["polygon"][2] == [50.0, 90.0] and kw["exclude"] == [{"disk": [50.0, 40.0, 5.0]}]
+    assert kw["snapshot"] == "s2" and kw["kind"] == "plane"
+    m, kw = chat.parse("goal 0.5 0 90d snapshot:s3 speed=0.1")
+    assert m == "goal" and kw["theta"] == pytest.approx(math.pi / 2) and kw["frame"] == "snapshot:s3"
+    assert kw["options"] == {"speed": 0.1}
+    with pytest.raises(ValueError):
+        chat.parse("fly 3")
+
+
+# -- end to end -----------------------------------------------------------------------------------------
+
+def wait_for(pred, timeout=10.0, interval=0.05):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        v = pred()
+        if v:
+            return v
+        time.sleep(interval)
+    raise AssertionError("condition not met in time")
+
+
+def serve(app):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1))
+    t = threading.Thread(target=srv.run, daemon=True)
+    t.start()
+    wait_for(lambda: srv.started, 10)
+    return f"http://127.0.0.1:{port}", srv, t
+
+
+@pytest.fixture
+def stack(tmp_path, request):
+    from robot_utils.nodes.agent_nav.node import AgentNav
+    from robot_utils.nodes.agent_nav.server import create_app as nav_app
+    from robot_utils.nodes.estimator.node import EstimatorNode
+    from robot_utils.nodes.estimator.server import create_app as est_app
+    from robot_utils.nodes.pose_servo.node import PoseServoNode
+    from robot_utils.nodes.pose_servo.server import create_app as ps_app
+    from robot_utils.nodes.swerve.node import SwerveNode
+    from robot_utils.nodes.swerve.server import create_app as sw_app
+    from robot_utils.nodes.swerve.sim import start_sim, stop_sim
+
+    scene = getattr(request, "param", None) or demo_scene()
+    sims, iface = start_sim()
+    sw = SwerveNode(iface)
+    servers = []
+    sw_url, *s = serve(sw_app(sw)); servers.append(s)
+    wait_for(lambda: sw.status == "running", 10)
+    est = EstimatorNode(sw_url, None)
+    est_url, *s = serve(est_app(est)); servers.append(s)
+
+    def pose():
+        p = est.state().get("pose")
+        return (p["x"], p["y"], p["theta"]) if p else (0.0, 0.0, 0.0)
+
+    per_url, *s = serve(fake_perception_app(scene, pose)); servers.append(s)
+    ps = PoseServoNode(sw_url, est_url)
+    ps_url, *s = serve(ps_app(ps)); servers.append(s)
+    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False)
+    url, *s = serve(nav_app(nav)); servers.append(s)
+    wait_for(lambda: nav.pose_now() is not None, 15)
+    yield {"url": url, "nav": nav, "swerve": sw_url, "est": est_url, "data": str(tmp_path / "nav")}
+    for srv, t in reversed(servers):
+        srv.should_exit = True
+        t.join(10)
+    stop_sim(sims, iface)
+
+
+def post(st, path, body=None, human=False):
+    return httpx.post(st["url"] + path, json=body if body is not None else {}, timeout=20,
+                      headers={"X-Operator": "human"} if human else {})
+
+
+def get(st, path, **kw):
+    return httpx.get(st["url"] + path, timeout=20, params=kw)
+
+
+def test_full_agent_session(stack):
+    st = stack
+    assert "You decide" in get(st, "/guide.md").text
+    assert post(st, "/look").status_code == 409                       # no session
+    r = post(st, "/session", {"agent": "Tester", "avatar": "🦉", "comment": "hello"})
+    assert r.status_code == 200 and r.json()["profile"] == "cautious"
+    assert post(st, "/enable", {"caps": {"max_speed": 0.5}}).status_code == 422          # cannot raise
+    assert post(st, "/enable", {"caps": {"max_speed": 0.12}, "comment": "slow"}).json()["caps"]["max_speed"] == 0.12
+    look = post(st, "/look", {"grid": True}).json()
+    assert "snapshot" in look, look
+    assert look["snapshot"] == "s1" and look["pose_world"] is not None and look["depth_fraction"] > 0.5
+    img = get(st, "/" + look["image"])
+    assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
+    assert get(st, "/" + look["bev"]).content[:4] == b"\x89PNG"
+    u, v = board_px(demo_scene().rects[0])
+    q = post(st, "/query/plane", {"select": {"polygon": [[u - 150, v - 50], [u + 150, v - 50], [u + 150, v + 50], [u - 150, v + 50]]},
+                                  "comment": "the board"}).json()
+    assert q["world"]["centre"][:2] == pytest.approx([3.0, 0.3], abs=0.05)
+    reg = post(st, "/query/region", {"select": {"point": [u, v]}}).json()
+    assert reg["base"]["centroid"][0] == pytest.approx(3.0, abs=0.05)
+    ap = post(st, "/plan/approach", {"query": q["query"], "standoff": 2.4}).json()
+    assert ap["goal"]["world"][:2] == pytest.approx([0.6, 0.3], abs=0.06) and "nothing moves" in ap["note"]
+    assert abs(abs(ap["goal"]["world"][2])) < 0.05                    # facing the board (heading ~0)
+    # nothing moved from planning
+    assert get(st, "/state").json()["pose_servo"]["status"] == "idle"
+    # move to the proposal (explicit), wait asynchronously
+    g = post(st, "/goal", {**ap["proposal"], "comment": "approach the board"}).json()
+    assert g["goal_id"] and isinstance(g["warnings"], list)
+    res = get(st, f"/goals/{g['goal_id']}/wait", timeout=40).json()
+    assert res["done"] and res["result"]["result"] == "reached", res
+    p = get(st, "/state").json()["pose_world"]
+    assert p[:2] == pytest.approx([0.6, 0.3], abs=0.05)
+    # memory
+    post(st, "/memory/place", {"name": "near_board"})
+    post(st, "/memory/note", {"text": "board is 3 m from the start"})
+    mem = get(st, "/memory").json()
+    assert "near_board" in mem["places"] and mem["notes"][0]["text"].startswith("board")
+    # transcript: memory and disk (thumbnails)
+    log = get(st, "/log").json()
+    kinds = [t["kind"] for t in log["turns"]]
+    for k in ("session", "enable", "look", "query_plane", "plan_approach", "goal", "event"):
+        assert k in kinds, kinds
+    assert any(t["comment"] == "approach the board" for t in log["turns"])
+    sid = log["session"]["id"]
+    lines = open(os.path.join(st["data"], sid, "log.jsonl")).read().splitlines()
+    first = min(t["n"] for t in log["turns"] if t["kind"] == "session")
+    assert len(lines) == log["last"] - first + 1                       # the session's turns, all on disk
+    thumbs = os.listdir(os.path.join(st["data"], sid, "thumbs"))
+    assert thumbs and get(st, f"/sessions/{sid}/thumbs/{thumbs[0]}").status_code == 200
+    assert get(st, "/sessions").json()[0]["id"] == sid
+    assert post(st, "/disable").status_code == 200
+
+
+def test_loud_but_not_binding_path_check(stack):
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    post(st, "/enable")
+    post(st, "/look")
+    chk = post(st, "/plan/check", {"frame": "local", "x": 1.4, "y": -0.75}).json()
+    assert chk["check"]["obstacle_points_in_path"] > 0 and any("OBSTACLE" in w for w in chk["check"]["warnings"])
+    g = post(st, "/goal", {"frame": "local", "x": 0.3, "y": -0.2, "comment": "short, checked"}).json()
+    assert g["goal_id"]                                                  # accepted, warnings or not
+    assert get(st, f"/goals/{g['goal_id']}/wait", timeout=30).json()["result"]["result"] == "reached"
+
+
+def test_human_hold_and_chat(stack):
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    assert post(st, "/enable").status_code == 200
+    assert post(st, "/disable", human=True).json()["latched"]
+    r = post(st, "/enable")
+    assert r.status_code == 423 and "human" in r.json()["detail"]
+    assert post(st, "/goal", {"x": 0.1}).status_code == 423
+    assert post(st, "/release").status_code == 403                       # agents cannot release
+    assert post(st, "/release", human=True).json()["released"]
+    assert post(st, "/enable").status_code == 200
+    assert post(st, "/chat", {"text": "look grid"}).json()["snapshot"]
+    r = post(st, "/chat", {"text": "region box 400 20 700 160"})
+    assert r.status_code == 200 and r.json()["kind"] == "region"
+    g = post(st, "/chat", {"text": "goal 0.2 0 10d"}).json()
+    assert get(st, f"/goals/{g['goal_id']}/wait", timeout=30).json()["result"]["result"] == "reached"
+    assert post(st, "/chat", {"text": "fly away"}).status_code == 422
+    turns = get(st, "/log").json()["turns"]
+    assert any(t["actor"] == "human" and t["kind"] == "goal" for t in turns)
+    assert any(t["actor"] == "human" and "error" in t["reply"] for t in turns)
+
+
+WALL_AHEAD = Scene(boxes=[Box(1.05, -0.6, 1.35, 0.6, 0.8)])
+
+
+@pytest.mark.parametrize("stack", [WALL_AHEAD], indirect=True)
+def test_reflex_stops_before_an_obstacle(stack):
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    post(st, "/enable", {"caps": {"max_distance": 2.0}})
+    post(st, "/look")
+    g = post(st, "/goal", {"x": 1.5, "comment": "deliberately into the box: the reflex must stop"}).json()
+    assert any("OBSTACLE" in w for w in g["warnings"])                   # loud
+    res = get(st, f"/goals/{g['goal_id']}/wait", timeout=40).json()
+    assert res["result"]["result"] == "stopped", res
+    x = get(st, "/state").json()["pose_world"][0]
+    assert x + G.HALF < 1.05, x                                          # front edge short of the box face
+    turns = get(st, "/log").json()["turns"]
+    assert any(t["actor"] == "robot" and "REFLEX STOP" in t["reply"].get("message", "") for t in turns)
+
+
+def test_page_meta_and_refusals(stack):
+    st = stack
+    page = get(st, "/").text
+    assert 'src="common/ui.js"' in page and 'api("/' not in page and "innerHTML = r" not in page
+    meta = get(st, "/meta").json()
+    assert meta["name"] == "agent_nav" and meta["guide"] == "guide.md"
+    post(st, "/session", {"agent": "T"})
+    assert post(st, "/query/plane", {"select": {"box": [0, 0, 10, 10]}}).status_code == 409   # no snapshot yet
+    post(st, "/look")
+    assert post(st, "/query/plane", {"snapshot": "s9", "select": {"box": [0, 0, 10, 10]}}).status_code == 404
+    assert post(st, "/query/region", {"select": {"triangle": [1]}}).status_code == 422
+    assert post(st, "/session", {"agent": "T", "avatar": "x" * 40}).status_code == 422

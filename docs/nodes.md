@@ -14,6 +14,7 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 | pose_servo (pose goals → jerk-limited swerve twists, from the estimator's pose) | `robot_utils.nodes.pose_servo` | `pose_servo` → `/nodes/pose_servo/` | yes (via the swerve lease) | [pose_servo_node.md](pose_servo_node.md) |
 | description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` → `/nodes/description/` | yes | [description_node.md](description_node.md) |
 | 3d_perception (colour + registered depth, motion-compensated; pixel → 3D point) | `robot_utils.nodes.perception3d` | `3d_perception` → `/nodes/3d_perception/` | no | [perception3d_node.md](perception3d_node.md) |
+| agent_nav (agent ↔ robot boundary: read-only perception / planning, explicit goals via pose_servo, stop reflex, transcript) | `robot_utils.nodes.agent_nav` | `agent_nav` → `/nodes/agent_nav/` | yes (via pose_servo) | [agent_nav.md](agent_nav.md) |
 
 ## Routing: one origin on port 80
 

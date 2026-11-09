@@ -24,6 +24,7 @@ def test_packaged_default_config():
     assert (nodes["estimator"].node_kind, nodes["estimator"].enabled) == ("estimator", True)
     assert (nodes["pose_servo"].node_kind, nodes["pose_servo"].enabled) == ("pose_servo", True)
     assert (nodes["3d_perception"].node_kind, nodes["3d_perception"].enabled) == ("3d_perception", True)
+    assert (nodes["agent_nav"].node_kind, nodes["agent_nav"].enabled) == ("agent_nav", True)
     assert all(n.host is None for n in nodes.values())
     # sockets, no ports (description keeps TCP 8104 until it moves to the serve helper)
     assert all(n.port is None for name, n in nodes.items() if name != "description")
