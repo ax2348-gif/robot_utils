@@ -456,7 +456,7 @@ function fmtAgo(ts) { const s = Date.now() / 1000 - ts; return s < 60 ? Math.rou
   : s < 3600 ? Math.round(s / 60) + " min ago" : (s / 3600).toFixed(1) + " h ago"; }
 async function pollWho() {
   let d;
-  try { d = await fetchJson("api/observe", {}, 4000); } catch (e) { return; }
+  try { const r = await fetchJson("api/observe", {}, 4000); d = r.ok ? r.body : null; } catch (e) { return; }
   if (!d || d.error) return;
   document.getElementById("who").hidden = false;
   const u = d.uplink || {}, up = document.getElementById("uplink"), ban = document.getElementById("uplink-banner");
