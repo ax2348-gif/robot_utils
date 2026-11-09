@@ -337,6 +337,97 @@ def fit_plane(cloud: Cloud, mask: np.ndarray, iters: int = 200, thresh: float = 
     return out
 
 
+@_quiet
+def point_samples(cloud: Cloud, points_px: Sequence[Sequence[float]], radius: float = 4.0) -> list:
+    """Base-frame point (median of a small disk) for each colour pixel; None where there is no depth."""
+    out = []
+    for u, v in points_px:
+        m = _shape_mask({"disk": [float(u), float(v), radius]}, cloud.cam.width, cloud.cam.height, cloud.cam.scale)
+        m &= np.isfinite(cloud.z)
+        out.append(None if not m.any() else np.median(cloud.p_b[m], 0))
+    return out
+
+
+@_quiet
+def fit_line(cloud: Cloud, mask: Optional[np.ndarray] = None, points_px: Optional[Sequence] = None,
+             thresh: float = 0.02, rng: Optional[np.random.Generator] = None) -> dict:
+    """Robust 3D line (base frame) through a selection's points or through pixel points (an edge,
+    a row of legs, a cable on the floor). Direction is oriented from the first point / left to right."""
+    if cloud.p_b is None:
+        raise ValueError("line fit needs a calibrated camera pose in base")
+    per_point = None
+    if points_px is not None:
+        if len(points_px) < 2:
+            raise ValueError("a line needs at least 2 points")
+        pts = point_samples(cloud, points_px)
+        per_point = [None if p is None else [round(float(v), 3) for v in p] for p in pts]
+        P = np.array([p for p in pts if p is not None])
+        if len(P) < 2:
+            raise ValueError("fewer than 2 of the points have depth")
+    else:
+        valid = mask & np.isfinite(cloud.z)
+        P = cloud.p_b[valid]
+        if len(P) < 10:
+            raise ValueError(f"only {len(P)} points with depth in the selection (need >= 10)")
+    rng = rng or np.random.default_rng(0)
+    inl = np.ones(len(P), bool)
+    if len(P) >= 8:
+        S = P[rng.choice(len(P), min(len(P), 4000), replace=False)]
+        best, best_n = None, -1
+        for _ in range(150):
+            a, b = S[rng.choice(len(S), 2, replace=False)]
+            d = b - a
+            nd = np.linalg.norm(d)
+            if nd < 1e-6:
+                continue
+            d /= nd
+            r = np.linalg.norm(np.cross(S - a, d), axis=1)
+            k = int((r < thresh).sum())
+            if k > best_n:
+                best, best_n = (a, d), k
+        a, d = best
+        inl = np.linalg.norm(np.cross(P - a, d), axis=1) < thresh
+    Q = P[inl]
+    c = Q.mean(0)
+    _, sv, vt = np.linalg.svd(Q - c, full_matrices=False)
+    d = vt[0]
+    if points_px is not None:
+        first = P[0]
+        if (P[-1] - first) @ d < 0:
+            d = -d
+    elif d[1] > 0:                                       # selection: point to the robot's right (-y) ... left to right in the image
+        d = -d
+    t = (Q - c) @ d
+    lo, hi = (np.percentile(t, [1, 99]) if len(Q) > 10 else (t.min(), t.max()))
+    p0, p1 = c + d * lo, c + d * hi
+    resid = np.linalg.norm(np.cross(Q - c, d), axis=1)
+    rms = float(np.sqrt((resid ** 2).mean()))
+    dh = d[:2] / (np.linalg.norm(d[:2]) or 1.0)
+    out = {"points": int(len(P)), "inliers": int(inl.sum()), "inlier_fraction": round(float(inl.mean()), 3),
+           "rms_m": round(rms, 4), "length_m": round(float(hi - lo), 3),
+           "tilt_from_horizontal_deg": round(float(math.degrees(math.asin(min(1.0, abs(d[2]))))), 1),
+           "base": {"centre": [round(float(v), 3) for v in (p0 + p1) / 2], "direction": [round(float(v), 3) for v in d],
+                    "heading": round(float(math.atan2(dh[1], dh[0])), 4),
+                    "ends": [[round(float(v), 3) for v in p0], [round(float(v), 3) for v in p1]]}}
+    if per_point is not None:
+        out["per_point_base"] = per_point
+    if cloud.pose is not None:
+        th = cloud.pose[2]
+        out["world"] = {"centre": [round(float(v), 3) for v in cloud.to_world(((p0 + p1) / 2)[None])[0]],
+                        "heading": round(float(math.atan2(dh[1], dh[0]) + th), 4),
+                        "ends": [[round(float(v), 3) for v in cloud.to_world(e[None])[0]] for e in (p0, p1)]}
+    warns = []
+    if len(P) >= 8 and (inl.mean() < 0.8 or rms > 0.02):
+        warns.append(f"MIXED: only {100 * inl.mean():.0f}% of the points lie on one line (rms {rms * 100:.1f} cm): "
+                     "the selection likely spans several things. Use points / disks on the edge itself")
+    if points_px is not None and rms > 0.03:
+        warns.append(f"the points are not collinear (rms {rms * 100:.1f} cm): check that each lies on the edge")
+    if warns:
+        out["warning"] = "; ".join(warns)
+    out["_ends_base"] = (p0, p1)
+    return out
+
+
 # ----------------------------------------------------------------------------------------------
 # Path check (swept footprint against the snapshot's obstacle points)
 # ----------------------------------------------------------------------------------------------
@@ -350,16 +441,41 @@ def _footprints(start, goal, step=0.05):
 
 
 @_quiet
-def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MARGIN) -> dict:
-    """Loud, advisory check of a straight move start -> goal (world poses) against the obstacle
-    points of ``cloud`` and the area the snapshot actually saw. Never refuses anything."""
-    pb = cloud.p_b
-    if pb is None or cloud.pose is None:
+def _seen_mask(cloud: Cloud, S: np.ndarray) -> np.ndarray:
+    """Which world floor samples (N, 2) this snapshot saw (the floor there, or something in front of it)."""
+    T = pose_matrix(*cloud.pose)
+    sb = (S - T[:2, 3]) @ T[:2, :2]                                   # world -> base (xy)
+    Sb = np.c_[sb, np.zeros(len(sb))]
+    Rc, tc = cloud.T_bc[:3, :3], cloud.T_bc[:3, 3]
+    Sc = (Sb - tc) @ Rc                                                # base -> colour optical
+    uv = project(cloud.cam, Sc)
+    gw, gh = cloud.cam.width, cloud.cam.height
+    ug, vg = uv[:, 0] * cloud.cam.scale, uv[:, 1] * cloud.cam.scale
+    inview = (Sc[:, 2] > 0.1) & (ug >= 0) & (ug < gw) & (vg >= 0) & (vg < gh)
+    iu, iv = np.clip(np.nan_to_num(ug).astype(int), 0, gw - 1), np.clip(np.nan_to_num(vg).astype(int), 0, gh - 1)
+    zmeas = cloud.z[iv, iu]
+    return inview & np.isfinite(zmeas) & (zmeas >= Sc[:, 2] - 0.15)
+
+
+@_quiet
+def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MARGIN,
+               others: Sequence[Cloud] = ()) -> dict:
+    """Loud, advisory check of a straight move start -> goal (world poses). Never refuses anything.
+
+    Obstacle points (0.04-1.6 m above the floor) come from ``cloud`` and the ``others`` (recent
+    snapshots in the same world frame); the swept area counts as seen where ANY of them saw the
+    floor (or something in front of it). A turn in place is reported as such: the ring it sweeps
+    around the base is below the camera and never visible."""
+    clouds = [c for c in [cloud, *others] if c.p_b is not None and c.pose is not None]
+    if not clouds:
         return {"checked": False, "warnings": ["cannot check the path: no calibrated camera pose or no pose"]}
-    fin = np.isfinite(cloud.z)
-    B = pb[fin]
-    obst_b = B[(B[:, 2] > OBST_Z[0]) & (B[:, 2] < OBST_Z[1])]
-    W = cloud.to_world(obst_b)[:, :2] if len(obst_b) else np.zeros((0, 2))
+    Ws = []
+    for c in clouds:
+        B = c.p_b[np.isfinite(c.z)]
+        ob = B[(B[:, 2] > OBST_Z[0]) & (B[:, 2] < OBST_Z[1])]
+        if len(ob):
+            Ws.append(c.to_world(ob)[:, :2])
+    W = np.concatenate(Ws) if Ws else np.zeros((0, 2))
     poses = _footprints(start, goal)
     h = HALF + margin
     inside = np.zeros(len(W), bool)
@@ -371,7 +487,9 @@ def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MAR
         ox, oy = np.maximum(np.abs(lx) - HALF, 0), np.maximum(np.abs(ly) - HALF, 0)
         clear = np.minimum(clear, np.hypot(ox, oy))                    # distance to the bare footprint
         inside |= (np.abs(lx) <= h) & (np.abs(ly) <= h)
-    # coverage: floor samples over the swept area, seen by the snapshot?
+    length = float(math.hypot(goal[0] - start[0], goal[1] - start[1]))
+    turn = float(goal[2] - start[2])
+    st = np.array(start[:2])
     samples = []
     for x, y, th in poses[:: max(1, len(poses) // 40)]:
         c, s = math.cos(th), math.sin(th)
@@ -379,31 +497,19 @@ def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MAR
             for b in np.linspace(-HALF, HALF, 5):
                 samples.append((x + c * a - s * b, y + s * a + c * b))
     S = np.array(samples)
-    T = pose_matrix(*cloud.pose)
-    sb = (S - T[:2, 3]) @ T[:2, :2]                                   # world -> base (xy)
-    Sb = np.c_[sb, np.zeros(len(sb))]
-    Rc, tc = cloud.T_bc[:3, :3], cloud.T_bc[:3, 3]
-    Sc = (Sb - tc) @ Rc                                                # base -> colour optical
-    uv = project(cloud.cam, Sc)
-    gw, gh = cloud.cam.width, cloud.cam.height
-    ug, vg = uv[:, 0] * cloud.cam.scale, uv[:, 1] * cloud.cam.scale
-    inview = (Sc[:, 2] > 0.1) & (ug >= 0) & (ug < gw) & (vg >= 0) & (vg < gh)
+    own = np.hypot(S[:, 0] - st[0], S[:, 1] - st[1]) < HALF * 1.2      # where the robot stands now
     seen = np.zeros(len(S), bool)
-    iu, iv = np.clip(ug.astype(int), 0, gw - 1), np.clip(vg.astype(int), 0, gh - 1)
-    zmeas = cloud.z[iv, iu]
-    # the floor there was seen (depth reaches it) or something nearer stands in front (an obstacle, reported above)
-    seen = inview & np.isfinite(zmeas) & (zmeas >= Sc[:, 2] - 0.15)
-    # the robot's own footprint at the start is never visible, and is where it stands: don't count it
-    st = np.array(start[:2])
-    own = np.hypot(S[:, 0] - st[0], S[:, 1] - st[1]) < HALF * 1.2
+    for c in clouds:
+        seen |= _seen_mask(c, S)
+    in_place = length < 0.03
     cov = float(seen[~own].mean()) if (~own).any() else 1.0
     n_in = int(inside.sum())
-    out = {"checked": True, "length_m": round(float(math.hypot(goal[0] - start[0], goal[1] - start[1])), 3),
-           "turn_rad": round(float(goal[2] - start[2]), 3),
+    out = {"checked": True, "length_m": round(length, 3), "turn_rad": round(turn, 3),
            "footprint_m": round(2 * HALF, 3), "margin_m": margin,
            "obstacle_points_in_path": n_in,
            "min_clearance_m": None if not len(W) else round(float(clear.min()), 3),
-           "verified_fraction": round(cov, 3), "warnings": []}
+           "verified_fraction": None if in_place else round(cov, 3),
+           "snapshots_used": len(clouds), "warnings": []}
     if n_in:
         idx = np.where(inside)[0]
         near = idx[np.argsort(clear[idx])[:5]]
@@ -412,9 +518,16 @@ def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MAR
                                f"(+{margin:.2f} m margin); nearest at {out['nearest_in_path_world'][0]} (world)")
     elif len(W) and clear.min() < 0.15:
         out["warnings"].append(f"tight: nearest obstacle point {clear.min():.2f} m from the footprint")
-    if cov < 0.95:
-        out["warnings"].append(f"UNVERIFIED: {100 * (1 - cov):.0f}% of the swept area was not visible in this "
-                               "snapshot (blind zone in front of the robot, outside the view, or occluded)")
+    if in_place:
+        r = math.hypot(HALF, HALF)
+        out["note"] = (f"turn in place: the corners sweep a {r:.2f} m radius around the base centre, below the "
+                       "camera's view; only objects seen there earlier would be reported")
+    elif cov < 0.9:
+        unseen = S[~seen & ~own]
+        d = np.hypot(unseen[:, 0] - st[0], unseen[:, 1] - st[1]) if len(unseen) else np.zeros(0)
+        where = (f"within {d.max():.2f} m of the start" if len(d) and d.max() < 1.0 else "along the path")
+        out["warnings"].append(f"UNVERIFIED: {100 * (1 - cov):.0f}% of the swept area ({where}) was not seen in "
+                               f"the last {len(clouds)} snapshot(s): blind zone, outside the view, or occluded")
     out["_poses"], out["_inside_world"], out["_unseen_world"] = poses, W[inside], S[~seen & ~own]
     return out
 
@@ -464,7 +577,8 @@ def draw_grid(img: Image.Image, step: int = 100) -> None:
 
 @_quiet
 def overlay_image(jpeg: bytes, *, grid: bool = False, shapes=(), plane: Optional[dict] = None,
-                  cam: Optional[Camera] = None, T_bc: Optional[np.ndarray] = None, label: str = "") -> bytes:
+                  cam: Optional[Camera] = None, T_bc: Optional[np.ndarray] = None, label: str = "",
+                  line: Optional[dict] = None) -> bytes:
     img = Image.open(io.BytesIO(jpeg)).convert("RGB")
     if grid:
         draw_grid(img)
@@ -479,6 +593,15 @@ def overlay_image(jpeg: bytes, *, grid: bool = False, shapes=(), plane: Optional
             cu, cv = project(cam, (np.array([plane["base"]["centre"]]) - tc) @ Rc)[0]
             if np.isfinite(cu):
                 ImageDraw.Draw(img).ellipse([cu - 8, cv - 8, cu + 8, cv + 8], outline=OK_COLOR, width=4)
+    if line is not None and cam is not None and T_bc is not None:
+        Rc, tc = T_bc[:3, :3], T_bc[:3, 3]
+        e = np.array(line["base"]["ends"])
+        uv = project(cam, (e - tc) @ Rc)
+        if np.isfinite(uv).all():
+            dr = ImageDraw.Draw(img)
+            dr.line([tuple(uv[0]), tuple(uv[1])], fill=OK_COLOR, width=5)
+            for q in uv:
+                dr.ellipse([q[0] - 7, q[1] - 7, q[0] + 7, q[1] + 7], outline=OK_COLOR, width=3)
     if label:
         ImageDraw.Draw(img).text((10, img.size[1] - 26), label, fill=(255, 255, 255), font=_font(16),
                                  stroke_width=3, stroke_fill=(0, 0, 0))
@@ -498,7 +621,8 @@ def thumbnail(jpeg: bytes, width: int = 320) -> bytes:
 @_quiet
 def bev_image(cloud: Cloud, *, size: int = 640, forward: float = 5.0, back: float = 1.0, side: float = 3.0,
               selection: Optional[np.ndarray] = None, plane: Optional[dict] = None,
-              path: Optional[dict] = None, goal_base: Optional[tuple] = None, label: str = "") -> bytes:
+              path: Optional[dict] = None, goal_base: Optional[tuple] = None, label: str = "",
+              line: Optional[dict] = None) -> bytes:
     """Top-down view in the snapshot's base frame (robot at the bottom, x up, y left), grid 0.5 m.
     Floor points light, obstacles coloured by height; the selection's footprint is outlined with a
     thick magenta border; a path check draws the swept footprint (green; red where blocked; hatched
@@ -592,6 +716,15 @@ def bev_image(cloud: Cloud, *, size: int = 640, forward: float = 5.0, back: floa
         p1 = to_px(c[0] + 0.5 * n[0], c[1] + 0.5 * n[1])
         dr.line([p0, p1], fill=OK_COLOR, width=3)
         dr.ellipse([p0[0] - 5, p0[1] - 5, p0[0] + 5, p0[1] + 5], fill=OK_COLOR)
+    if line is not None:
+        e = line["base"]["ends"]
+        a, b = to_px(e[0][0], e[0][1]), to_px(e[1][0], e[1][1])
+        dr.line([a, b], fill=OK_COLOR, width=5)
+        dr.ellipse([a[0] - 5, a[1] - 5, a[0] + 5, a[1] + 5], fill=OK_COLOR)
+        for p in line.get("per_point_base") or []:
+            if p is not None:
+                q = to_px(p[0], p[1])
+                dr.ellipse([q[0] - 6, q[1] - 6, q[0] + 6, q[1] + 6], outline=SEL_COLOR, width=3)
     # the robot (footprint, heading) at the snapshot, and an optional goal
     _robot(dr, to_px, (0.0, 0.0, 0.0), (90, 160, 255))
     if goal_base is not None:

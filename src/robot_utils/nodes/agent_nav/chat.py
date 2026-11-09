@@ -2,6 +2,7 @@
 
     look [scale] [grid]            region <shape> [exclude <shape>...] [on <snapshot>]
     plane <shape> [exclude ...]    approach <query> [standoff]
+    line u,v u,v [u,v ...] | line <shape>
     check <x> <y> [theta] [frame]  goal <x> <y> [theta] [frame] [key=value ...]
     robot                          stop | enable | disable | release | estop [reason]
     note <text>                    place <name> [x y theta [frame]]
@@ -70,6 +71,12 @@ def parse(text: str) -> tuple[str, dict]:
             else:
                 raise ValueError(f"unexpected {a[i]!r}")
         return "query", {"kind": cmd, "snapshot": snap, "select": sel, "exclude": exclude}
+    if cmd == "line":
+        if a and a[0] in ("point", "disk", "box", "poly", "polygon"):
+            sel, _ = _shape(a, 0)
+            return "query", {"kind": "line", "snapshot": None, "select": sel, "exclude": []}
+        pts = [[float(x) for x in t.split(",")] for t in a if "," in t]
+        return "query", {"kind": "line", "snapshot": None, "select": None, "exclude": [], "points": pts}
     if cmd == "approach":
         return "plan_approach", {"query": a[0], "standoff": float(a[1]) if len(a) > 1 else 1.0, "face": True}
     if cmd in ("check", "goal"):

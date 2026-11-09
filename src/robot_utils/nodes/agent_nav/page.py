@@ -143,6 +143,7 @@ function avatar(actor){
 }
 const SUM = {look: ["snapshot", "pose_world", "depth_fraction", "mode", "moving"],
   query_region: ["query", "with_depth", "base", "world", "range_m", "touches_image_edge"],
+  query_line: ["query", "length_m", "tilt_from_horizontal_deg", "rms_m", "inlier_fraction", "base", "world"],
   query_plane: ["query", "orientation", "width_m", "height_m", "rms_m", "inlier_fraction", "base", "world", "touches_image_edge"],
   plan_check: ["goal", "check"], plan_approach: ["proposal", "goal"], goal: ["goal_id", "goal", "check"],
   enable: ["profile", "caps"], session: ["session", "profile"]};

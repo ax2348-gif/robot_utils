@@ -52,6 +52,20 @@ human can watch, and take part in, the exchange on the node's page.
   exclusions. It also lists the sanity checks (`depth_fraction`, `inlier_fraction` / `rms_m`, the
   5–95 % spread, the overlay and BEV outline).
 
+- **From the collaborator's logs (four sessions: parking at a whiteboard, then beside a table
+  with the cable on the right):**
+  - **Plane fits used for edges.** The guide now says planes give normals and lines give
+    headings, and `/query/line` was added.
+  - **Pixel coordinates reused after moving.** The guide now says pixels belong to one snapshot.
+  - **The first park was not parallel.** The guide now has an alignment pattern with a
+    measure-move-verify loop.
+  - **Warning fatigue.** `STALE` now means "moved since the snapshot" (more than 0.10 m or
+    0.35 rad) or older than 5 min, instead of older than 30 s. `UNVERIFIED` combines the last 6
+    snapshots in the same world frame, and a turn in place gets a plain `note` instead of a
+    percentage.
+  - **Enable failed when the page held pose_servo.** Enable now adopts agent_nav's own idle hold,
+    re-applying the caller's caps.
+
 ## Robot description (`GET /robot`)
 
 Read-only. It combines the description node (footprint, wheel modules, camera calibration source)

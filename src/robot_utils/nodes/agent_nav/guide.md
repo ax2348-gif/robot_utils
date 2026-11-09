@@ -76,9 +76,24 @@ curl -s -X POST $N/query/plane -H 'content-type: application/json' -d '{
 - `/query/plane`: robust plane fit: centre, normal (toward the camera), facing heading, width, height,
   rms, inliers. `touches_image_edge: true` means the surface may continue out of view, so its
   centre and width may be biased. Look again from elsewhere, or account for it.
+- `/query/line`: robust 3D line through **points on an edge** (`"points": [[u, v], ...]`, 2 or
+  more, each read as a small disk) or a thin selection. It returns the direction, `heading`
+  (base and world), length, ends and tilt. Use it for anything you want to drive *along* or
+  park *parallel to*: a table edge, a wall's base, a row of legs, a cable.
+
+**Planes give normals; lines give headings.**
+- A plane fit of a strip along an edge returns whichever surface dominates the strip (often the
+  tabletop, whose normal is vertical and says nothing about the edge's direction), or a mixed fit.
+- For a direction, put 3–5 points on the edge itself and use `/query/line`.
+- For a face's orientation, select an area of that face (the table's side panel, the wall),
+  not its edge.
 
 Check the overlay: magenta is your selection, red your exclusions, green the fitted plane. In
 the BEV, the selection's footprint has a thick magenta border.
+
+**Pixel coordinates belong to one snapshot.** Once the robot moves (even a small turn), the same
+(u, v) is a different place. Pick pixels anew on each new image. To carry a 3D location across
+snapshots, use its coordinates in a `snapshot:<id>` frame or the world frame, or save a place.
 
 **Selections must contain only the thing you are measuring.** This is not 2D object detection:
 a loose bounding box that "contains" the object is fine for a 2D detector, but in 3D every stray
@@ -114,6 +129,15 @@ curl -s -X POST $N/plan/check -H 'content-type: application/json' -d '{"frame": 
 In the check BEV: green footprint = clear, red = obstacle points inside (red dots), grey = never
 seen. Proposals are suggestions. Verify them and adjust them yourself.
 
+**Reading the warnings.** They are meant to be rare, so act on them:
+- `OBSTACLE`: points above the floor inside the swept footprint.
+- `tight`: under 15 cm of clearance.
+- `UNVERIFIED`: part of the swept area was not seen in any of the recent snapshots. Look from a
+  position that sees it, or move in a shorter leg.
+- `STALE`: the robot moved since that snapshot, or it is minutes old. Look again.
+- A turn in place carries a `note` instead: its corners sweep a 0.31 m radius around the base
+  that the camera can't see. Make sure nothing low stands beside the robot.
+
 **4. Move.** Explicitly. Then wait in the background.
 
 ```bash
@@ -145,6 +169,22 @@ Goal options (each within the caps):
 - `mode`: `synchronized` (default) or `independent`;
 - `on_reach`: `terminate` or `hold`.
 
+**Patterns that work.**
+- **Scan:** turn in place in steps of about 90° (`theta` 1.57, `local`), looking after each, to
+  find something not in view. Prefer the direction that keeps any cable unwound if the human
+  says so.
+- **Approach:** take legs of at most about 1.3 m toward the target, looking and measuring again
+  after each. Plan the final leg from the newest snapshot.
+- **Park parallel to an edge at a gap:**
+  1. Face the edge and look.
+  2. Get the edge's line and heading from `/query/line` on 3–5 points along it.
+  3. Compute the goal pose: the line's heading, offset by your half-width (0.216 m) plus the gap
+     along the line's normal.
+  4. Check it, move, look again, and measure the same edge with `/query/line` on the new image.
+  5. Correct with a small `local` goal (a sideways crab and a small turn) if the gap or angle is off.
+- **Find a thin thing on the floor (a cable):** depth doesn't see it, but a point or small disk on
+  its pixels returns the floor under it, which is its position. Trace it with a sequence of disks.
+
 **5. Remember.** `POST /memory/note {"text"}` and `POST /memory/place {"name", ...}` (default: here),
 then `GET /memory`. Places are lost when the estimator resets.
 
@@ -175,6 +215,7 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `POST /enable {caps?, comment}` / `POST /disable` | motion on (pose_servo + swerve lease) / off at once |
 | `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture |
 | `POST /query/region`, `POST /query/plane` `{snapshot?, select, exclude?}` | read-only geometry with overlays |
+| `POST /query/line {snapshot?, points \| select, exclude?}` | 3D line: direction, heading, length (edges, alignment) |
 | `POST /plan/check {frame, x, y, theta, snapshot?}` | path check (loud, advisory) |
 | `POST /plan/approach {query, standoff, face}` | proposed goal in front of a surface |
 | `POST /goal {frame, x, y, theta, options…, comment}` | **move**; returns at once |

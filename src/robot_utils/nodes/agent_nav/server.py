@@ -98,6 +98,16 @@ class GoalIn(CheckIn):
         {"frame": "snapshot:s3", "x": 1.4, "y": 0.2, "theta": -0.5}]})
 
 
+class LineIn(Commented):
+    snapshot: Optional[str] = Field(None, description="Snapshot id (default: the latest).")
+    select: Optional[Shape] = Field(None, description="A selection along the line (a thin polygon on an edge), or ...")
+    points: Optional[list[list[float]]] = Field(None, description="... >= 2 colour pixels [[u, v], ...] on the line "
+                                                "(each read as the median depth of a 4 px disk). Preferred for edges.")
+    exclude: list[Shape] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"points": [[850, 320], [950, 385], [1080, 465], [1200, 535]], "comment": "table edge beside the robot"}]})
+
+
 class ApproachIn(Commented):
     query: str = Field(..., description="A plane (or region) query id.")
     standoff: float = Field(1.0, gt=0, le=5, description="m from the surface (plane) / point (region).")
@@ -296,6 +306,12 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     @app.post("/query/plane", tags=["perception"], summary="Fit a plane to a selection (centre, extent, normal)")
     async def q_plane(body: QueryIn, x_operator: Optional[str] = Operator):
         return await run(node.query, actor(x_operator), "plane", body.snapshot, body.select, body.exclude, body.comment)
+
+    @app.post("/query/line", tags=["perception"], summary="Fit a 3D line (edge, row of legs): direction, heading, length")
+    async def q_line(body: LineIn, x_operator: Optional[str] = Operator):
+        """Use `points` on the edge itself (preferred) or a thin `select`ion. Gives the heading to align with."""
+        return await run(node.query, actor(x_operator), "line", body.snapshot, body.select, body.exclude, body.comment,
+                         points=body.points)
 
     # -- planning -----------------------------------------------------------------------------------------
 

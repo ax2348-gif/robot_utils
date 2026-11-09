@@ -342,3 +342,62 @@ def test_loose_boxes_are_flagged_as_mixed():
     assert r_loose["range_spread_m"] > 0.4 > r_tight["range_spread_m"]
     p_loose, p_tight = G.fit_plane(cl, loose), G.fit_plane(cl, tight)
     assert "MIXED" in p_loose.get("warning", "") and "warning" not in p_tight
+
+
+def _edge_px(pts_world, pose=(0, 0, 0)):
+    T = np.linalg.inv(G.pose_matrix(*pose))
+    out = []
+    for p in pts_world:
+        pb = (T @ np.array([*p, 1.0]))[:3]
+        out.append([float(x) for x in G.project(CAM, ((pb - T_BC[:3, 3]) @ T_BC[:3, :3])[None])[0]])
+    return out
+
+
+def test_line_fit_from_points_and_from_a_thin_selection():
+    sc = demo_scene()
+    dm, _ = sc.render((0, 0, 0))
+    cl = G.Cloud(dm, CAM, T_BC, (0, 0, 0))
+    # four points just above the board's bottom edge (x = 3.0 face, z = 0.78), left to right
+    px = _edge_px([(3.0, 0.3 + y, 0.78) for y in (0.8, 0.3, -0.2, -0.7)])
+    ln = G.fit_line(cl, points_px=px)
+    assert ln["base"]["heading"] == pytest.approx(-math.pi / 2, abs=0.03)        # along -y (left to right)
+    assert ln["length_m"] == pytest.approx(1.5, abs=0.05) and ln["tilt_from_horizontal_deg"] < 2
+    assert "warning" not in ln and len(ln["per_point_base"]) == 4
+    # a thin polygon along the same edge band
+    a, b = px[0], px[-1]
+    poly = [[a[0], a[1] - 4], [b[0], b[1] - 4], [b[0], b[1] + 4], [a[0], a[1] + 4]]
+    ln2 = G.fit_line(cl, G.selection_mask({"polygon": poly}, [], CAM))
+    assert abs(math.sin(ln2["base"]["heading"] - ln["base"]["heading"])) < 0.05
+
+
+def test_turn_in_place_and_coverage_from_earlier_snapshots():
+    sc = demo_scene()
+    near = G.Cloud(sc.render((0, 0, 0))[0], CAM, T_BC, (0, 0, 0))
+    back = G.Cloud(sc.render((-1.0, 0, 0))[0], CAM, T_BC, (-1.0, 0, 0))       # seen from 1 m further back
+    turn = G.path_check(near, (0, 0, 0), (0, 0, 1.5))
+    assert turn["verified_fraction"] is None and "turn in place" in turn["note"]
+    assert not any("UNVERIFIED" in w for w in turn["warnings"])
+    alone = G.path_check(near, (0, 0, 0), (1.0, 0.3, 0))
+    both = G.path_check(near, (0, 0, 0), (1.0, 0.3, 0), others=[back])
+    assert alone["verified_fraction"] < 0.8 and both["verified_fraction"] > 0.9 and both["snapshots_used"] == 2
+    assert any("UNVERIFIED" in w for w in alone["warnings"]) and not any("UNVERIFIED" in w for w in both["warnings"])
+
+
+def test_stale_means_moved_and_enable_adopts_the_pages_hold(stack):
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    assert post(st, "/enable", human=True).status_code == 200          # a human enables from the page
+    r = post(st, "/enable", {"caps": {"max_speed": 0.1}}).json()           # the agent adopts it, with its caps
+    assert "adopted" in r and r["caps"]["max_speed"] == 0.1
+    post(st, "/look")
+    time.sleep(1.0)
+    g = post(st, "/goal", {"x": 0.3}).json()                               # no motion since the look: not stale
+    assert not any("STALE" in w for w in g["warnings"])
+    assert get(st, f"/goals/{g['goal_id']}/wait", timeout=30).json()["result"]["result"] == "reached"
+    g2 = post(st, "/goal", {"x": 0.1}).json()                              # moved 0.3 m since s1
+    assert any("STALE" in w and "moved" in w for w in g2["warnings"])
+    get(st, f"/goals/{g2['goal_id']}/wait", timeout=30)
+    ln = post(st, "/query/line", {"points": [[400, 120], [500, 125], [600, 130]]})
+    assert ln.status_code == 200 and "heading" in ln.json()["base"]
+    assert post(st, "/query/line", {"points": [[400, 120]]}).status_code == 422
+    assert post(st, "/chat", {"text": "line 400,120 500,125 600,130"}).json()["kind"] == "line"

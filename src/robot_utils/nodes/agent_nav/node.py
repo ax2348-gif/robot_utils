@@ -48,6 +48,10 @@ REFLEX_POINTS = 25           # obstacle points ahead needed to trigger the refle
 REFLEX_LATENCY = 0.35        # s: depth age + reaction, added to the braking distance
 REFLEX_MARGIN = 0.12         # m
 MAX_AVATAR = 64 * 1024       # bytes (data URI)
+CHECK_SNAPSHOTS = 6          # path checks also use this many recent snapshots (coverage, obstacles)
+STALE_MOVE_M = 0.10          # a snapshot is stale once the robot moved this far / turned this much since
+STALE_TURN_RAD = 0.35
+STALE_AGE_S = 300.0
 
 # Safety profiles (server side). An agent may lower values, never raise them; the human picks the profile.
 PROFILES = {
@@ -324,14 +328,27 @@ class AgentNav:
                 raise ValueError(f"{k} must be within (0, {base[k]}] (profile {self.profile!r}; only the human can raise it)")
             cfg[k] = float(v)
         name = (self.session or {}).get("agent", "human") if actor == "agent" else "human"
+        ps = self._call("pose_servo", "GET", "/state")
+        adopted = None
+        if ps.get("enabled"):
+            holder = ps.get("holder") or ""
+            if not holder.startswith("agent_nav"):
+                raise RequestError(409, f"pose_servo is enabled by {holder!r} (not agent_nav): they must disable it first")
+            if ps.get("status") not in ("idle", "holding"):
+                raise RequestError(409, f"pose_servo is {ps.get('status')} under {holder!r}: stop it first")
+            self._call("pose_servo", "POST", "/disable", {})     # idle: re-enable with this caller's caps
+            adopted = holder
         out = self._call("pose_servo", "POST", "/enable", {"client": f"agent_nav: {name}",
                                                            "config": {**cfg, "require_imu": self.require_imu}}, timeout=8)
         with self.lock:
             self.enabled_by, self.caps = actor, cfg
             if actor == "human":
                 self.latch = None
-        self.turn(actor, "enable", {"caps": caps or {}}, {"enabled": True, "profile": self.profile, "caps": cfg}, comment)
-        return {"enabled": True, "profile": self.profile, "caps": cfg, "pose_servo": out.get("config")}
+        reply = {"enabled": True, "profile": self.profile, "caps": cfg}
+        if adopted:
+            reply["adopted"] = f"pose_servo was already enabled by {adopted!r} (idle): re-enabled with these caps"
+        self.turn(actor, "enable", {"caps": caps or {}}, reply, comment)
+        return {**reply, "pose_servo": out.get("config")}
 
     def disable(self, actor: str, comment: str = "") -> dict:
         try:
@@ -512,35 +529,44 @@ class AgentNav:
         s = self.snapshot(sid)
         return G.overlay_image(s.jpeg, grid=True, label=sid)
 
-    def query(self, actor: str, kind: str, snapshot: Optional[str], select: dict, exclude: list,
-              comment: str = "") -> dict:
+    def query(self, actor: str, kind: str, snapshot: Optional[str], select: Optional[dict], exclude: list,
+              comment: str = "", points: Optional[list] = None) -> dict:
         self._need_session(actor)
         s = self.snapshot(snapshot)
-        G.check_shape(select, s.cam)
+        if select is None and not (kind == "line" and points):
+            raise ValueError("give a selection (or, for a line, 'points')")
+        if select is not None:
+            G.check_shape(select, s.cam)
         for e in exclude or []:
             G.check_shape(e, s.cam)
-        mask = G.selection_mask(select, exclude, s.cam)
+        mask = G.selection_mask(select, exclude, s.cam) if select is not None else None
+        plane = line = None
         if kind == "region":
             res = G.region_stats(s.cloud, mask)
-            plane = None
         elif kind == "plane":
             res = G.fit_plane(s.cloud, mask)
             plane = res
+        elif kind == "line":
+            res = G.fit_line(s.cloud, mask, points_px=points if select is None else None)
+            line = res
         else:
             raise ValueError(kind)
         inl = res.pop("_inlier_mask", None)
+        res.pop("_ends_base", None)
         with self.lock:
             self._n_q += 1
             qid = f"q{self._n_q}"
-        shapes = [(select, G.SEL_COLOR)] + [(e, G.WARN_COLOR) for e in exclude or []]
-        ov = self.store_image(G.overlay_image(s.jpeg, shapes=shapes, plane=plane, cam=s.cam, T_bc=s.T_bc,
+        shapes = ([(select, G.SEL_COLOR)] if select is not None else
+                  [({"point": p}, G.SEL_COLOR) for p in points or []]) + [(e, G.WARN_COLOR) for e in exclude or []]
+        ov = self.store_image(G.overlay_image(s.jpeg, shapes=shapes, plane=plane, cam=s.cam, T_bc=s.T_bc, line=line,
                                               label=f"{qid} {kind} on {s.sid}"), qid, "jpg")
-        bev = self.store_image(G.bev_image(s.cloud, selection=mask, plane=plane,
+        bev = self.store_image(G.bev_image(s.cloud, selection=mask, plane=plane, line=line,
                                            label=f"{qid} {kind}: selection outlined (magenta)"), qid + "_bev", "png")
         out = {"query": qid, "kind": kind, "snapshot": s.sid, **res, "overlay": f"images/{ov}", "bev": f"images/{bev}"}
         with self.lock:
             self.queries[qid] = {"snapshot": s.sid, "kind": kind, "select": select, "exclude": exclude, "result": res}
-        self.turn(actor, f"query_{kind}", {"snapshot": s.sid, "select": select, "exclude": exclude}, out, comment,
+        self.turn(actor, f"query_{kind}", {"snapshot": s.sid, "select": select, "exclude": exclude,
+                                            **({"points": points} if points else {})}, out, comment,
                   [ov, bev], level="warn" if (res.get("warning") or res.get("warnings")) else "info")
         return out
 
@@ -583,16 +609,32 @@ class AgentNav:
                 "from_world": [round(v, 4) for v in (cx, cy, cth)], "distance": round(math.hypot(dx, dy), 4)}
 
     def _check(self, resolved: dict, snapshot: Optional[str]) -> tuple[dict, Optional[Snapshot]]:
+        """Path check against the given (or latest) snapshot plus the recent ones in the same world
+        frame (coverage and obstacles from all of them). STALE only when the robot moved since that
+        snapshot, or it is minutes old: agents take their time between a look and a goal."""
         try:
             s = self.snapshot(snapshot)
         except RequestError:
             return {"checked": False, "warnings": ["UNCHECKED: no snapshot to check the path against (POST /look)"]}, None
-        chk = G.path_check(s.cloud, tuple(resolved["from_world"]), tuple(resolved["world"]))
+        with self.lock:
+            recent = [o for o in list(self.snapshots.values())[-CHECK_SNAPSHOTS:]
+                      if o is not s and o.pose is not None and o.reset_id == s.reset_id]
+        chk = G.path_check(s.cloud, tuple(resolved["from_world"]), tuple(resolved["world"]),
+                           others=[o.cloud for o in recent])
         chk["against_snapshot"] = s.sid
+        chk["also_used"] = [o.sid for o in recent]
         age = time.monotonic() - s.t
         chk["snapshot_age_s"] = round(age, 1)
-        if age > 30:
-            chk.setdefault("warnings", []).append(f"STALE: checked against {s.sid}, taken {age:.0f} s ago")
+        now = self.pose_now()
+        if s.pose is not None and now is not None:
+            moved = math.hypot(now[0] - s.pose[0], now[1] - s.pose[1])
+            turned = abs(now[2] - s.pose[2])
+            chk["moved_since_snapshot"] = {"m": round(moved, 3), "rad": round(turned, 3)}
+            if moved > STALE_MOVE_M or turned > STALE_TURN_RAD:
+                chk.setdefault("warnings", []).append(
+                    f"STALE: the robot moved {moved:.2f} m / {turned:.2f} rad since {s.sid}; look again before trusting it")
+        if age > STALE_AGE_S:
+            chk.setdefault("warnings", []).append(f"STALE: {s.sid} is {age / 60:.0f} min old; the scene may have changed")
         return chk, s
 
     def _check_images(self, chk: dict, s: Optional[Snapshot], resolved: dict, tag: str) -> list:
