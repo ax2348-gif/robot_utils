@@ -142,6 +142,24 @@ def node_meta(name: str, title: str, version: str, kind: str, *, actuated: bool,
             **extra}
 
 
+FONT_TYPES = {".woff2": "font/woff2", ".txt": "text/plain"}
+
+
+def font_response(name: str):
+    """A bundled font file (``nodes/common/fonts/``): served next to common/ui.css by every node
+    and by the landing page, so pages get the same typeface offline."""
+    from fastapi.responses import Response
+    from importlib import resources
+    from pathlib import PurePosixPath
+    if "/" in name or name.startswith(".") or PurePosixPath(name).suffix not in FONT_TYPES:
+        return Response(status_code=404)
+    f = resources.files("robot_utils.nodes.common").joinpath("fonts", name)
+    if not f.is_file():
+        return Response(status_code=404)
+    return Response(f.read_bytes(), media_type=FONT_TYPES[PurePosixPath(name).suffix],
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
 def add_page_routes(app: FastAPI, meta: dict) -> None:
     """``GET /meta`` plus the shared browser toolkit at ``common/ui.js`` and ``common/ui.css``."""
     from fastapi.responses import Response
@@ -157,6 +175,10 @@ def add_page_routes(app: FastAPI, meta: dict) -> None:
     @app.get("/common/ui.js", include_in_schema=False)
     async def ui_js():
         return Response(UI_JS, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/common/fonts/{name}", include_in_schema=False)
+    async def ui_font(name: str):
+        return font_response(name)
 
     @app.get("/common/ui.css", include_in_schema=False)
     async def ui_css():

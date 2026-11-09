@@ -592,7 +592,11 @@ class PoseServoNode:
             ts = self._tick_times
             rate = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None
             e = self.est
+            from ..common.locks import LockStore, lock_state
+            if not hasattr(self, "_locks"):
+                self._locks = LockStore()
             return {
+                **lock_state(self._locks, chock={"swerve", "pose_servo"}),
                 "status": "disabled" if not self.enabled else self.servo.status,
                 "enabled": self.enabled,
                 "holder": self.holder if self.enabled else None,

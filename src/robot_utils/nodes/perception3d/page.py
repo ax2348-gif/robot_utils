@@ -23,7 +23,7 @@ PAGE = r"""<!doctype html>
 #bar{height:10px;border-radius:3px;margin-top:4px}
 .mode-full{color:var(--ok)} .mode-rotation,.mode-base{color:var(--warn)} .mode-none,.mode-no_depth{color:var(--err)}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">3D perception <span id="state" class="ru-pill">…</span> <span id="mode" class="ru-pill"></span></h2>
   <div class="ru-row"><span id="lat" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>
@@ -193,7 +193,11 @@ $("#scale").onchange = () => { const s = +$("#scale").value; setting({scale: s, 
 $("#stride").onchange = () => setting({stride: +$("#stride").value});
 
 let first = true;
+const band = RU.stateBand($("#band"));
 RU.sse("events", st => {
+  // the camera node flags covered frames (common/locks.py): these are procedural, not images
+  band.update({locks: st.covered ? [{kind: "cover", reason: "frames are procedural; 3D points are not real",
+                                     by: "the camera node (see its page)", age_s: 0}] : []});
   const p = $("#state"); p.textContent = st.state; p.className = "ru-pill " + (st.state === "running" ? "ru-ok" : st.state === "idle" ? "" : "ru-warn");
   err(st.error);
   if (first || document.activeElement.tagName !== "SELECT"){

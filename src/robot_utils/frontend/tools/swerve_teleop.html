@@ -18,8 +18,10 @@
   (wheel angle and speed), with the same least-squares fit as robot_twist() in
   robot_utils/nodes/swerve/kinematics.py and the module positions from constants.py.
 -->
+<link rel="stylesheet" href="../common/ui.css">
 <style>
-  :root { color-scheme: light dark; font-family: system-ui, sans-serif; --pad: min(36vw, 62vh, 320px); }
+  /* colours from the shared token sheet (common/ui.css); filled buttons put --panel text on a token fill */
+  :root { color-scheme: light dark; font-family: var(--font); --pad: min(36vw, 62vh, 320px); }
   html, body { height: 100%; margin: 0; overscroll-behavior: none; }
   body { display: grid; grid-template: "move panel turn" 1fr / 1fr minmax(200px, 280px) 1fr;
          align-items: center; justify-items: center; gap: 8px; padding: 8px; box-sizing: border-box;
@@ -31,32 +33,32 @@
   .panel { grid-area: panel; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 6px; }
   .pad { grid-area: move; position: relative; width: var(--pad); height: var(--pad); border-radius: 50%; }
   .slider { grid-area: turn; position: relative; width: var(--pad); height: 88px; border-radius: 44px; }
-  .pad, .slider { border: 2px solid #8886; background: #8881; touch-action: none; }
+  .pad, .slider { border: 2px solid var(--rule); background: var(--panel); touch-action: none; }
   .knob, .ring { position: absolute; left: calc(50% - 36px); top: calc(50% - 36px); width: 72px; height: 72px;
                  border-radius: 50%; box-sizing: border-box; pointer-events: none; }
-  .knob { background: #3b82f6; }
-  .ring { border: 5px solid #f97316; }
+  .knob { background: var(--plot-1); }
+  .ring { border: 5px solid var(--plot-2); }
   body.disabled .ring { opacity: .4; border-style: dashed; }
   .twist { border-collapse: collapse; }
   .twist th, .twist td { padding: 0 6px 0 0; text-align: right; font-weight: normal; }
   .twist th:first-child { text-align: left; }
-  .cmd { color: #3b82f6; } .ach { color: #f97316; }
+  .cmd { color: var(--plot-1); } .ach { color: var(--plot-2); }
   .legend { font-size: 12px; opacity: .8; }
   .label { position: absolute; width: 100%; text-align: center; top: -1.5em; font-size: 13px; opacity: .7; }
-  button { font: 600 18px system-ui; padding: 10px; border: 0; border-radius: 10px; color: white; cursor: pointer; }
+  button { font: 600 18px var(--font); min-height: 44px; padding: 10px; border: 0; border-radius: 10px; color: var(--panel); cursor: pointer; }
   .buttons { display: flex; gap: 8px; }
-  #enable { flex: 1; background: #16a34a; }
-  #disable { flex: 2; background: #64748b; font-size: 22px; padding: 14px 10px; }
-  #estop { background: #dc2626; font-size: 24px; padding: 16px 10px; border: 3px solid #7a0d08; }
-  #clear, #take, #release { flex: 1; background: #475569; font-size: 15px; }
+  #enable { flex: 1; background: var(--live); }
+  #disable { flex: 2; background: var(--ink); font-size: 22px; padding: 14px 10px; }
+  #estop { background: var(--stop); font-size: 24px; padding: 16px 10px; border: 3px solid color-mix(in srgb, var(--stop) 60%, #000); }
+  #clear, #take, #release { flex: 1; background: var(--muted); font-size: 15px; }
   button:disabled { opacity: .35; cursor: default; }
-  #state { text-align: center; font: 700 20px system-ui; padding: 6px; border-radius: 10px; background: #8883; }
-  #state.on { background: #16a34a; color: white; }
-  #state.off { background: #dc2626; color: white; }
-  .status { font: 13px ui-monospace, monospace; line-height: 1.4; }
+  #state { text-align: center; font: 700 20px var(--font); padding: 6px; border-radius: 10px; background: var(--rule); }
+  #state.on { background: var(--live); color: var(--panel); }
+  #state.off { background: var(--stop); color: var(--panel); }
+  .status { font: 13px var(--mono); line-height: 1.4; }
   .limits { display: flex; gap: 8px; font-size: 13px; }
   .limits input { width: 4.5em; font: inherit; }
-  .bad { color: #dc2626; font-weight: 600; }
+  .bad { color: var(--stop); font-weight: 600; }
   a.back { font-size: 13px; text-align: center; }
   #hint { display: none; font-size: 12px; opacity: .7; text-align: center; }
   @media (orientation: portrait) { #hint { display: block; } }

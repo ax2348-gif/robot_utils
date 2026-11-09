@@ -923,11 +923,22 @@ class AgentNav:
 
     # -- state ------------------------------------------------------------------------------------
 
+    def safety(self) -> dict:
+        """Locks that apply (chocks on the base, a camera cover) and the swerve's e-stop, for pages."""
+        from ..common.locks import LockStore, lock_state
+        if not hasattr(self, "_locks"):
+            self._locks = LockStore()
+        sw = (self._ps_status or {}).get("swerve") or {}
+        return {**lock_state(self._locks, chock={"swerve", "pose_servo", "agent_nav"}, cover={"camera"}),
+                "estop": {"latched": bool(sw.get("estop")), "source": "swerve" if sw.get("estop") else None, "reason": None}}
+
     def state(self) -> dict:
         now = self.pose_now()
         st = self._ps_status or {}
+        safety = self.safety()
         with self.lock:
             return {
+                **safety,
                 "session": self.session, "profile": self.profile, "profiles": PROFILES,
                 "enabled_by": self.enabled_by, "caps": self.caps, "latch": self.latch,
                 "pose_world": None if now is None else [round(v, 4) for v in now[:3]],

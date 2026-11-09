@@ -389,8 +389,13 @@ class DescriptionNode:
                     for k, v in self.cams.items()}
         e = self.estop.info
         running = job is not None and job.state == "running"
+        from ..common.locks import LockStore, lock_state
+        if not hasattr(self, "_locks"):
+            self._locks = LockStore()
         return {"state": "calibrating" if running else "ready",
                 "error": None, "job": None if job is None else job.info(),
                 "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source, "t": e and e.t},
                 "lease": {"held": False, "holder": None},
-                "cameras": cams, "active": self.store.active(), "events": self.events.list()}
+                "cameras": cams, "active": self.store.active(), "events": self.events.list(),
+                # the yaw routine drives through the swerve: its chocks apply here too
+                **lock_state(self._locks, chock={"swerve", "description"}, cover={"camera"})}

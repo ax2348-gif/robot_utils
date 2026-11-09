@@ -16,12 +16,12 @@ PAGE = r"""<!doctype html>
 .av img{width:100%;height:100%;object-fit:cover}
 .bub{max-width:86%;border:1px solid var(--line);border-radius:10px;padding:6px 9px;background:var(--card,#fff);overflow-wrap:anywhere}
 .turn.robot .bub{background:var(--bg)}
-.bub.warn{border-color:#ef4444}
+.bub.warn{border-color:var(--stop)}
 .meta{font-size:11px;color:var(--muted)}
 .call{font-family:ui-monospace,monospace;font-size:12px;font-weight:600}
 .cmt{font-style:italic;margin:2px 0}
 .kv{font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;margin:2px 0}
-.wl{color:#ef4444;font-size:12.5px;font-weight:600}
+.wl{color:var(--stop);font-size:12.5px;font-weight:600}
 .thumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
 .thumbs img{height:110px;border-radius:4px;cursor:zoom-in;border:1px solid var(--line)}
 details summary{cursor:pointer;font-size:11px;color:var(--muted)}
@@ -33,12 +33,12 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 #zoom img{max-width:96vw;max-height:94vh}
 .sbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 6px}
 .sbar .info{flex:1;min-width:180px;font-size:13px}
-.banner{background:#f59e0b22;border:1px solid #f59e0b;border-radius:6px;padding:4px 8px;margin-bottom:6px;font-size:13px;display:none}
+.banner{background:var(--caution-bg);border:1px solid var(--caution);border-radius:6px;padding:4px 8px;margin-bottom:6px;font-size:13px;display:none}
 #sessions{display:none;max-height:300px;overflow:auto;margin-bottom:6px}
 #sessions table{width:100%;border-collapse:collapse;font-size:13px}
 #sessions td,#sessions th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span></h2>
   <div class="ru-row"><span id="status" class="ru-muted"></span><a class="ru-muted" href="guide.md">guide.md</a><a class="ru-muted" href="docs">API docs</a></div>
@@ -63,7 +63,7 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
       <div class="ctl">
         <button class="ru" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
         <button class="ru" id="stop">Stop</button><button class="ru" id="release">Release hold</button>
-        <button class="ru ru-estop" id="estop">E-STOP</button>
+        <span id="estop"></span>
         <label>profile <select id="profile"></select></label>
         <label><input type="checkbox" id="reflex" checked> stop reflex</label>
       </div>
@@ -86,7 +86,9 @@ $("#enable").onclick = () => human("enable");
 $("#disable").onclick = () => human("disable");
 $("#stop").onclick = () => human("stop");
 $("#release").onclick = () => human("release");
-$("#estop").onclick = () => human("estop", {reason: "page button"});
+// the shared e-stop, sent as the human operator (agent_nav latches its hold too)
+const estop = RU.estopButton($("#estop"), {headers: H, body: {reason: "page button"}});
+const band = RU.stateBand($("#band"));
 $("#reflex").onchange = e => human("reflex?enabled=" + e.target.checked);
 $("#profile").onchange = e => human("profile/" + e.target.value);
 async function sendCmd(){ const t = $("#cmd").value.trim(); if (!t) return;
@@ -209,6 +211,10 @@ RU.api("state").then(s => { const p = $("#profile");
   for (const n of Object.keys(s.profiles)){ const o = el("option", "", n); o.value = n; p.appendChild(o); } p.value = s.profile;
   $("#reflex").checked = s.reflex.enabled; });
 RU.sse("events", s => {
+  estop.update(s);
+  band.update(s, {live: ["moving", "holding", "braking"].includes(s.servo), liveText: "servo " + s.servo});
+  $("#enable").disabled = !!s.chocked;
+  $("#enable").title = s.chocked ? "Chocked: an admin removes the chock over SSH" : "";
   $("#who").textContent = s.session ? (s.session.avatar && !s.session.avatar.startsWith("data:") ? s.session.avatar + " " : "") + s.session.agent : "no session";
   const L = s.latest || {}, f = v => v === null || v === undefined ? "–" : Number(v).toFixed(3);
   $("#status").textContent = `servo ${s.servo || "?"}${s.enabled_by ? " · enabled by " + s.enabled_by : ""}${s.latch ? " · HELD by human" : ""}`;

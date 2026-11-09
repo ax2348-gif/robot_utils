@@ -4,40 +4,37 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Robot nodes</title>
+<link rel="stylesheet" href="common/ui.css">
 <style>
+  /* colours come from the shared token sheet (nodes/common/ui_assets.py, served at common/ui.css);
+     themes restyle the tokens. These names are this page's older ones, mapped onto the tokens. */
   :root {
-    --bg: #f4f5f7; --panel: #ffffff; --text: #1b1f24; --muted: #646b75; --line: #d9dde3;
-    --ok: #18794e; --ok-bg: #e3f5ea; --bad: #c4231c; --bad-bg: #fde8e7;
-    --warn: #9a5b00; --warn-bg: #fff2d6; --off: #8a919b; --off-bg: #eceef1; --link: #0b5cad;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #121417; --panel: #1b1e23; --text: #e6e8eb; --muted: #9aa1ab; --line: #2d3239;
-      --ok: #4cc38a; --ok-bg: #12301f; --bad: #ff6b5f; --bad-bg: #3a1513;
-      --warn: #f0b44c; --warn-bg: #352812; --off: #7d848e; --off-bg: #23272d; --link: #6cb0ff;
-    }
+    --bg: var(--ground); --text: var(--ink); --line: var(--rule);
+    --ok: var(--live); --ok-bg: var(--live-bg); --bad: var(--stop); --bad-bg: var(--stop-bg);
+    --warn: var(--caution); --warn-bg: var(--caution-bg); --off: var(--muted); --off-bg: var(--ground);
+    --link: var(--signal);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
-         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+         font: 15px/1.4 var(--font); }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 16px; }
   header h1 { font-size: 20px; margin: 0; flex: 1 1 auto; }
   header .sub { color: var(--muted); font-size: 13px; font-weight: normal; display: block; }
-  #restart { font: 600 12px system-ui, sans-serif; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+  #restart { font: 600 12px var(--font); min-height: 28px; padding: 2px 10px; border-radius: 6px; cursor: pointer;
              border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   #restart:disabled { opacity: .5; cursor: default; }
   #restart-msg.err { color: var(--bad); font-weight: 600; }
-  #theme-pick { font: 12px system-ui, sans-serif; border: 1px solid var(--line); border-radius: 6px;
+  #theme-pick { font: 12px var(--font); border: 1px solid var(--line); border-radius: 6px;
                 background: var(--panel); color: var(--text); padding: 1px 4px; }
 
-  #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid #7a0d08;
-           border-radius: 12px; background: #d7261e; color: #fff; cursor: pointer;
-           font: 800 24px/1 system-ui, sans-serif; letter-spacing: .06em;
-           box-shadow: 0 3px 0 #7a0d08; }
-  #estop:hover { background: #e8342b; }
-  #estop:active { transform: translateY(2px); box-shadow: 0 1px 0 #7a0d08; }
-  #estop:focus-visible { outline: 4px solid #ffcc00; outline-offset: 2px; }
+  #estop { flex: 0 0 auto; min-width: 220px; padding: 18px 28px; border: 3px solid color-mix(in srgb, var(--stop) 60%, #000);
+           border-radius: 12px; background: var(--stop); color: #fff; cursor: pointer;
+           font: 700 24px/1 var(--font); letter-spacing: .06em;
+           box-shadow: 0 3px 0 color-mix(in srgb, var(--stop) 60%, #000); }
+  #estop:hover { background: color-mix(in srgb, var(--stop) 88%, #fff); }
+  #estop:active { transform: translateY(2px); box-shadow: 0 1px 0 color-mix(in srgb, var(--stop) 60%, #000); }
+  #estop:focus-visible { outline: 4px solid var(--caution); outline-offset: 2px; }
   #estop small { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0; margin-top: 6px; opacity: .9; }
 
   #estop-result { display: none; margin-bottom: 16px; padding: 12px 14px; border-radius: 10px;
@@ -55,6 +52,8 @@
           border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   .tile.up { border-left-color: var(--ok); }
   .tile.down { border-left-color: var(--bad); }
+  .tile.chocked { border-left-color: var(--bad); }
+  .tile.covered { border-left-color: var(--warn); }
   .tile.latched { border-left-color: var(--bad); background: var(--bad-bg); }
   .tile .head { display: flex; align-items: baseline; gap: 8px; }
   .tile .title { font-weight: 700; font-size: 17px; flex: 1 1 auto; overflow-wrap: anywhere; }
@@ -71,12 +70,10 @@
 
   .tile .ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
   .tile .ctl:empty { display: none; }
-  .tile .ctl button { font: 600 13px system-ui, sans-serif; padding: 4px 12px; border-radius: 6px;
+  .tile .ctl button { font: 600 13px var(--font); min-height: 32px; padding: 4px 12px; border-radius: 6px;
                       border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
-  .tile .ctl button.go { border-color: var(--ok); color: var(--ok); }
-  .tile .ctl button.stop { border-color: var(--bad); color: var(--bad); }
+  .tile .ctl button.link { border-color: transparent; background: none; color: var(--link); padding: 4px 6px; }
   .tile .ctl button:disabled { opacity: .45; cursor: default; }
-  .tile .ctl a { color: var(--link); cursor: pointer; text-decoration: none; }
   .tile .ctl .msg { flex-basis: 100%; color: var(--muted); }
   .tile .ctl .msg.err { color: var(--bad); font-weight: 600; }
   .tile pre.logs { margin: 0; max-height: 160px; overflow: auto; font: 11px/1.35 ui-monospace, monospace;
@@ -84,7 +81,7 @@
   .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700;
           white-space: nowrap; background: var(--off-bg); color: var(--off); }
   .pill.ok { background: var(--ok-bg); color: var(--ok); }
-  .pill.bad { background: var(--bad); color: #fff; }
+  .pill.bad { background: var(--bad); color: var(--panel); }
   .pill.warn { background: var(--warn-bg); color: var(--warn); }
 
   #planned, #note { color: var(--muted); font-size: 13px; margin-top: 16px; }
@@ -104,7 +101,7 @@
   #locks .lock b { text-transform: uppercase; letter-spacing: .03em; }
   #locks .lock small { display: block; color: var(--muted); margin-top: 2px; }
   #lock-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
-  #lock-ctl button { font: 600 12px system-ui, sans-serif; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  #lock-ctl button { font: 600 12px var(--font); min-height: 32px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
                      border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   #who { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 16px 0; }
   #who h2 { font-size: 16px; margin: 0 0 6px; }
@@ -240,7 +237,9 @@ function render(n) {
                     n.cfg.host ? n.cfg.host + ":" + n.cfg.port : "/nodes/" + n.cfg.name + "/"];
   ui.kind.textContent = kindBits.filter(Boolean).join(" · ");
   const latched = !!(n.up && s.estop && s.estop.latched);
-  ui.root.className = "tile " + (n.up === undefined ? "" : n.up ? "up" : "down") + (latched ? " latched" : "");
+  const chocked = !!(n.up && s.chocked), covered = !!(n.up && s.covered);
+  ui.root.className = "tile " + (n.up === undefined ? "" : n.up ? "up" : "down") + (latched ? " latched" : "")
+                      + (chocked ? " chocked" : covered ? " covered" : "");
   ui.pill.className = "pill " + (n.up === undefined ? "" : n.up ? "ok" : "bad");
   ui.pill.textContent = n.up === undefined ? "…" : n.up ? "UP" : "DOWN";
 
@@ -256,6 +255,10 @@ function render(n) {
       row(ui.dl, "e-stop", s.estop.latched ? h("span", { className: "pill bad", textContent: "LATCHED" })
                                            : h("span", { className: "pill ok", textContent: "clear" }));
     }
+    const lockText = (kind) => (s.locks || []).filter(l => l.kind === kind)
+      .map(l => (l.by || "?") + (l.reason ? ": " + l.reason : "")).join("; ");
+    if (chocked) row(ui.dl, "chock", h("span", { className: "pill bad", textContent: "CHOCKED", title: lockText("chock") }));
+    if (covered) row(ui.dl, "cover", h("span", { className: "pill warn", textContent: "covered", title: lockText("cover") }));
   } else if (n.up === false) {
     row(ui.dl, "status", n.err || "unreachable", "err");
   }
@@ -286,15 +289,18 @@ function renderControls(n) {
   if (!pill) pill = m.listening ? ["running (not managed)", ""] : ["stopped", ""];
   ui.ctl.append(h("span", { className: "pill " + pill[1], textContent: pill[0] }));
   if (st === "running" || st === "starting") {
-    ui.ctl.append(h("button", { className: "stop", textContent: "Stop", disabled: busy,
+    ui.ctl.append(h("button", { type: "button", textContent: "Stop service", disabled: busy,
+                                title: "Stop this node's systemd service (robot-node-" + n.cfg.name + ")",
                                 onclick: () => control(n, "stop") }));
   } else {
     const blocked = m.listening && st !== "stopping";
-    ui.ctl.append(h("button", { className: "go", textContent: "Start", disabled: busy || blocked || st === "stopping",
-                                title: blocked ? "Already running outside the landing page (e.g. in a terminal)" : "",
+    ui.ctl.append(h("button", { type: "button", textContent: "Start service", disabled: busy || blocked || st === "stopping",
+                                title: blocked ? "Already running outside the landing page (e.g. in a terminal)"
+                                               : "Start this node's systemd service (robot-node-" + n.cfg.name + ")",
                                 onclick: () => control(n, "start") }));
   }
-  ui.ctl.append(h("a", { textContent: ui.logs.hidden ? "logs" : "hide logs", onclick: () => toggleLogs(n) }));
+  ui.ctl.append(h("button", { type: "button", className: "link", textContent: ui.logs.hidden ? "logs" : "hide logs",
+                              onclick: () => toggleLogs(n) }));
   if (n.ctlMsg) ui.ctl.append(h("span", { className: "msg" + (n.ctlErr ? " err" : ""), textContent: n.ctlMsg }));
 }
 

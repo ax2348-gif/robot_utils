@@ -16,16 +16,18 @@ canvas.view{width:100%;height:300px;display:block;background:var(--bg);border-ra
 #poly svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 input[type=number]{width:72px}
 .job{font:12px ui-monospace,monospace;white-space:pre-wrap;max-height:180px;overflow:auto}
-#abort{font-size:18px;font-weight:700;color:var(--err);border:3px solid var(--err);background:transparent;padding:8px 18px}
+#abort{font-size:16px;font-weight:700;color:var(--stop);border:2px solid var(--stop);background:transparent;padding:6px 16px;min-height:40px;border-radius:var(--radius)}
+#cals td{text-align:left}
+.caution{border-left:4px solid var(--caution);background:var(--caution-bg);padding:6px 10px;border-radius:var(--radius);margin:6px 0}
 table.ru-table td,table.ru-table th{font-size:12px}
 #events{max-height:150px;overflow:auto;font-size:12px}
 .camhead{display:flex;flex-wrap:wrap;gap:6px 24px;align-items:flex-start}
 /*VIZ_CSS*/
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Robot description <span id="state" class="ru-pill">…</span></h2>
-  <div class="ru-row"><div id="estop"></div><button class="ru" id="clear">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
+  <div class="ru-row"><div id="estop"></div><button class="ru" id="clear" hidden title="Clears this node's e-stop (the swerve node's is separate)">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
 <div class="ru-card">
@@ -47,13 +49,13 @@ table.ru-table td,table.ru-table th{font-size:12px}
       <button class="ru" id="clr">Clear</button><button class="ru" id="refresh">Refresh image</button>
       frames <input type="number" id="gframes" value="10" min="1" max="60"><button class="ru" id="ground">Run ground calibration</button></div>
   </div>
-  <div class="ru-card"><b>Camera yaw</b> <span class="ru-err">drives the base</span> <span class="ru-muted">(back and forth, no rotation)</span>
+  <div class="ru-card"><b>Camera yaw</b> <div class="caution"><b>Drives the base</b>: back and forth along the given vectors, no rotation. Keep the area clear.</div>
     <div class="ru-row">vectors <input id="vecs" value="1,0; 0,1" style="width:140px"> <span class="ru-muted">base frame [vx, vy]; …</span></div>
     <div class="ru-row">amplitude <input type="number" id="amp" value="0.08" step="0.01" min="0.01" max="0.15"> m
       frequency <input type="number" id="freq" value="1.0" step="0.1" min="0.3" max="2"> Hz cycles <input type="number" id="cyc" value="5" min="2" max="20"></div>
     <div class="ru-muted" id="yawinfo"></div>
     <label class="ru-row"><input type="checkbox" id="confirm"> clear space around the robot, tether slack, e-stop at hand</label>
-    <div class="ru-row"><button class="ru" id="yaw">Run yaw calibration</button><button id="abort">ABORT</button></div>
+    <div class="ru-row"><button class="ru live" id="yaw">Run yaw calibration</button><button id="abort" hidden>Abort calibration</button></div>
     <div class="ru-muted">Aborts by itself on yaw rate &gt; 15°/s (0.1 s mean), heading drift &gt; 5°, or a lost stream (and then latches the swerve e-stop).</div>
   </div>
 </div>
@@ -138,16 +140,22 @@ async function loadCals(){
 
 // ---------- state ----------
 let lastJob = null;
+const band = RU.stateBand($("#band"));
 RU.sse("events", st => { ST = st; estop.update(st);
-  $("#state").textContent = st.state; $("#state").className = "ru-pill " + (st.state === "ready" ? "ru-ok" : "ru-warn");
+  const running = !!(st.job && st.job.state === "running");
+  band.update(st, {live: running, liveText: running ? "calibration driving the base" : ""});
+  $("#abort").hidden = !running;
+  $("#clear").hidden = !(st.estop && st.estop.latched);
+  $("#state").textContent = st.chocked ? "chocked" : st.state; $("#state").className = "ru-pill " + (st.chocked ? "ru-err" : st.state === "ready" ? "ru-ok" : "ru-warn");
   const j = st.job;
   if (j){ $("#jobstate").textContent = `#${j.id} ${j.kind}: ${j.state} (${j.elapsed} s)`;
     $("#jobstate").className = "ru-pill " + ({done: "ru-ok", running: "ru-warn"}[j.state] || "ru-err");
     $("#job").textContent = j.progress.join("\n") + (j.error ? "\n" + j.error : "") + (j.result ? "\n" + JSON.stringify(j.result, null, 1) : "");
     $("#jobraw").hidden = !j.raw; if (j.raw) $("#jobraw").href = j.raw;
     if (lastJob && lastJob !== j.state && j.state !== "running"){ loadCals(); loadDesc(); } lastJob = j.state; }
-  $("#yaw").disabled = st.state !== "ready" || (st.estop && st.estop.latched);
-  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level !== "info" ? "ru-err" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
+  $("#yaw").disabled = st.state !== "ready" || (st.estop && st.estop.latched) || !!st.chocked;
+  $("#yaw").title = st.chocked ? "Chocked: an admin removes the chock over SSH" : (st.estop && st.estop.latched) ? "Clear the e-stop first" : "";
+  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level !== "info" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 loadDesc().then(refreshImg); loadCals(); setInterval(loadDesc, 5000);
 </script></body></html>

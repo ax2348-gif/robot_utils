@@ -199,7 +199,7 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
             return {"turns": node.n_turn, "session": node.session, "enabled_by": node.enabled_by, "latch": node.latch,
                     "pose_world": (node.pose_now() or [None] * 3)[:3],
                     "servo": (node._ps_status or {}).get("status"), "reflex": node.reflex.get("blind"),
-                    "latest": (node._ps_status or {}).get("latest")}
+                    "latest": (node._ps_status or {}).get("latest"), **node.safety()}
         return StreamingResponse(sse(hub, small), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
     @app.get("/log", tags=["log"], summary="Dialogue turns after `since` (live session, in memory)")

@@ -290,6 +290,28 @@ Every page can be restyled with a **theme**, a CSS file, without touching any be
 
 Packaged: `contrast`: high contrast, heavier borders, visible focus.
 
+### The token sheet
+
+Every page (node pages, the landing page, the swerve teleop tool) takes its colours and type from
+one set of CSS variables, defined in `nodes/common/ui_assets.py` and served at `common/ui.css` by
+every node and by the landing page. A theme only has to redefine these to restyle everything:
+
+| Token | Use |
+|---|---|
+| `--ground`, `--panel`, `--ink`, `--muted`, `--rule` | page background, cards, text, secondary text, borders |
+| `--signal` (`-bg`) | interactive elements, primary data |
+| `--stop` (`-bg`) | e-stop, latched, chocked, errors |
+| `--caution` (`-bg`) | covers, warnings, a lease held by someone else |
+| `--live` (`-bg`) | motors enabled, healthy |
+| `--plot-1` … `--plot-5` | data series (plots, maps, the teleop knob and ring) |
+| `--font`, `--mono`, `--radius` | IBM Plex Sans (bundled, OFL, `common/fonts/`), monospace, corner radius |
+
+Older names (`--bg`, `--fg`, `--acc`, `--ok`, `--err`, `--warn`, …) are aliases of these. Each
+token has a light and a dark value (`prefers-color-scheme`). Node pages also show a **state band**
+at the top (`RU.stateBand`): e-stop latched, chocked (red hatch), camera covered (amber hatch),
+live (motors enabled), or a thin rule when nominal. It reads the node's own `/state`. The remote
+teleop tool keeps its own light-on-video palette: it is drawn over the camera image.
+
 ## Editing pages
 
 Pages are HTML and JavaScript strings, isolated from the nodes' logic:

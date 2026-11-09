@@ -11,15 +11,15 @@ PAGE = r"""<!doctype html>
 input[type=number]{width:70px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Swerve base <span id="state" class="ru-pill">…</span></h2>
   <div id="estop"></div>
 </div>
 <div class="ru-card ru-row" style="justify-content:space-between">
   <div id="lease"></div>
-  <div class="ru-row"><button class="ru" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
-    <button class="ru" id="clear">Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
+  <div class="ru-row"><button class="ru live" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
+    <button class="ru hazard" id="clear" hidden>Clear e-stop</button><a class="ru-muted" href="docs">API docs</a></div>
 </div>
 <div id="err" class="ru-err"></div>
 <div class="grid">
@@ -28,9 +28,9 @@ input[type=number]{width:70px}
     <div class="ru-row" style="margin:8px 0">speed <input type="number" id="spd" value="0.2" step="0.05" min="0" max="2"> m/s
       turn <input type="number" id="trn" value="0.5" step="0.1" min="0" max="4"> rad/s</div>
     <div class="pad">
-      <button class="ru" data-j="q">⟲</button><button class="ru" data-j="w">↑</button><button class="ru" data-j="e">⟳</button>
-      <button class="ru" data-j="a">←</button><button class="ru" data-j=" ">■</button><button class="ru" data-j="d">→</button>
-      <span></span><button class="ru" data-j="s">↓</button><span></span>
+      <button class="ru" data-j="q" aria-label="rotate left (Q)">⟲</button><button class="ru" data-j="w" aria-label="forward (W)">↑</button><button class="ru" data-j="e" aria-label="rotate right (E)">⟳</button>
+      <button class="ru" data-j="a" aria-label="left (A)">←</button><button class="ru" data-j=" " aria-label="stop (space)">■</button><button class="ru" data-j="d" aria-label="right (D)">→</button>
+      <span></span><button class="ru" data-j="s" aria-label="back (S)">↓</button><span></span>
     </div>
     <div class="ru-row" style="margin-top:10px">soft limits <input type="number" id="lv" step="0.1" min="0" max="2"> m/s
       <input type="number" id="lw" step="0.1" min="0" max="4"> rad/s <button class="ru" id="setlim">Set</button></div>
@@ -50,9 +50,10 @@ input[type=number]{width:70px}
 const $ = s => document.querySelector(s);
 const lease = RU.leaseWidget($("#lease"), {});
 const estop = RU.estopButton($("#estop"));
+const band = RU.stateBand($("#band"));
 const ts = new RU.TimeSync();
-const MODS = ["FL", "FR", "RR", "RL"], COLORS = ["#2563eb", "#16a34a", "#dc2626", "#9333ea"];
-const plot = new RU.Plot($("#plot"), {seconds: 5, series: MODS.map((m, i) => ({name: m, color: COLORS[i]})).concat([{name: "cmd vx", color: "#888"}])});
+const MODS = ["FL", "FR", "RR", "RL"];
+const plot = new RU.Plot($("#plot"), {seconds: 5, series: MODS.map(m => ({name: m})).concat([{name: "cmd vx", color: "--muted"}])});
 const err = m => $("#err").textContent = m || "";
 const call = async (path, body) => { try { err(""); return await RU.api(path, {method: "POST", body, headers: lease.headers()}); } catch(e){ err(e.message); } };
 $("#enable").onclick = () => call("enable");
@@ -77,12 +78,18 @@ window.addEventListener("blur", () => { held.clear(); press("x", false); });
 // state (SSE)
 RU.sse("events", st => {
   lease.update(st); estop.update(st);
-  $("#state").textContent = st.state + (st.enabled ? " · enabled" : "") + (st.loop_hz ? " · " + st.loop_hz + " Hz" : "");
-  $("#state").className = "ru-pill " + (st.state === "running" ? "ru-ok" : "ru-err");
+  const live = st.enabled && st.latest && st.latest.motors_enabled;
+  band.update(st, {live, liveText: live ? "the base can move" : ""});
+  const latched = st.estop && st.estop.latched;
+  $("#state").textContent = st.chocked ? "chocked" : latched ? "e-stop latched" : st.state + (st.enabled ? ", enabled" : "") + (st.loop_hz ? ", " + st.loop_hz + " Hz" : "");
+  $("#state").className = "ru-pill " + (st.chocked || latched || st.state !== "running" ? "ru-err" : st.enabled ? "ru-ok" : "");
+  $("#enable").disabled = !!(st.chocked || latched);
+  $("#enable").title = st.chocked ? "Chocked: an admin removes the chock over SSH" : latched ? "Clear the e-stop first" : "";
+  $("#clear").hidden = !latched;
   if (st.error) err(st.error);
   const l = st.limits; $("#lim").textContent = `hard ${l.hard.max_speed} m/s, ${l.hard.max_omega} rad/s · soft ${l.soft.max_speed} m/s, ${l.soft.max_omega} rad/s`;
   if (!$("#lv").value) { $("#lv").value = l.soft.max_speed; $("#lw").value = l.soft.max_omega; }
-  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-err" : ""}">${new Date(e.wall*1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
+  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : (e.level === "warn" || e.level === "warning") ? "ru-ev-warn" : ""}">${new Date(e.wall*1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 
 // telemetry (every 100 Hz tick; plotted and tabulated at screen rate)

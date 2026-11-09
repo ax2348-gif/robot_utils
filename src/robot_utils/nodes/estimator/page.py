@@ -12,7 +12,7 @@ PAGE = r"""<!doctype html>
 .ru-wrap{max-width:1300px}
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:12px}
 @media (max-width:900px){.layout{grid-template-columns:1fr}}
-#map{width:100%;height:560px;display:block;border-radius:6px;background:var(--bg);cursor:grab;touch-action:none}
+#map{width:100%;height:min(560px,60vh);display:block;border-radius:6px;background:var(--bg);cursor:grab;touch-action:none}
 #map.drag{cursor:grabbing}
 .ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-variant-numeric:tabular-nums}
@@ -21,7 +21,7 @@ canvas.ru-plot{width:100%;height:110px}
 #events{max-height:150px;overflow:auto;font-size:12px}
 .sw{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:4px}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">State estimator <span id="state" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="mode" class="ru-muted"></span><a class="ru-muted" href="docs">API docs</a></div>
@@ -30,8 +30,8 @@ canvas.ru-plot{width:100%;height:110px}
 <div class="layout">
   <div class="ru-card">
     <b>Trajectory</b> <span class="ru-muted">(kept in this page only; grid 1 m)</span>
-    <span class="ru-muted" style="float:right"><span class="sw" style="background:#2563eb"></span>fused
-      <span class="sw" style="background:#9ca3af"></span>odometry only</span>
+    <span class="ru-muted" style="float:right"><span class="sw" style="background:var(--plot-1)"></span>fused
+      <span class="sw" style="background:var(--muted)"></span>odometry only</span>
     <canvas id="map"></canvas>
     <div class="ctl">
       <label><input type="checkbox" id="follow" checked> follow robot</label>
@@ -42,7 +42,7 @@ canvas.ru-plot{width:100%;height:110px}
       <button class="ru" id="origin" title="Centre on the world origin">Origin</button>
       <button class="ru" id="zin">+</button><button class="ru" id="zout">−</button>
       <button class="ru" id="clear" title="Forget the trail (the pose is unchanged)">Clear trail</button>
-      <button class="ru" id="reset" title="Set the pose to the origin and clear the trail">Reset pose</button>
+      <button class="ru hazard" id="reset" title="Changes the node's pose for everyone (the world frame moves): sets it to the origin and clears the trail">Reset pose</button>
       <span class="ru-muted" id="scale"></span>
     </div>
     <div class="ru-muted">Drag to pan (turns off follow), wheel to zoom about the cursor, double-click to recentre.</div>
@@ -77,9 +77,9 @@ function keep(p){
   if (trail.length > MAX_PTS) trail.splice(0, trail.length - MAX_PTS);
 }
 const plots = {
-  h: new RU.Plot($("#ph"), {seconds: 20, series: [{name: "fused", color: "#2563eb"}, {name: "odometry", color: "#9ca3af"}]}),
-  w: new RU.Plot($("#pw"), {seconds: 20, series: [{name: "IMU", color: "#2563eb"}, {name: "wheels", color: "#f59e0b"}]}),
-  v: new RU.Plot($("#pv"), {seconds: 20, series: [{name: "speed", color: "#16a34a"}]}),
+  h: new RU.Plot($("#ph"), {seconds: 20, series: [{name: "fused"}, {name: "odometry", color: "--muted"}]}),
+  w: new RU.Plot($("#pw"), {seconds: 20, series: [{name: "IMU"}, {name: "wheels", color: "--plot-2"}]}),
+  v: new RU.Plot($("#pv"), {seconds: 20, series: [{name: "speed"}]}),
 };
 RU.rows("stream", d => {
   const c = n => d.col(n), F = d.fields;
@@ -152,19 +152,19 @@ function draw(){
       g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke(); } }
   // origin axes (x red, y green)
   const o = w2s(0, 0), ox = w2s(0.5, 0), oy = w2s(0, 0.5);
-  g.lineWidth = 2; g.strokeStyle = "#dc2626"; g.beginPath(); g.moveTo(o[0], o[1]); g.lineTo(ox[0], ox[1]); g.stroke();
-  g.strokeStyle = "#16a34a"; g.beginPath(); g.moveTo(o[0], o[1]); g.lineTo(oy[0], oy[1]); g.stroke();
+  g.lineWidth = 2; g.strokeStyle = RU.token("--stop", "#dc2626"); g.beginPath(); g.moveTo(o[0], o[1]); g.lineTo(ox[0], ox[1]); g.stroke();
+  g.strokeStyle = RU.token("--live", "#16a34a"); g.beginPath(); g.moveTo(o[0], o[1]); g.lineTo(oy[0], oy[1]); g.stroke();
   // trails
   const path = (ix, iy, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); let pen = false;
     for (const p of trail){ if (!p){ pen = false; continue; } const s = w2s(p[ix], p[iy]); if (pen) g.lineTo(s[0], s[1]); else { g.moveTo(s[0], s[1]); pen = true; } } g.stroke(); };
-  if ($("#showodom").checked){ g.setLineDash([5, 4]); path(2, 3, "#9ca3af", 1.5); g.setLineDash([]); }
-  path(0, 1, "#2563eb", 2);
+  if ($("#showodom").checked){ g.setLineDash([5, 4]); path(2, 3, RU.token("--muted", "#9ca3af"), 1.5); g.setLineDash([]); }
+  path(0, 1, RU.token("--plot-1", "#2563eb"), 2);
   // robot footprint + heading arrow
   if (last){
     const c = Math.cos(last.theta), s = Math.sin(last.theta), L = FOOT.half_length, Wd = FOOT.half_width;
     const P = (bx, by) => w2s(last.x + c * bx - s * by, last.y + s * bx + c * by);
     const pts = [P(L, Wd), P(L, -Wd), P(-L, -Wd), P(-L, Wd)];
-    g.fillStyle = "#2563eb33"; g.strokeStyle = "#2563eb"; g.lineWidth = 2; g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); g.fill(); g.stroke();
+    g.fillStyle = RU.token("--signal-bg", "#2563eb33"); g.strokeStyle = RU.token("--signal", "#2563eb"); g.lineWidth = 2; g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); g.fill(); g.stroke();
     const tip = P(L + 0.15, 0), base = P(0, 0); g.beginPath(); g.moveTo(base[0], base[1]); g.lineTo(tip[0], tip[1]); g.stroke();
     const h1 = P(L + 0.05, 0.06), h2 = P(L + 0.05, -0.06); g.beginPath(); g.moveTo(h1[0], h1[1]); g.lineTo(tip[0], tip[1]); g.lineTo(h2[0], h2[1]); g.stroke();
   }
@@ -177,7 +177,9 @@ requestAnimationFrame(draw);
 // ---------------- state ----------------------------------------------------------------------
 const f = (v, k) => v === null || v === undefined || !isFinite(v) ? "–" : (+v).toFixed(k);
 const kv = (el, rows) => el.innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
+const band = RU.stateBand($("#band"));
 RU.sse("events", st => {
+  band.update(st);
   $("#state").textContent = st.state + (st.rate_hz ? " · " + st.rate_hz + " Hz" : "");
   $("#state").className = "ru-pill " + (st.state === "running" ? "ru-ok" : "ru-warn");
   $("#mode").textContent = st.mode; err(st.error);
@@ -190,7 +192,7 @@ RU.sse("events", st => {
     ["pose age", lag === null ? "–" : lag.toFixed(0) + " ms"]]);
   kv($("#inputs"), Object.entries(st.inputs).flatMap(([k, u]) => [[k, `<span class="${u.connected ? "ru-ok" : "ru-err"}">${u.connected ? "connected" : "down"}</span> ${u.rate_hz ? u.rate_hz + " Hz" : ""}`],
     ["", `<span class="ru-muted">${u.url}${u.error ? " · " + u.error : ""}${u.clock_uncertainty !== null ? " · clock ±" + (u.clock_uncertainty * 1000).toFixed(2) + " ms" : ""}</span>`]]));
-  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level !== "info" ? "ru-err" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
+  $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level !== "info" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 </script></body></html>
 """

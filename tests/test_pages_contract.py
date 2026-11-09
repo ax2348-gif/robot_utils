@@ -61,8 +61,10 @@ def test_node_pages_with_actuation_use_the_shared_estop_button(page):
 
 def test_agent_nav_estop_button_posts_estop():
     html = PAGES["agent_nav"]()
-    assert has(r'<button[^>]*id="estop"', html)
-    assert has(r'\$\("#estop"\)\.onclick\s*=\s*\(\)\s*=>\s*human\("estop"', html)
+    assert has(r'id="estop"', html)
+    # the shared e-stop button, sent as the human operator (X-Operator: human)
+    assert has(r'RU\.estopButton\(\$\("#estop"\), \{headers: H\b', html)
+    assert has(r'const H = \{"X-Operator": "human"\}', html)
 
 
 @pytest.mark.parametrize("page", ["swerve_teleop_tool", "remote_teleop_tool"])
@@ -84,7 +86,8 @@ def test_landing_page_estop_all_and_lock_buttons():
 
 def test_shared_toolkit_estop_and_lease_renewal():
     js = ui_js()
-    assert has(r'RU\.estopButton = function\(el\)\{.*?b\.onclick = async \(\) => \{ try \{ await RU\.api\("estop", \{method: "POST"\}\)', js)
+    # POSTs "estop" by default (opts.path / opts.headers let a page target its own e-stop, e.g. agent_nav as the human)
+    assert has(r'RU\.estopButton = function\(el, opts\)\{.*?b\.onclick = async \(\) => \{ try \{ await RU\.api\(opts\.path \|\| "estop", \{method: "POST"', js)
     assert has(r'setInterval\(async \(\) => \{.*?RU\.api\("lease/renew"', js), "lease auto-renewal is gone"
 
 

@@ -3,21 +3,24 @@
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Orbbec node</title>
+<link rel="stylesheet" href="common/ui.css">
 <style>
-:root{--bg:#111418;--panel:#1a1f26;--line:#2b323c;--fg:#dde3ea;--dim:#8a96a3;--acc:#4ea1ff;--err:#ff6b6b;--ok:#4cd28a;--warn:#f5c04e}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,sans-serif}
+/* colours come from the shared token sheet (common/ui.css; themes restyle it) */
+:root{--dim:var(--muted)}
+*{box-sizing:border-box}body{margin:0;background:var(--ground);color:var(--ink);font:13px/1.4 var(--font)}
 header{display:flex;gap:12px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 header h1{font-size:15px;margin:0}#dev{color:var(--dim)}header a{color:var(--acc)}
 .pill{padding:2px 8px;border-radius:10px;background:var(--line);font-weight:600}
-.pill.streaming{background:#1d4d33;color:var(--ok)}.pill.err{background:#4d1d1d;color:var(--err)}.pill.busy{background:#4d401d;color:var(--warn)}
-#banner{display:none;background:#4d1d1d;color:#ffd0d0;padding:6px 14px;border-bottom:1px solid #6d2d2d}
+.pill.streaming{background:var(--live-bg);color:var(--live)}.pill.err{background:var(--stop-bg);color:var(--stop)}.pill.busy{background:var(--caution-bg);color:var(--caution)}
+.pill.covered{background:var(--caution-bg);color:var(--caution)}
+#banner{display:none;background:var(--stop-bg);color:var(--stop);padding:6px 14px;border-bottom:1px solid var(--stop)}
 #main{display:flex;align-items:flex-start}
 aside{width:300px;flex:none;padding:10px;border-right:1px solid var(--line);min-height:calc(100vh - 42px)}
 section.box{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px}
-section.box h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin:0 0 6px}
+section.box h2{font-size:13px;font-weight:600;color:var(--ink);margin:0 0 6px}
 label.row,div.row{display:flex;align-items:center;gap:6px;margin:4px 0}
 label.row span.k,div.row span.k{flex:1;color:var(--dim)}
-select,input[type=number]{background:#0d1014;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:2px 4px;font:inherit}
+select,input[type=number]{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 4px;font:inherit}
 input[type=number]{width:74px}select{max-width:170px}input[type=range]{width:100%}
 input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 .bar{height:10px;border-radius:3px;margin:4px 0}
@@ -37,7 +40,7 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 #log div{margin:2px 0}#log .e{color:var(--err)}
 @media (max-width:760px){#main{flex-direction:column}aside{width:100%;min-height:0;border-right:none}#tiles{width:100%;grid-template-columns:1fr}}
 </style><script src="../../themes/theme.js"></script>
-</head><body>
+</head><body><div id="band"></div>
 <header><h1>Orbbec node</h1><span id="dev">connecting...</span><span id="pill" class="pill">...</span>
 <span id="sync" class="small"></span><span id="msg" class="small"></span><a href="docs" class="small">API docs</a></header>
 <div id="banner"></div>
@@ -72,6 +75,7 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 </aside>
 <div id="tiles"></div>
 </div>
+<script src="common/ui.js"></script>
 <script>
 "use strict";
 const $=s=>document.querySelector(s), ORDER=["color","depth","ir_left","ir_right"];
@@ -133,8 +137,9 @@ function syncControls(){
   for(const t of Object.values(tiles))if(t.bar){t.bar.style.background=grad(d.colormap);t.bar.style.transform=d.invert?"scaleX(-1)":""}
 }
 function renderStatus(){
-  const d=S.device||{};$("#dev").textContent=d.name?`${d.name} - SN ${d.serial} - fw ${d.firmware} - ${d.connection}`:"no camera";
-  const p=$("#pill");p.textContent=S.state;p.className="pill "+(S.state==="streaming"?"streaming":S.state==="idle"?"":["starting","restarting"].includes(S.state)?"busy":"err");
+  const d=S.device||{};$("#dev").textContent=d.name?`${d.name}, SN ${d.serial}, firmware ${d.firmware}, ${d.connection}`:"no camera";
+  const p=$("#pill");p.textContent=S.state;p.className="pill "+(S.state==="streaming"?"streaming":S.state==="covered"?"covered":S.state==="idle"?"":["starting","restarting"].includes(S.state)?"busy":"err");
+  if(window.RU&&RU.stateBand){(window._band=window._band||RU.stateBand($("#band"))).update(S)}
   const b=$("#banner");b.style.display=S.error?"block":"none";b.textContent=S.error||"";
   $("#log").innerHTML="";for(const e of S.events.slice().reverse()){$("#log").append(el("div",{class:e.error?"e":""},new Date(e.wall*1000).toLocaleTimeString()+" "+e.msg))}
   for(const n of ORDER){const f=$("#fps_"+n),x=S.streams[n];if(f)f.textContent=x.fps?x.fps.toFixed(1)+" fps":""}

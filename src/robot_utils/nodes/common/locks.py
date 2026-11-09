@@ -175,5 +175,12 @@ class LockStore:
         return out
 
 
+def lock_state(store: LockStore, chock: Iterable[str] = (), cover: Iterable[str] = ()) -> dict:
+    """For a node's /state: the chocks / covers that apply to it (pages show them; common/ui.js)."""
+    ch = store.matching("chock", chock) if chock else []
+    cv = store.matching("cover", cover) if cover else []
+    return {"chocked": bool(ch), "covered": bool(cv), "locks": [l.public() for l in ch + cv]}
+
+
 def describe(locks: list[Lock]) -> str:
     return "; ".join(f"{l.kind}ed by {l.by}" + (f": {l.reason}" if l.reason else "") + f" ({l.id})" for l in locks)

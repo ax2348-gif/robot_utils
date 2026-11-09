@@ -17,7 +17,7 @@ canvas.ru-plot{width:100%;height:100px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 .ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
 </style><script src="../../themes/theme.js"></script>
-</head><body><div class="ru-wrap">
+</head><body><div id="band"></div><div class="ru-wrap">
 <div class="ru-row" style="justify-content:space-between">
   <h2 style="margin:6px 0">Pose servo <span id="status" class="ru-pill">…</span></h2>
   <div class="ru-row"><span id="estop"></span><a class="ru-muted" href="docs">API docs</a></div>
@@ -28,9 +28,9 @@ canvas.ru-plot{width:100%;height:100px}
     <b>Map</b> <span class="ru-muted">(estimator world frame, grid 0.5 m; click to place a global goal; trail kept in this page)</span>
     <canvas id="map"></canvas>
     <div class="ctl">
-      <button class="ru" id="center">Recentre</button><button class="ru" id="zin">+</button><button class="ru" id="zout">−</button>
+      <button class="ru" id="center" title="Back to the default scale (the view always follows the robot)">Reset zoom</button><button class="ru" id="zin">+</button><button class="ru" id="zout">−</button>
       <button class="ru" id="clear">Clear trail</button>
-      <span class="ru-muted">robot blue, goal green (acceptance circle), drag-free: the view follows the robot</span>
+      <span class="ru-muted">the view follows the robot; robot in blue, goal with its acceptance circle</span>
     </div>
     <b>Twist sent</b> <span class="ru-muted">vx, vy m/s · omega rad/s, 20 s</span><canvas class="ru-plot" id="pv"></canvas>
     <b>Twist rate</b> <span class="ru-muted">|a| m/s² · alpha rad/s²</span><canvas class="ru-plot" id="pa"></canvas>
@@ -39,7 +39,7 @@ canvas.ru-plot{width:100%;height:100px}
   <div>
     <div class="ru-card"><b>Control</b>
       <div class="ctl"><input id="client" size="10" placeholder="your name">
-        <button class="ru" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
+        <button class="ru live" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
         <button class="ru" id="stop">Stop (brake)</button></div>
       <div class="ru-muted">Enable takes the swerve lease (with the caps below); Disable stops at once and releases it.</div>
     </div>
@@ -54,7 +54,7 @@ canvas.ru-plot{width:100%;height:100px}
         <span>speed</span><input id="g_speed" type="number" step="0.05" placeholder="cap">
         <span>accel</span><input id="g_accel" type="number" step="0.05" placeholder="cap">
       </div>
-      <div class="ctl"><button class="ru" id="go">Go</button><span class="ru-muted" id="goalinfo"></span></div>
+      <div class="ctl"><button class="ru primary" id="go">Go</button><span class="ru-muted" id="goalinfo"></span></div>
     </div>
     <div class="ru-card"><b>Config</b> <span class="ru-muted">(per enable; changeable when idle)</span>
       <div class="form" id="cfg"></div>
@@ -72,6 +72,7 @@ const err = m => $("#err").textContent = m || "";
 const call = async (p, body) => { try { err(""); return await RU.api(p, body === undefined ? {method: "POST"} : {body}); } catch(e){ err(e.message); } };
 $("#client").value = localStorage.getItem("ru-client") || "";
 const es = RU.estopButton($("#estop"));
+const band = RU.stateBand($("#band"));
 $("#enable").onclick = () => { localStorage.setItem("ru-client", $("#client").value); call("enable", {client: $("#client").value || "browser", config: cfgValues()}); };
 $("#disable").onclick = () => call("disable");
 $("#stop").onclick = () => call("stop");
@@ -103,9 +104,9 @@ RU.api("config").then(r => { cfgShow(r.config); const h = r.hard;
 
 // stream: trail, plots
 const plots = {
-  v: new RU.Plot($("#pv"), {seconds: 20, series: [{name: "vx", color: "#2563eb"}, {name: "vy", color: "#16a34a"}, {name: "omega", color: "#f59e0b"}]}),
-  a: new RU.Plot($("#pa"), {seconds: 20, series: [{name: "|a|", color: "#2563eb"}, {name: "alpha", color: "#f59e0b"}]}),
-  e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "dist", color: "#2563eb"}, {name: "heading", color: "#f59e0b"}]}),
+  v: new RU.Plot($("#pv"), {seconds: 20, series: [{name: "vx"}, {name: "vy"}, {name: "omega"}]}),
+  a: new RU.Plot($("#pa"), {seconds: 20, series: [{name: "|a|"}, {name: "alpha"}]}),
+  e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "dist"}, {name: "heading"}]}),
 };
 let last = null, trail = [], goal = null;
 RU.rows("stream?batch_ms=100", d => {
@@ -120,7 +121,11 @@ RU.rows("stream?batch_ms=100", d => {
 });
 let st = null;
 RU.sse("events", s => {
-  st = s; es.update({estop: s.swerve && s.swerve.estop ? {latched: true, source: "swerve", reason: ""} : null});
+  st = s; const est = {estop: s.swerve && s.swerve.estop ? {latched: true, source: "swerve", reason: ""} : null};
+  es.update(est);
+  band.update({...s, estop: est.estop || {}}, {live: ["moving", "holding", "braking"].includes(s.status), liveText: s.status});
+  $("#enable").disabled = !!s.chocked;
+  $("#enable").title = s.chocked ? "Chocked: an admin removes the chock over SSH" : "";
   $("#status").textContent = s.status; $("#status").className = "ru-pill " + ({moving: "ru-ok", holding: "ru-ok", braking: "ru-warn", disabled: ""}[s.status] || "");
   if (!s.enabled) cfgShow(s.config);
   const g = s.goal, L = s.latest || {}, f = (v, n) => v === null || v === undefined ? "–" : Number(v).toFixed(n);
@@ -139,7 +144,7 @@ RU.sse("events", s => {
     ["loop", `${f(s.loop_hz, 1)} Hz`],
   ];
   $("#kv").innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
-  $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" || e.level === "warn" ? "ru-err" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
+  $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 
 // map: world x up, y left; follows the robot
@@ -151,7 +156,7 @@ cv.addEventListener("click", e => { const r = cv.getBoundingClientRect(), [x, y]
 cv.addEventListener("wheel", e => { e.preventDefault(); scale = Math.max(20, Math.min(2000, scale * Math.exp(-e.deltaY * 0.0015))); }, {passive: false});
 $("#zin").onclick = () => scale = Math.min(2000, scale * 1.5);
 $("#zout").onclick = () => scale = Math.max(20, scale / 1.5);
-$("#center").onclick = () => {};
+$("#center").onclick = () => scale = 150;
 $("#clear").onclick = () => trail = [];
 function robot(g, x, y, th, color){
   const pts = [[0.25, 0], [-0.2, 0.18], [-0.2, -0.18]].map(([a, b]) => w2s(x + a * Math.cos(th) - b * Math.sin(th), y + a * Math.sin(th) + b * Math.cos(th)));
@@ -165,11 +170,11 @@ function draw(){
   const [a, b] = s2w(W, H), [c, d] = s2w(0, 0); g.strokeStyle = line; g.lineWidth = 1;
   for (let x = Math.floor(a / 0.5) * 0.5; x <= c; x += 0.5){ const [s0, t0] = w2s(x, d), [s1, t1] = w2s(x, b); g.beginPath(); g.moveTo(s0, t0); g.lineTo(s1, t1); g.stroke(); }
   for (let y = Math.floor(b / 0.5) * 0.5; y <= d; y += 0.5){ const [s0, t0] = w2s(a, y), [s1, t1] = w2s(c, y); g.beginPath(); g.moveTo(s0, t0); g.lineTo(s1, t1); g.stroke(); }
-  g.strokeStyle = "#9ca3af"; g.lineWidth = 1.5; g.beginPath(); trail.forEach((p, i) => { const [x, y] = w2s(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
-  if (goal){ robot(g, goal.x, goal.y, goal.theta, "#16a34a"); const [x, y] = w2s(goal.x, goal.y);
-    g.strokeStyle = "#16a34a"; g.lineWidth = 1; g.beginPath(); g.arc(x, y, Math.max(2, goal.motion.pos_tol * scale), 0, 2 * Math.PI); g.stroke();
+  g.strokeStyle = RU.token("--muted", "#9ca3af"); g.lineWidth = 1.5; g.beginPath(); trail.forEach((p, i) => { const [x, y] = w2s(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  if (goal){ robot(g, goal.x, goal.y, goal.theta, RU.token("--live", "#157A45")); const [x, y] = w2s(goal.x, goal.y);
+    g.strokeStyle = RU.token("--live", "#157A45"); g.lineWidth = 1; g.beginPath(); g.arc(x, y, Math.max(2, goal.motion.pos_tol * scale), 0, 2 * Math.PI); g.stroke();
     if (last && isFinite(last.x)){ const [p, q] = w2s(last.x, last.y); g.setLineDash([4, 4]); g.beginPath(); g.moveTo(p, q); g.lineTo(x, y); g.stroke(); g.setLineDash([]); } }
-  if (last && isFinite(last.x)) robot(g, last.x, last.y, last.theta, "#2563eb");
+  if (last && isFinite(last.x)) robot(g, last.x, last.y, last.theta, RU.token("--signal", "#1F5FBF"));
   Object.values(plots).forEach(p => p.draw());
   requestAnimationFrame(draw);
 }
