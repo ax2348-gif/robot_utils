@@ -22,6 +22,7 @@ def test_packaged_default_config():
     assert (nodes["swerve"].node_kind, nodes["swerve"].enabled) == ("swerve", True)
     assert (nodes["arm"].node_kind, nodes["arm"].enabled) == ("arm", False)
     assert (nodes["estimator"].node_kind, nodes["estimator"].enabled) == ("estimator", True)
+    assert (nodes["pose_servo"].node_kind, nodes["pose_servo"].enabled) == ("pose_servo", True)
     assert all(n.host is None for n in nodes.values())
     # sockets, no ports (description keeps TCP 8104 until it moves to the serve helper)
     assert all(n.port is None for name, n in nodes.items() if name != "description")

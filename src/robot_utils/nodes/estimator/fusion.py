@@ -37,11 +37,11 @@ IMU_FLAG_STILL = 2
 FIELDS = ["t", "x", "y", "theta", "vx", "vy", "omega",
           "vx_world", "vy_world", "speed", "distance",
           "x_odom", "y_odom", "theta_odom", "omega_wheel", "omega_imu",
-          "imu_ok", "odom_ok", "imu_lead", "dt", "master"]
+          "imu_ok", "odom_ok", "imu_lead", "dt", "master", "reset_id"]
 UNITS = ["s", "m", "m", "rad", "m/s", "m/s", "rad/s",
          "m/s", "m/s", "m/s", "m",
          "m", "m", "rad", "rad/s", "rad/s",
-         "bool", "bool", "s", "s", "enum"]
+         "bool", "bool", "s", "s", "enum", "count"]
 FIELD_DOC = {
     "t": "sample time (master: swerve drive-reading time; IMU record end in heading-only mode), Pi monotonic s",
     "x": "position in the world frame (m); world = robot pose at the last reset, x forward, y left",
@@ -61,6 +61,7 @@ FIELD_DOC = {
     "imu_lead": "IMU coverage end minus t when the sample was fused (s): how far the IMU was ahead",
     "dt": "interval since the previous sample (s)",
     "master": "1 = swerve odometry tick, 2 = IMU record (heading-only mode, no swerve data)",
+    "reset_id": "number of pose resets since the node started: a change means the world frame moved",
 }
 MASTER_ODOM, MASTER_IMU = 1.0, 2.0
 MAX_DT = 0.25    # s: a longer gap between master samples is not integrated across (flagged)
@@ -156,9 +157,11 @@ class PoseFusion:
 
     def __init__(self):
         self.heading = HeadingTrack()
+        self.reset_id = -1
         self.reset()
 
     def reset(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0):
+        self.reset_id += 1
         self.x, self.y, self.theta = x, y, theta
         self.xo, self.yo, self.thetao = x, y, theta
         self.distance = 0.0
@@ -208,7 +211,7 @@ class PoseFusion:
                ct * vx - st * vy, st * vx + ct * vy, math.hypot(vx, vy), self.distance,
                self.xo, self.yo, self.thetao, dth_wheel / dt,
                (dth_imu / dt) if imu_ok else float("nan"),
-               float(imu_ok), 1.0, lead, dt, MASTER_ODOM]
+               float(imu_ok), 1.0, lead, dt, MASTER_ODOM, float(self.reset_id)]
         self.last_row = row
         return row
 
@@ -230,6 +233,6 @@ class PoseFusion:
         self.theta += dth
         nan = float("nan")
         row = [t, self.x, self.y, self.theta, 0.0, 0.0, dth / dt, 0.0, 0.0, 0.0, self.distance,
-               self.xo, self.yo, self.thetao, nan, dth / dt, 1.0, 0.0, 0.0, dt, MASTER_IMU]
+               self.xo, self.yo, self.thetao, nan, dth / dt, 1.0, 0.0, 0.0, dt, MASTER_IMU, float(self.reset_id)]
         self.last_row = row
         return row

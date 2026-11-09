@@ -50,6 +50,7 @@ landing page that indexes them. Start each on the robot from this checkout, with
 | camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | `/nodes/camera/` | [docs/orbbec_node.md](docs/orbbec_node.md) |
 | swerve base | `python -m robot_utils.nodes.swerve` | `/nodes/swerve/` | [docs/swerve_node.md](docs/swerve_node.md) |
 | estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | `/nodes/estimator/` | [docs/estimator_node.md](docs/estimator_node.md) |
+| pose servo (drive the base to a pose: jerk-limited, uses the estimator) | `python -m robot_utils.nodes.pose_servo` | `/nodes/pose_servo/` | [docs/pose_servo_node.md](docs/pose_servo_node.md) |
 | robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | `/nodes/description/` | [docs/description_node.md](docs/description_node.md) |
 | landing page | `python -m robot_utils.frontend` | `/` | [docs/frontend.md](docs/frontend.md) |
 

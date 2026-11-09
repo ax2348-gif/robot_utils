@@ -98,6 +98,7 @@ visual odometry. The world frame is the pose at the last `POST /reset`. Assumes 
 | `imu_lead` | s | IMU coverage end minus `t` when fused (how far ahead the IMU was) |
 | `dt` | s | interval since the previous sample |
 | `master` | enum | 1 swerve tick, 2 IMU record (heading-only mode) |
+| `reset_id` | count | pose resets since the node started (a change = the world frame moved; pose_servo aborts on it) |
 
 ### curl / JavaScript
 

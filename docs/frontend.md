@@ -76,6 +76,7 @@ nodes:
   - {name: arm, kind: arm, enabled: false}        # future
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
+  - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
   # a second camera would be e.g.
   # - {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 ```
