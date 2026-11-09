@@ -230,6 +230,17 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   --lens-focus: #0E7490;
   --lens-focus-glow: rgba(14, 116, 144, 0.35);
   --lens-matte: #EFEFED;
+  /* thick glass (panels): softened, magnified dots under a heavier veil */
+  --panel-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23C4C4C0'%3E%3Ccircle cx='12' cy='12' r='1.6'/%3E%3Ccircle cx='12' cy='36' r='1.6'/%3E%3Ccircle cx='12' cy='60' r='1.6'/%3E%3Ccircle cx='12' cy='84' r='1.6'/%3E%3Ccircle cx='12' cy='108' r='1.6'/%3E%3Ccircle cx='36' cy='12' r='1.6'/%3E%3Ccircle cx='36' cy='36' r='1.6'/%3E%3Ccircle cx='36' cy='60' r='1.6'/%3E%3Ccircle cx='36' cy='84' r='1.6'/%3E%3Ccircle cx='36' cy='108' r='1.6'/%3E%3Ccircle cx='60' cy='12' r='1.6'/%3E%3Ccircle cx='60' cy='36' r='1.6'/%3E%3Ccircle cx='60' cy='60' r='1.6'/%3E%3Ccircle cx='60' cy='84' r='1.6'/%3E%3Ccircle cx='60' cy='108' r='1.6'/%3E%3Ccircle cx='84' cy='12' r='1.6'/%3E%3Ccircle cx='84' cy='36' r='1.6'/%3E%3Ccircle cx='84' cy='60' r='1.6'/%3E%3Ccircle cx='84' cy='84' r='1.6'/%3E%3Ccircle cx='84' cy='108' r='1.6'/%3E%3Ccircle cx='108' cy='12' r='1.6'/%3E%3Ccircle cx='108' cy='36' r='1.6'/%3E%3Ccircle cx='108' cy='60' r='1.6'/%3E%3Ccircle cx='108' cy='84' r='1.6'/%3E%3Ccircle cx='108' cy='108' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+  --panel-veil: rgba(248, 248, 247, 0.50);
+  --panel-mag: 156px;
+  --panel-spec: rgba(255, 255, 255, 0.95);
+  --panel-rim: rgba(255, 255, 255, 0.55);
+  --panel-depth: rgba(0, 0, 0, 0.05);
+  --tick-layers: linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
   --lens-mag: 168px;
   --lens-mag-press: 204px;
 }
@@ -253,6 +264,15 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     --lens-press: inset 0 2px 6px rgba(0, 0, 0, 0.6), inset 0 -1px 0 rgba(255, 255, 255, 0.12);
     --lens-focus: #22D3EE;
     --lens-focus-glow: rgba(34, 211, 238, 0.35);
+    --panel-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23363937'%3E%3Ccircle cx='12' cy='12' r='1.6'/%3E%3Ccircle cx='12' cy='36' r='1.6'/%3E%3Ccircle cx='12' cy='60' r='1.6'/%3E%3Ccircle cx='12' cy='84' r='1.6'/%3E%3Ccircle cx='12' cy='108' r='1.6'/%3E%3Ccircle cx='36' cy='12' r='1.6'/%3E%3Ccircle cx='36' cy='36' r='1.6'/%3E%3Ccircle cx='36' cy='60' r='1.6'/%3E%3Ccircle cx='36' cy='84' r='1.6'/%3E%3Ccircle cx='36' cy='108' r='1.6'/%3E%3Ccircle cx='60' cy='12' r='1.6'/%3E%3Ccircle cx='60' cy='36' r='1.6'/%3E%3Ccircle cx='60' cy='60' r='1.6'/%3E%3Ccircle cx='60' cy='84' r='1.6'/%3E%3Ccircle cx='60' cy='108' r='1.6'/%3E%3Ccircle cx='84' cy='12' r='1.6'/%3E%3Ccircle cx='84' cy='36' r='1.6'/%3E%3Ccircle cx='84' cy='60' r='1.6'/%3E%3Ccircle cx='84' cy='84' r='1.6'/%3E%3Ccircle cx='84' cy='108' r='1.6'/%3E%3Ccircle cx='108' cy='12' r='1.6'/%3E%3Ccircle cx='108' cy='36' r='1.6'/%3E%3Ccircle cx='108' cy='60' r='1.6'/%3E%3Ccircle cx='108' cy='84' r='1.6'/%3E%3Ccircle cx='108' cy='108' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+    --panel-veil: rgba(15, 16, 16, 0.50);
+    --panel-spec: rgba(255, 255, 255, 0.16);
+    --panel-rim: rgba(255, 255, 255, 0.05);
+    --panel-depth: rgba(0, 0, 0, 0.35);
+    --tick-layers: linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
     --lens-matte: #1A1C1B;
   }
 }
@@ -266,7 +286,11 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick,
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
-:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=number],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=text],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input:not([type]),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) select:not(#theme-pick) {
   background-color: var(--ground);
   background-image:
     radial-gradient(80% 60% at 50% 0%, var(--lens-spec), transparent 68%),
@@ -278,7 +302,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background-attachment: scroll, scroll, fixed;
   border: 1px solid var(--lens-edge);
   border-bottom-color: var(--lens-edge-low);
-  border-radius: 999px;
+  border-radius: 0;
   box-shadow:
     inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-lead),
     inset 0 -1px 0 var(--lens-rim-bottom), inset -1px 0 0 var(--lens-rim-trail),
@@ -297,9 +321,9 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
-:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link) { padding-left: 14px; padding-right: 14px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile .ctl button:not(.link) { padding-left: 12px; padding-right: 12px; }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick { padding: 2px 10px; }
-:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a { border-radius: 22px; padding: 12px 18px; }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a { border-radius: 0; }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill,
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .pill { font-family: var(--mono); letter-spacing: .03em; }
 
@@ -456,6 +480,76 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   border-style: dashed; border-color: var(--caution); color: var(--caution);
 }
 
+
+/* == thick glass: panels == ------------------------------------------------------------------
+   Every panel is a box drawn in 1px line with corner ticks (wireframe), filled with thick glass:
+   the sheet's dots softened (r 1.6, half contrast) and magnified 1.3x, registered to the sheet
+   (attachment: fixed), under a heavier veil; a specular line under the top edge and a faint inner
+   rim. The ticks are the top layers, so the drawing stays crisp above the material.
+   Panels holding canvas / video / img use attachment: scroll for their tile (same look at rest,
+   no full-viewport repaint while a 100 Hz plot or the camera is on screen). */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad) {
+  background-color: var(--ground);
+  background-image: var(--tick-layers),
+    linear-gradient(var(--panel-veil), var(--panel-veil)),
+    var(--panel-tile);
+  background-size: 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px, 11px 2px, 2px 11px,
+    100% 100%, var(--panel-mag) var(--panel-mag);
+  background-position: left 3px top 3px, left 3px top 3px, right 3px top 3px, right 3px top 3px,
+    left 3px bottom 3px, left 3px bottom 3px, right 3px bottom 3px, right 3px bottom 3px,
+    0 0, -1px -1px;
+  background-repeat: no-repeat;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: scroll, scroll, scroll, scroll, scroll, scroll, scroll, scroll, scroll, fixed;
+  box-shadow: inset 0 1px 0 var(--panel-spec), inset 0 0 0 1px var(--panel-rim), inset 0 -1px 0 var(--panel-depth);
+}
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched):has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who:has(img),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(canvas),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(video),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad):has(img) {
+  background-attachment: scroll;
+}
+/* the robot's eye keeps wireframe's double viewfinder line, with the glass highlight inside */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:has(.wrap) {
+  box-shadow: 0 0 0 3px var(--panel), 0 0 0 4px var(--eye), inset 0 1px 0 var(--panel-spec);
+}
+/* camera page chrome and the landing title block: the same thick glass, no ticks */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) body > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) main > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-head {
+  background-color: var(--ground);
+  background-image: linear-gradient(var(--panel-veil), var(--panel-veil)), var(--panel-tile);
+  background-size: 100% 100%, var(--panel-mag) var(--panel-mag);
+  background-position: 0 0, -1px -1px;
+  background-repeat: no-repeat, repeat;
+  background-attachment: scroll, fixed;
+  box-shadow: inset 0 1px 0 var(--panel-spec);
+}
+/* inputs: square wells cut into the glass */
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=number],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input[type=text],
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) input:not([type]),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) select:not(#theme-pick) {
+  border: 1px solid var(--rule);
+  box-shadow: var(--lens-press);
+  font-family: var(--mono);
+}
+
 /* == motion == -------------------------------------------------------------------------------
    Only in answer to the pointer: 150ms ease-out on background position/size and box-shadow. */
 @media (prefers-reduced-motion: reduce) {
@@ -468,8 +562,16 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a,
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"] { transition: none; }
 }
-/* less transparency asked for: solid lenses (no dots, no highlight), rims kept */
+/* less transparency asked for: solid lenses and panels (no dots, no highlight), lines and ticks kept */
 @media (prefers-reduced-transparency: reduce) {
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-card,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .tile:not(.latched),
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) section.box,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #who,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) #estop-result:not(.bad) { background-image: var(--tick-layers); }
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) body > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) main > header,
+:root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-head { background-image: none; }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru:not(.ru-estop),
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-btn,
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #restart,
