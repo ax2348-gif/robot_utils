@@ -12,6 +12,12 @@ nginx hands the request to the landing page's own ``/nodes/`` route, which repor
 direction, no gzip, HTTP/1.1 keep-alive to the sockets, day-long timeouts (SSE, MJPEG, record
 streams). nginx runs as the user: pid, logs and temp files live under ``state_dir``.
 
+Access log: one JSON object per request in ``state_dir/access.log`` (time, client address, method,
+URI, status, bytes, duration, node, user agent), buffered and flushed every 2 s. A request is
+logged when it ends, so an open stream appears when it closes. The landing page's observer
+(frontend/observe.py) tails it, resolves Tailscale addresses to devices and users, and rotates it
+(7 days kept).
+
     python -m robot_utils.frontend.proxy --conf-dir ~/.config/robot_utils/nginx \\
         --state-dir ~/.local/state/robot_utils/nginx      # writes nginx.conf (install.sh does this)
 """
@@ -54,7 +60,16 @@ events {{
 }}
 
 http {{
-    access_log off;
+    # the node a request is for (empty for the landing page)
+    map $uri $robot_node {{
+        ~^/nodes/(?<n>{NAME_RE}) $n;
+        default "";
+    }}
+    log_format robot_json escape=json
+        '{{"t":"$time_iso8601","ts":$msec,"ip":"$remote_addr","method":"$request_method",'
+        '"uri":"$request_uri","status":$status,"bytes":$bytes_sent,"req_bytes":$request_length,'
+        '"dur":$request_time,"node":"$robot_node","ua":"$http_user_agent","conn":$connection}}';
+    access_log {state_dir}/access.log robot_json buffer=16k flush=2s;
     client_body_temp_path {tmp}/body;
     proxy_temp_path {tmp}/proxy;
     fastcgi_temp_path {tmp}/fastcgi;

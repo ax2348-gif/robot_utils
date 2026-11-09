@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m robot_utils.frontend", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="node registry YAML (default: the packaged nodes.yaml)")
+    ap.add_argument("--no-observe", action="store_true",
+                    help="don't run the access-log / connections / uplink observer (frontend/observe.py)")
     add_serve_args(ap, "frontend")
     args = ap.parse_args(argv)
 
@@ -29,7 +31,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     enabled = [n.name for n in nodes if n.enabled]
-    serve(create_app(nodes), args,
+    observer = None
+    if not args.no_observe:
+        from .observe import Observer
+        observer = Observer()
+    serve(create_app(nodes, observer=observer), args,
           banner=f"robot frontend -> nodes: {', '.join(enabled) or 'none configured'}", public_path="/")
     return 0
 

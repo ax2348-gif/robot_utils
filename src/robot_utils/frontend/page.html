@@ -95,6 +95,20 @@
   #tools strong { color: var(--link); }
   #tools span { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
   #empty { color: var(--muted); }
+  #who { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 16px 0; }
+  #who h2 { font-size: 16px; margin: 0 0 6px; }
+  #uplink { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  #uplink.bad { color: var(--bad); font-weight: 600; }
+  #uplink-banner { display: none; background: var(--bad-bg); color: var(--bad); border-radius: 6px; padding: 6px 10px;
+                   margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+  .who-wrap { overflow-x: auto; }
+  #who table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #who th, #who td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #who th { color: var(--muted); font-weight: 600; }
+  #who td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #who .sub2 { color: var(--muted); font-size: 12px; }
+  #who .heavy { color: var(--warn); font-weight: 600; }
+  #who-note { color: var(--muted); font-size: 12px; margin-top: 6px; }
   @media (max-width: 520px) {
     #estop { width: 100%; }
   }
@@ -116,6 +130,16 @@
   <section id="tools-section" hidden>
     <h2>Tools</h2>
     <ul id="tools"></ul>
+  </section>
+  <section id="who" hidden>
+    <h2>Who's here</h2>
+    <div id="uplink-banner"></div>
+    <div id="uplink">uplink: measuring…</div>
+    <div class="who-wrap"><table>
+      <thead><tr><th>client</th><th class="num">sending now</th><th class="num">conns</th><th class="num">last hour</th><th>nodes (last hour)</th><th>last request</th></tr></thead>
+      <tbody id="who-body"></tbody>
+    </table></div>
+    <div id="who-note"></div>
   </section>
   <p id="note">This page only indexes the nodes. Each node keeps running, and keeps its own page
     and e-stop, without it.</p>
@@ -398,6 +422,7 @@ async function start() {
   const tick = () => nodes.forEach(poll);
   tick();
   setInterval(tick, POLL_MS);
+  pollWho(); setInterval(pollWho, 3000);
 }
 // Restart this frontend's systemd service, wait until the new process answers, reload the page.
 async function restartFrontend() {
@@ -422,6 +447,47 @@ async function restartFrontend() {
   }
   msg.className = "err"; msg.textContent = "did not come back within 30 s (journalctl --user -u robot-frontend)";
   btn.disabled = false;
+}
+
+// -- who's here (read-only; GET api/observe) ------------------------------------------------------
+function fmtBytes(b) { return b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB"
+  : b >= 1e3 ? (b / 1e3).toFixed(0) + " kB" : b + " B"; }
+function fmtAgo(ts) { const s = Date.now() / 1000 - ts; return s < 60 ? Math.round(s) + " s ago"
+  : s < 3600 ? Math.round(s / 60) + " min ago" : (s / 3600).toFixed(1) + " h ago"; }
+async function pollWho() {
+  let d;
+  try { d = await fetchJson("api/observe", {}, 4000); } catch (e) { return; }
+  if (!d || d.error) return;
+  document.getElementById("who").hidden = false;
+  const u = d.uplink || {}, up = document.getElementById("uplink"), ban = document.getElementById("uplink-banner");
+  const ms = v => v == null ? "lost" : v.toFixed(v < 10 ? 1 : 0) + " ms";
+  const ifs = Object.entries(u.interfaces || {}).filter(([k, v]) => v.tx_bps > 1000 || v.rx_bps > 1000)
+    .map(([k, v]) => `${k} ↑${fmtBytes(v.tx_bps)}/s ↓${fmtBytes(v.rx_bps)}/s`).join(" · ");
+  up.textContent = `uplink: internet ${ms(u.internet_ms)} (1 min median ${ms(u.internet_ms_median_1min)})` +
+    ` · gateway ${ms(u.gateway_ms)}` + (ifs ? " · " + ifs : "");
+  up.className = u.saturated ? "bad" : "";
+  ban.style.display = u.saturated ? "block" : "none";
+  ban.textContent = u.saturated ? "The internet uplink looks saturated (high round trip or losses): remote views and control will lag. "
+    + "Check the heaviest clients below." : "";
+  const body = document.getElementById("who-body"); body.textContent = "";
+  for (const c of d.clients || []) {
+    const id = c.identity || {}, hr = c.hour || {}, live = c.live || {};
+    const who = h("td", {}, h("div", {textContent: id.kind === "tailscale" ? (id.user || id.label) : id.label}),
+      h("div", {className: "sub2", textContent: id.kind === "tailscale"
+        ? `${id.device || "?"}${id.os ? " · " + id.os : ""} · ${id.ip}` : (id.kind === "lan" ? "LAN (no identity)" : id.kind)}));
+    const heavy = live.send_bps > 300000;
+    body.append(h("tr", {},
+      who,
+      h("td", {className: "num" + (heavy ? " heavy" : ""), textContent: live.send_bps ? fmtBytes(live.send_bps) + "/s" : "–",
+               title: live.send_queue ? `${fmtBytes(live.send_queue)} queued (the client is not keeping up)` : ""}),
+      h("td", {className: "num", textContent: live.connections || "–"}),
+      h("td", {className: "num", textContent: hr.requests ? `${hr.requests} req · ${fmtBytes(hr.bytes)}` : "–"}),
+      h("td", {textContent: Object.entries(hr.nodes || {}).map(([k, v]) => `${k} ${v}`).join(", ")}),
+      h("td", {className: "sub2", textContent: hr.last_seen ? `${fmtAgo(hr.last_seen)} · ${(hr.last_uri || "").slice(0, 60)}` : ""})));
+  }
+  document.getElementById("who-note").textContent = `${(d.clients || []).length} clients. ` +
+    "Identities come from Tailscale (device and owner); LAN addresses have none. Requests are logged when they end: " +
+    "open streams show as live sending rate and connections. Access log kept " + ((d.log || {}).retention_days || 7) + " days.";
 }
 
 async function loadTools() {

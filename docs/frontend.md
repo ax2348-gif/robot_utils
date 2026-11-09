@@ -224,6 +224,39 @@ What a node serves to appear on the page (paths relative to the node's root, whi
 Everything is same-origin now, so CORS is no longer needed for the landing page (nodes still
 send it, for scripts and other tools).
 
+## Who's here: observability (read-only)
+
+The landing page has a **Who's here** panel and a matching API; admin stays on SSH.
+
+- **Access log:** nginx writes one JSON object per finished request to
+  `~/.local/state/robot_utils/nginx/access.log`: time, client address, method, URI, status, bytes,
+  duration, the node, and the user agent. Requests are logged when they *end*, so a stream that's
+  still open shows up in the live columns below.
+- **Identity:** Tailscale addresses can't be forged over the tailnet, and `tailscale whois` maps them
+  to the device and its owner (cached 10 min). LAN addresses are shown as they are, with no
+  identity.
+- **Live:** every 2 s, `ss` on port 80 gives each client's open connections, current send rate and
+  send-queue backlog. A large backlog means the client can't keep up with its stream.
+- **Uplink:** ping to 1.1.1.1 and to the gateway every 10 s, plus interface rates. The panel shows a
+  banner when the 1-minute median is over 150 ms or pings are lost.
+- **Retention:** the frontend rotates `access.log` daily (or past 100 MB) and `error.log` past
+  20 MB, has nginx reopen them (SIGUSR1), and deletes rotated logs older than **7 days**.
+
+| request | what |
+|---|---|
+| `GET /api/observe` | clients (identity, live connections / send rate / backlog, last hour's requests, bytes, nodes, last request), uplink, log info |
+| `GET /api/observe/requests?limit=&ip=&node=` | the most recent finished requests, newest first, with identities |
+
+From a terminal on the robot:
+
+```bash
+.venv/bin/python -m robot_utils.frontend.observe report --hours 24    # per client: requests, MB, nodes, top paths
+.venv/bin/python -m robot_utils.frontend.observe rotate                # rotate now (normally automatic)
+tail -f ~/.local/state/robot_utils/nginx/access.log | jq -c '{t, ip, uri, status, bytes}'
+```
+
+`--no-observe` starts the frontend without the observer.
+
 ## Port 80 without root
 
 Once per machine, as the user (the frontend never runs sudo, and neither does `install.sh`,

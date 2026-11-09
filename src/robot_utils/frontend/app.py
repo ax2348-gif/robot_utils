@@ -194,6 +194,7 @@ def create_app(
     manager: NodeManager | None = None,
     is_service=running_as_service,
     restart=restart_service,
+    observer=None,
 ) -> FastAPI:
     """``transport``: one transport for every node (tests); otherwise unix sockets for local
     nodes and TCP for nodes with a ``host``."""
@@ -203,9 +204,13 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.manager = manager or NodeManager(nodes, default_runner())
         app.state.links = links = NodeLinks(transport)
+        if observer is not None:
+            observer.start()
         try:
             yield
         finally:
+            if observer is not None:
+                observer.close()
             await links.aclose()
         close = getattr(app.state.manager.runner, "close", None)
         if close is not None:   # only the subprocess fallback: its children die with us
@@ -285,6 +290,22 @@ def create_app(
             await restart()
         return JSONResponse({"restarting": True, "pid": os.getpid(), "started": started}, status_code=202,
                             background=BackgroundTask(later))
+
+    @app.get("/api/observe")
+    async def observe() -> JSONResponse:
+        """Who is connected (identity, live send rate, last hour's requests), uplink health. Read-only."""
+        if observer is None:
+            return JSONResponse({"error": "observability is not running (frontend started without it)"},
+                                status_code=503, headers=no_cache)
+        return JSONResponse(await asyncio.to_thread(observer.snapshot), headers=no_cache)
+
+    @app.get("/api/observe/requests")
+    async def observe_requests(limit: int = 100, ip: str | None = None, node: str | None = None) -> JSONResponse:
+        """The most recent finished requests from the access log (newest first), with identities."""
+        if observer is None:
+            return JSONResponse({"error": "observability is not running"}, status_code=503, headers=no_cache)
+        limit = max(1, min(limit, 1000))
+        return JSONResponse(await asyncio.to_thread(observer.requests, limit, ip, node), headers=no_cache)
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:
