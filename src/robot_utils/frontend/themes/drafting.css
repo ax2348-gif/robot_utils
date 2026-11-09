@@ -1,6 +1,6 @@
 /*
 title: Drafting table
-description: Frosted drafting film on a light table: milky panels soften the sharp grid beneath them (cool grey-blue by day, graphite by night), camera and plots mounted on a dark mat, aviation alerting (red warning, amber caution, green normal).
+description: Frosted drafting film on a light table: milky panels soften the sharp grid beneath them (cool grey-blue by day, graphite by night), camera and plots mounted with a thin line, aviation alerting (red warning, amber caution, green normal).
 */
 /* How this theme works
    - The material is the identity. The ground is a crisp drafting grid; panels are frosted film:
@@ -12,7 +12,7 @@ description: Frosted drafting film on a light table: milky panels soften the sha
      blur a panel nested in another; never blur anything holding canvas / video / img / svg, the
      e-stop or the band. Selectors list one element per :has() (the scope test splits on commas).
    - The robot's eye (camera tiles, map, plots, the swerve diagram) is mounted like a photo on the
-     table: opaque panel, 2px dark mat border, no blur.
+     table: near-opaque film, a thin mount line and a soft inner shadow, no blur.
    - --glass-behind is the worst case seen through film: the major grid line. Text contrast is hand-
      checked for the film composited (unblurred, so conservatively) over that line and over the ground.
    - prefers-reduced-transparency and no backdrop-filter support both fall back to opaque panels. */
@@ -24,17 +24,19 @@ description: Frosted drafting film on a light table: milky panels soften the sha
   --signal: #3B3FB6; --stop: #AE1515; --caution: #7C4A00; --live: #12613A;
   --stop-bg: #F8DEDC; --caution-bg: #F6E8C8; --live-bg: #D8EDE0; --signal-bg: #E1E2F6;
   --plot-1: #2350D8; --plot-2: #0A8A70; --plot-3: #C94A0C; --plot-4: #B0309A; --plot-5: #6F6A00;
-  --stop-fill: #AE1515; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #12613A; --caution-ink: #1B1200;
+  --stop-fill: #C21C1C; --stop-fill-lo: #A01212; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #12613A; --caution-ink: #1B1200;
   --caution-fill: #E8A317; --caution-fill-b: #C98A0E; --on-caution: #1B1200;
   --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
   --radius: 5px;
   /* theme-private */
   --on-signal: #FFFFFF;
   --line: #5F6F80;                   /* control boundaries (>= 3:1 on panel and film) */
-  --mat: #27313C;                    /* the dark mat the robot's-eye views are mounted on */
+  --mount: #7D8D9C;                  /* the thin mount line around the robot's-eye views */
+  --mount-shade: rgba(20, 35, 50, 0.16);
+  --film-solid-hi: rgba(250, 252, 253, 0.94); --film-solid-lo: rgba(240, 244, 247, 0.94);
   --stop-latched: #6A0C0C; --chock-b: #6A0C0C; --estop-edge: #6A0C0C;
-  --grid-minor: #C3CED8; --grid-major: #93A6B8;
-  --glass-behind: #93A6B8;
+  --grid: #A9B8C6; --ground-hi: #DDE4EA; --ground-lo: #D5DDE5;
+  --glass-behind: #A9B8C6;
   --film-hi: rgba(250, 252, 253, 0.82); --film-lo: rgba(238, 243, 247, 0.70);
   --film-edge: rgba(255, 255, 255, 0.9);
 }
@@ -44,14 +46,16 @@ description: Frosted drafting film on a light table: milky panels soften the sha
     --signal: #A9B4FF; --stop: #FF8E80; --caution: #F2B33D; --live: #62D597;
     --stop-bg: #3E1E1C; --caution-bg: #3A2D12; --live-bg: #183323; --signal-bg: #2C2F4A;
     --plot-1: #5F88EC; --plot-2: #14A390; --plot-3: #E06A2C; --plot-4: #C658B2; --plot-5: #9C9530;
-    --stop-fill: #D9302A; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #62D597; --caution-ink: #1B1200;
+    --stop-fill: #D9302A; --stop-fill-lo: #B82420; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #62D597; --caution-ink: #1B1200;
     --caution-fill: #E8A317; --caution-fill-b: #C98A0E; --on-caution: #1B1200;
     --on-signal: #14162E;
     --line: #878A93;
-    --mat: #0A0A0B;
+    --mount: #62656D;
+    --mount-shade: rgba(0, 0, 0, 0.35);
+    --film-solid-hi: rgba(48, 50, 55, 0.95); --film-solid-lo: rgba(40, 42, 46, 0.95);
     --stop-latched: #6E0F0F; --chock-b: #6E0F0F; --estop-edge: #FFD9D4;
-    --grid-minor: #303236; --grid-major: #4D5056;
-    --glass-behind: #4D5056;
+    --grid: #3E4046; --ground-hi: #232427; --ground-lo: #1C1D20;
+    --glass-behind: #3E4046;
     --film-hi: rgba(52, 54, 59, 0.74); --film-lo: rgba(42, 44, 48, 0.74);
     --film-edge: rgba(255, 255, 255, 0.10);
   }
@@ -69,14 +73,14 @@ description: Frosted drafting film on a light table: milky panels soften the sha
 /* == surfaces == */
 /* frosted film: milky graded fill, a bright top edge where the film catches the light-table glow */
 :root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] .tile, :root[data-theme="drafting"] section.box,
-:root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+:root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result{
   border-radius: var(--radius);
   background-color: transparent;
   background-image: linear-gradient(170deg, var(--film-hi), var(--film-lo));
   box-shadow: inset 0 1px 0 var(--film-edge);
 }
 :root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] section.box, :root[data-theme="drafting"] #who,
-:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result { border: 1px solid var(--rule); }
+:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result{ border: 1px solid var(--rule); }
 /* tiles keep the page's own left edge (landing: the 6px status edge) */
 :root[data-theme="drafting"] .tile { border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
 /* the blur: only on static panels */
@@ -84,7 +88,7 @@ description: Frosted drafting film on a light table: milky panels soften the sha
 :root[data-theme="drafting"] .tile:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
 :root[data-theme="drafting"] section.box:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
 :root[data-theme="drafting"] #who:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
-:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result{
   -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px);
 }
 /* never nest blur: film inside film is drawn opaque */
@@ -93,18 +97,19 @@ description: Frosted drafting film on a light table: milky panels soften the sha
 :root[data-theme="drafting"] section.box .ru-card, :root[data-theme="drafting"] #who .ru-card {
   -webkit-backdrop-filter: none; backdrop-filter: none; background-image: none; background-color: var(--panel);
 }
-/* the robot's eye: mounted on a dark mat, opaque, never blurred */
+/* the robot's eye: mounted with a thin line and a soft inner shadow; near-opaque film, never blurred */
 :root[data-theme="drafting"] .ru-card:has(canvas), :root[data-theme="drafting"] .ru-card:has(video), :root[data-theme="drafting"] .ru-card:has(img),
 :root[data-theme="drafting"] .ru-card:has(svg), :root[data-theme="drafting"] .tile:has(canvas), :root[data-theme="drafting"] .tile:has(video),
 :root[data-theme="drafting"] .tile:has(img), :root[data-theme="drafting"] .tile:has(svg), :root[data-theme="drafting"] section.box:has(canvas),
 :root[data-theme="drafting"] section.box:has(video), :root[data-theme="drafting"] section.box:has(img), :root[data-theme="drafting"] section.box:has(svg) {
-  background-image: none; background-color: var(--panel); box-shadow: none;
-  border: 2px solid var(--mat); border-radius: 6px;
+  background-color: transparent; background-image: linear-gradient(170deg, var(--film-solid-hi), var(--film-solid-lo));
+  border: 1px solid var(--mount); border-radius: 6px;
+  box-shadow: inset 0 1px 3px var(--mount-shade);
 }
-:root[data-theme="drafting"] .tile .hd { border-bottom: 2px solid var(--mat); }
-:root[data-theme="drafting"] #map { outline: 2px solid var(--mat); outline-offset: 0; border-radius: 2px; }
-:root[data-theme="drafting"] #estop-result.good { border-color: var(--live); }
-:root[data-theme="drafting"] #estop-result.bad { border-color: var(--stop); background-image: none; background-color: var(--stop-bg); }
+:root[data-theme="drafting"] .tile .hd { border-bottom: 1px solid var(--mount); }
+:root[data-theme="drafting"] #map { outline: 1px solid var(--mount); outline-offset: 0; border-radius: 2px; }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result.good{ border-color: var(--live); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result.bad{ border-color: var(--stop); background-image: none; background-color: var(--stop-bg); }
 :root[data-theme="drafting"] .tile.latched { background-image: none; background-color: var(--stop-bg); }
 :root[data-theme="drafting"] #tools a:hover { border-color: var(--signal); }
 :root[data-theme="drafting"] .tile .foot { border-top: 1px solid var(--rule); }
@@ -120,66 +125,91 @@ description: Frosted drafting film on a light table: milky panels soften the sha
 :root[data-theme="drafting"] #lock-ctl button:hover, :root[data-theme="drafting"] #restart:hover:not(:disabled) {
   border-color: var(--signal); background: var(--signal-bg);
 }
-:root[data-theme="drafting"] button.ru.primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); font-weight: 600; }
-:root[data-theme="drafting"] button.ru.primary:hover:not(:disabled) { background: var(--signal); box-shadow: inset 0 0 0 2px var(--panel); }
+:root[data-theme="drafting"] button.ru.primary { background: var(--signal-bg); border: 1px solid var(--signal); box-shadow: inset 0 0 0 1px var(--signal); color: var(--signal); font-weight: 600; }
+:root[data-theme="drafting"] button.ru.primary:hover:not(:disabled) { background: var(--panel); }
 :root[data-theme="drafting"] button.ru.hazard { border: 1px solid var(--stop); color: var(--stop); }
 :root[data-theme="drafting"] button.ru.live { border: 1px solid var(--live); color: var(--live); }
 :root[data-theme="drafting"] input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),
 :root[data-theme="drafting"] select, :root[data-theme="drafting"] #theme-pick {
   border: 1px solid var(--line); border-radius: 3px; background-color: var(--panel); color: var(--ink);
 }
-:root[data-theme="drafting"] .pad .on { border-color: var(--signal); outline: 2px solid var(--signal); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) .pad .on{ border-color: var(--signal); outline: 2px solid var(--signal); }
 :root[data-theme="drafting"] .ru-table th { color: var(--muted); font-weight: 600; border-bottom-color: var(--line); }
 /* swerve teleop tool */
-:root[data-theme="drafting"] .pad, :root[data-theme="drafting"] .slider { border: 2px solid var(--line); }
-:root[data-theme="drafting"] .panel button { border-radius: var(--radius); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) .pad, :root[data-theme="drafting"] :where(body:not(:has(#veil))) .slider{ border: 2px solid var(--line); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) .panel button{ border-radius: var(--radius); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #enable{ background: var(--live-bg); color: var(--live); box-shadow: inset 0 0 0 2px var(--live); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #disable{ background: var(--panel); color: var(--ink); box-shadow: inset 0 0 0 2px var(--ink); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #clear, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #take, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #release{
+  background: var(--panel); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line);
+}
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #state{ border-radius: var(--radius); background: var(--panel); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #state.on{ background: var(--live-bg); color: var(--live); box-shadow: inset 0 0 0 2px var(--live); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #state.off{ background: var(--stop-bg); color: var(--stop); box-shadow: inset 0 0 0 2px var(--stop); }
 
 /* == ground == */
-/* a crisp drafting grid: minor every 8px, major every 40px; scrolls with the page */
+/* a calm drafting grid: one light line every 40px over a very slight vertical falloff; scrolls with the page */
 :root[data-theme="drafting"] body {
   background-color: var(--ground);
   background-image:
-    linear-gradient(to right, var(--grid-major) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
-    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
-  background-size: 40px 40px, 40px 40px, 8px 8px, 8px 8px;
-  background-position: -1px -1px;
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--ground-hi), var(--ground-lo));
+  background-size: 40px 40px, 40px 40px, 100% 100%;
+  background-position: -1px -1px, -1px -1px, 0 0;
+  background-repeat: repeat, repeat, no-repeat;
 }
 
 /* == alerting == */
 /* red = warning (e-stop, latched, chocked), amber = caution (covers, someone else's lease), green = normal */
-:root[data-theme="drafting"] button.ru-estop, :root[data-theme="drafting"] #estop {
-  background: var(--stop-fill); color: var(--on-stop); border: 2px solid var(--estop-edge);
-  border-radius: var(--radius); box-shadow: none; text-shadow: none; font-weight: 700;
+:root[data-theme="drafting"] button.ru-estop, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop{
+  background-color: var(--stop-fill); background-image: linear-gradient(to bottom, var(--stop-fill), var(--stop-fill-lo));
+  color: var(--on-stop); border: 2px solid var(--estop-edge); border-bottom-width: 3px; border-bottom-color: var(--stop-latched);
+  border-radius: var(--radius); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28); text-shadow: none; font-weight: 700;
 }
-:root[data-theme="drafting"] #estop:hover { background: var(--stop-fill); box-shadow: 0 0 0 3px var(--stop-bg); }
-:root[data-theme="drafting"] #estop:active { box-shadow: none; }
-:root[data-theme="drafting"] #estop small { opacity: 1; }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop:hover{ background-image: linear-gradient(to bottom, var(--stop-fill), var(--stop-fill-lo));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 0 0 3px var(--stop-bg); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop:active{ box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28); }
+:root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop small{ opacity: 1; }
 :root[data-theme="drafting"] button.ru-estop.latched {
-  background: var(--stop-latched); color: #FFFFFF; border-color: var(--stop-fill);
+  background: var(--stop-latched); background-image: none; color: #FFFFFF; border-color: var(--stop-fill);
   box-shadow: inset 0 0 0 3px var(--stop-latched), inset 0 0 0 5px #FFFFFF;
 }
 /* state band: the robot's voice; opaque, never blurred */
 :root[data-theme="drafting"] .ru-band small { opacity: 1; }
 :root[data-theme="drafting"] .ru-band.nominal { background: var(--line); }
 :root[data-theme="drafting"] .ru-band.live { background: var(--live-bg); color: var(--live); box-shadow: inset 0 -3px 0 var(--live); }
-:root[data-theme="drafting"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop); box-shadow: inset 0 -3px 0 var(--stop-latched); }
+:root[data-theme="drafting"] .ru-band.estop {
+  color: var(--on-stop); background: linear-gradient(to bottom, var(--stop-fill), var(--stop-fill-lo));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), inset 0 -3px 0 var(--stop-latched);
+}
 :root[data-theme="drafting"] .ru-band.chocked {
   color: var(--on-stop);
-  background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--chock-b) 14px 28px);
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.14)),
+              repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--chock-b) 14px 28px);
+  background-color: var(--stop-fill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -2px 0 var(--chock-b);
 }
 :root[data-theme="drafting"] .ru-band.covered {
   color: var(--on-caution);
-  background: repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-fill-b) 14px 28px);
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0)),
+              repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-fill-b) 14px 28px);
+  background-color: var(--caution-fill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -2px 0 #9A6A08;
 }
 /* pills and the lease: held by you = green, held by someone else = amber, free = plain line */
 :root[data-theme="drafting"] .ru-pill { border-radius: 3px; border-color: var(--line); padding: 1px 8px; }
 :root[data-theme="drafting"] .ru-pill.ru-ok { border: 1px solid var(--live); border-left-width: 4px; background: var(--live-bg); color: var(--live); font-weight: 600; }
 :root[data-theme="drafting"] .ru-pill.ru-warn { border: 1px solid var(--caution); border-left-width: 4px; background: var(--caution-bg); color: var(--caution); font-weight: 600; }
 :root[data-theme="drafting"] .ru-pill.ru-err { border: 1px solid var(--stop); border-left-width: 4px; background: var(--stop-bg); color: var(--stop); font-weight: 600; }
-:root[data-theme="drafting"] .pill { border-radius: 3px; }
-:root[data-theme="drafting"] .pill.bad { background: var(--stop-fill); color: var(--on-stop); }
+:root[data-theme="drafting"] .pill { border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line); }
+:root[data-theme="drafting"] .pill.ok { box-shadow: inset 0 0 0 1px var(--live), inset 3px 0 0 var(--live); }
+:root[data-theme="drafting"] .pill.warn { box-shadow: inset 0 0 0 1px var(--caution), inset 3px 0 0 var(--caution); }
+:root[data-theme="drafting"] .pill.bad { background: var(--stop-bg); color: var(--stop); box-shadow: inset 0 0 0 1.5px var(--stop), inset 3px 0 0 var(--stop); }
+/* camera page status pills */
+:root[data-theme="drafting"] .pill.streaming { box-shadow: inset 0 0 0 1px var(--live); }
+:root[data-theme="drafting"] .pill.err { box-shadow: inset 0 0 0 1.5px var(--stop); }
+:root[data-theme="drafting"] .pill.busy, :root[data-theme="drafting"] .pill.covered { box-shadow: inset 0 0 0 1px var(--caution); }
 :root[data-theme="drafting"] #locks .lock { border-radius: var(--radius); border-left-width: 4px; }
 :root[data-theme="drafting"] #uplink-banner { border-radius: var(--radius); }
 
@@ -187,7 +217,7 @@ description: Frosted drafting film on a light table: milky panels soften the sha
 @media (prefers-reduced-transparency: reduce) {
   :root[data-theme="drafting"] { --film-hi: var(--panel); --film-lo: var(--panel); }
   :root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] .tile, :root[data-theme="drafting"] section.box,
-  :root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+  :root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] :where(body:not(:has(#veil))) #estop-result{
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
 }

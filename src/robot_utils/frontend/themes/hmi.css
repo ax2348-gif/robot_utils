@@ -1,6 +1,6 @@
 /*
 title: Industrial HMI
-description: Control-room grey after ISA-101 high-performance HMI: everything normal is greyscale, so any colour on screen means something is abnormal or needs attention.
+description: Low-chroma control-room look after ISA-101 high-performance HMI: everything normal is greyscale, so any colour on screen means something is abnormal or needs attention.
 */
 
 /* == palette == (tokens only)
@@ -9,16 +9,18 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
    the only loud colours. --stop is the red used as text; --stop-fill is the saturated alarm red
    that e-stop buttons, the e-stop band and the chocked hatch are filled with. On charcoal a deep red
    can't reach 3:1 as a boundary, so the dark scheme lifts the fill and puts near-black text on it.
-   --annun-amber/-2 fill the "covered" hatch and caution annunciator pills; --caution is the darker
+   --annun-amber/-2 fill the "covered" hatch; --caution is the darker
    amber used as text. --frame / --bevel draw the faceplate edge and its top highlight. */
 :root[data-theme="hmi"] {
   color-scheme: light dark;
-  --ground: #D5D7D9; --panel: #E4E5E6; --ink: #1B1E21; --muted: #4D5359; --rule: #A3A8AD;
-  --frame: #8E9399; --bevel: #F5F6F6; --raise: #ECEDEE; --key-edge: #7F858B; --nominal: #858A90;
+  --ground: #EEF0F1; --panel: #FAFBFB; --ink: #1B1E21; --muted: #535960; --rule: #CDD1D4;
+  --frame: #AEB3B8; --bevel: #FFFFFF; --raise: #F3F4F5; --key-edge: #8C9197; --nominal: #959A9F;
+  --strip: #E7E9EB; --eye-frame: #3A3F44; --ground-top: #F2F4F5; --ground-bot: #EAECEE;
   --signal: #2F4A6B; --signal-ink: #FFFFFF;
   --stop: #B5121B; --caution: #8A5200; --live: #2B675C;
-  --stop-bg: #F4DEDD; --caution-bg: #F1E5CC; --live-bg: #D9E5E2; --signal-bg: #D2DBE5;
+  --stop-bg: #FBE8E7; --caution-bg: #FBF1DD; --live-bg: #E4EFEC; --signal-bg: #E4EAF1;
   --stop-fill: #C8102E; --on-stop: #FFFFFF; --stop-ink: #FFFFFF;
+  --stop-fill-top: #D8213C; --stop-fill-bot: #B50E28; --stop-gloss: #FFFFFF59;
   --stop-fill-2: #7A0A14; --hatch-dark: #7A0A14;
   --live-ink: #FFFFFF; --caution-ink: #FFFFFF;
   --annun-amber: #FFB000; --annun-amber-2: #E39A00; --on-amber: #1B1200;
@@ -28,12 +30,14 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="hmi"] {
-    --ground: #2A2D30; --panel: #33373B; --ink: #DCDFE2; --muted: #A4AAB0; --rule: #575D63;
-    --frame: #1C1F22; --bevel: #474C51; --raise: #3B4045; --key-edge: #6E747A; --nominal: #6E747A;
+    --ground: #26292C; --panel: #303438; --ink: #DCDFE2; --muted: #A4AAB0; --rule: #484D53;
+    --frame: #1A1D20; --bevel: #474C52; --raise: #393E43; --key-edge: #6E747A; --nominal: #6E747A;
+    --strip: #2A2E32; --eye-frame: #0C0E10; --ground-top: #2C2F33; --ground-bot: #212427;
     --signal: #93AECB; --signal-ink: #10161D;
     --stop: #FF7D72; --caution: #F2B640; --live: #78B9AB;
-    --stop-bg: #4C2625; --caution-bg: #403520; --live-bg: #253B36; --signal-bg: #2C3A4A;
+    --stop-bg: #45272A; --caution-bg: #3B3224; --live-bg: #243834; --signal-bg: #2B3846;
     --stop-fill: #FF3B30; --on-stop: #160000; --stop-ink: #160000;
+    --stop-fill-top: #FF5247; --stop-fill-bot: #E8302A; --stop-gloss: #FFFFFF40;
     --stop-fill-2: #E82C2C; --hatch-dark: #6E0A12;
     --live-ink: #0E1A17; --caution-ink: #1B1200;
     --annun-amber: #FFB000; --annun-amber-2: #E39A00; --on-amber: #1B1200;
@@ -62,7 +66,7 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
    Panels are inset faceplates: square, a 1px frame darker than the panel, and a 1px highlight on
    the top edge (a static inset shadow, no blur). Tighter padding for density. */
 :root[data-theme="hmi"] .ru-card, :root[data-theme="hmi"] #who,
-:root[data-theme="hmi"] section.box, :root[data-theme="hmi"] #tools a, :root[data-theme="hmi"] #estop-result {
+:root[data-theme="hmi"] section.box, :root[data-theme="hmi"] #tools a, :root[data-theme="hmi"] :where(body:not(:has(#veil))) #estop-result{
   border-color: var(--frame); border-radius: var(--radius); box-shadow: inset 0 1px 0 var(--bevel);
 }
 :root[data-theme="hmi"] .tile {   /* not the left edge: that stripe is the node's status */
@@ -85,7 +89,8 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
   border-color: var(--signal);
 }
 :root[data-theme="hmi"] button.ru.primary {
-  background: var(--signal); border-color: var(--signal); color: var(--signal-ink); box-shadow: none;
+  background: var(--signal-bg); border-color: var(--signal); color: var(--signal); font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--signal);
 }
 :root[data-theme="hmi"] button.ru.hazard { border-color: var(--stop); color: var(--stop); }
 :root[data-theme="hmi"] button.ru.live { border-color: var(--live); color: var(--live); }
@@ -95,33 +100,40 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
 }
 :root[data-theme="hmi"] .tile pre.logs { border-radius: var(--radius); border-color: var(--frame); }
 /* teleop tool keys: square corners like everything else (the round pad and slider stay round) */
-:root[data-theme="hmi"] .buttons button, :root[data-theme="hmi"] #clear, :root[data-theme="hmi"] #take,
-:root[data-theme="hmi"] #release, :root[data-theme="hmi"] #state { border-radius: var(--radius); }
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) .buttons button, :root[data-theme="hmi"] :where(body:not(:has(#veil))) #clear, :root[data-theme="hmi"] :where(body:not(:has(#veil))) #take,
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) #release, :root[data-theme="hmi"] :where(body:not(:has(#veil))) #state{ border-radius: var(--radius); }
 
-/* the robot's eye: camera tiles become a black viewport bezel in both schemes (a monitor set into
-   the console), not another grey faceplate; tokens are re-pointed locally so the header text and
-   links stay legible on the bezel. The map gets a hard black frame. */
-:root[data-theme="hmi"] .tile:has(.wrap) {
-  --dim: #A4AAB0; --acc: #93AECB; --line: #000;
-  background: #17191B; color: #DCDFE2; border-color: #000; box-shadow: inset 0 1px 0 #2E3236;
-}
-:root[data-theme="hmi"] .tile:has(.wrap) .hd { background: #222528; border-bottom-color: #000; }
+/* the robot's eye: camera tiles and the map get a thin dark frame (a monitor set into the
+   console) with a structural grey header strip, instead of a grey faceplate edge. */
+:root[data-theme="hmi"] .tile:has(.wrap), :root[data-theme="hmi"] .tile:has(canvas) { border-color: var(--eye-frame); box-shadow: none; }
+:root[data-theme="hmi"] .tile:has(.wrap) .hd, :root[data-theme="hmi"] .tile:has(canvas) .hd { background: var(--strip); border-bottom-color: var(--eye-frame); }
 :root[data-theme="hmi"] .tile .hd b { text-transform: uppercase; letter-spacing: .08em; }
 :root[data-theme="hmi"] .ro { border-radius: 0; background: #000c; color: #E4E6E8; }
-:root[data-theme="hmi"] #map { border-radius: 0; outline: 1px solid #000; outline-offset: -1px; }
+:root[data-theme="hmi"] #map { border-radius: 0; outline: 1px solid var(--eye-frame); outline-offset: -1px; }
+/* grey is for structure: table header rows and the camera page's sidebar sit on the strip grey */
+:root[data-theme="hmi"] .ru-table tr:first-child > th, :root[data-theme="hmi"] #who th { background: var(--strip); }
 
-/* == ground == flat control-room grey, no texture */
-:root[data-theme="hmi"] body { background: var(--ground); }
+/* == ground ==
+   Light: a near-white cool ground; the calm comes from low chroma, not darkness. Both schemes get
+   a very slight vertical falloff so the ground isn't one dead value (static, scrolls with the page). */
+:root[data-theme="hmi"] body {
+  background: var(--ground) linear-gradient(180deg, var(--ground-top), var(--ground-bot)) no-repeat;
+}
 :root[data-theme="hmi"] header { border-bottom-color: var(--frame); }
 
 /* == alerting ==
-   E-stop: the saturated alarm red in both schemes with white label, flat (no drop shadow). */
-:root[data-theme="hmi"] button.ru-estop, :root[data-theme="hmi"] #estop {
-  background: var(--stop-fill); color: var(--on-stop); border-radius: var(--radius);
-  letter-spacing: .08em;
+   E-stop: opaque --stop-fill with material: a slight vertical gradient (label measured at both ends),
+   a 1px inner highlight and a darker bottom edge. No drop shadow. */
+:root[data-theme="hmi"] button.ru-estop, :root[data-theme="hmi"] :where(body:not(:has(#veil))) #estop{
+  background: var(--stop-fill) linear-gradient(180deg, var(--stop-fill-top), var(--stop-fill-bot));
+  color: var(--on-stop); border-radius: var(--radius); letter-spacing: .08em;
+  box-shadow: inset 0 1px 0 var(--stop-gloss), inset 0 -3px 0 var(--stop-fill-2);
 }
-:root[data-theme="hmi"] #estop { border-color: var(--stop-fill-2); box-shadow: inset 0 -3px 0 var(--stop-fill-2); }
-:root[data-theme="hmi"] #estop:hover { background: var(--stop-fill); box-shadow: inset 0 -3px 0 var(--stop-fill-2), inset 0 0 0 2px var(--on-stop); }
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) #estop{ border-color: var(--stop-fill-2); }
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) #estop:hover{
+  background: var(--stop-fill) linear-gradient(180deg, var(--stop-fill-top), var(--stop-fill-bot));
+  box-shadow: inset 0 1px 0 var(--stop-gloss), inset 0 -3px 0 var(--stop-fill-2), inset 0 0 0 2px var(--on-stop);
+}
 :root[data-theme="hmi"] button.ru-estop.latched {
   background: var(--stop-fill-2); color: var(--on-stop); box-shadow: inset 0 0 0 3px var(--annun-amber);
 }
@@ -133,11 +145,13 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
   background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live);
 }
 :root[data-theme="hmi"] .ru-band.estop {
-  background: var(--stop-fill); color: var(--on-stop); box-shadow: inset 0 -3px 0 var(--stop-fill-2);
+  background: var(--stop-fill) linear-gradient(180deg, var(--stop-fill-top), var(--stop-fill-bot));
+  color: var(--on-stop); box-shadow: inset 0 1px 0 var(--stop-gloss), inset 0 -3px 0 var(--stop-fill-2);
 }
 :root[data-theme="hmi"] .ru-band.chocked {
   color: var(--on-stop);
   background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--hatch-dark) 14px 28px);
+  box-shadow: inset 0 1px 0 var(--stop-gloss), inset 0 -3px 0 var(--hatch-dark);
 }
 /* dark scheme: the hatch's dark stripe is too dark for the near-black label, so the label sits on a
    solid --stop-fill chip (light scheme: white reads on both stripes, chip is the same red anyway) */
@@ -145,29 +159,32 @@ description: Control-room grey after ISA-101 high-performance HMI: everything no
 :root[data-theme="hmi"] .ru-band.covered {
   color: var(--on-amber);
   background: repeating-linear-gradient(135deg, var(--annun-amber) 0 14px, var(--annun-amber-2) 14px 28px);
+  box-shadow: inset 0 1px 0 #FFFFFF59, inset 0 -3px 0 #B87A00;
 }
-/* pills: square tags. Alarms (error, caution, "held by someone else") are filled annunciators;
-   "you hold the lease" is the restrained live state; a free lease stays plain grey. */
+/* pills: square tags, tint + strong line + bold text; readable without colour by line style:
+   error = 2px solid edge, caution / "held by someone else" = dashed edge, "you hold the lease" =
+   a solid left bar, a free lease stays plain grey. Only the e-stop and the bands are solid fills. */
 :root[data-theme="hmi"] .ru-pill, :root[data-theme="hmi"] .pill {
   border-radius: var(--radius); font-weight: 600; letter-spacing: .03em;
 }
 :root[data-theme="hmi"] .ru-pill { border-color: var(--frame); background: var(--raise); }
 :root[data-theme="hmi"] .ru-pill.ru-ok { border-color: var(--live); background: var(--live-bg); color: var(--live); box-shadow: inset 3px 0 0 var(--live); }
 :root[data-theme="hmi"] .ru-pill.ru-err, :root[data-theme="hmi"] .pill.bad, :root[data-theme="hmi"] .pill.err {
-  border-color: var(--stop-fill-2); background: var(--stop-fill); color: var(--on-stop);
+  border: 1px solid var(--stop); background: var(--stop-bg); color: var(--stop); font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--stop);
 }
 :root[data-theme="hmi"] .ru-pill.ru-warn, :root[data-theme="hmi"] .pill.warn,
 :root[data-theme="hmi"] .pill.busy, :root[data-theme="hmi"] .pill.covered {
-  border-color: var(--caution); background: var(--annun-amber); color: var(--on-amber);
+  border: 1px dashed var(--caution); background: var(--caution-bg); color: var(--caution); font-weight: 700;
 }
 :root[data-theme="hmi"] .pill.ok, :root[data-theme="hmi"] .pill.streaming { background: var(--live-bg); color: var(--live); }
 :root[data-theme="hmi"] #locks .lock, :root[data-theme="hmi"] #uplink-banner { border-radius: var(--radius); }
 :root[data-theme="hmi"] #locks .lock.chock { box-shadow: inset 4px 0 0 var(--stop-fill); }
 :root[data-theme="hmi"] #locks .lock.cover { box-shadow: inset 4px 0 0 var(--annun-amber); }
 :root[data-theme="hmi"] .tile.latched { box-shadow: inset 0 0 0 1px var(--stop-fill); }
-/* teleop tool: its state chip and e-stop on the same alarm fill */
-:root[data-theme="hmi"] #state.off { background: var(--stop-fill); color: var(--on-stop); }
-:root[data-theme="hmi"] #state.on { background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live); }
+/* teleop tool: its state chip as tint + strong line (the e-stop beside it is the fill) */
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) #state.off{ background: var(--stop-bg); color: var(--stop); box-shadow: inset 0 0 0 2px var(--stop); }
+:root[data-theme="hmi"] :where(body:not(:has(#veil))) #state.on{ background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live); }
 :root[data-theme="hmi"] :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 
 /* == motion == none: an HMI holds still so that change means something */
