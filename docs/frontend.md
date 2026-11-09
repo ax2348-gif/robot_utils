@@ -261,6 +261,31 @@ tail -f ~/.local/state/robot_utils/nginx/access.log | jq -c '{t, ip, uri, status
 
 `--no-observe` starts the frontend without the observer.
 
+## Editing pages
+
+Pages are HTML and JavaScript strings, isolated from the nodes' logic:
+- node pages in `nodes/<node>/page.py` (and `page_viz.py`);
+- the shared toolkit in `nodes/common/ui_assets.py`;
+- the landing page and tools in `frontend/*.html`.
+
+The robot's guards are all server-side, so no page edit can defeat them: speed limits, the 0.25 s
+command timeout, leases, e-stop latches, chocks, pose_servo's caps, agent_nav's profiles. Some page
+code still matters for safety, though. When restyling:
+- **Restyle through CSS and markup.** Keep element ids and the wiring the contracts check:
+  - `#estop` and `RU.estopButton($("#estop"))` on the swerve, pose_servo and description pages;
+  - agent_nav's and the teleop tools' own e-stop handlers;
+  - the landing page's E-STOP ALL (`estopAll` / `estopOne`) and lock buttons.
+- **Treat the toolkit's functions as an API.** Change how `RU.estopButton`, `RU.leaseWidget` (and its
+  300 ms renewal) and `RU.api` look, not what they do.
+- **Never drop a teleop stop path:**
+  - the swerve page sends commands only while a key is held, and releases on key-up, window blur and
+    pointer-up/leave;
+  - the teleop tools zero a stick on pointer-up, cancel or lost capture, and disable the base when
+    the tab is hidden or the page closes.
+- **Run `tests/test_pages_contract.py`.** It pins all of the above and checks that every page's
+  JavaScript parses (`node --check`; install Node.js in the test environment with
+  `conda install -c conda-forge nodejs`, or the check is skipped).
+
 ## Port 80 without root
 
 Once per machine, as the user (the frontend never runs sudo, and neither does `install.sh`,
