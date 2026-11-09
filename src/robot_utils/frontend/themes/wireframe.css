@@ -22,6 +22,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
   --signal-ink: #FFFFFF;
   --line-soft: #B4B4B2; --tick: #1A1A1A; --eye: #1A1A1A;
   --grid-dot: #BDBDB9;
+  --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%23C2C2BE'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%238A8A86' stroke-width='1'/%3E%3C/svg%3E");
   --plot-1: #262626; --plot-2: #4C68B0; --plot-3: #7A7A7A; --plot-4: #A0457E; --plot-5: #7D6A3A;
   --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -37,6 +38,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
     --signal-ink: #0F1010;
     --line-soft: #4A4D4B; --tick: #E8EAE8; --eye: #E8EAE8;
     --grid-dot: #3D403E;
+    --grid-tile: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg fill='%233A3D3B'%3E%3Ccircle cx='12' cy='12' r='.9'/%3E%3Ccircle cx='12' cy='36' r='.9'/%3E%3Ccircle cx='12' cy='60' r='.9'/%3E%3Ccircle cx='12' cy='84' r='.9'/%3E%3Ccircle cx='12' cy='108' r='.9'/%3E%3Ccircle cx='36' cy='12' r='.9'/%3E%3Ccircle cx='36' cy='36' r='.9'/%3E%3Ccircle cx='36' cy='60' r='.9'/%3E%3Ccircle cx='36' cy='84' r='.9'/%3E%3Ccircle cx='36' cy='108' r='.9'/%3E%3Ccircle cx='60' cy='12' r='.9'/%3E%3Ccircle cx='60' cy='36' r='.9'/%3E%3Ccircle cx='60' cy='84' r='.9'/%3E%3Ccircle cx='60' cy='108' r='.9'/%3E%3Ccircle cx='84' cy='12' r='.9'/%3E%3Ccircle cx='84' cy='36' r='.9'/%3E%3Ccircle cx='84' cy='60' r='.9'/%3E%3Ccircle cx='84' cy='84' r='.9'/%3E%3Ccircle cx='84' cy='108' r='.9'/%3E%3Ccircle cx='108' cy='12' r='.9'/%3E%3Ccircle cx='108' cy='36' r='.9'/%3E%3Ccircle cx='108' cy='60' r='.9'/%3E%3Ccircle cx='108' cy='84' r='.9'/%3E%3Ccircle cx='108' cy='108' r='.9'/%3E%3C/g%3E%3Cpath d='M55 60.5h11M60.5 55v11' stroke='%23686C69' stroke-width='1'/%3E%3C/svg%3E");
     --plot-1: #E8EAE8; --plot-2: #8FA6E8; --plot-3: #7E827F; --plot-4: #E08CC0; --plot-5: #CDB88E;
   }
 }
@@ -71,7 +73,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
    registration ticks inside the corners. Inner divisions are dashed construction lines. */
 :root[data-theme="wireframe"] .ru-card, :root[data-theme="wireframe"] .tile,
 :root[data-theme="wireframe"] section.box, :root[data-theme="wireframe"] #who,
-:root[data-theme="wireframe"] #estop-result {
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) #estop-result{
   border-radius: 0; box-shadow: none; border-top-color: var(--rule); border-right-color: var(--rule);
   border-bottom-color: var(--rule);
   background-image:
@@ -86,7 +88,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 }
 :root[data-theme="wireframe"] .ru-card, :root[data-theme="wireframe"] .tile:not(.latched),
 :root[data-theme="wireframe"] section.box, :root[data-theme="wireframe"] #who,
-:root[data-theme="wireframe"] #estop-result:not(.bad), :root[data-theme="wireframe"] #tools a {
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) #estop-result:not(.bad), :root[data-theme="wireframe"] #tools a {
   background-color: var(--ground);   /* same colour as the sheet: still reads unfilled, but the dots stop at the outline */
 }
 :root[data-theme="wireframe"] .ru-card:not(.tile), :root[data-theme="wireframe"] section.box,
@@ -160,28 +162,32 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 }
 
 /* swerve teleop tool: square controls, crosshair construction lines through the pads */
-:root[data-theme="wireframe"] .panel button { border-radius: 0; }
-:root[data-theme="wireframe"] .panel > #state { border-radius: 0; font-family: var(--mono); letter-spacing: .08em; }
-:root[data-theme="wireframe"] .panel > #state:not(.on):not(.off) {
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .panel button{ border-radius: 0; }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .panel > #state{ border-radius: 0; font-family: var(--mono); letter-spacing: .08em; }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .panel > #state:not(.on):not(.off){
   background: var(--signal-bg); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule);
 }
-:root[data-theme="wireframe"] .panel > #state.off { color: var(--on-stop); background: var(--stop-fill); }
-:root[data-theme="wireframe"] .pad, :root[data-theme="wireframe"] .slider {
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .panel > #state.off{ color: var(--on-stop); background: var(--stop-fill); }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .pad, :root[data-theme="wireframe"] :where(body:not(:has(#veil))) .slider{
   border-color: var(--rule);
   background-image: linear-gradient(var(--line-soft), var(--line-soft)), linear-gradient(var(--line-soft), var(--line-soft));
   background-size: 1px 100%, 100% 1px; background-position: center, center; background-repeat: no-repeat;
 }
-:root[data-theme="wireframe"] .slider { border-radius: 0; background-size: 1px 100%, 0 0; }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) .slider{ border-radius: 0; background-size: 1px 100%, 0 0; }
 
 /* == ground == -------------------------------------------------------------------------------
-   Engineering dot paper: one 1.5px dot every 24px. Sparse dots, not lines, so nothing strikes
-   through text and nothing aliases into uneven lines; panels are filled with the ground colour, so
-   the dots stop at each outline. Reusable on its own: it needs only --ground and --grid-dot. */
+   Engineering dot paper with two scales: a faint dot every 24px and a small, slightly stronger
+   cross every 120px (one 120px SVG tile per scheme, --grid-tile: crisp at any zoom, no aliasing
+   lines). Nothing strikes through text: panels take the ground fill, so the sheet only shows
+   between outlines. Reusable on its own: it needs only --ground and --grid-tile. */
+:root[data-theme="wireframe"] .ru-head, :root[data-theme="wireframe"] main > header {
+  background-color: var(--ground);   /* header text sits on clean sheet, like text inside panels */
+}
 :root[data-theme="wireframe"] body {
   background-color: var(--ground);
-  background-image: radial-gradient(circle at 1px 1px, var(--grid-dot) 0 1px, transparent 1.5px);
-  background-size: 24px 24px;
-  background-position: 11px 11px;
+  background-image: var(--grid-tile);
+  background-size: 120px 120px;
+  background-position: -1px -1px;
 }
 /* main header of the landing page reads as a drawing's title block: a ruled line beneath */
 :root[data-theme="wireframe"] main > header { border-bottom: 1px solid var(--rule); padding-bottom: 12px; }
@@ -189,13 +195,13 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 /* == alerting == -----------------------------------------------------------------------------
    Alarms are the only solid ink on the sheet. E-stops: a full opaque --stop-fill block with
    --on-stop lettering and one thin inner rule (a drafted double border). */
-:root[data-theme="wireframe"] button.ru-estop, :root[data-theme="wireframe"] #estop {
+:root[data-theme="wireframe"] button.ru-estop, :root[data-theme="wireframe"] :where(body:not(:has(#veil))) #estop{
   background: var(--stop-fill); color: var(--on-stop); border-radius: 0;
   font-family: var(--mono); letter-spacing: .1em;
 }
 :root[data-theme="wireframe"] button.ru-estop { box-shadow: inset 0 0 0 3px var(--stop-fill), inset 0 0 0 4px var(--on-stop); }
-:root[data-theme="wireframe"] #estop:hover { background: color-mix(in srgb, var(--stop-fill) 86%, #000); }
-:root[data-theme="wireframe"] #estop small { font-family: var(--font); letter-spacing: 0; }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) #estop:hover{ background: color-mix(in srgb, var(--stop-fill) 86%, #000); }
+:root[data-theme="wireframe"] :where(body:not(:has(#veil))) #estop small{ font-family: var(--font); letter-spacing: 0; }
 :root[data-theme="wireframe"] button.ru-estop.latched {
   background: var(--stop-latched); color: var(--on-stop);
   box-shadow: inset 0 0 0 3px var(--stop-latched), inset 0 0 0 5px var(--on-stop);
@@ -209,11 +215,11 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
 :root[data-theme="wireframe"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop); }
 :root[data-theme="wireframe"] .ru-band.chocked {
   color: var(--on-stop);
-  background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--stop-latched) 14px 28px);
+  background: var(--stop-fill) repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--stop-latched) 14px 28px);
 }
 :root[data-theme="wireframe"] .ru-band.covered {
   color: var(--on-caution);
-  background: repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-hatch) 14px 28px);
+  background: var(--caution-fill) repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-hatch) 14px 28px);
 }
 :root[data-theme="wireframe"] .ru-band.live {
   background: var(--live-bg); color: var(--live); box-shadow: inset 0 -2px 0 var(--live);
