@@ -64,14 +64,25 @@ async (args) => {
     for (let i = stack.length - 1; i >= 0; i--) out = blend(stack[i], out);
     return out; };
   // a gradient (hatched bands, glass sheens) behind the text: every colour stop counts, worst case wins
+  // Only layers that cover the box count (hatches, sheens); small tiled decorations such as corner
+  // ticks or a dot grid (a background-size, or a radial gradient) are lines, not what text sits on.
+  const layers = (v) => { const out = []; let d = 0, cur = "";
+    for (const ch of v){ if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && !d){ out.push(cur.trim()); cur = ""; } else cur += ch; }
+    if (cur.trim()) out.push(cur.trim()); return out; };
   const stops = (el) => { for (let e = el; e; e = e.parentElement){
-      const img = getComputedStyle(e).backgroundImage;
-      if (img && img !== "none"){ const cs = (img.match(/rgba?\([^)]+\)/g) || []).map(parse).filter(Boolean);
+      const st = getComputedStyle(e), img = st.backgroundImage;
+      if (img && img !== "none"){
+        const imgs = layers(img), sizes = layers(st.backgroundSize);
+        const cs = [];
+        imgs.forEach((g, i) => { const size = sizes[i % sizes.length] || "auto";
+          const covers = /^(auto|cover|100%( 100%)?|auto auto)$/.test(size);
+          if (!covers || !/^(repeating-)?linear-gradient/.test(g)) return;
+          for (const m of g.match(/rgba?\([^)]+\)/g) || []){ const c = parse(m); if (c && c.a > 0) cs.push(c); } });
         if (cs.length) return cs.map(c => blend(c, behind(e))); }
-      const c = parse(getComputedStyle(e).backgroundColor); if (c && c.a >= 1) return []; }
+      const c = parse(st.backgroundColor); if (c && c.a >= 1) return []; }
     return []; };
   const textContrast = (el) => { const fg = parse(getComputedStyle(el).color); if (!fg) return 21;
-    const bgs = [behind(el), ...stops(el)];
+    const st = stops(el), bgs = st.length ? st : [behind(el)];   // a covering gradient is what the text sits on
     return Math.min(...bgs.map(bg => ratio(blend(fg, bg), bg))); };
   const hiddenBy = (el) => { for (let e = el; e && e !== document.documentElement; e = e.parentElement){
       const s = getComputedStyle(e);
