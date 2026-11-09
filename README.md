@@ -83,6 +83,11 @@ page. The shared conventions (routing, record framing, time sync, `/meta`, lease
 The older single-file camera viewer (`python examples/orbbec_web_viewer.py`, port 8080) still
 works; design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md).
 
+## Administration
+
+SSH access to the robot is key-only and managed from a config file on the robot (GitHub accounts
+and extra keys): `python -m robot_utils.admin.ssh_access`, see [docs/ssh_access.md](docs/ssh_access.md).
+
 ## The environment
 
 **One env, Python ≥ 3.12.** LeRobot ≥ 0.5 requires Python 3.12 and is not capped. The robot
