@@ -322,7 +322,7 @@ the page contracts are untouched):
 
 | Hook | What |
 |---|---|
-| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_nav`, `description`, `estimator`, `perception3d`, `camera`, `landing` |
+| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_nav`, `description`, `estimator`, `perception3d`, `camera`, `landing`, and the tools `swerve_teleop`, `remote_teleop` (which share element ids, so scope tool rules by page) |
 | `.ru-head` | the header row: title, status, e-stop (every e-stop lives here, so it is above the fold on a phone) |
 | `.ru-body`, `.ru-side` | the main grid of panels, and its side column where the page has one |
 | `[data-panel="<name>"]` | one panel, unique within its page (`map`, `jog`, `events`, ...) |

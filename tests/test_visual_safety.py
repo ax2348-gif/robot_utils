@@ -44,6 +44,12 @@ def test_layout_contract(f, kind):
         assert '<div id="band"></div>' in s
 
 
+@pytest.mark.parametrize("tool", ["swerve_teleop", "remote_teleop"])
+def test_tools_name_their_page(tool):
+    """The teleop tools share element ids (#estop, #state, #take ...); themes tell them apart by page."""
+    assert f'<body data-page="{tool}"' in (ROOT / "frontend" / "tools" / f"{tool}.html").read_text()
+
+
 def test_estop_lives_in_the_header():
     """Every node page with an e-stop puts it in the header row, so it is above the fold on a phone."""
     for f in ["nodes/swerve/page.py", "nodes/pose_servo/page.py", "nodes/agent_nav/page.py", "nodes/description/page.py"]:
