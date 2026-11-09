@@ -1,0 +1,187 @@
+/*
+title: Glass cockpit
+description: Dark only. An aviation glass cockpit: black displays in grey bezels, EICAS colours (red warning, amber caution, green engaged, cyan selectable, magenta command, white measured), monospaced readouts and uppercase legends.
+*/
+/* Colour philosophy (FAA AC 25-11 / EICAS):
+     red     --stop     warnings only (e-stop, chocked, errors); never a plot series
+     amber   --caution  cautions (camera covered, controls held by someone else)
+     green   --live     normal / engaged (motors live, you have the controls)
+     cyan    --signal   selectable: soft keys, links, focus, and values the operator types in
+     magenta --plot-1   command / target data (the teleop knob, the first plot series)
+     white   --ink      measured data and primary text (--plot-2 = the teleop "achieved" ring)
+   Deliberately single-scheme (color-scheme: dark): every token is set once, here. */
+
+/* == palette == */
+:root[data-theme="cockpit"] {
+  color-scheme: dark;
+  --ground: #05080C; --panel: #0C1219; --ink: #F2F5F7; --muted: #A7B2BD; --rule: #3A4654;
+  --signal: #2FE3EE; --stop: #FF3B30; --caution: #FFB000; --live: #3DDC78;
+  --stop-bg: #2B0C0A; --caution-bg: #261A02; --live-bg: #072116; --signal-bg: #062730;
+  --stop-fill: #FF3B30; --on-stop: #0A0000;           /* master-warning red, dark legend */
+  --live-ink: #03140A; --caution-ink: #1B1200; --signal-ink: #001619;
+  /* data: magenta command, white measured, then cyan / green / violet (series 2+ are also dashed) */
+  --plot-1: #FF5CE6; --plot-2: #F2F5F7; --plot-3: #5CD6FF; --plot-4: #7EE05A; --plot-5: #8F7BFF;
+  --bezel: #5A6775;    /* the lighter frame line of a display or entry field */
+  --entry: #03060A;    /* the black window of an entry field or a sensor view */
+  --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 2px;
+}
+
+/* == type == */
+:root[data-theme="cockpit"] body { letter-spacing: .01em; font-variant-numeric: tabular-nums; }
+:root[data-theme="cockpit"] h1, :root[data-theme="cockpit"] h2, :root[data-theme="cockpit"] h3 {
+  text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+:root[data-theme="cockpit"] header .sub { text-transform: none; letter-spacing: .02em; }
+:root[data-theme="cockpit"] a { color: var(--signal); }
+/* readouts: monospaced, tabular, slashed zero */
+:root[data-theme="cockpit"] .ru-num, :root[data-theme="cockpit"] code, :root[data-theme="cockpit"] pre,
+:root[data-theme="cockpit"] .ru-table td, :root[data-theme="cockpit"] .kv span:nth-child(even),
+:root[data-theme="cockpit"] .tile dd, :root[data-theme="cockpit"] #who td.num,
+:root[data-theme="cockpit"] .mono, :root[data-theme="cockpit"] .status, :root[data-theme="cockpit"] .twist td,
+:root[data-theme="cockpit"] .tile .hd .st, :root[data-theme="cockpit"] .tile .foot .age,
+:root[data-theme="cockpit"] .ro {
+  font-family: var(--mono); font-variant-numeric: tabular-nums slashed-zero; }
+/* legends: uppercase, letter-spaced, grey */
+:root[data-theme="cockpit"] th, :root[data-theme="cockpit"] .tile dt,
+:root[data-theme="cockpit"] .kv span:nth-child(odd), :root[data-theme="cockpit"] label.row span.k,
+:root[data-theme="cockpit"] div.row span.k, :root[data-theme="cockpit"] .tile .kind,
+:root[data-theme="cockpit"] .legend {
+  text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+:root[data-theme="cockpit"] .tile .title, :root[data-theme="cockpit"] #tools strong,
+:root[data-theme="cockpit"] .tile .hd b {
+  text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+
+/* == surfaces == */
+/* display panels: grey bezel, black inner line */
+:root[data-theme="cockpit"] .ru-card, :root[data-theme="cockpit"] .tile, :root[data-theme="cockpit"] #who,
+:root[data-theme="cockpit"] section.box, :root[data-theme="cockpit"] #tools a,
+:root[data-theme="cockpit"] #estop-result {
+  background: var(--panel); border-color: var(--rule); border-radius: 3px;
+  box-shadow: inset 0 0 0 1px #000, inset 0 1px 0 #ffffff0d; }
+:root[data-theme="cockpit"] .ru-card h2, :root[data-theme="cockpit"] .ru-card h3,
+:root[data-theme="cockpit"] #who h2, :root[data-theme="cockpit"] section.box h2,
+:root[data-theme="cockpit"] #estop-result h2 {
+  color: var(--ink); padding-bottom: 4px; border-bottom: 1px solid var(--rule); }
+:root[data-theme="cockpit"] .tile .head { padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+:root[data-theme="cockpit"] #tools a:hover { border-color: var(--signal); }
+:root[data-theme="cockpit"] .tile.latched { background: var(--stop-bg); }
+:root[data-theme="cockpit"] .ru-table td, :root[data-theme="cockpit"] .ru-table th,
+:root[data-theme="cockpit"] #who th, :root[data-theme="cockpit"] #who td { border-bottom-color: var(--rule); }
+:root[data-theme="cockpit"] .tile pre.logs { background: var(--entry); border-radius: 2px; }
+:root[data-theme="cockpit"] .bub, :root[data-theme="cockpit"] .banner, :root[data-theme="cockpit"] .thumbs img,
+:root[data-theme="cockpit"] #uplink-banner, :root[data-theme="cockpit"] .caution,
+:root[data-theme="cockpit"] #locks .lock { border-radius: 2px; }
+
+/* the robot's eye: camera, point cloud, maps sit in a black sensor window with a double bezel
+   (static, unblurred shadows only: these elements repaint) */
+:root[data-theme="cockpit"] .tile:has(.wrap) {
+  background: #000; border-color: var(--bezel); border-radius: 2px;
+  box-shadow: 0 0 0 2px #000, 0 0 0 3px var(--rule); }
+:root[data-theme="cockpit"] .tile:has(.wrap) .hd { background: var(--panel); border-bottom-color: var(--bezel); }
+:root[data-theme="cockpit"] .wrap { background: #000; }
+:root[data-theme="cockpit"] .ro { background: #000c; border-radius: 2px; color: var(--ink); }
+:root[data-theme="cockpit"] #map, :root[data-theme="cockpit"] canvas.view,
+:root[data-theme="cockpit"] #poly img, :root[data-theme="cockpit"] .live img {
+  background: var(--entry); border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--bezel), 0 0 0 3px #000, 0 0 0 4px var(--rule); }
+
+/* soft keys: cyan outline; primary is filled cyan with a dark legend */
+:root[data-theme="cockpit"] button.ru, :root[data-theme="cockpit"] .ru-btn,
+:root[data-theme="cockpit"] .tile .ctl button, :root[data-theme="cockpit"] #restart,
+:root[data-theme="cockpit"] #lock-ctl button {
+  background: var(--panel); color: var(--signal); border: 1px solid var(--signal); border-radius: 2px;
+  text-transform: uppercase; letter-spacing: .08em; font-weight: 600; box-shadow: inset 0 0 0 1px #000; }
+:root[data-theme="cockpit"] button.ru:hover, :root[data-theme="cockpit"] .tile .ctl button:hover,
+:root[data-theme="cockpit"] #restart:hover, :root[data-theme="cockpit"] #lock-ctl button:hover {
+  background: var(--signal-bg); border-color: var(--signal); }
+:root[data-theme="cockpit"] .tile .ctl button.link { border-color: transparent; background: none; box-shadow: none; }
+:root[data-theme="cockpit"] button.ru.primary { background: var(--signal); border-color: var(--signal); color: var(--signal-ink); }
+:root[data-theme="cockpit"] button.ru.primary:hover { background: #7AF0F6; }
+:root[data-theme="cockpit"] button.ru.hazard { border-color: var(--stop); color: var(--stop); }
+:root[data-theme="cockpit"] button.ru.hazard:hover { background: var(--stop-bg); }
+:root[data-theme="cockpit"] button.ru.live { border-color: var(--live); color: var(--live); }
+:root[data-theme="cockpit"] button.ru.live:hover { background: var(--live-bg); }
+:root[data-theme="cockpit"] #abort { border-radius: 2px; text-transform: uppercase; letter-spacing: .08em; }
+:root[data-theme="cockpit"] .pad .on { background: var(--signal-bg); }
+/* teleop tool: filled buttons carry --panel (dark) legends on a token fill */
+:root[data-theme="cockpit"] .panel button { border-radius: 3px; text-transform: uppercase; letter-spacing: .04em; }
+:root[data-theme="cockpit"] #state { border-radius: 2px; text-transform: uppercase; letter-spacing: .12em;
+  background: var(--panel); border: 1px solid var(--bezel); }
+:root[data-theme="cockpit"] #state.on { background: var(--live-bg); border-color: var(--live); color: var(--live); }
+:root[data-theme="cockpit"] #state.off { background: var(--stop-fill); border-color: var(--stop-fill); color: var(--on-stop); }
+
+/* entry fields: black window, cyan operator-entered values */
+:root[data-theme="cockpit"] input:not([type=range]):not([type=color]):not([type=checkbox]):not([type=radio]),
+:root[data-theme="cockpit"] select, :root[data-theme="cockpit"] textarea, :root[data-theme="cockpit"] #theme-pick {
+  background: var(--entry); color: var(--signal); border: 1px solid var(--bezel); border-radius: 2px;
+  font-variant-numeric: tabular-nums slashed-zero; }   /* Plex, not mono: page forms size fields to Plex */
+:root[data-theme="cockpit"] input::placeholder, :root[data-theme="cockpit"] textarea::placeholder { color: var(--muted); }
+:root[data-theme="cockpit"] input[type=range], :root[data-theme="cockpit"] input[type=checkbox],
+:root[data-theme="cockpit"] input[type=radio] { accent-color: var(--signal); }
+:root[data-theme="cockpit"] :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+/* == ground == */
+/* the instrument panel: near-black with a faint glare falling off from the top (not fixed: no repaint on scroll) */
+:root[data-theme="cockpit"] body {
+  background: var(--ground) linear-gradient(180deg, #0A1018 0, var(--ground) 220px) no-repeat; color: var(--ink); }
+
+/* == alerting == */
+/* E-STOP: master-warning pushbutton. Solid red, dark legend, light bezel ring */
+:root[data-theme="cockpit"] button.ru-estop, :root[data-theme="cockpit"] #estop {
+  background: var(--stop-fill); color: var(--on-stop); border: 3px solid #E6EBEF; border-radius: 4px;
+  text-transform: uppercase; letter-spacing: .14em; font-weight: 700;
+  box-shadow: inset 0 0 0 2px #000, 0 0 0 1px #000; }
+:root[data-theme="cockpit"] #estop:hover, :root[data-theme="cockpit"] button.ru-estop:hover { background: #FF5A50; }
+:root[data-theme="cockpit"] #estop:active { box-shadow: inset 0 0 0 2px #000, 0 0 0 1px #000; }
+:root[data-theme="cockpit"] #estop small { opacity: 1; letter-spacing: .04em; text-transform: none; }
+:root[data-theme="cockpit"] #estop:focus-visible { outline: 3px solid var(--signal); outline-offset: 3px; }
+/* latched: lit and held in, steady (no flashing): red bezel, black + white inner rings, red halo */
+:root[data-theme="cockpit"] button.ru-estop.latched {
+  background: var(--stop-fill); color: var(--on-stop); border-color: var(--stop-fill);
+  box-shadow: inset 0 0 0 3px #000, inset 0 0 0 5px #F2F5F7, 0 0 0 2px var(--ground), 0 0 0 4px var(--stop-fill); }
+
+/* the state band: the robot's voice, an EICAS message line */
+:root[data-theme="cockpit"] .ru-band { letter-spacing: .03em; }
+:root[data-theme="cockpit"] .ru-band b { text-transform: uppercase; letter-spacing: .12em; }
+:root[data-theme="cockpit"] .ru-band small { opacity: 1; }
+:root[data-theme="cockpit"] .ru-band.nominal { background: var(--rule); }
+:root[data-theme="cockpit"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop);
+  box-shadow: inset 0 -2px 0 #000; }
+:root[data-theme="cockpit"] .ru-band.live { background: var(--live-bg); color: var(--live);
+  box-shadow: inset 0 -2px 0 var(--live); }
+/* hatched locks: colour / black stripes; the legend sits on solid chips of the lock colour */
+:root[data-theme="cockpit"] .ru-band.chocked { color: var(--on-stop);
+  background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, #000 14px 28px); }
+:root[data-theme="cockpit"] .ru-band.covered { color: var(--caution-ink);
+  background: repeating-linear-gradient(135deg, var(--caution) 0 14px, #000 14px 28px); }
+:root[data-theme="cockpit"] .ru-band.chocked .in > :not(:empty) { background: var(--stop-fill); padding: 1px 6px; border-radius: 2px; }
+:root[data-theme="cockpit"] .ru-band.covered .in > :not(:empty) { background: var(--caution); padding: 1px 6px; border-radius: 2px; }
+
+/* annunciators */
+:root[data-theme="cockpit"] .ru-pill, :root[data-theme="cockpit"] .pill {
+  border-radius: 2px; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+:root[data-theme="cockpit"] .ru-pill { border-color: var(--bezel); color: var(--muted); }
+:root[data-theme="cockpit"] .ru-pill.ru-ok { color: var(--live); }
+:root[data-theme="cockpit"] .ru-pill.ru-err { color: var(--stop); }
+:root[data-theme="cockpit"] .ru-pill.ru-warn { color: var(--caution); }
+:root[data-theme="cockpit"] .pill { border: 1px solid transparent; }
+:root[data-theme="cockpit"] .pill.ok { border-color: var(--live); }
+:root[data-theme="cockpit"] .pill.warn { border-color: var(--caution); }
+:root[data-theme="cockpit"] .pill.bad { background: var(--stop-fill); color: var(--on-stop); border-color: var(--stop-fill); }
+/* who has the controls (the lease): a flight-mode annunciator. Free = dashed empty box;
+   you = engaged, boxed in green; someone else = amber box */
+:root[data-theme="cockpit"] .ru-pill[data-k="who"] {
+  font-family: var(--mono); padding: 2px 10px; border: 1px dashed var(--bezel); background: var(--entry);
+  color: var(--muted); letter-spacing: .1em; }
+:root[data-theme="cockpit"] .ru-pill[data-k="who"].ru-ok {
+  border: 2px solid var(--live); background: var(--live-bg); color: var(--live); padding: 1px 9px; }
+:root[data-theme="cockpit"] .ru-pill[data-k="who"].ru-warn {
+  border: 2px solid var(--caution); background: var(--caution-bg); color: var(--caution); padding: 1px 9px; }
+:root[data-theme="cockpit"] #locks .lock b { letter-spacing: .1em; }
+
+/* == motion == */
+/* none: displays are steady; alerts never flash. Drop the landing e-stop's press nudge for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="cockpit"] #estop:active { transform: none; }
+}

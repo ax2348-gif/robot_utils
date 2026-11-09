@@ -1,0 +1,199 @@
+/*
+title: Drafting table
+description: Frosted drafting film on a light table: milky panels soften the sharp grid beneath them (cool grey-blue by day, graphite by night), camera and plots mounted on a dark mat, aviation alerting (red warning, amber caution, green normal).
+*/
+/* How this theme works
+   - The material is the identity. The ground is a crisp drafting grid; panels are frosted film:
+     a milky, slightly graded translucent fill plus backdrop-filter: blur(7px), so the grid under a
+     panel goes visibly soft while the bare ground stays sharp.
+   - Tokens stay OPAQUE (--panel is also a text colour and a button fill). Translucency lives in
+     --film-hi / --film-lo and is applied by selector.
+   - Cost rules: the grid scrolls with the page (no fixed attachment); one blur radius (7px); never
+     blur a panel nested in another; never blur anything holding canvas / video / img / svg, the
+     e-stop or the band. Selectors list one element per :has() (the scope test splits on commas).
+   - The robot's eye (camera tiles, map, plots, the swerve diagram) is mounted like a photo on the
+     table: opaque panel, 2px dark mat border, no blur.
+   - --glass-behind is the worst case seen through film: the major grid line. Text contrast is hand-
+     checked for the film composited (unblurred, so conservatively) over that line and over the ground.
+   - prefers-reduced-transparency and no backdrop-filter support both fall back to opaque panels. */
+
+/* == palette == */
+:root[data-theme="drafting"] {
+  color-scheme: light dark;
+  --ground: #D9E1E8; --panel: #EEF2F5; --ink: #121B26; --muted: #3E4C5C; --rule: #A2B1BF;
+  --signal: #3B3FB6; --stop: #AE1515; --caution: #7C4A00; --live: #12613A;
+  --stop-bg: #F8DEDC; --caution-bg: #F6E8C8; --live-bg: #D8EDE0; --signal-bg: #E1E2F6;
+  --plot-1: #2350D8; --plot-2: #0A8A70; --plot-3: #C94A0C; --plot-4: #B0309A; --plot-5: #6F6A00;
+  --stop-fill: #AE1515; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #12613A; --caution-ink: #1B1200;
+  --caution-fill: #E8A317; --caution-fill-b: #C98A0E; --on-caution: #1B1200;
+  --font: "Plex", system-ui, -apple-system, "Segoe UI", Roboto, Cantarell, sans-serif;
+  --radius: 5px;
+  /* theme-private */
+  --on-signal: #FFFFFF;
+  --line: #5F6F80;                   /* control boundaries (>= 3:1 on panel and film) */
+  --mat: #27313C;                    /* the dark mat the robot's-eye views are mounted on */
+  --stop-latched: #6A0C0C; --chock-b: #6A0C0C; --estop-edge: #6A0C0C;
+  --grid-minor: #C3CED8; --grid-major: #93A6B8;
+  --glass-behind: #93A6B8;
+  --film-hi: rgba(250, 252, 253, 0.82); --film-lo: rgba(238, 243, 247, 0.70);
+  --film-edge: rgba(255, 255, 255, 0.9);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="drafting"] {
+    --ground: #1F2023; --panel: #27282C; --ink: #EDEDEF; --muted: #B4B6BD; --rule: #46484E;
+    --signal: #A9B4FF; --stop: #FF8E80; --caution: #F2B33D; --live: #62D597;
+    --stop-bg: #3E1E1C; --caution-bg: #3A2D12; --live-bg: #183323; --signal-bg: #2C2F4A;
+    --plot-1: #5F88EC; --plot-2: #14A390; --plot-3: #E06A2C; --plot-4: #C658B2; --plot-5: #9C9530;
+    --stop-fill: #D9302A; --on-stop: #FFFFFF; --stop-ink: #FFFFFF; --live-ink: #62D597; --caution-ink: #1B1200;
+    --caution-fill: #E8A317; --caution-fill-b: #C98A0E; --on-caution: #1B1200;
+    --on-signal: #14162E;
+    --line: #878A93;
+    --mat: #0A0A0B;
+    --stop-latched: #6E0F0F; --chock-b: #6E0F0F; --estop-edge: #FFD9D4;
+    --grid-minor: #303236; --grid-major: #4D5056;
+    --glass-behind: #4D5056;
+    --film-hi: rgba(52, 54, 59, 0.74); --film-lo: rgba(42, 44, 48, 0.74);
+    --film-edge: rgba(255, 255, 255, 0.10);
+  }
+}
+
+/* == type == */
+:root[data-theme="drafting"] h1, :root[data-theme="drafting"] h2 { font-weight: 600; letter-spacing: -.005em; }
+:root[data-theme="drafting"] .ru-card > b:first-child, :root[data-theme="drafting"] section.box h2 { font-weight: 600; }
+:root[data-theme="drafting"] .ru-num, :root[data-theme="drafting"] td, :root[data-theme="drafting"] .kv,
+:root[data-theme="drafting"] .st, :root[data-theme="drafting"] .twist, :root[data-theme="drafting"] .status,
+:root[data-theme="drafting"] .ru-pill, :root[data-theme="drafting"] .tile dd { font-variant-numeric: tabular-nums slashed-zero; }
+:root[data-theme="drafting"] a { color: var(--signal); }
+:root[data-theme="drafting"] :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+/* == surfaces == */
+/* frosted film: milky graded fill, a bright top edge where the film catches the light-table glow */
+:root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] .tile, :root[data-theme="drafting"] section.box,
+:root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+  border-radius: var(--radius);
+  background-color: transparent;
+  background-image: linear-gradient(170deg, var(--film-hi), var(--film-lo));
+  box-shadow: inset 0 1px 0 var(--film-edge);
+}
+:root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] section.box, :root[data-theme="drafting"] #who,
+:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result { border: 1px solid var(--rule); }
+/* tiles keep the page's own left edge (landing: the 6px status edge) */
+:root[data-theme="drafting"] .tile { border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+/* the blur: only on static panels */
+:root[data-theme="drafting"] .ru-card:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
+:root[data-theme="drafting"] .tile:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
+:root[data-theme="drafting"] section.box:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
+:root[data-theme="drafting"] #who:not(:has(canvas)):not(:has(video)):not(:has(img)):not(:has(svg)),
+:root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+  -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px);
+}
+/* never nest blur: film inside film is drawn opaque */
+:root[data-theme="drafting"] .ru-card .ru-card, :root[data-theme="drafting"] .ru-card .tile, :root[data-theme="drafting"] .ru-card section.box,
+:root[data-theme="drafting"] .tile .ru-card, :root[data-theme="drafting"] .tile .tile, :root[data-theme="drafting"] section.box section.box,
+:root[data-theme="drafting"] section.box .ru-card, :root[data-theme="drafting"] #who .ru-card {
+  -webkit-backdrop-filter: none; backdrop-filter: none; background-image: none; background-color: var(--panel);
+}
+/* the robot's eye: mounted on a dark mat, opaque, never blurred */
+:root[data-theme="drafting"] .ru-card:has(canvas), :root[data-theme="drafting"] .ru-card:has(video), :root[data-theme="drafting"] .ru-card:has(img),
+:root[data-theme="drafting"] .ru-card:has(svg), :root[data-theme="drafting"] .tile:has(canvas), :root[data-theme="drafting"] .tile:has(video),
+:root[data-theme="drafting"] .tile:has(img), :root[data-theme="drafting"] .tile:has(svg), :root[data-theme="drafting"] section.box:has(canvas),
+:root[data-theme="drafting"] section.box:has(video), :root[data-theme="drafting"] section.box:has(img), :root[data-theme="drafting"] section.box:has(svg) {
+  background-image: none; background-color: var(--panel); box-shadow: none;
+  border: 2px solid var(--mat); border-radius: 6px;
+}
+:root[data-theme="drafting"] .tile .hd { border-bottom: 2px solid var(--mat); }
+:root[data-theme="drafting"] #map { outline: 2px solid var(--mat); outline-offset: 0; border-radius: 2px; }
+:root[data-theme="drafting"] #estop-result.good { border-color: var(--live); }
+:root[data-theme="drafting"] #estop-result.bad { border-color: var(--stop); background-image: none; background-color: var(--stop-bg); }
+:root[data-theme="drafting"] .tile.latched { background-image: none; background-color: var(--stop-bg); }
+:root[data-theme="drafting"] #tools a:hover { border-color: var(--signal); }
+:root[data-theme="drafting"] .tile .foot { border-top: 1px solid var(--rule); }
+:root[data-theme="drafting"] .tile pre.logs { border-radius: 3px; background: var(--panel); }
+
+/* buttons and inputs: opaque, 1px line; signal blue when interactive */
+:root[data-theme="drafting"] button.ru, :root[data-theme="drafting"] .ru-btn, :root[data-theme="drafting"] .tile .ctl button,
+:root[data-theme="drafting"] #lock-ctl button, :root[data-theme="drafting"] #restart {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); box-shadow: none;
+}
+:root[data-theme="drafting"] .tile .ctl button.link { border-color: transparent; background: none; color: var(--signal); }
+:root[data-theme="drafting"] button.ru:hover:not(:disabled), :root[data-theme="drafting"] .tile .ctl button:hover:not(:disabled),
+:root[data-theme="drafting"] #lock-ctl button:hover, :root[data-theme="drafting"] #restart:hover:not(:disabled) {
+  border-color: var(--signal); background: var(--signal-bg);
+}
+:root[data-theme="drafting"] button.ru.primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); font-weight: 600; }
+:root[data-theme="drafting"] button.ru.primary:hover:not(:disabled) { background: var(--signal); box-shadow: inset 0 0 0 2px var(--panel); }
+:root[data-theme="drafting"] button.ru.hazard { border: 1px solid var(--stop); color: var(--stop); }
+:root[data-theme="drafting"] button.ru.live { border: 1px solid var(--live); color: var(--live); }
+:root[data-theme="drafting"] input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),
+:root[data-theme="drafting"] select, :root[data-theme="drafting"] #theme-pick {
+  border: 1px solid var(--line); border-radius: 3px; background-color: var(--panel); color: var(--ink);
+}
+:root[data-theme="drafting"] .pad .on { border-color: var(--signal); outline: 2px solid var(--signal); }
+:root[data-theme="drafting"] .ru-table th { color: var(--muted); font-weight: 600; border-bottom-color: var(--line); }
+/* swerve teleop tool */
+:root[data-theme="drafting"] .pad, :root[data-theme="drafting"] .slider { border: 2px solid var(--line); }
+:root[data-theme="drafting"] .panel button { border-radius: var(--radius); }
+
+/* == ground == */
+/* a crisp drafting grid: minor every 8px, major every 40px; scrolls with the page */
+:root[data-theme="drafting"] body {
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(to right, var(--grid-major) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
+    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+  background-size: 40px 40px, 40px 40px, 8px 8px, 8px 8px;
+  background-position: -1px -1px;
+}
+
+/* == alerting == */
+/* red = warning (e-stop, latched, chocked), amber = caution (covers, someone else's lease), green = normal */
+:root[data-theme="drafting"] button.ru-estop, :root[data-theme="drafting"] #estop {
+  background: var(--stop-fill); color: var(--on-stop); border: 2px solid var(--estop-edge);
+  border-radius: var(--radius); box-shadow: none; text-shadow: none; font-weight: 700;
+}
+:root[data-theme="drafting"] #estop:hover { background: var(--stop-fill); box-shadow: 0 0 0 3px var(--stop-bg); }
+:root[data-theme="drafting"] #estop:active { box-shadow: none; }
+:root[data-theme="drafting"] #estop small { opacity: 1; }
+:root[data-theme="drafting"] button.ru-estop.latched {
+  background: var(--stop-latched); color: #FFFFFF; border-color: var(--stop-fill);
+  box-shadow: inset 0 0 0 3px var(--stop-latched), inset 0 0 0 5px #FFFFFF;
+}
+/* state band: the robot's voice; opaque, never blurred */
+:root[data-theme="drafting"] .ru-band small { opacity: 1; }
+:root[data-theme="drafting"] .ru-band.nominal { background: var(--line); }
+:root[data-theme="drafting"] .ru-band.live { background: var(--live-bg); color: var(--live); box-shadow: inset 0 -3px 0 var(--live); }
+:root[data-theme="drafting"] .ru-band.estop { background: var(--stop-fill); color: var(--on-stop); box-shadow: inset 0 -3px 0 var(--stop-latched); }
+:root[data-theme="drafting"] .ru-band.chocked {
+  color: var(--on-stop);
+  background: repeating-linear-gradient(135deg, var(--stop-fill) 0 14px, var(--chock-b) 14px 28px);
+}
+:root[data-theme="drafting"] .ru-band.covered {
+  color: var(--on-caution);
+  background: repeating-linear-gradient(135deg, var(--caution-fill) 0 14px, var(--caution-fill-b) 14px 28px);
+}
+/* pills and the lease: held by you = green, held by someone else = amber, free = plain line */
+:root[data-theme="drafting"] .ru-pill { border-radius: 3px; border-color: var(--line); padding: 1px 8px; }
+:root[data-theme="drafting"] .ru-pill.ru-ok { border: 1px solid var(--live); border-left-width: 4px; background: var(--live-bg); color: var(--live); font-weight: 600; }
+:root[data-theme="drafting"] .ru-pill.ru-warn { border: 1px solid var(--caution); border-left-width: 4px; background: var(--caution-bg); color: var(--caution); font-weight: 600; }
+:root[data-theme="drafting"] .ru-pill.ru-err { border: 1px solid var(--stop); border-left-width: 4px; background: var(--stop-bg); color: var(--stop); font-weight: 600; }
+:root[data-theme="drafting"] .pill { border-radius: 3px; }
+:root[data-theme="drafting"] .pill.bad { background: var(--stop-fill); color: var(--on-stop); }
+:root[data-theme="drafting"] #locks .lock { border-radius: var(--radius); border-left-width: 4px; }
+:root[data-theme="drafting"] #uplink-banner { border-radius: var(--radius); }
+
+/* == fallbacks: opaque film when transparency is unwanted or unsupported == */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="drafting"] { --film-hi: var(--panel); --film-lo: var(--panel); }
+  :root[data-theme="drafting"] .ru-card, :root[data-theme="drafting"] .tile, :root[data-theme="drafting"] section.box,
+  :root[data-theme="drafting"] #who, :root[data-theme="drafting"] #tools a, :root[data-theme="drafting"] #estop-result {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-theme="drafting"] { --film-hi: var(--panel); --film-lo: var(--panel); }
+}
+
+/* == motion == */
+/* none: nothing moves on its own; the theme adds no transitions. */
