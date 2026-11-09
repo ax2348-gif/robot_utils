@@ -693,7 +693,8 @@ start();
   // the robot view is showing and the tab is visible. It only reads: it never turns camera streams
   // on or changes a node's settings, so it is offered only while colour and depth already run.
   let dens = 2; try { dens = +localStorage.getItem("ru-landing-density") || 2; } catch (_) {}
-  let cloudOn = false, cloudOk = false, cloudLoop = null, calib = null, calibAt = 0;
+  let cloudOn = false; try { cloudOn = localStorage.getItem("ru-landing-points") === "1"; } catch (_) {}   // remembered per browser
+  let cloudOk = false, cloudLoop = null, calib = null, calibAt = 0;
   function cloudWanted(){ return cloudOn && cloudOk && !!ctl; }
   function cloudSync(){
     $("rv-cloud").disabled = !cloudOk;
@@ -820,7 +821,7 @@ start();
     box.replaceChildren(...kids);
   }
   const camView = v => { scene.setView(v); $("rv-iso").setAttribute("aria-pressed", String(v === "iso")); $("rv-top").setAttribute("aria-pressed", String(v === "top")); };
-  $("rv-cloud").onclick = () => { cloudOn = !cloudOn; cloudSync(); };
+  $("rv-cloud").onclick = () => { cloudOn = !cloudOn; try { localStorage.setItem("ru-landing-points", cloudOn ? "1" : "0"); } catch (_) {} cloudSync(); };
   $("rv-dens").textContent = dens + "×";
   $("rv-dens").onclick = () => { dens = dens >= 4 ? 1 : dens * 2; $("rv-dens").textContent = dens + "×";
     try { localStorage.setItem("ru-landing-density", String(dens)); } catch (_) {} };
