@@ -203,7 +203,7 @@
     <div class="rv-grid">
       <div class="ru-card" data-panel="scene" data-role="view">
         <div class="cap"><span>fused <span aria-hidden="true">━</span> odometry <span aria-hidden="true">╍</span> · camera view <span aria-hidden="true">▱</span> · <span id="rv-pose"></span></span>
-          <span class="rv-vbtn"><button type="button" id="rv-cloud" aria-pressed="false" disabled title="Coloured point cloud from 3D perception (needs the camera's colour and depth streams on)">points</button></span>
+          <span class="rv-vbtn"><button type="button" id="rv-cloud" aria-pressed="false" disabled title="Coloured point cloud from 3D perception (needs the camera's colour and depth streams on)">points</button><button type="button" id="rv-dens" title="Point density: about 8k / 16k / 32k points">2×</button></span>
           <span class="rv-vbtn"><button type="button" id="rv-iso" aria-pressed="true">3D</button><button type="button" id="rv-top" aria-pressed="false">Top</button></span></div>
         <div id="rv-scene"></div>
       </div>
@@ -692,6 +692,7 @@ start();
   // the point cloud: off by default; fetched (one frame at a time, ~2 Hz) only while the toggle is on,
   // the robot view is showing and the tab is visible. It only reads: it never turns camera streams
   // on or changes a node's settings, so it is offered only while colour and depth already run.
+  let dens = 2; try { dens = +localStorage.getItem("ru-landing-density") || 2; } catch (_) {}
   let cloudOn = false, cloudOk = false, cloudLoop = null, calib = null, calibAt = 0;
   function cloudWanted(){ return cloudOn && cloudOk && !!ctl; }
   function cloudSync(){
@@ -709,7 +710,7 @@ start();
           if (r.ok){
             const rec = new RU.RecordReader().feed(new Uint8Array(await r.arrayBuffer()))[0];
             if (rec){ if (calib.depth_grid && rec.header.depth && rec.header.depth.width !== calib.depth_grid.width) calibAt = 0;   // grid changed
-              const c = await RU.viz.cloudFromFrame(rec.header, rec.payload, calib, {maxPoints: 8000});
+              const c = await RU.viz.cloudFromFrame(rec.header, rec.payload, calib, {maxPoints: 8000 * dens});
               if (!ac.signal.aborted) scene.update({cloud: c}); }
           }
         } catch (_) { if (ac.signal.aborted) return; }
@@ -818,6 +819,9 @@ start();
   }
   const camView = v => { scene.setView(v); $("rv-iso").setAttribute("aria-pressed", String(v === "iso")); $("rv-top").setAttribute("aria-pressed", String(v === "top")); };
   $("rv-cloud").onclick = () => { cloudOn = !cloudOn; cloudSync(); };
+  $("rv-dens").textContent = dens + "×";
+  $("rv-dens").onclick = () => { dens = dens >= 4 ? 1 : dens * 2; $("rv-dens").textContent = dens + "×";
+    try { localStorage.setItem("ru-landing-density", String(dens)); } catch (_) {} };
   $("rv-iso").onclick = () => camView("iso"); $("rv-top").onclick = () => camView("top");
   $("view-robot").onclick = () => setView("robot");
   $("view-nodes").onclick = () => setView("nodes");

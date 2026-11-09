@@ -112,12 +112,19 @@ async function cloudFromFrame(header, payload, calib, opts){
     xyz[3 * n + 2] = T[2][0] * x + T[2][1] * y + T[2][2] * z + T[2][3];
     const k = 4 * (v * W + u); rgb[3 * n] = px[k]; rgb[3 * n + 1] = px[k + 1]; rgb[3 * n + 2] = px[k + 2]; n++;
   }
-  return {xyz, rgb, n, t: H.t_color};
+  // group by colour (4 bits a channel) so drawing sets fillStyle once per group, not per point
+  const key = new Uint16Array(n), order = new Uint32Array(n);
+  for (let i = 0; i < n; i++){ key[i] = (rgb[3 * i] >> 4) << 8 | (rgb[3 * i + 1] >> 4) << 4 | rgb[3 * i + 2] >> 4; order[i] = i; }
+  order.sort((a, b) => key[a] - key[b]);
+  const groups = [];
+  for (let i = 0; i < n; ){ let j = i; const k = key[order[i]]; while (j < n && key[order[j]] === k) j++;
+    groups.push({style: `rgb(${(k >> 8) * 17},${((k >> 4) & 15) * 17},${(k & 15) * 17})`, a: i, b: j}); i = j; }
+  return {xyz, rgb, n, order, groups, t: H.t_color};
 }
 viz.cloudFromFrame = cloudFromFrame;
 
 // -- Scene: the robot in its world, in 3D ---------------------------------------------------------
-const SCENE_DEFAULTS = {frustum: 0.35, range: 2.5, half: 1.6, trailMax: 20000, staleAfter: 1};
+const SCENE_DEFAULTS = {frustum: 0.35, range: 4, half: 1.6, trailMax: 20000, staleAfter: 1};
 const VIEWS = {iso: {az: -2.35, el: 0.6}, top: {az: Math.PI, el: Math.PI / 2 - 1e-4}};
 class Scene extends Surface {
   constructor(el, opts){
@@ -187,9 +194,10 @@ class Scene extends Surface {
     const cl = D.cloud;
     if (cl && cl.n){
       const sz = Math.max(1.5, Math.min(4, s / 220));
-      for (let i = 0; i < cl.n; i++){
-        const a = P(Bw([cl.xyz[3 * i], cl.xyz[3 * i + 1], cl.xyz[3 * i + 2]]));
-        g.fillStyle = `rgb(${cl.rgb[3 * i]},${cl.rgb[3 * i + 1]},${cl.rgb[3 * i + 2]})`; g.fillRect(a[0] - sz / 2, a[1] - sz / 2, sz, sz);
+      for (const grp of cl.groups){
+        g.fillStyle = grp.style;
+        for (let j = grp.a; j < grp.b; j++){ const i = cl.order[j];
+          const a = P(Bw([cl.xyz[3 * i], cl.xyz[3 * i + 1], cl.xyz[3 * i + 2]])); g.fillRect(a[0] - sz / 2, a[1] - sz / 2, sz, sz); }
       }
     }
     // the robot: frame box 0.02-0.12 m, front marker, wheels at their steering angles
@@ -206,6 +214,14 @@ class Scene extends Surface {
       for (let k = 0; k < 16; k++) line(ring[k], ring[k + 1], col, 1.5);
       line(Bw([m.x, m.y, Rw]), Bw([m.x + ca * Rw * 1.7, m.y + sa * Rw * 1.7, Rw]), col, 1);
     }
+    // coordinate frames (x red, y green, z blue, as on the description page): world origin, base,
+    // and every camera frame the description gives (depth / colour optical, IMU)
+    const AXC = ["#ef4444", "#22c55e", "#3b82f6"];
+    const axes = (T, len, w) => { const o = Bw(tf(T, [0, 0, 0])); for (let k = 0; k < 3; k++){ const d = [0, 0, 0]; d[k] = len; line(o, Bw(tf(T, d)), AXC[k], w); } };
+    for (let k = 0; k < 3; k++){ const d = [0, 0, 0]; d[k] = 0.25; line([0, 0, 0], d, AXC[k], 1.5); }          // world origin
+    axes([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]], 0.2, 2.5);                                        // base
+    const FB = (desc && desc.frames_in_base) || {};
+    for (const [name, T] of Object.entries(FB)) if (name !== "base") axes(T, name.endsWith("/imu") ? 0.04 : 0.07, 1.5);
     // cameras: frustum, optical axis to the floor, drop line
     for (const f of this.fov || []){
       const T = f.T, o = Bw(f.origin), z = this.o.frustum;
