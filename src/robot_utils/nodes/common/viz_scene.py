@@ -16,7 +16,12 @@ redraw, colours from theme tokens), kept in its own module so it composes with t
   ``range`` (m of floor footprint, 2.5), ``trailMax`` (points, 20000), ``staleAfter`` (s, 1).
   ``push(pose)``: an estimator row ({t, x, y, theta, x_odom, y_odom}); kept in the trail when the
   robot moved 5 mm / 0.01 rad or 0.25 s passed; a jump > 0.5 m or a gap > 1 s breaks it.
-  ``update({desc, modules: {FL: {angle, speed}, ...}, velocity: [vx, vy] (world m/s), driving})``.
+  ``update({desc, modules: {FL: {angle, speed}, ...}, velocity: [vx, vy] (world m/s), driving,
+  cloud})``; ``cloud`` from ``cloudFromFrame`` (null to hide).
+
+``RU.viz.cloudFromFrame(header, payload, calib, {maxPoints})`` (async): a 3d_perception fused frame
+  record (``GET frame``) and its ``GET calibration`` -> coloured points in the base frame
+  ``{xyz, rgb, n, t}`` (about ``maxPoints``, 8000), or null without ``base_to_color``.
 """
 
 SCENE_JS = r"""
@@ -82,6 +87,34 @@ function cameraFloor(desc, opts){
   return out;
 }
 viz.cameraFloor = cameraFloor;
+
+// a 3d_perception fused frame (RU.RecordReader record) + its GET calibration -> coloured points in the
+// base frame: {xyz: Float32Array, rgb: Uint8ClampedArray, n, t}. Depth is z in the colour optical
+// frame on calib.depth_grid; the colour JPEG is resampled onto the same grid. null without a pose.
+async function cloudFromFrame(header, payload, calib, opts){
+  const T = calib && calib.base_to_color, K = calib && calib.depth_grid, H = header || {};
+  if (!T || !K || !H.depth || !H.depth.len || !H.color || !H.color.len) return null;
+  const W = H.depth.width, Hh = H.depth.height, max = (opts && opts.maxPoints) || 8000;
+  const dep = new Uint16Array(payload.buffer.slice(payload.byteOffset + H.depth.offset, payload.byteOffset + H.depth.offset + H.depth.len));
+  const img = await createImageBitmap(new Blob([payload.subarray(H.color.offset, H.color.offset + H.color.len)], {type: "image/jpeg"}));
+  const cv = (typeof OffscreenCanvas !== "undefined") ? new OffscreenCanvas(W, Hh) : Object.assign(document.createElement("canvas"), {width: W, height: Hh});
+  const g = cv.getContext("2d"); g.drawImage(img, 0, 0, W, Hh); img.close && img.close();
+  const px = g.getImageData(0, 0, W, Hh).data;
+  const fx = K.fx * W / K.width, fy = K.fy * Hh / K.height, cx = K.cx * W / K.width, cy = K.cy * Hh / K.height;
+  const step = Math.max(1, Math.ceil(Math.sqrt(W * Hh / max)));
+  const xyz = new Float32Array(Math.ceil(W / step) * Math.ceil(Hh / step) * 3), rgb = new Uint8ClampedArray(xyz.length);
+  let n = 0;
+  for (let v = 0; v < Hh; v += step) for (let u = 0; u < W; u += step){
+    const z = dep[v * W + u] / 1000; if (!z) continue;
+    const x = (u - cx) / fx * z, y = (v - cy) / fy * z;
+    xyz[3 * n] = T[0][0] * x + T[0][1] * y + T[0][2] * z + T[0][3];
+    xyz[3 * n + 1] = T[1][0] * x + T[1][1] * y + T[1][2] * z + T[1][3];
+    xyz[3 * n + 2] = T[2][0] * x + T[2][1] * y + T[2][2] * z + T[2][3];
+    const k = 4 * (v * W + u); rgb[3 * n] = px[k]; rgb[3 * n + 1] = px[k + 1]; rgb[3 * n + 2] = px[k + 2]; n++;
+  }
+  return {xyz, rgb, n, t: H.t_color};
+}
+viz.cloudFromFrame = cloudFromFrame;
 
 // -- Scene: the robot in its world, in 3D ---------------------------------------------------------
 const SCENE_DEFAULTS = {frustum: 0.35, range: 2.5, half: 1.6, trailMax: 20000, staleAfter: 1};
@@ -149,6 +182,15 @@ class Scene extends Surface {
     for (const f of this.fov || []){
       if (f.ring.length > 2){ poly(f.ring.map(q => Bw([q[0], q[1], 0])), true);
         g.globalAlpha = 0.5; g.fillStyle = C.signalBg; g.fill(); g.globalAlpha = 1; g.setLineDash([3, 3]); g.strokeStyle = C.signal; g.lineWidth = 1; g.stroke(); g.setLineDash([]); }
+    }
+    // the coloured point cloud (base frame, placed at the current pose), 2 px squares
+    const cl = D.cloud;
+    if (cl && cl.n){
+      const sz = Math.max(1.5, Math.min(4, s / 220));
+      for (let i = 0; i < cl.n; i++){
+        const a = P(Bw([cl.xyz[3 * i], cl.xyz[3 * i + 1], cl.xyz[3 * i + 2]]));
+        g.fillStyle = `rgb(${cl.rgb[3 * i]},${cl.rgb[3 * i + 1]},${cl.rgb[3 * i + 2]})`; g.fillRect(a[0] - sz / 2, a[1] - sz / 2, sz, sz);
+      }
     }
     // the robot: frame box 0.02-0.12 m, front marker, wheels at their steering angles
     const rb = (desc && desc.robot) || {frame_size: 0.4318, modules: [{name: "FL", x: 0.1656, y: 0.1656}, {name: "FR", x: 0.1656, y: -0.1656}, {name: "RR", x: -0.1656, y: -0.1656}, {name: "RL", x: -0.1656, y: 0.1656}]};
