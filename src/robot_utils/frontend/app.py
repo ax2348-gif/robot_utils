@@ -195,6 +195,7 @@ def create_app(
     is_service=running_as_service,
     restart=restart_service,
     observer=None,
+    locks=None,
 ) -> FastAPI:
     """``transport``: one transport for every node (tests); otherwise unix sockets for local
     nodes and TCP for nodes with a ``host``."""
@@ -230,6 +231,59 @@ def create_app(
     @app.get("/api/health")
     async def health() -> dict:
         return {"ok": True}
+
+    # -- locks (common/locks.py): anyone may place a chock / cover here; removal is SSH-only --------
+    from ..nodes.common.locks import LockStore
+    lock_store = locks if locks is not None else LockStore()
+    actuated_kinds, camera_kinds = {"swerve", "arm"}, {"camera"}
+
+    def lock_targets(kind: str) -> set:
+        kinds = actuated_kinds if kind == "chock" else camera_kinds
+        return {"all"} | kinds | {n.name for n in nodes if n.node_kind in kinds}
+
+    def client_of(request: Request) -> str:
+        fwd = request.headers.get("x-forwarded-for", "")
+        return fwd.split(",")[0].strip() or (request.client.host if request.client else "?")
+
+    @app.get("/api/locks")
+    async def list_locks() -> JSONResponse:
+        return JSONResponse({"locks": [l.public() for l in lock_store.active(force=True)],
+                             "targets": {k: sorted(lock_targets(k)) for k in ("chock", "cover")},
+                             "remove": "on the robot over SSH: python -m robot_utils.admin.locks remove <id>"},
+                            headers=no_cache)
+
+    @app.post("/api/locks")
+    async def place_lock(request: Request) -> JSONResponse:
+        """Place a chock (stop + refuse enable) or a cover (camera captures nothing). Body:
+        {kind: chock|cover, target, reason}. Rate-limited per client; an identical lock is reused."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "JSON body {kind, target, reason} expected"}, status_code=422)
+        kind, target = str(body.get("kind", "")), str(body.get("target", ""))
+        if kind not in ("chock", "cover"):
+            return JSONResponse({"error": "kind must be chock or cover"}, status_code=422)
+        if target not in lock_targets(kind):
+            return JSONResponse({"error": f"target must be one of {sorted(lock_targets(kind))}"}, status_code=422)
+        ip = client_of(request)
+        who = ip
+        if observer is not None:
+            who = (await asyncio.to_thread(observer.ids.get, ip))["label"]
+        from ..nodes.common.lease import RequestError
+        try:
+            lock, created = lock_store.place(kind, target, f"{who} (web)", str(body.get("reason", "")), source=f"web {ip}")
+        except RequestError as e:
+            return JSONResponse({"error": str(e)}, status_code=e.status)
+        return JSONResponse({"lock": lock.public(), "created": created,
+                             "remove": "on the robot over SSH: python -m robot_utils.admin.locks remove " + lock.id},
+                            status_code=201 if created else 200)
+
+    @app.delete("/api/locks/{lock_id}")
+    async def remove_lock(lock_id: str) -> JSONResponse:
+        return JSONResponse({"error": "locks are removed by an admin on the robot over SSH: "
+                                      f"python -m robot_utils.admin.locks remove {lock_id}"}, status_code=403)
 
     @app.post("/api/estop")
     async def estop() -> JSONResponse:

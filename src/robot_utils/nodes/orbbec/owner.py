@@ -19,6 +19,8 @@ from typing import Optional
 
 import numpy as np
 
+from ..common.locks import LockStore, describe as describe_locks
+from .cover import CoverSource
 from .encode import colormap_stops
 from .hub import Frame, Hub
 from .imu_filter import AttitudeFilter, Calibration, FilterConfig
@@ -65,8 +67,13 @@ class _Rate:
 
 class Owner:
     def __init__(self, backend, hub: Hub, settings: Optional[Settings] = None, startup_s: float = STARTUP_S,
-                 calibration_file: Optional[str] = IMU_CALIBRATION_FILE):
+                 calibration_file: Optional[str] = IMU_CALIBRATION_FILE, locks: Optional[LockStore] = None):
         self.backend = backend
+        # cover locks (common/locks.py): while covered, no image is captured; procedural frames instead
+        self.locks = locks or LockStore()
+        self.lock_names = {"camera"}            # + the instance name (server.py adds it)
+        self.covered: Optional[list] = None     # the cover locks in force (owner thread)
+        self._cover_src = CoverSource()
         self.startup_s = startup_s
         self.hub = hub
         self.settings = settings or Settings()
@@ -198,7 +205,9 @@ class Owner:
                          "error": self.imu["error"]}
             f = self.filter
             st["imu"]["filter"] = f.status() if f is not None and self.imu["running"] else None
-        st.update(clients=self.hub.clients, cpu=self.cpu(), server_mono=now, server_wall=time.time())
+        cov = self.covered or []
+        st.update(clients=self.hub.clients, cpu=self.cpu(), server_mono=now, server_wall=time.time(),
+                  covered=bool(cov), locks=[l.public() for l in cov])
         return st
 
     # -- owner thread ------------------------------------------------------------------------
@@ -253,8 +262,56 @@ class Owner:
         with self.lock:
             self.imu["running"] = False
 
+    def covers(self) -> list:
+        return self.locks.matching("cover", self.lock_names)
+
+    def _cover_text(self) -> str:
+        c = self.covered or []
+        if not c:
+            return ""
+        l = c[0]
+        since = time.strftime("%H:%M", time.localtime(l.placed))
+        more = f" (+{len(c) - 1} more)" if len(c) > 1 else ""
+        return f"{l.reason or 'no reason given'} - {l.by}, since {since}{more}"
+
+    def _enter_cover(self, locks):
+        self.covered = locks
+        try:
+            self.backend.stop()                 # video only: the IMU has its own pipeline and keeps running
+        except Exception as e:
+            log.debug("stop for cover: %s", e)
+        self.hub.drop_frames()
+        self._cover_src.reset()
+        self._event(f"COVERED ({describe_locks(locks)}): no images are captured; streams serve procedural frames")
+        self._set_state("covered")
+
+    def _leave_cover(self):
+        self.covered = None
+        self.hub.drop_frames()
+        self._event("cover removed: capturing again")
+        self._start_video(self.settings, prev=None)
+
+    def _serve_covered(self):
+        self._handle_cmds(block=0)
+        frames = self._cover_src.frames(self.settings, self._cover_text())
+        if frames:
+            self.last_frame_t = time.monotonic()
+            self._publish(frames)
+        else:
+            time.sleep(min(0.05, max(0.002, self._cover_src.next_due())))
+
     def _serve(self):
         while not self.stopping.is_set():
+            cov = self.covers()
+            if cov and not self.covered:
+                self._enter_cover(cov)
+            elif not cov and self.covered:
+                self._leave_cover()
+            elif cov:
+                self.covered = cov
+            if self.covered:
+                self._serve_covered()
+                continue
             self._handle_cmds(block=0 if self.backend.running else 0.5)
             if not self.backend.running:
                 continue
@@ -296,8 +353,9 @@ class Owner:
                 self.shape[f.stream] = (f.w, f.h, f.fmt)
                 self.last_capture[f.stream] = f.t_capture
                 self.last_pub[f.stream] = now
-            if self.state != "streaming":
-                self.state = "streaming"
+            want = "covered" if self.covered else "streaming"
+            if self.state != want:
+                self.state = want
                 self.hub.state_changed()
         self.hub.publish_frames(frames)
 
@@ -441,6 +499,13 @@ class Owner:
         (e.g. uncompressed color on USB 2), restore prev and raise SettingsError.
         Returns the server monotonic time the new pipeline was started."""
         self.hub.drop_frames()
+        if self.covered or self.covers():
+            # covered: keep the new settings (the procedural frames follow them) but capture nothing
+            self.covered = self.covered or self.covers()
+            self._cover_src.reset()
+            self._update_calibration(new)        # intrinsics need no capture; consumers keep working
+            self._set_state("covered")
+            return time.monotonic()
         self._set_state("starting" if any(new.streams.values()) else "idle")
         try:
             self.backend.start(new)

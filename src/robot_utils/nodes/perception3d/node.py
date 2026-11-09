@@ -582,6 +582,8 @@ class PerceptionNode:
             "dt_color_depth": None if dt is None else round(dt, 6),
             "mode": mode, "motion": np.round(M, 9).tolist(), **self.comp.summary(M),
             "color_seq": hc.get("seq"), "depth_seq": hd.get("seq"),
+            # the camera is covered (common/locks.py): these are procedural frames, not images
+            "covered": bool(hc.get("covered") or hd.get("covered")),
             "color": {"format": hc.get("format"), "width": hc["width"], "height": hc["height"],
                       "offset": 0, "len": len(cbytes)},
             "depth": {"width": o.width, "height": o.height, "dtype": "<u2", "units": "mm",
@@ -659,6 +661,7 @@ class PerceptionNode:
         return {
             "state": st, "error": err,
             "mode": f.header["mode"] if f is not None and live else None,
+            "covered": bool(f.header.get("covered")) if f is not None and live else None,
             "modes": dict(Counter(s["mode"] for s in recent)),
             "rate_hz": None if rate is None else round(rate, 2),
             "color_rate_hz": None if crate is None else round(crate, 2),

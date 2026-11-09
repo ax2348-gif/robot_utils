@@ -4,6 +4,8 @@ Threads: ``SwerveDrive`` runs the 100 Hz control loop on its own thread (the har
 This class plugs into it through two hooks that run on that thread every tick:
 
 ``_pre_tick``  safety gating and the command handoff, in this order:
+               0. chocks (common/locks.py): while any chock covers this node it stops and
+                  disables, every tick, even if the web server stalls;
                1. ``lease.expire_if_due()``: a lapsed lease ends here (stops, disables, resets
                   the soft limits), so a lapse is caught at 100 Hz even if the web server stalls;
                2. e-stop latched, or not enabled -> ``drive.stop()``;
@@ -33,6 +35,7 @@ from sparkcan import PeriodicFrame
 from ..common.estop import EStop, EStopInfo
 from ..common.hub import RowHub
 from ..common.lease import Lease, RequestError
+from ..common.locks import LockStore, describe as describe_locks
 from ..common.server import EventLog
 from .constants import COMMAND_TIMEOUT, MODULES
 from .drive import SwerveDrive
@@ -118,8 +121,10 @@ def clamp(twist, max_speed: float, max_omega: float) -> tuple[tuple[float, float
 
 
 class SwerveNode:
-    def __init__(self, interface: str, hub: Optional[RowHub] = None):
+    def __init__(self, interface: str, hub: Optional[RowHub] = None, locks: Optional[LockStore] = None):
         self.interface = interface
+        self.locks = locks or LockStore()
+        self.lock_names = {"swerve"}        # + the instance name (server.py adds it)
         self.hub = hub or RowHub({"tick": len(FIELDS)})
         self.events = EventLog(on_add=self.hub.state_changed)
         self.slot = CommandSlot()
@@ -183,8 +188,15 @@ class SwerveNode:
     def renew(self, token: Optional[str]):
         return self.lease.renew(token)
 
+    def chocks(self) -> list:
+        return self.locks.matching("chock", self.lock_names)
+
     def enable(self, token: Optional[str]) -> None:
         self.lease.renew(token)
+        ch = self.chocks()
+        if ch:
+            raise RequestError(423, f"chocked: {describe_locks(ch)}. An admin removes it on the robot: "
+                                    "python -m robot_utils.admin.locks remove <id>")
         if self.estop.active:
             raise RequestError(409, "e-stop is latched; clear it first (POST /estop/clear)")
         if self.status != "running":
@@ -264,8 +276,15 @@ class SwerveNode:
         self._disable(f"E-STOP ({info.source}: {info.reason})")
 
     def _pre_tick(self, drive: SwerveDrive) -> None:
-        self.lease.expire_if_due()
         self._applied = None
+        ch = self.chocks()                       # cached: a directory stat at most every 0.2 s
+        if ch:
+            if self.enabled:
+                self._disable(f"CHOCKED ({describe_locks(ch)}): stopped and disabled")
+            drive.stop()
+            self.lease.expire_if_due()
+            return
+        self.lease.expire_if_due()
         if self.estop.active or not self.enabled:
             drive.stop()
             return
@@ -329,6 +348,8 @@ class SwerveNode:
             "error": self.drive_error or self._loop_error(),
             "interface": self.interface,
             "enabled": self.enabled,
+            "chocked": bool(ch := self.chocks()),
+            "locks": [l.public() for l in ch],
             "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source,
                       "t": e and e.t},
             "lease": {"held": info is not None, "holder": info and info.client,

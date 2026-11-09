@@ -39,12 +39,14 @@ class Frame:
     seq: int = 0           # per stream, set at publish
     frameset: int = 0      # frames from one SDK frameset share this
     t_publish: float = 0.0
+    covered: bool = False  # True: a procedural frame from a covered camera (common/locks.py), not an image
 
     def header(self) -> dict:
         h = {"type": "frame", "stream": self.stream, "seq": self.seq, "frameset": self.frameset,
              "index": self.index, "t_capture": self.t_capture, "t_sensor": self.t_sensor,
              "t_device_us": self.t_device_us, "t_owner": self.t_owner, "t_publish": self.t_publish,
-             "width": self.w, "height": self.h, "source_format": self.fmt, "aligned": self.aligned}
+             "width": self.w, "height": self.h, "source_format": self.fmt, "aligned": self.aligned,
+             "covered": self.covered}
         if self.stream == "depth":
             h["depth_scale"] = self.depth_scale
         return h

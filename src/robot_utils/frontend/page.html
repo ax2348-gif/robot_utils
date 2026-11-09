@@ -95,6 +95,15 @@
   #tools strong { color: var(--link); }
   #tools span { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
   #empty { color: var(--muted); }
+  #locks { margin: 0 0 14px; }
+  #locks .lock { border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; font-size: 14px; border: 1px solid; }
+  #locks .lock.chock { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+  #locks .lock.cover { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+  #locks .lock b { text-transform: uppercase; letter-spacing: .03em; }
+  #locks .lock small { display: block; color: var(--muted); margin-top: 2px; }
+  #lock-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+  #lock-ctl button { font: 600 12px system-ui, sans-serif; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+                     border: 1px solid var(--line); background: var(--panel); color: var(--text); }
   #who { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 16px 0; }
   #who h2 { font-size: 16px; margin: 0 0 6px; }
   #uplink { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
@@ -125,6 +134,14 @@
     </button>
   </header>
   <section id="estop-result" aria-live="assertive"></section>
+  <section id="locks" aria-live="polite">
+    <div id="lock-list"></div>
+    <div id="lock-ctl">
+      <button id="chock-all" type="button" title="Chock every actuator: they stop and refuse to enable until an admin removes it over SSH">Chock all actuators</button>
+      <button id="cover-cam" type="button" title="Cover the camera: it captures nothing and serves procedural frames until an admin removes it over SSH">Cover camera</button>
+      <span id="lock-msg">Anyone can place a lock; only an admin removes it, on the robot over SSH.</span>
+    </div>
+  </section>
   <section id="grid" aria-live="polite"><p id="empty">Loading node list…</p></section>
   <p id="planned"></p>
   <section id="tools-section" hidden>
@@ -423,6 +440,9 @@ async function start() {
   tick();
   setInterval(tick, POLL_MS);
   pollWho(); setInterval(pollWho, 3000);
+  pollLocks(); setInterval(pollLocks, 3000);
+  document.getElementById("chock-all").onclick = () => placeLock("chock", "all");
+  document.getElementById("cover-cam").onclick = () => placeLock("cover", "camera");
 }
 // Restart this frontend's systemd service, wait until the new process answers, reload the page.
 async function restartFrontend() {
@@ -488,6 +508,35 @@ async function pollWho() {
   document.getElementById("who-note").textContent = `${(d.clients || []).length} clients. ` +
     "Identities come from Tailscale (device and owner); LAN addresses have none. Requests are logged when they end: " +
     "open streams show as live sending rate and connections. Access log kept " + ((d.log || {}).retention_days || 7) + " days.";
+}
+
+// -- locks (chocks and covers; GET/POST api/locks) ---------------------------------------------------
+async function pollLocks() {
+  let r;
+  try { r = await fetchJson("api/locks", {}, 3000); } catch (e) { return; }
+  if (!r.ok || !r.body) return;
+  const list = document.getElementById("lock-list"); list.textContent = "";
+  for (const l of r.body.locks) {
+    const what = l.kind === "chock" ? `Chocked: ${l.target === "all" ? "all actuators" : l.target}` + " (stopped, can't enable)"
+                                     : `Camera covered: ${l.target}` + " (no images captured; streams show procedural frames)";
+    const ago = l.age_s < 3600 ? Math.round(l.age_s / 60) + " min ago" : (l.age_s / 3600).toFixed(1) + " h ago";
+    list.append(h("div", {className: "lock " + l.kind}, h("b", {textContent: what}),
+      h("div", {textContent: l.reason ? "“" + l.reason + "”" : "(no reason given)"}),
+      h("small", {textContent: `by ${l.by}, ${ago} · remove on the robot: python -m robot_utils.admin.locks remove ${l.id}`})));
+  }
+}
+async function placeLock(kind, target) {
+  const what = kind === "chock" ? "Chock all actuators (they stop and can't be enabled)" : "Cover the camera (no images captured)";
+  const reason = prompt(what + ".\nReason (shown to everyone):", "");
+  if (reason === null) return;
+  const msg = document.getElementById("lock-msg");
+  try {
+    const r = await fetchJson("api/locks", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kind, target, reason})}, 4000);
+    msg.textContent = r.ok ? (r.body.created ? "Placed. Only an admin can remove it, over SSH." : "Already in place.")
+                           : "Refused: " + ((r.body && r.body.error) || r.status);
+  } catch (e) { msg.textContent = "Failed: " + e; }
+  pollLocks();
 }
 
 async function loadTools() {

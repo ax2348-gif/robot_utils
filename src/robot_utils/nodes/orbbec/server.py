@@ -123,6 +123,9 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         hub.attach(asyncio.get_running_loop())
+        name = getattr(app.state, "node_meta", {}).get("name")
+        if name:
+            owner.lock_names.add(name)          # cover locks may name this instance as well as "camera"
         owner.start()
         yield
         await asyncio.get_running_loop().run_in_executor(None, owner.close)

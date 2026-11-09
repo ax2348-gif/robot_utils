@@ -87,6 +87,9 @@ works; design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md).
 
 SSH access to the robot is key-only and managed from a config file on the robot (GitHub accounts
 and extra keys): `python -m robot_utils.admin.ssh_access`, see [docs/ssh_access.md](docs/ssh_access.md).
+Chocks (actuators stop and can't be enabled) and covers (the camera captures nothing and serves
+procedural frames) are placed from the landing page or over SSH and removed only over SSH:
+`python -m robot_utils.admin.locks`, see [docs/locks.md](docs/locks.md).
 
 ## The environment
 

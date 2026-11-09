@@ -342,7 +342,10 @@ class CpuStatus(BaseModel):
 
 
 class State(BaseModel):
-    state: str = Field(description="starting | streaming | idle | restarting | reconnecting | no device | stopped")
+    state: str = Field(description="starting | streaming | covered | idle | restarting | reconnecting | no device | stopped")
+    covered: bool = Field(False, description="A cover lock is in force: no images are captured; every stream "
+                          "serves procedural frames (headers carry covered: true). The IMU keeps running.")
+    locks: list[dict] = Field([], description="The cover locks in force (common/locks.py).")
     error: Optional[str] = None
     events: list[Event] = []
     device: Optional[DeviceInfo] = None

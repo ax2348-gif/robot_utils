@@ -65,6 +65,9 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         node.hub.attach(asyncio.get_running_loop())
+        name = getattr(app.state, "node_meta", {}).get("name")
+        if name:
+            node.lock_names.add(name)            # chocks may name this instance as well as "swerve"
         if start:
             await asyncio.to_thread(node.start)
         yield
