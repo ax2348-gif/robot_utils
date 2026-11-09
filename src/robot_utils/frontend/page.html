@@ -719,13 +719,13 @@ start();
   function start(){
     ctl = new AbortController();
     const sw = byKind("swerve"), es = byKind("estimator");
-    if (sw) RU.rows(base(sw) + "stream?batch_ms=100", d => {
+    if (sw) RU.rows(base(sw) + "stream?max_hz=10", d => {
       const s = RU.viz.Swerve.fromRow(n => d.last(n)), mods = {};
       for (const k of ["FL", "FR", "RR", "RL"]) if (s[k]) mods[k] = {angle: s[k].angle, speed: s[k].speed};
       cmd = s.twist || cmd; driving = !!s.driving;
       swv.update(s); scene.update({modules: mods, driving});
     }, {signal: ctl.signal});
-    if (es) RU.rows(base(es) + "stream?batch_ms=100", d => {
+    if (es) RU.rows(base(es) + "stream?max_hz=10", d => {
       const F = d.fields, cols = {}; for (const k of F) cols[k] = d.col(k);
       let p = null;
       for (let i = 0; i < d.n; i++){
