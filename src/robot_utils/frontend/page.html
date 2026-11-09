@@ -754,20 +754,27 @@ start();
     if (!s){ box.replaceChildren(Object.assign(document.createElement("span"), {className: "ru-pill ru-err", textContent: "power down"})); gauges = {}; return; }
     const src = Array.isArray(s.sources) ? s.sources : Object.entries(s.sources || {}).map(([k, v]) => Object.assign({name: k}, v));
     const kids = [];
+    const tag = (text, cls, title) => Object.assign(document.createElement("span"), {className: "ru-pill" + (cls ? " " + cls : ""), textContent: text, title: title || ""});
     src.forEach((x, i) => {
-      const key = x.name || x.id || String(i);
-      if (RU.viz.Battery){
-        if (!gauges[key]){ const el = document.createElement("span"); el.className = "gauge"; gauges[key] = {el, g: new RU.viz.Battery(el, {caption: false, compact: true, label: key})}; }
+      x = x || {};
+      const key = x.id || x.name || String(i);
+      // a source without readings (e.g. the tether) is just a labelled plug; missing fields = unknown
+      if (x.telemetry === false || (x.percent === undefined && x.pack_v === undefined)){
+        kids.push(tag("⏻ " + key, x.ok === false ? "ru-err" : "", (x.type || "power source") + (x.telemetry === false ? ": no telemetry" : ""))); return; }
+      if (RU.viz.Battery && RU.viz.Battery.fromSource){
+        if (!gauges[key]){ const el = document.createElement("span"); el.className = "gauge"; el.title = key; gauges[key] = {el, g: new RU.viz.Battery(el, {caption: false, compact: true, label: key})}; }
         gauges[key].g.update(RU.viz.Battery.fromSource(x)); kids.push(gauges[key].el);
       } else {
-        const p = x.percent, bar = document.createElement("span"), fill = document.createElement("b");
-        bar.className = "bar" + (p <= 10 ? " crit" : p <= 25 ? " low" : ""); fill.style.width = (isFinite(p) ? Math.max(0, Math.min(100, p)) : 0) * 0.42 + "px";
-        bar.append(fill); bar.title = key;
-        const t = document.createElement("span"); t.textContent = (isFinite(p) ? Math.round(p) + "%" : "?") + (x.input_present ? " ⚡" : "");
+        const p = x.percent, ok = isFinite(p), bar = document.createElement("span"), fill = document.createElement("b");
+        bar.className = "bar" + (!ok ? "" : p <= 10 ? " crit" : p <= 25 ? " low" : ""); fill.style.width = (ok ? Math.max(0, Math.min(100, p)) : 0) * 0.42 + "px";
+        bar.append(fill); bar.title = key + (x.ok === false ? ": fault" : "");
+        const t = document.createElement("span"); t.textContent = key + " " + (ok ? Math.round(p) + "%" : "?") + (x.input_present ? " ⚡" : "");
         kids.push(bar, t);
       }
     });
-    if (s.shutdown && s.shutdown.pending) kids.push(Object.assign(document.createElement("span"), {className: "ru-pill ru-err", textContent: "shutdown pending"}));
+    const sd = s.shutdown || {};
+    if (sd.pending) kids.push(tag(isFinite(sd.in_s) ? "SHUTDOWN in " + Math.max(0, Math.round(sd.in_s)) + " s" : "SHUTDOWN pending", "ru-err",
+      [sd.reason, sd.by && "by " + sd.by].filter(Boolean).join(" · ")));
     box.replaceChildren(...kids);
   }
   const camView = v => { scene.setView(v); $("rv-iso").setAttribute("aria-pressed", String(v === "iso")); $("rv-top").setAttribute("aria-pressed", String(v === "top")); };
