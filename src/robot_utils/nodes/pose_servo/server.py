@@ -37,6 +37,8 @@ class ConfigIn(BaseModel):
     heading_tol: Optional[float] = Field(None, description="rad, acceptance region (default 0.035)")
     on_reach: Optional[Literal["terminate", "hold"]] = Field(None, description="default terminate")
     hold_band: Optional[float] = Field(None, description="an axis done inside its tolerance moves again beyond hold_band × tolerance (default 2)")
+    min_wheel_speed: Optional[float] = Field(None, description="m/s: while the base does not move, the command is raised up to this wheel speed (static friction; default 0.08, 0 = off)")
+    stall_s: Optional[float] = Field(None, description="s without progress before a goal ends as 'stalled' (default 3, 0 = never)")
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
         {}, {"max_speed": 0.15, "max_accel": 0.2, "max_distance": 1.0}]})
 
@@ -63,6 +65,8 @@ class GoalIn(BaseModel):
     heading_tol: Optional[float] = None
     on_reach: Optional[Literal["terminate", "hold"]] = None
     hold_band: Optional[float] = None
+    min_wheel_speed: Optional[float] = None
+    stall_s: Optional[float] = None
     speed: Optional[float] = Field(None, description="m/s, <= max_speed")
     omega: Optional[float] = Field(None, description="rad/s, <= max_omega")
     accel: Optional[float] = Field(None, description="m/s², <= max_accel")

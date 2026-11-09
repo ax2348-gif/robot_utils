@@ -50,11 +50,11 @@ SWERVE_GRACE_S = 0.25    # after enable, swerve telemetry this old may still sho
 FIELDS = ["t", "status", "goal_id", "x", "y", "theta", "goal_x", "goal_y", "goal_theta",
           "err_pos", "err_theta", "vx", "vy", "omega", "ax", "ay", "alpha",
           "vdes_x", "vdes_y", "wdes", "scale_lin", "scale_rot", "ttg_lin", "ttg_rot",
-          "lin_done", "rot_done", "kept", "wheel_max", "steer_rate", "est_age", "sent", "violations"]
+          "lin_done", "rot_done", "kept", "boost", "wheel_max", "steer_rate", "est_age", "sent", "violations"]
 UNITS = ["s", "enum", "id", "m", "m", "rad", "m", "m", "rad",
          "m", "rad", "m/s", "m/s", "rad/s", "m/s^2", "m/s^2", "rad/s^2",
          "m/s", "m/s", "rad/s", "", "", "s", "s",
-         "bool", "bool", "", "m/s", "rad/s", "s", "bool", "count"]
+         "bool", "bool", "", "m/s", "m/s", "rad/s", "s", "bool", "count"]
 FIELD_DOC = {
     "t": "control tick time (this host's monotonic clock; the Pi's when run there)",
     "status": "0 disabled, 1 idle, 2 moving, 3 holding, 4 braking",
@@ -68,6 +68,7 @@ FIELD_DOC = {
     "ttg_lin": "predicted time to the acceptance region per axis",
     "lin_done": "axis latched inside its acceptance region",
     "kept": "share of the planned step the limiter kept (1 = no intervention)",
+    "boost": "static-friction wheel-speed floor in force (rises while the base does not move)",
     "wheel_max": "fastest wheel of the sent twist; steer_rate = fastest wheel steering of this step",
     "est_age": "age of the estimator pose used (s)",
     "sent": "1 if the twist was accepted by the swerve node",
@@ -94,6 +95,8 @@ class Config:
     heading_tol: float = 0.035
     on_reach: str = "terminate"
     hold_band: float = 2.0
+    min_wheel_speed: float = 0.08     # m/s static-friction boost limit (0 = off)
+    stall_s: float = 3.0              # s without progress -> goal "stalled" (0 = never)
 
     @property
     def caps(self) -> Caps:
@@ -103,7 +106,7 @@ class Config:
 
 SAFETY_KEYS = ("max_speed", "max_omega", "max_accel", "max_alpha", "max_jerk", "max_ang_jerk",
                "max_distance", "max_rotation", "require_imu")
-MOTION_KEYS = ("mode", "pos_tol", "heading_tol", "on_reach", "hold_band")
+MOTION_KEYS = ("mode", "pos_tol", "heading_tol", "on_reach", "hold_band", "min_wheel_speed", "stall_s")
 CAP_BOUNDS = {"max_speed": HARD_MAX_SPEED, "max_omega": HARD_MAX_OMEGA, "max_accel": 10.0,
               "max_alpha": 40.0, "max_jerk": 100.0, "max_ang_jerk": 400.0,
               "max_distance": 20.0, "max_rotation": 20 * math.pi}
@@ -111,7 +114,11 @@ GOAL_LIMIT_KEYS = {"speed": "max_speed", "omega": "max_omega", "accel": "max_acc
                    "alpha": "max_alpha", "jerk": "max_jerk", "ang_jerk": "max_ang_jerk"}
 
 
-def validate_motion(mode, pos_tol, heading_tol, on_reach, hold_band) -> None:
+def validate_motion(mode, pos_tol, heading_tol, on_reach, hold_band, min_wheel_speed=0.0, stall_s=0.0) -> None:
+    if not (0 <= min_wheel_speed <= 0.3):
+        raise ValueError("min_wheel_speed must be within [0, 0.3] m/s")
+    if not (0 <= stall_s <= 60):
+        raise ValueError("stall_s must be within [0, 60] s (0 = never)")
     if mode not in ("synchronized", "independent"):
         raise ValueError("mode must be 'synchronized' or 'independent'")
     if on_reach not in ("terminate", "hold"):
@@ -136,7 +143,7 @@ def make_config(base: Config, changes: dict) -> Config:
     if c.max_speed + c.max_omega * WHEEL_R > WHEEL_SPEED_MAX:
         raise ValueError(f"max_speed + max_omega * {WHEEL_R:.3f} m must not exceed the wheel limit "
                          f"{WHEEL_SPEED_MAX} m/s")
-    validate_motion(c.mode, c.pos_tol, c.heading_tol, c.on_reach, c.hold_band)
+    validate_motion(c.mode, c.pos_tol, c.heading_tol, c.on_reach, c.hold_band, c.min_wheel_speed, c.stall_s)
     return replace(c, **{k: float(getattr(c, k)) for k in CAP_BOUNDS}, require_imu=bool(c.require_imu))
 
 
@@ -382,9 +389,9 @@ class PoseServoNode:
         row += [cmd.vx, cmd.vy, cmd.w, cmd.ax, cmd.ay, cmd.al] if cmd else [nan] * 6
         if diag:
             row += [diag.vdes_x, diag.vdes_y, diag.wdes, diag.scale_lin, diag.scale_rot,
-                    diag.ttg_lin, diag.ttg_rot, diag.lin_done, diag.rot_done, diag.kept]
+                    diag.ttg_lin, diag.ttg_rot, diag.lin_done, diag.rot_done, diag.kept, diag.boost]
         else:
-            row += [nan] * 10
+            row += [nan] * 11
         row += [chk.wheel, chk.steer] if chk else [nan, nan]
         row += [pp[3] if pp else nan, sent, float(self.servo.violations)]
         self.hub.publish_rows(np.array([row], dtype=np.float64), "servo")
@@ -402,6 +409,8 @@ class PoseServoNode:
         g.update(res, **extra)
         if res["result"] == "reached":
             self.events.add(f"goal {res['goal_id']} reached")
+        elif res["result"] == "stalled":
+            self.events.add(f"goal {res['goal_id']} stalled: {res['reason']}", "warn")
 
     # -- requests -----------------------------------------------------------------------------
 

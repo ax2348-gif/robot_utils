@@ -32,6 +32,14 @@ the desired velocity after unwinding the current acceleration (``a|a| / 2J``), c
 motion's accel, ``sqrt(2 J |e|)`` and ``|e| / TAU_VEL``; the jerk takes it there in one period
 if allowed.
 
+**Static friction.** The real base does not move for a few cm/s at the wheels, so the linear
+final approach could stall just short of the goal. When the error has not improved over a
+``BOOST_WINDOW`` although motion is commanded, a wheel-speed floor (``boost``) rises by
+``BOOST_STEP`` per window up to ``min_wheel_speed``; the desired twist is scaled up (axis ratio
+kept, so synchronization holds) until its fastest wheel reaches it, with no axis faster than
+what stops within the hold band past its goal. It holds while the base moves and resets when
+the goal is settled or replaced; a base that follows its commands never gets one. A goal whose error stops improving for ``stall_s`` ends as ``stalled`` (braking).
+
 **Acceptance region.** Each axis latches *done* inside its tolerance (it then only brakes and
 holds still) and is released only beyond ``hold_band`` x the tolerance: no hunting at the goal.
 With both done the goal is reached: ``terminate`` brakes to zero and ends; ``hold`` keeps
@@ -97,6 +105,8 @@ class Motion:
     heading_tol: float = 0.035      # rad
     on_reach: str = "terminate"     # or "hold"
     hold_band: float = 2.0          # an axis done inside tol is released beyond hold_band * tol
+    min_wheel_speed: float = 0.08   # m/s: up to this wheel speed is added while the base is not moving (static friction)
+    stall_s: float = 3.0            # s without progress -> the goal ends as "stalled" (0 = never)
 
     @classmethod
     def from_caps(cls, caps: Caps, **kw) -> "Motion":
@@ -393,6 +403,12 @@ def limit_step(c: Cmd, jx: float, jy: float, jr: float, caps: Caps, dt: float) -
 # --------------------------------------------------------------------------------------------
 
 STATUS = {"disabled": 0, "idle": 1, "moving": 2, "holding": 3, "braking": 4}
+STALL_POS = 0.005      # m: less improvement than this of the best distance is not progress
+STALL_THETA = 0.01     # rad
+BOOST_WINDOW = 0.25    # s: progress check of the static-friction boost
+BOOST_STEP = 0.02      # m/s of wheel speed added per window without progress
+BOOST_POS = 0.002      # m / rad of error improvement per window that counts as moving
+BOOST_THETA = 0.004
 
 
 @dataclass
@@ -412,6 +428,7 @@ class Diag:
     lin_done: float = 0.0
     rot_done: float = 0.0
     kept: float = 1.0               # share of the planned step the limiter kept
+    boost: float = 0.0              # m/s static-friction wheel-speed floor in force
     violations: int = 0             # steps that broke a constraint (expected 0)
 
 
@@ -427,6 +444,10 @@ class Servo:
         self.result: Optional[dict] = None      # how the last goal ended
         self.violations = 0
         self.last_check: Optional[StepCheck] = None
+        self._t = 0.0
+        self._progress = (math.inf, math.inf, 0.0)     # best distance, best |heading error|, when
+        self.boost = 0.0                               # m/s wheel-speed floor (static friction), adaptive
+        self._boost_ref = (math.inf, math.inf, 0.0)    # errors at the start of the boost window
 
     # -- commands ---------------------------------------------------------------------------
 
@@ -435,6 +456,8 @@ class Servo:
         self.goal, self.braking = goal, None
         self.lin_done = self.rot_done = False
         self.result = None
+        self._progress = (math.inf, math.inf, self._t)
+        self.boost, self._boost_ref = 0.0, (math.inf, math.inf, self._t)
 
     def stop(self, reason: str, result: str = "stopped") -> None:
         """Brake to zero within the caps (no pose needed) and drop the goal."""
@@ -467,6 +490,7 @@ class Servo:
         """One period. ``pose`` = (x, y, theta) now (None is allowed only without a goal).
         Returns the twist to send (None = nothing to send: idle) and diagnostics."""
         d = Diag(goal_id=self.goal.goal_id if self.goal else 0)
+        self._t += dt
         if not self.active:
             d.status = "idle"
             return None, d
@@ -479,6 +503,14 @@ class Servo:
             m = g.motion
             assert pose is not None
             vdx, vdy, wd = self._plan(g, pose, d)
+            if self._stalled(g, d):
+                self.stop(f"no progress for {g.motion.stall_s:g} s (error {d.err_pos:.3f} m, "
+                          f"{d.err_theta:+.3f} rad): the base is not following", "stalled")
+                g, m = None, Motion.from_caps(caps)
+                vdx = vdy = wd = 0.0
+                if self.braking is None:          # already at rest
+                    d.status = "idle"
+                    return None, d
         d.vdes_x, d.vdes_y, d.wdes = vdx, vdy, wd
         # track the desired body twist (motion accel / jerk); limiter enforces the caps
         tax, tay = _track(vdx - c.vx, vdy - c.vy, c.ax, c.ay, m.accel, m.jerk)
@@ -514,6 +546,33 @@ class Servo:
             d.status = "braking"
         d.lin_done, d.rot_done = float(self.lin_done), float(self.rot_done)
         return n, d
+
+    def _update_boost(self, g: Goal, d: Diag, commanding: bool) -> None:
+        """Adaptive static-friction floor: rises while the error does not improve although motion is
+        commanded, holds while moving, resets once both axes are done. A base that follows its
+        commands never gets one (no effect in simulation or on a smooth floor)."""
+        if self.lin_done and self.rot_done:
+            self.boost, self._boost_ref = 0.0, (d.err_pos, abs(d.err_theta), self._t)
+            return
+        p0, t0, since = self._boost_ref
+        if self._t - since < BOOST_WINDOW:
+            return
+        moved = d.err_pos < p0 - BOOST_POS or abs(d.err_theta) < t0 - BOOST_THETA
+        if not moved and commanding:
+            self.boost = min(g.motion.min_wheel_speed, self.boost + BOOST_STEP)
+        self._boost_ref = (d.err_pos, abs(d.err_theta), self._t)
+
+    def _stalled(self, g: Goal, d: Diag) -> bool:
+        """True when a moving goal's error has not improved for stall_s (the base is stuck,
+        e.g. commanded speeds the drive does not respond to). Holding / settled resets it."""
+        if g.motion.stall_s <= 0 or (self.lin_done and self.rot_done):
+            self._progress = (d.err_pos, abs(d.err_theta), self._t)
+            return False
+        bp, bt, since = self._progress
+        if d.err_pos < bp - STALL_POS or abs(d.err_theta) < bt - STALL_THETA:
+            self._progress = (min(bp, d.err_pos), min(bt, abs(d.err_theta)), self._t)
+            return False
+        return self._t - since > g.motion.stall_s
 
     def _plan(self, g: Goal, pose, d: Diag) -> tuple[float, float, float]:
         x, y, th = pose
@@ -552,6 +611,7 @@ class Servo:
                 s_rot = max(SYNC_MIN_SCALE, t_rot / t_lin)
         d.scale_lin, d.scale_rot = s_lin, s_rot
         # desired speeds (stop at the goal with the scaled limits; linear final approach)
+        sp = 0.0
         if lin_active:
             sp = min(m.speed * s_lin, speed_for_distance(dist, A_l * s_lin ** 2, J_l * s_lin ** 3),
                      dist * s_lin / TAU_POS)
@@ -559,12 +619,27 @@ class Servo:
         else:
             vdw = (0.0, 0.0)
         if rot_active:
-            wd = math.copysign(min(m.omega * s_rot, speed_for_distance(abs(eth), A_r * s_rot ** 2, J_r * s_rot ** 3),
-                                   abs(eth) * s_rot / TAU_POS), eth)
+            w = min(m.omega * s_rot, speed_for_distance(abs(eth), A_r * s_rot ** 2, J_r * s_rot ** 3),
+                    abs(eth) * s_rot / TAU_POS)
+            wd = math.copysign(w, eth)
         else:
             wd = 0.0
         # world -> body at the heading half a step ahead is not worth it; use the current one
         vdx, vdy = ct * vdw[0] + st * vdw[1], -st * vdw[0] + ct * vdw[1]
+        # static friction: while the base does not move, scale the whole desired twist (axis ratio kept)
+        # so its fastest wheel turns at least `boost`; no axis faster than what stops within the hold
+        # band past its goal (an overshoot never releases a done axis: no hunting)
+        fastest = max_wheel_speed(vdx, vdy, wd)
+        self._update_boost(g, d, fastest > 0)
+        d.boost = self.boost
+        if 0 < fastest < self.boost:
+            k = self.boost / fastest
+            if sp > 0:
+                k = min(k, min(m.speed, speed_for_distance(dist + m.hold_band * m.pos_tol, A_l, J_l)) / sp)
+            if wd != 0:
+                k = min(k, min(m.omega, speed_for_distance(abs(eth) + m.hold_band * m.heading_tol, A_r, J_r)) / abs(wd))
+            if k > 1:
+                vdx, vdy, wd = vdx * k, vdy * k, wd * k
         return vdx, vdy, wd
 
 

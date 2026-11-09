@@ -8,8 +8,8 @@ import random
 import pytest
 
 from robot_utils.nodes.pose_servo.planner import (STEER_RATE_MAX, WHEEL_SPEED_MAX, Caps, Cmd, Goal, Motion, Servo,
-                                                  approach_time, check_step, limit_step, speed_for_distance,
-                                                  steer_rate, stop_distance, within)
+                                                  approach_time, check_step, limit_step, max_wheel_speed,
+                                                  speed_for_distance, steer_rate, stop_distance, within)
 
 DT = 0.02
 CAPS_SETS = [Caps(), Caps(2.0, 4.0, 5.0, 20.0, 50.0, 200.0), Caps(0.1, 0.3, 0.2, 0.5, 0.5, 1.0),
@@ -19,7 +19,7 @@ CAPS_SETS = [Caps(), Caps(2.0, 4.0, 5.0, 20.0, 50.0, 200.0), Caps(0.1, 0.3, 0.2,
 class Sim:
     """Kinematic base + servo; records the worst of every constrained quantity."""
 
-    def __init__(self, caps=Caps(), pose=(0.0, 0.0, 0.0), cmd=None, disturb=None):
+    def __init__(self, caps=Caps(), pose=(0.0, 0.0, 0.0), cmd=None, disturb=None, breakaway=0.0):
         self.servo = Servo(caps)
         if cmd is not None:
             self.servo.cmd = cmd
@@ -32,6 +32,7 @@ class Sim:
         self.log = []
         self.n_id = 0
         self.disturb = disturb
+        self.breakaway = breakaway        # static friction: no motion while every wheel is slower than this
 
     def goal(self, x, y, th, **kw):
         self.n_id += 1
@@ -50,6 +51,9 @@ class Sim:
         if within(c, self.caps):
             self.bad.append((self.t, within(c, self.caps)))
         self.prev = Cmd(**vars(n))
+        if max_wheel_speed(n.vx, n.vy, n.w) < self.breakaway:
+            self.log.append((self.t, d, n))
+            return d
         ct, st = math.cos(self.th), math.sin(self.th)
         self.x += (ct * n.vx - st * n.vy) * DT
         self.y += (st * n.vx + ct * n.vy) * DT
@@ -236,3 +240,69 @@ def test_approach_time_is_a_reasonable_prediction():
     # the ratio of the two axes matters for synchronization)
     assert t_reach < d0.ttg_lin < 1.3 * t_reach
     assert approach_time(0.01, 0, 0.3, 0.4, 1.6, 0.02) == 0.0
+
+
+# -- static friction (the real base does not move for a few cm/s at the wheels) ----------------------
+
+def test_without_min_wheel_speed_a_sticky_base_stalls_and_is_reported():
+    s = Sim(Caps(0.15, 0.4, 0.2, 0.8, 0.8, 3.0), breakaway=0.06)
+    s.goal(0, 0, 1.5708, min_wheel_speed=0.0)
+    assert s.run(30)
+    assert s.servo.result["result"] == "stalled", s.servo.result
+    assert 0.035 < abs(1.5708 - s.th) < 0.2                   # stuck short, as seen on the robot
+    assert s.servo.cmd.is_zero()
+    assert_clean(s)
+
+
+@pytest.mark.parametrize("goal", [(0, 0, 1.5708), (0, 0, -0.06), (0.03, 0, 0), (0.6, 0.35, 0), (0.5, 0.2, -0.9),
+                                  (0.92, 0.1, -0.96)])
+def test_min_wheel_speed_reaches_goals_on_a_sticky_base(goal):
+    s = Sim(Caps(0.15, 0.4, 0.2, 0.8, 0.8, 3.0), breakaway=0.06)
+    s.goal(*goal)
+    assert s.run(60)
+    assert s.servo.result["result"] == "reached", s.servo.result
+    assert math.hypot(s.x - goal[0], s.y - goal[1]) <= 0.02 * 1.5 + 1e-3     # within tol (+ half a tol of stopping)
+    assert abs(s.th - goal[2]) <= 0.035 * 1.5 + 1e-3
+    assert_clean(s)
+
+
+def test_min_wheel_speed_keeps_synchronization():
+    for goal in [(1.0, 0.5, 1.0), (2.0, 0.0, 0.3)]:
+        s = Sim(breakaway=0.045)
+        s.goal(*goal)
+        assert s.run(60)
+        tp = next(t for t, d, _ in s.log if d.err_pos <= 0.02)
+        tr = next(t for t, d, _ in s.log if abs(d.err_theta) <= 0.035)
+        assert abs(tp - tr) < 0.3, (goal, tp, tr)
+
+
+def test_a_base_that_does_not_move_stalls_after_stall_s():
+    s = Sim(breakaway=10.0)
+    s.goal(0.5, 0.0, 0.0, stall_s=2.0)
+    assert s.run(10)
+    res = s.servo.result
+    assert res["result"] == "stalled" and "no progress" in res["reason"]
+    t_end = s.log[-1][0]
+    assert 2.0 < t_end < 4.0                                    # 2 s + braking
+    assert_clean(s)
+
+
+def test_hold_with_a_sticky_base_does_not_report_stalled():
+    s = Sim(breakaway=0.045)
+    s.goal(0.3, 0.0, 0.0, on_reach="hold", stall_s=1.0)
+    s.run(10, until_idle=False)
+    assert s.servo.goal is not None and s.servo.status == "holding"
+
+
+def test_fuzz_sticky_base():
+    rnd = random.Random(7)
+    for i in range(120):
+        caps = rnd.choice(CAPS_SETS[:3] + CAPS_SETS[4:])
+        s = Sim(caps, breakaway=rnd.uniform(0.0, 0.045))
+        for _ in range(rnd.randint(1, 3)):
+            s.goal(rnd.uniform(-1, 1), rnd.uniform(-1, 1), rnd.uniform(-3, 3), mode=rnd.choice(["synchronized", "independent"]))
+            for _ in range(int(rnd.uniform(0.1, 2.0) / DT)):
+                s.step()
+        assert s.run(120), i
+        assert s.servo.result["result"] == "reached", (i, caps, s.servo.result)
+        assert_clean(s)

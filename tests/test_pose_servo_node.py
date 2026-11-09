@@ -271,3 +271,15 @@ def test_page_and_meta(stack):
         assert 'src="common/ui.js"' in page and 'api("/' not in page and 'rows("/' not in page
         cfg = c.get("/config")
         assert cfg["config"]["max_distance"] == 3.0 and cfg["hard"]["steer_rate"] == pytest.approx(4 * math.pi)
+
+
+def test_static_friction_options(stack):
+    url = stack["url"]
+    r = post(url, "/enable", {"client": "t", "config": {"require_imu": False, "min_wheel_speed": 0.1, "stall_s": 5}})
+    assert r.status_code == 200 and r.json()["config"]["min_wheel_speed"] == 0.1
+    assert post(url, "/config", {"min_wheel_speed": 0.5}).status_code == 422
+    r = post(url, "/goal", {"theta": 0.3, "min_wheel_speed": 0.0, "stall_s": 0})
+    assert r.status_code == 200 and r.json()["motion"]["min_wheel_speed"] == 0.0
+    assert wait_result(stack)["result"] == "reached"
+    with NodeClient(stack["url"]) as c:
+        assert "boost" in c.get("/fields")["fields"]

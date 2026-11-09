@@ -86,7 +86,7 @@ $("#go").onclick = async () => {
 };
 // config form
 const CFG = [["max_speed","m/s"],["max_omega","rad/s"],["max_accel","m/s²"],["max_alpha","rad/s²"],["max_jerk","m/s³"],
-             ["max_ang_jerk","rad/s³"],["max_distance","m"],["max_rotation","rad"],["pos_tol","m"],["heading_tol","rad"],["hold_band","×"]];
+             ["max_ang_jerk","rad/s³"],["max_distance","m"],["max_rotation","rad"],["pos_tol","m"],["heading_tol","rad"],["hold_band","×"],["min_wheel_speed","m/s"],["stall_s","s"]];
 $("#cfg").innerHTML = CFG.map(([k,u]) => `<span title="${u}">${k}</span><input id="c_${k}" type="number" step="any">`).join("") +
   `<span>mode</span><select id="c_mode"><option>synchronized</option><option>independent</option></select>` +
   `<span>on_reach</span><select id="c_on_reach"><option>terminate</option><option>hold</option></select>` +
@@ -133,7 +133,7 @@ RU.sse("events", s => {
     ["error", `${f(L.err_pos, 3)} m, ${f(L.err_theta === null ? null : L.err_theta * D, 1)}°`],
     ["twist", `${f(L.vx, 3)}, ${f(L.vy, 3)} m/s, ${f(L.omega, 3)} rad/s`],
     ["sync scale", `${f(L.scale_lin, 2)} lin / ${f(L.scale_rot, 2)} rot; ttg ${f(L.ttg_lin, 2)} / ${f(L.ttg_rot, 2)} s`],
-    ["limiter", `kept ${f(L.kept, 2)}; wheel ${f(L.wheel_max, 3)} m/s; steer ${f(L.steer_rate, 2)} rad/s`],
+    ["limiter", `kept ${f(L.kept, 2)}; wheel ${f(L.wheel_max, 3)} m/s; steer ${f(L.steer_rate, 2)} rad/s; boost ${f(L.boost, 2)} m/s`],
     ["violations", String(s.violations)],
     ["loop", `${f(s.loop_hz, 1)} Hz`],
   ];

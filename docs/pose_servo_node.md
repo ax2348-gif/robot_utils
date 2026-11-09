@@ -70,7 +70,7 @@ another lease, or disabled, pose_servo disables itself.
   - an unknown option.
 - **Other refusals:** 409 if not enabled; 503 if the estimator pose is unusable.
 - **Per-goal options** override the config's motion defaults for this goal only:
-  - `mode`, `pos_tol`, `heading_tol`, `on_reach`, `hold_band`;
+  - `mode`, `pos_tol`, `heading_tol`, `on_reach`, `hold_band`, `min_wheel_speed`, `stall_s`;
   - limits `speed`, `omega`, `accel`, `alpha`, `jerk`, `ang_jerk`, each ≤ its cap. They shape
     the motion; the caps stay the hard bound. Lowering `speed` mid-motion decelerates within the
     limits rather than jumping.
@@ -88,6 +88,8 @@ another lease, or disabled, pose_servo disables itself.
 | `pos_tol`, `heading_tol` | 0.02 m, 0.035 rad | acceptance region |
 | `on_reach` | `terminate` | or `hold` |
 | `hold_band` | 2 | once inside its tolerance, an axis moves again only beyond `hold_band` × the tolerance |
+| `min_wheel_speed` | 0.08 m/s | static friction: while the base does not move although motion is commanded, the command is raised up to this wheel speed (0 = off) |
+| `stall_s` | 3 s | a goal whose error stops improving for this long ends as `stalled` (braking; 0 = never) |
 
 **Fixed in code:**
 - every wheel ≤ **3 m/s**;
@@ -145,6 +147,23 @@ Every accepted state therefore has an allowed next step, and the sequence cannot
 a violation. Each sent step is verified again and any violation is counted (`violations`,
 expected 0; none has occurred in testing).
 
+**Static friction.** On the robot, wheels commanded at about 4 cm/s or less don't move. The
+linear final approach then stalls short of the goal: on 2026-11-08, rotation goals stopped
+0.05–0.06 rad short with about 0.16 rad/s commanded. Translation didn't stall in that
+episode. The fix works like integral action:
+- Every 0.25 s the servo checks whether the error improved, by at least 2 mm or 4 mrad.
+- If not, while motion is commanded, a wheel-speed floor (`boost`) rises by 0.02 m/s, up to
+  `min_wheel_speed`.
+- The desired twist is scaled up, keeping the ratio of its axes so synchronization still
+  holds, until its fastest wheel reaches the floor.
+- No axis is driven faster than what stops within the hold band past its goal, so an overshoot
+  never releases a done axis.
+- The floor holds while the base moves and resets when the goal is settled or replaced.
+- A base that follows its commands, such as the simulation, never gets a floor.
+
+If the base still does not move, the goal ends as `stalled` after `stall_s` instead of
+staying "moving".
+
 **Acceptance region.**
 - Each axis latches *done* inside its tolerance; it then only brakes and holds.
 - It is released only beyond `hold_band` × the tolerance, so there is no hunting at the goal.
@@ -176,6 +195,9 @@ expected 0; none has occurred in testing).
 - The final approach is exponential; the time to reach the tolerance grows slowly as
   `pos_tol` shrinks below about 1 cm.
 
+- Small corrections are limited by the caps: a turn needs `max_omega × 0.234 m` above the
+  breakaway wheel speed, or it ends `stalled`.
+
 ## Measured (simulation)
 
 - **Kinematic simulation** (tests/test_pose_servo_planner.py):
@@ -185,6 +207,11 @@ expected 0; none has occurred in testing).
   - Speed, acceleration and jerk reach their caps exactly.
   - Synchronized axes finish within 0.12 s of each other.
   - Planner step about 0.02 ms on a Mac.
+  - With a static-friction model (no motion below a breakaway wheel speed of 0.06 m/s, the
+    robot's case): without the boost, a 90° turn stalls short and is reported `stalled`. With
+    it, turns, small corrections (0.06 rad, 3 cm) and the 2026-11-08 navigation legs end within
+    1.5× the tolerance. 120 random goal sequences, with breakaway up to 0.045 m/s, are all
+    reached with zero violations.
 - **Full stack** (tests/test_pose_servo_node.py): simulated swerve node, estimator (odometry
   only) and pose_servo, as real servers.
   - Local goal (0.4, 0.2, 0.6 rad) reached within 3 cm and 0.05 rad.
