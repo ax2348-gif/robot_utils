@@ -234,9 +234,11 @@ On the robot:
    ```
 3. **Start the node and enable its low-voltage shutdown.** Add the start recipe to `nodes.yaml`:
    ```yaml
-   - {name: power, kind: power, start: {module: robot_utils.nodes.power}}
+   - {name: power, kind: power, boot: true, start: {module: robot_utils.nodes.power}}
    ```
-   Restart the landing page, then press Start on the power tile. Tick **enabled** in the page's
+   Restart the landing page, then run `python -m robot_utils.frontend.boot` (install.sh does this):
+   the node gets a persistent unit and starts at every boot, so low-voltage protection doesn't
+   depend on someone pressing Start (docs/frontend.md, "Nodes that start at boot"). Tick **enabled** in the page's
    Low-voltage shutdown panel at 13.2 V, which matches the old setting. You can also run
    `curl -X POST localhost/nodes/power/low_voltage -H 'Content-Type: application/json' -d '{"enabled": true, "volts": 13.2, "by": "cutover"}'`.
 4. **Check** the page and run `python -m robot_utils.admin.power status`.

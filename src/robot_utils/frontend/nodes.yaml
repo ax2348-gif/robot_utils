@@ -12,6 +12,8 @@
 #            stops its own units. A second camera, e.g.:
 #              {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 #   enabled: optional, default true; false = listed as "planned", not polled, not e-stopped
+#   boot:    optional, default false; true = a persistent user unit that starts at boot (needs start:;
+#            python -m robot_utils.frontend.boot, run by install.sh, writes and enables it)
 #   port:    optional; for a local instance, a debug TCP port it was told to open (--port);
 #   host:    with port, for a node on another machine (reached through the frontend's proxy)
 #
@@ -19,8 +21,9 @@
 nodes:
   - {name: camera, kind: camera, start: {module: robot_utils.nodes.orbbec}}
   - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve}}
-  # power: the UPS HAT (and later the main / aux batteries); replaced ~/ups-dashboard (docs/power.md)
-  - {name: power, kind: power, start: {module: robot_utils.nodes.power}}
+  # power: the UPS HAT (and later the main / aux batteries); replaced ~/ups-dashboard (docs/power.md).
+  # boot: its low-voltage shutdown must run without anyone pressing Start (frontend/boot.py)
+  - {name: power, kind: power, boot: true, start: {module: robot_utils.nodes.power}}
   - {name: arm, kind: arm, enabled: false}        # future
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}

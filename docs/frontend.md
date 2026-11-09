@@ -158,6 +158,24 @@ The scope is deliberately small (`frontend/manager.py`):
   them up again from systemd.
 - **Anyone** who can reach the landing page can start and stop nodes (for now).
 
+### Nodes that start at boot
+
+Most nodes run as **transient** units: after a reboot nothing comes back until someone presses
+Start. A node that must always run (the power node: its low-voltage shutdown has to work after a
+power event) gets `boot: true` in `nodes.yaml`:
+
+```yaml
+  - {name: power, kind: power, boot: true, start: {module: robot_utils.nodes.power}}
+```
+
+`python -m robot_utils.frontend.boot` (which `install.sh` runs) then writes
+`~/.config/systemd/user/robot-node-<name>.service`, enabled for the user's lingering session, with
+`Restart=on-failure`, and starts it. A node already running as a transient unit is handed over
+(stopped, then started as the unit file: a few seconds' gap). The unit keeps the same name, so
+Start, Stop and logs on the landing page work as before; Stop lasts until the next boot. Remove
+`boot: true` and run the command again to go back: it disables and deletes only the unit files it
+wrote. `--dry-run` shows what it would do.
+
 Pill states: `stopped`, `managed: starting…`, `managed: running`, `managed: stopping…`,
 `managed: failed (<result>)`, `running (not managed)`. Starting the camera shows a reminder
 to keep the robot still for ~2 s (startup IMU calibration).

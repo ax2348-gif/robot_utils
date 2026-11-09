@@ -204,6 +204,10 @@ UNITEOF
     echo "  $FRONTEND did not start; see: journalctl --user -u $FRONTEND -n 30" >&2
   fi
 
+  # nodes with boot: true in nodes.yaml (e.g. power): persistent units, started at boot
+  (cd "$ROOT" && "$PY" -m robot_utils.frontend.boot | sed 's/^/  boot: /') \
+    || echo "  some boot nodes did not start (above)" >&2
+
   if [[ $PROXY_OK == 1 ]]; then
     "$PY" -m robot_utils.frontend.proxy --conf-dir "$NGINX_CONF_DIR" --state-dir "$NGINX_STATE" >/dev/null
     NGINX_ARGS="-p $NGINX_STATE -e $NGINX_STATE/error.log -c $NGINX_CONF_DIR/nginx.conf"

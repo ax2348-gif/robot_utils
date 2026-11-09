@@ -40,6 +40,7 @@ class NodeEntry:
     enabled: bool = True
     start: StartRecipe | None = None  # None: the frontend cannot start this node
     kind: str | None = None           # camera, swerve, estimator, ... (default: the name)
+    boot: bool = False                # start at boot (a persistent user unit; frontend/boot.py)
 
     @property
     def node_kind(self) -> str:
@@ -62,7 +63,7 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
         where = f"{source}: nodes[{i}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where}: expected a mapping like {{name: swerve, kind: swerve}}")
-        unknown = set(raw) - {"name", "kind", "port", "host", "enabled", "start"}
+        unknown = set(raw) - {"name", "kind", "port", "host", "enabled", "start", "boot"}
         if unknown:
             raise ConfigError(f"{where}: unknown keys {sorted(unknown)}")
         name = raw.get("name")
@@ -87,8 +88,13 @@ def parse_config(data: object, source: str = "<config>") -> list[NodeEntry]:
         start = _parse_start(raw.get("start"), where)
         if start is not None and host is not None:
             raise ConfigError(f"{where}: 'start' only works for nodes on this machine (no 'host')")
+        boot = raw.get("boot", False)
+        if not isinstance(boot, bool):
+            raise ConfigError(f"{where}: 'boot' must be true or false, got {boot!r}")
+        if boot and (start is None or not enabled):
+            raise ConfigError(f"{where}: 'boot: true' needs a 'start' recipe and 'enabled' (it is how the node starts)")
         seen.add(name)
-        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled, start, kind))
+        nodes.append(NodeEntry(name, port, host.strip() if host else None, enabled, start, kind, boot))
     return nodes
 
 

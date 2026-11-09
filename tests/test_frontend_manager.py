@@ -169,7 +169,8 @@ def test_systemd_commands():
     st = run(r.start(node, ["/venv/python", "-m", "robot_utils.nodes.orbbec"], "/repo"))
     assert st.state == "running" and st.pid == 4242
     assert rec.calls[0] == ["systemctl", "--user", "reset-failed", "robot-node-cam.service"]
-    sr = rec.calls[1]
+    assert rec.calls[1][:4] == ["systemctl", "--user", "show", "robot-node-cam.service"]   # unit file? (boot nodes)
+    sr = rec.calls[2]
     assert sr[:3] == ["systemd-run", "--user", "--unit=robot-node-cam.service"]
     assert "--working-directory=/repo" in sr and "--property=TimeoutStopSec=10" in sr
     assert not any("Restart=" in a for a in sr)                     # no restart policy
