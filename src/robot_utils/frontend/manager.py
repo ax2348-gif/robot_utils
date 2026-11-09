@@ -144,9 +144,22 @@ class SystemdRunner:
         result = props.get("Result") if state == "failed" else None
         return UnitStatus(state, pid, since, result)
 
+    async def persistent(self, node: NodeEntry) -> bool:
+        """The node has a unit file (``boot: true``, frontend/boot.py): start it as that unit."""
+        code, out, _ = await self._run("systemctl", "--user", "show", unit_name(node), "--no-pager",
+                                       "-p", "LoadState", "-p", "Transient", "-p", "FragmentPath", timeout=5)
+        props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        return (code == 0 and props.get("LoadState") == "loaded" and props.get("Transient") == "no"
+                and bool(props.get("FragmentPath")))
+
     async def start(self, node: NodeEntry, argv: list[str], cwd: str) -> UnitStatus:
         unit = unit_name(node)
         await self._run("systemctl", "--user", "reset-failed", unit, timeout=5)  # clear a failed run
+        if await self.persistent(node):
+            code, out, err = await self._run("systemctl", "--user", "start", unit, timeout=STOP_TIMEOUT_S + 20)
+            if code != 0:
+                raise ManagerError(500, f"systemctl start failed: {(err or out).strip()}")
+            return await self.status(node)
         code, out, err = await self._run(
             "systemd-run", "--user", f"--unit={unit}",
             f"--description=robot_utils node {node.name} (started by the landing page)",
