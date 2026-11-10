@@ -258,8 +258,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def enable(token: LeaseToken = None):
         """Motors on, gravity compensated. The arm floats (kp = kd = 0) until the first closed-loop arm
         command (track, servo, chunk, home, stow) engages servoing from the measured pose; the gripper
-        is free until a gripper command makes it hold (disable puts it into damping; enable frees it again). 409 with the reason if an output encoder
-        disagrees with its motor."""
+        is free until a gripper command makes it hold (disable puts it into damping; enable frees it again)."""
         return await asyncio.to_thread(node.enable, token)
 
     @app.post("/disable", tags=["control"], summary="Disable: the arm floats, the gripper goes into damping, commands refused (holder)")

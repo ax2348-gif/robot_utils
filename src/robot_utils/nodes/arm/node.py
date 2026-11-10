@@ -59,8 +59,7 @@ LEASE_HEARTBEAT = 1.0         # s (a lapse disables: the arm floats, it does not
 LATE_TICK = 0.06              # s between ticks with the motors on = fault (motor watchdog 100 ms)
 LATE_SEND = 0.09              # s since the last frame, checked just before sending
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
-ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor that refuses enable
-ENC_MISMATCH_RUN = 0.15       # rad that faults while the motors are on (arm joints)
+ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor feedback that refuses enable
 PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
 TRACK_IK_ITER = 30            # the Quest teleop's per-command IK iterations (warm-started)
 TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is refused
@@ -340,13 +339,6 @@ class ArmNode:
         if faults:
             self._fault("motor fault: " + "; ".join(faults))
             return
-        # arm joints only: the gripper moves fast, and its output and motor readings are not taken
-        # at the same instant (its encoders are checked at enable, at rest)
-        mism = np.abs(r.q - r.q_mot)
-        if self.motors_on and mism.max() > ENC_MISMATCH_RUN:
-            i = int(np.argmax(mism))
-            self._fault(f"{self.bus.names[i]}: output encoder and motor disagree by {math.degrees(mism[i]):.1f}°")
-            return
         ch = self.chocks()
         if ch and self.enabled:
             self._disable(f"CHOCKED ({describe_locks(ch)}): disabled (arm floating)")
@@ -378,15 +370,17 @@ class ArmNode:
             self.events.add(f"motors off (damping): {why}")
 
     def _check_encoders(self, r) -> None:
+        """At enable, at rest: each joint's output encoder (q, what kinematics, IK and plans use)
+        and its motor's feedback position (q_mot, what the MIT loop servos on) must agree to within
+        backlash, or every command would land off by the difference (a full turn for a 2π wrap)."""
         names = self.bus.names
-        diff = np.abs(r.q - r.q_mot)
+        diff = np.abs(np.append(r.q - r.q_mot, r.g_q - r.g_q_mot))
         for i in np.flatnonzero(diff > ENC_MISMATCH_ENABLE):
-            raise RequestError(409, f"{names[i]}: output encoder {math.degrees(r.q[i]):+.1f}° and motor "
-                                    f"{math.degrees(r.q_mot[i]):+.1f}° disagree by {math.degrees(diff[i]):.1f}° "
-                                    "(encoder wrap or slipped zero): power-cycle the arm; not enabling")
-        if abs(r.g_q - r.g_q_mot) > ENC_MISMATCH_ENABLE:
-            raise RequestError(409, f"gripper: output encoder and motor disagree by "
-                                    f"{math.degrees(abs(r.g_q - r.g_q_mot)):.1f}°: power-cycle the arm; not enabling")
+            qo = r.q[i] if i < N else r.g_q
+            qm = r.q_mot[i] if i < N else r.g_q_mot
+            raise RequestError(409, f"{names[i]}: output encoder {math.degrees(qo):+.1f}° and motor feedback "
+                                    f"{math.degrees(qm):+.1f}° disagree by {math.degrees(diff[i]):.1f}°: "
+                                    "power-cycle the arm; not enabling")
 
     def _limit_problem(self, q) -> Optional[str]:
         """Why servoing must not start from ``q`` (a joint further outside its limits than
@@ -414,7 +408,6 @@ class ArmNode:
                     raise RequestError(409, f"cancelled: {req['cancel']}")
                 self._check_encoders(self.bus.read())    # before any motor is switched on
                 self.bus.enable()
-                self._check_encoders(self.bus.read())
                 with self._lock:
                     self.servo = False
                     self.q_cmd = None

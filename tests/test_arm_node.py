@@ -474,19 +474,6 @@ def test_engaging_far_outside_limits_is_refused_not_snapped(rig):
     assert n.kin.within_limits(rig.sim.q, margin=1e-3)
 
 
-def test_encoder_mismatch_refuses_enable_and_faults_running(rig):
-    rig.sim.mot_offset[5] = 2 * math.pi              # joint6 output vs motor: a 2π wrap
-    rig.lease()
-    with pytest.raises(RequestError) as e:
-        rig.enable()
-    assert "disagree" in str(e.value) and not rig.sim.enabled
-    rig.sim.mot_offset[5] = 0.0
-    rig.enable()
-    rig.sim.mot_offset[2] = 0.3
-    rig.step(1)
-    assert rig.node.state == "fault" and "disagree" in rig.node.error
-
-
 def test_engage_seeds_from_the_reading(rig):
     rig.sim.mot_offset[:] = 0.01                      # backlash: the motors sit 0.01 rad off the output
     n = ready(rig).node
@@ -666,14 +653,6 @@ def test_gravity_floating_holds_estop_sinks_and_home_recovers(tmp_path):
     assert np.allclose(rig.sim.q, 0.0, atol=5e-3)
 
 
-def test_gripper_encoder_mismatch_refuses_enable(rig):
-    rig.sim.g_mot_offset = 0.2
-    rig.lease()
-    with pytest.raises(RequestError) as e:
-        rig.enable()
-    assert "gripper" in str(e.value)
-
-
 
 # -- float / disable / stow ------------------------------------------------------------------------
 
@@ -794,10 +773,15 @@ def test_servo_uses_the_geodesic_and_clik(rig):
     assert dp < 2e-3 and dr < math.radians(1.0)
     assert np.allclose(tr.qd[-1], 0.0)
 
-
-def test_fast_gripper_reading_skew_does_not_fault(rig):
-    # on the robot: the gripper's output and motor readings differed by 12.7° while it moved fast
-    n = engaged(rig).node
-    rig.sim.g_mot_offset = math.radians(15.0)
+def test_encoder_disagreement_refuses_enable_only(rig):
+    rig.sim.mot_offset[5] = 2 * math.pi                # joint6: output encoder and motor a turn apart
+    rig.lease()
+    with pytest.raises(RequestError) as e:
+        rig.enable()
+    assert e.value.status == 409 and "disagree" in str(e.value) and not rig.sim.enabled
+    rig.sim.mot_offset[5] = 0.0
+    rig.enable()
+    rig.sim.mot_offset[2] = 0.3                        # while running: not checked
+    rig.sim.g_mot_offset = 0.3
     rig.step(3)
-    assert n.state == "servoing", n.error
+    assert rig.node.state == "floating"

@@ -32,15 +32,16 @@ calibration (stay as `rebot_ctl` CLI tools), payload identification.
 | **disabled** | floating (kp = kd = 0, gravity feedforward) | damping (motor off) | `disable`, lease released or lapsed, chock |
 | **floating** | floating | free (gainless) until a gripper command makes it hold | `enable`; `float` from servoing |
 | **servoing** | closed loop | as commanded | the first closed-loop arm command (track, servo, chunk, home, stow) |
-| fault | off | off | read failure, motor fault code, late tick, encoder mismatch, refused setpoint; `reset` reconnects |
+| fault | off | off | read failure, motor fault code, late tick, refused setpoint; `reset` reconnects |
 
 - **Connect** only opens the bus and checks (watchdog settings, joint readings for 2π wraps), then
   disables all motors; no mode change.
 - **Enable** (lease; refused while the arm's chock is held or the e-stop is latched): faults
   cleared, MIT mode set and confirmed, motors on, gravity compensation on, the arm floating. The first enable after connecting closes the gripper
-  and checks it reads near zero (up to 2 tries). Refused (409) when an output encoder disagrees
-  with its motor by more than 0.05 rad (a 2π wrap or slipped zero); while the motors are on, a
-  disagreement over 0.15 rad faults.
+  and checks it reads near zero (up to 2 tries). Before the motors go on, each joint's output
+  encoder (used for kinematics, IK and plans) and its motor's feedback position (what the MIT loop
+  servos on) must agree within 0.05 rad, or enable is refused (409): otherwise every command would
+  land off by the difference.
 - **Float** (`POST /float`): an enabled state for the arm only; servoing stops, the gripper keeps
   doing what it does. **Disable** is different: commands are refused until enable, and the gripper
   goes into damping.
