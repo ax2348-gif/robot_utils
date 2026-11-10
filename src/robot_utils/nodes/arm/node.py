@@ -42,6 +42,12 @@ DT = 1.0 / RATE_HZ
 TWIST_TIMEOUT = 0.25          # s a track twist feedforward stays in force
 LEASE_HEARTBEAT = 1.0         # s
 LATE_TICK = 0.06              # s between ticks while enabled = fault (motor watchdog 100 ms)
+LATE_SEND = 0.09              # s since the last command frame, checked just before sending
+ENABLE_LIMIT_TOL = math.radians(3.0)   # a joint this far outside its limits is clamped at enable; further = refused
+ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor that refuses enable
+ENC_MISMATCH_RUN = 0.15       # rad that faults while running (backlash + load deflection stay below)
+PLAN_DRIFT = 0.02             # rad the command may move while a servo / home is planned
+TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the previous one is refused
 SLOW_TICK = 0.015             # s between ticks counted as an overrun
 ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
 CONNECT_RETRY_S = 2.0
@@ -125,6 +131,7 @@ class Gripper:
     goal: Optional[float] = None       # m gap
     cmd: Optional[float] = None        # m gap (rate limited)
     max_force: float = C.DEFAULT_MAX_FORCE
+    v: float = 0.0                     # m/s of the command
 
 
 def finite(v):
@@ -164,7 +171,10 @@ class ArmNode:
         self._enable_req: Optional[dict] = None
         self._reconnect = False
         self.q_cmd: Optional[np.ndarray] = None
-        self.qd_ff = np.zeros(N)
+        self.qd_ff = np.zeros(N)          # MIT velocity reference sent (= q_cmd's velocity)
+        self.v_cmd = np.zeros(N)
+        self._last_send = 0.0
+        self._plan_lock = threading.Lock()
         self.track: Optional[Track] = None
         self.motion: Optional[Motion] = None
         self.hold_q: Optional[np.ndarray] = None   # what "hold" holds (None: q_cmd)
@@ -269,6 +279,11 @@ class ArmNode:
         if faults and self.state != "fault":
             self._fault("motor fault: " + "; ".join(faults))
             return
+        mism = np.abs(np.append(r.q - r.q_mot, r.g_q - r.g_q_mot))
+        if self.motors_on and mism.max() > ENC_MISMATCH_RUN:
+            i = int(np.argmax(mism))
+            self._fault(f"{self.bus.names[i]}: output encoder and motor disagree by {math.degrees(mism[i]):.1f}°")
+            return
         if self.state == "fault":
             self._publish(now, dt_tick, r)
             return
@@ -287,6 +302,30 @@ class ArmNode:
             self._control(now, r)
         self._publish(now, dt_tick, r)
 
+    def _enable_pose(self, r) -> np.ndarray:
+        """The pose to hold at enable: the motor-side positions (the motors' MIT loops run on
+        those, so the first frame asks for no correction), clamped into the setpoint limits.
+        Refuses (409) when an output encoder disagrees with its motor (a wrap or a slipped zero
+        would make the first frame snap) or when a joint is further outside its limits than
+        ENABLE_LIMIT_TOL (clamping it would snap it back)."""
+        kin = self.kin
+        names = self.bus.names
+        diff = np.abs(r.q - r.q_mot)
+        for i in np.flatnonzero(diff > ENC_MISMATCH_ENABLE):
+            raise RequestError(409, f"{names[i]}: output encoder {math.degrees(r.q[i]):+.1f}° and motor "
+                                    f"{math.degrees(r.q_mot[i]):+.1f}° disagree by {math.degrees(diff[i]):.1f}° "
+                                    "(encoder wrap or slipped zero): power-cycle the arm; not enabling")
+        if abs(r.g_q - r.g_q_mot) > ENC_MISMATCH_ENABLE:
+            raise RequestError(409, f"gripper: output encoder and motor disagree by "
+                                    f"{math.degrees(abs(r.g_q - r.g_q_mot)):.1f}°: power-cycle the arm; not enabling")
+        out = np.maximum(kin.lo - r.q_mot, r.q_mot - kin.hi)
+        for i in np.flatnonzero(out > ENABLE_LIMIT_TOL):
+            raise RequestError(409, f"{names[i]} is at {math.degrees(r.q_mot[i]):+.1f}°, "
+                                    f"{math.degrees(out[i]):.1f}° outside its limits "
+                                    f"{math.degrees(kin.lo[i]):+.1f}..{math.degrees(kin.hi[i]):+.1f}°: "
+                                    "move it back by hand first (enabling would snap it back)")
+        return np.clip(r.q_mot, kin.lo, kin.hi)
+
     def _do_enable(self, req: dict, r) -> None:
         try:
             if self.estop.active or self.chocks() or not self.lease.held:
@@ -297,73 +336,121 @@ class ArmNode:
                 g = self.bus.check_gripper()
                 self.initialized = True
                 self.events.add(f"gripper check passed (closed reads {math.degrees(g):+.1f}°)")
-                r = self.bus.read()
             if req.get("cancel"):
                 raise RequestError(409, f"cancelled: {req['cancel']}")
+            self._enable_pose(self.bus.read())          # refuse before any motor is switched on
             self.bus.enable()
+            r = self.bus.read()                          # fresh: the arm may have moved meanwhile
+            q0 = self._enable_pose(r)
             with self._lock:
-                self.q_cmd = r.q.copy()
+                self.q_cmd = q0
+                self.v_cmd = np.zeros(N)
                 self.hold_q = None
                 self.qd_ff = np.zeros(N)
                 self.track, self.motion = None, None
-                self.gripper.goal = self.gripper.cmd = C.rad_to_gap(r.g_q)
+                self.gripper.goal = self.gripper.cmd = float(np.clip(C.rad_to_gap(r.g_q_mot), 0.0, C.GAP_CMD_MAX))
+                self.gripper.v = 0.0
+                self.gripper.max_force = C.DEFAULT_MAX_FORCE
             self.motors_on = self.enabled = True
             self.state = "enabled"
-            self._last_t = self.clock()
+            now = self.clock()
+            self._last_t = self._last_send = now
+            self._control(now, r)                        # the first hold frame right away
             self.events.add("enabled: holding the measured pose")
-            req["result"] = (True, None)
+            req["result"] = (True, None, 200)
         except Exception as e:  # noqa: BLE001
             msg = f"{type(e).__name__}: {e}" if not isinstance(e, RequestError) else str(e)
-            self.state = "uninitialized" if not self.initialized else "disabled"
+            self.enabled = False
+            if self.state != "fault":
+                self.state = "uninitialized" if not self.initialized else "disabled"
             try:
                 self.bus.disable()
             except Exception:  # noqa: BLE001
                 pass
             self.motors_on = False
             self.events.add(f"enable failed: {msg}", "error")
-            req["result"] = (False, msg)
+            req["result"] = (False, msg, e.status if isinstance(e, RequestError) else 503)
         finally:
             with self._lock:
                 ev = req.get("event")
             if ev is not None:
                 ev.set()
 
+    def _command_step(self, q_goal: np.ndarray, v_goal: np.ndarray) -> None:
+        """Move q_cmd one tick toward q_goal (call under _lock): joint speed and acceleration
+        limited, braking so it stops at the goal, the goal's own velocity (trajectory or twist)
+        fed forward; never outside the joint limits. Every source goes through here, so no source
+        change, cancel or preemption can step the commanded velocity."""
+        kin, s = self.kin, self.soft
+        q_goal = np.clip(q_goal, kin.lo, kin.hi)
+        e = q_goal - self.q_cmd
+        corr = np.sign(e) * np.minimum(np.sqrt(2.0 * s.joint_acc * np.abs(e)), np.abs(e) / DT)
+        want = v_goal + corr
+        v_des = np.clip(want, -s.joint_vel, s.joint_vel)
+        v = np.clip(v_des, self.v_cmd - s.joint_acc * DT, self.v_cmd + s.joint_acc * DT)
+        self._limited = bool(np.any(np.abs(v - want) > 1e-9))
+        q_new = self.q_cmd + v * DT
+        q_c = np.clip(q_new, kin.lo, kin.hi)
+        v[q_c != q_new] = 0.0
+        self.q_cmd, self.v_cmd = q_c, v
+
+    def _stopping_point(self) -> np.ndarray:
+        """Where q_cmd comes to rest decelerating at the acceleration limit (call under _lock)."""
+        a = self.soft.joint_acc
+        return np.clip(self.q_cmd + self.v_cmd * np.abs(self.v_cmd) / (2.0 * a), self.kin.lo, self.kin.hi)
+
+    def _gripper_step(self, gap_goal: Optional[float]) -> None:
+        """Gap command toward its goal: rate and acceleration limited with braking, never past
+        GAP_CMD_MAX (1 mm short of the printed stops). Call under _lock."""
+        g, s = self.gripper, self.soft
+        if gap_goal is not None:
+            g.goal = gap_goal
+        goal = min(max(g.goal, 0.0), C.GAP_CMD_MAX)
+        e = goal - g.cmd
+        vd = math.copysign(min(s.gripper_vel, math.sqrt(2.0 * s.gripper_acc * abs(e)), abs(e) / DT), e)
+        g.v = min(max(vd, g.v - s.gripper_acc * DT), g.v + s.gripper_acc * DT)
+        g.cmd = min(max(g.cmd + g.v * DT, 0.0), C.GAP_CMD_MAX)
+
     def _control(self, now: float, r) -> None:
         kin, p = self.kin, self.profile
+        if now - self._last_send > LATE_SEND:
+            self._fault(f"{(now - self._last_send) * 1e3:.0f} ms since the last command frame "
+                        "(the motors' watchdog is 100 ms)")
+            return
         with self._lock:
-            src, q_goal, qd_ff, gap_goal = self._source(now)
-            q_cmd = self.q_cmd
-            step = self.soft.joint_vel * DT
-            delta = np.clip(q_goal - q_cmd, -step, step)
-            self._limited = bool(np.any(np.abs(q_goal - q_cmd) > step + 1e-12))
-            q_cmd = q_cmd + delta
-            qd_ff = np.clip(qd_ff, -self.soft.joint_vel, self.soft.joint_vel)
-            self.q_cmd, self.qd_ff = q_cmd, qd_ff
-            if gap_goal is not None:
-                self.gripper.goal = gap_goal
-            g = self.gripper
-            gstep = self.soft.gripper_vel * DT
-            prev = g.cmd
-            g.cmd = float(g.cmd + np.clip(g.goal - g.cmd, -gstep, gstep))
-            g_rate = (g.cmd - prev) / DT
-            max_force = g.max_force
+            src, q_goal, v_goal, gap_goal = self._source(now)
+            self._command_step(q_goal, np.clip(v_goal, -self.soft.joint_vel, self.soft.joint_vel))
+            q_cmd, v_cmd = self.q_cmd, self.v_cmd
+            self.qd_ff = v_cmd
+            self._gripper_step(gap_goal)
+            g_cmd, max_force = self.gripper.cmd, self.gripper.max_force
         tau_g = kin.gravity(r.q) * p.tau_scale
-        # gripper: estimated torque from its MIT law (motor side), force limit by opposing feedforward
-        g_q = C.gap_to_rad(g.cmd)
-        g_qd = -g_rate / C.GAP_PER_RAD
-        tau_est = p.g_kp * (g_q - r.g_q_mot) + p.g_kd * (g_qd - r.g_qd)
+        # Gripper: the torque its MIT law applies (motor side; no velocity reference, so kd only
+        # damps), and the force limit. Away from fully open: an opposing feedforward, never larger
+        # than that torque (so the net torque never opens). Within FF_OPEN_MARGIN of fully open:
+        # no feedforward; the position command is pulled back toward the jaws instead.
+        g_q = C.gap_to_rad(g_cmd)
+        tau_est = p.g_kp * (g_q - r.g_q_mot) + p.g_kd * (0.0 - r.g_qd)
         force = C.force_of_torque(max(tau_est, 0.0))
+        tau_lim = C.torque_of_force(max_force)
         g_ff, limiting = 0.0, False
-        near_open = C.rad_to_gap(r.g_q) > C.GAP_MAX - C.FF_OPEN_MARGIN
-        if force > max_force and not near_open:
-            g_ff = -(tau_est - C.torque_of_force(max_force))   # opposes closing; |g_ff| < tau_est
+        if force > max_force:
             limiting = True
+            if C.rad_to_gap(r.g_q) > C.GAP_MAX - C.FF_OPEN_MARGIN:
+                g_q = min(g_q, r.g_q_mot + tau_lim / p.g_kp)          # closing is +rad
+            else:
+                g_ff = -(tau_est - tau_lim)                          # opposes closing; |g_ff| < tau_est
         self._g = {"tau_est": tau_est, "force": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
-        self.bus.send(q_cmd, qd_ff, p.kp, p.kd, tau_g, g_q, g_qd, p.g_kp, p.g_kd, g_ff)
+        try:
+            self.bus.send(q_cmd, v_cmd, p.kp, p.kd, tau_g, g_q, 0.0, p.g_kp, p.g_kd, g_ff)
+        except BusError as e:
+            self._fault(str(e))
+            return
+        self._last_send = now
         self._supervise(now, r, src)
 
     def _source(self, now: float):
-        """(source, q_goal, qd_ff, gripper gap goal or None); call under _lock."""
+        """(source, q_goal, goal velocity, gripper gap goal or None); call under _lock."""
         m = self.motion
         if m is not None and m.phase in ("executing", "settling"):
             q, qd, gap, done = m.traj.sample(now)
@@ -375,11 +462,17 @@ class ArmNode:
             return m.traj.kind, q, qd, gap
         t = self.track
         if t is not None:
-            qd = np.zeros(N)
-            if t.twist is not None and now - t.t <= TWIST_TIMEOUT:
-                qd = self.kin.twist_to_qd(self.q_cmd, t.twist, t.twist_frame)
+            # The pose was the goal when it was sent; a fresh twist says how it moves on from there,
+            # so the goal runs ahead along it (at most TWIST_TIMEOUT worth, twist capped at the soft
+            # servo speeds). When the twist times out the goal is the pose again.
+            qd, q_goal = np.zeros(N), t.q_goal
+            age = now - t.t
+            if t.twist is not None and age <= TWIST_TIMEOUT:
+                qd = np.clip(self.kin.twist_to_qd(t.q_goal, t.twist, t.twist_frame),
+                             -self.soft.joint_vel, self.soft.joint_vel)
+                q_goal = t.q_goal + qd * max(age, 0.0)
             self._goal_pose = t.pose
-            return "track", t.q_goal, qd, None
+            return "track", q_goal, qd, None
         self._goal_pose = None
         return "hold", (self.q_cmd if self.hold_q is None else self.hold_q), np.zeros(N), None
 
@@ -393,8 +486,9 @@ class ArmNode:
         if dp > s.abort_pos or dr > s.abort_rot:
             m.bad_since = m.bad_since or now
             if now - m.bad_since >= s.abort_hold_s:
-                with self._lock:
-                    self.q_cmd = r.q.copy()          # hold where the arm is, not where it was told to be
+                with self._lock:   # hold where the arm is, not where it was told to be
+                    self.q_cmd = np.clip(r.q_mot, self.kin.lo, self.kin.hi)
+                    self.v_cmd = np.zeros(N)
                 self._end_motion("aborted", f"tracking error {dp * 1e3:.0f} mm / {math.degrees(dr):.0f}° "
                                             "(obstructed?): holding")
                 return
@@ -419,7 +513,7 @@ class ArmNode:
                 return
             m.phase, m.reason = phase, reason
             self.last_motion, self.motion = m, None
-            self.hold_q = m.traj.q[-1].copy() if phase in ("done", "reached", "not_reached") else self.q_cmd.copy()
+            self.hold_q = m.traj.q[-1].copy() if phase in ("done", "reached", "not_reached") else self._stopping_point()
         self.events.add(f"{m.traj.kind} {m.traj.id}: {phase}" + (f" ({reason})" if reason else ""),
                         "warn" if phase in ("aborted", "not_reached") else "info")
 
@@ -570,9 +664,9 @@ class ArmNode:
                 ev = req["event"]
         if not ev.wait(timeout):
             raise RequestError(503, "enable did not finish in time (is the control loop running?)")
-        ok, msg = req["result"]
+        ok, msg, status = req["result"]
         if not ok:
-            raise RequestError(409 if "chock" in msg or "e-stop" in msg else 503, f"enable failed: {msg}")
+            raise RequestError(status, f"enable failed: {msg}")
         return {"enabled": True, "initialized": self.initialized}
 
     def disable(self, token) -> None:
@@ -615,11 +709,31 @@ class ArmNode:
                 raise ValueError("twist must be 6 finite numbers [vx, vy, vz, wx, wy, wz]")
         if twist_frame not in ("base", "tcp"):
             raise ValueError("twist_frame must be base or tcp")
+        scaled = False
+        if twist is not None:          # bounded by the soft servo speeds (it feeds the command forward)
+            lin, ang = float(np.linalg.norm(twist[:3])), float(np.linalg.norm(twist[3:]))
+            if lin > self.soft.lin_vel:
+                twist[:3] *= self.soft.lin_vel / lin
+                scaled = True
+            if ang > self.soft.ang_vel:
+                twist[3:] *= self.soft.ang_vel / ang
+                scaled = True
+        g_args = self._check_gripper(**gripper) if gripper is not None else None
         with self._lock:
-            seed = self.track.q_goal if self.track is not None else self.q_cmd
+            prev = self.track
+            seed = prev.q_goal if prev is not None else self.q_cmd
+        if prev is not None and seq and prev.seq and seq < prev.seq:
+            return {"ok": False, "seq": seq, "ik": None, "limited": self._limited,
+                    "reason": f"stale: seq {seq} is older than {prev.seq} already applied"}
         r = self.kin.ik(pose, seed, max_iter=50)
-        out = {"ok": r.ok, "seq": seq, "ik": r.public(), "limited": self._limited}
-        if not r.ok:
+        out = {"ok": r.ok, "seq": seq, "ik": r.public(), "limited": self._limited, "twist_scaled": scaled,
+               "reason": r.reason}
+        if r.ok:
+            jump = float(np.max(np.abs(r.q - seed)))
+            if jump > TRACK_MAX_JUMP:
+                out.update(ok=False, reason=f"too far for track: a joint would move {math.degrees(jump):.0f}° "
+                                            f"(max {math.degrees(TRACK_MAX_JUMP):.0f}°); use servo for large moves")
+        if not out["ok"]:
             return out
         with self._lock:
             if not self.enabled:
@@ -627,39 +741,91 @@ class ArmNode:
             self._preempt("track")
             self.hold_q = None
             self.track = Track(r.q, pose, twist, twist_frame, self.clock(), int(seq))
-            if gripper is not None:
-                self._gripper_locked(**gripper)
+            if g_args is not None:
+                self._apply_gripper(*g_args)
         return out
 
-    def _gripper_locked(self, gap_mm: Optional[float] = None, max_force_n: Optional[float] = None) -> None:
+    @staticmethod
+    def _check_gripper(gap_mm: Optional[float] = None, max_force_n: Optional[float] = None):
+        """Validated (gap m or None, max force N or None). Raises ValueError before anything changes."""
+        f = None
         if max_force_n is not None:
-            if not 0.0 <= float(max_force_n) <= C.HARD_MAX_FORCE:
+            f = float(max_force_n)
+            if not (math.isfinite(f) and 0.0 <= f <= C.HARD_MAX_FORCE):
                 raise ValueError(f"max_force_n must be within 0..{C.HARD_MAX_FORCE:g} N")
-            self.gripper.max_force = float(max_force_n)
-        else:
-            self.gripper.max_force = C.DEFAULT_MAX_FORCE
+        gap = None
         if gap_mm is not None:
             gap = float(gap_mm) / 1000.0
-            if not 0.0 <= gap <= C.GAP_MAX + 1e-9:
+            if not (math.isfinite(gap) and 0.0 <= gap <= C.GAP_MAX + 1e-9):
                 raise ValueError(f"gap_mm must be within 0..{C.GAP_MAX * 1000:.1f}")
+        return gap, f
+
+    def _apply_gripper(self, gap: Optional[float], max_force: Optional[float]) -> None:
+        """Call under _lock. An omitted force limit keeps the one in force (50 N after enable)."""
+        if max_force is not None:
+            self.gripper.max_force = max_force
+        if gap is not None:
             self.gripper.goal = gap
 
     def gripper_cmd(self, token, gap_mm: Optional[float] = None, max_force_n: Optional[float] = None) -> dict:
         self._ready(token)
+        args = self._check_gripper(gap_mm, max_force_n)
         with self._lock:
-            self._gripper_locked(gap_mm, max_force_n)
+            self._apply_gripper(*args)
             return self.gripper_state()
 
-    def _start(self, traj: Trajectory, by: str) -> dict:
+    def _start(self, traj: Trajectory, by: str, q0: np.ndarray) -> dict:
+        """Put a planned motion in force. It was planned from ``q0``; if the command moved since
+        (a track or motion kept running while planning), a servo / pose / home is refused rather
+        than started from a stale pose, and a chunk's lead-in is re-anchored on the command now and
+        its speed checked."""
         with self._lock:
             if not self.enabled:
                 raise RequestError(409, "disabled while planning")
+            now = self.clock()
+            if traj.kind == "chunk":
+                # samples that came due while planning are dropped; the lead-in starts here, now
+                k = int(np.searchsorted(traj.t[1:], now + max(traj.info.get("blend_s", 0.0), DT), side="left")) + 1
+                if k >= len(traj.t):
+                    raise RequestError(422, "refused, nothing moved: the chunk went stale while planning")
+                keep = np.r_[0, np.arange(k, len(traj.t))]
+                traj.t, traj.q, traj.qd = traj.t[keep], traj.q[keep], traj.qd[keep]
+                if traj.gap is not None:
+                    traj.gap = traj.gap[keep]
+                traj.q[0], traj.t[0], traj.qd[0] = self.q_cmd.copy(), now, 0.0
+                if len(traj.t) > 1:
+                    v = np.abs(traj.q[1] - traj.q[0]) / max(traj.t[1] - traj.t[0], 1e-6)
+                    if np.any(v > self.soft.joint_vel):
+                        j = int(np.argmax(v / self.soft.joint_vel))
+                        raise RequestError(422, f"refused, nothing moved: the chunk's first sample is too far from "
+                                                f"the arm's command for its blend (joint{j + 1} at "
+                                                f"{v[j]:.2f} rad/s); increase blend_s or start nearer")
+            else:
+                moved = float(np.max(np.abs(self.q_cmd - q0)))
+                if moved > PLAN_DRIFT:
+                    raise RequestError(409, f"refused, nothing moved: the arm's command moved "
+                                            f"{math.degrees(moved):.1f}° while planning (a track or motion is in "
+                                            "force); cancel it first, or retry")
+                traj.shift(now - traj.t[0])
             self._preempt(by)
             self.track = None
             self.hold_q = None
             self.motion = Motion(traj)
+            out = self.motion.public(now)
         self.events.add(f"{traj.kind} {traj.id}: {traj.duration:.2f} s" + (f" to {traj.name}" if traj.name else ""))
-        return self.motion.public(self.clock())
+        return out
+
+    def _plan(self, fn):
+        """Plans run one at a time (each holds the interpreter for a while; several at once would
+        starve the control loop)."""
+        if not self._plan_lock.acquire(blocking=False):
+            raise RequestError(409, "already planning another motion; retry")
+        try:
+            return fn()
+        except PlanError as e:
+            raise RequestError(422, f"refused, nothing moved: {e}")
+        finally:
+            self._plan_lock.release()
 
     def servo(self, token, pose: Optional[pin.SE3] = None, name: Optional[str] = None,
               lin_vel=None, lin_acc=None, ang_vel=None, ang_acc=None, duration=None) -> dict:
@@ -669,23 +835,19 @@ class ArmNode:
         lim = {}
         for k, v in (("lin_vel", lin_vel), ("lin_acc", lin_acc), ("ang_vel", ang_vel), ("ang_acc", ang_acc)):
             cap = getattr(s, k)
-            if v is not None and not 0 < float(v) <= getattr(h, k):
+            if v is not None and not (math.isfinite(float(v)) and 0 < float(v) <= getattr(h, k)):
                 raise ValueError(f"{k} must be within 0..{getattr(h, k):g}")
             lim[k] = min(float(v), cap) if v is not None else cap
+        if name is not None and name not in self.settings.named_poses:
+            raise RequestError(422, f"unknown named pose {name!r} (have: {', '.join(self.settings.named_poses)})")
         with self._lock:
             q0 = self.q_cmd.copy()
-        try:
-            if name is not None:
-                if name not in self.settings.named_poses:
-                    raise PlanError(f"unknown named pose {name!r} (have: {', '.join(self.settings.named_poses)})")
-                traj = plan_joint(q0, [self.settings.named_poses[name]], s.home_vel, s.joint_vel, self.kin,
-                                  kind="pose", name=name)
-            else:
-                traj = plan_servo(self.kin, q0, pose, joint_vel=s.joint_vel, duration=duration, **lim)
-        except PlanError as e:
-            raise RequestError(422, f"refused, nothing moved: {e}")
-        traj.shift(self.clock() - traj.t[0])
-        return self._start(traj, "servo")
+        if name is not None:
+            traj = self._plan(lambda: plan_joint(q0, [self.settings.named_poses[name]], s.home_vel, s.joint_vel,
+                                                 self.kin, kind="pose", name=name))
+        else:
+            traj = self._plan(lambda: plan_servo(self.kin, q0, pose, joint_vel=s.joint_vel, duration=duration, **lim))
+        return self._start(traj, "servo", q0)
 
     def home(self, token) -> dict:
         self._ready(token)
@@ -693,12 +855,9 @@ class ArmNode:
         with self._lock:
             q0 = self.q_cmd.copy()
         way = [st.named_poses[n] for n in st.home_via] + [st.named_poses["home"]]
-        try:
-            traj = plan_joint(q0, way, self.soft.home_vel, self.soft.joint_vel, self.kin, kind="home", name="home")
-        except PlanError as e:
-            raise RequestError(422, f"refused, nothing moved: {e}")
-        traj.shift(self.clock() - traj.t[0])
-        return self._start(traj, "home")
+        traj = self._plan(lambda: plan_joint(q0, way, self.soft.home_vel, self.soft.joint_vel, self.kin,
+                                             kind="home", name="home"))
+        return self._start(traj, "home", q0)
 
     def chunk(self, token, poses: list, dt: float, t0: Optional[float] = None, gaps_mm=None,
               blend_s: float = 0.1) -> dict:
@@ -707,32 +866,29 @@ class ArmNode:
             raise ValueError("a chunk has 1..1000 poses")
         if gaps_mm is not None and len(gaps_mm) != len(poses):
             raise ValueError("gaps_mm must have one value per pose")
-        if gaps_mm is not None and not all(0.0 <= g / 1000 <= C.GAP_MAX + 1e-9 for g in gaps_mm):
+        if gaps_mm is not None and not all(math.isfinite(g) and 0.0 <= g / 1000 <= C.GAP_MAX + 1e-9 for g in gaps_mm):
             raise ValueError(f"gaps_mm must be within 0..{C.GAP_MAX * 1000:.1f}")
         if not 0.0 <= blend_s <= 1.0:
             raise ValueError("blend_s must be within 0..1")
-        now = self.clock()
+        if t0 is not None and not math.isfinite(t0):
+            raise ValueError("t0 must be finite")
         with self._lock:
             q_now = self.q_cmd.copy()
-            seed = q_now
-        try:
-            traj = plan_chunk(self.kin, seed, poses, None if gaps_mm is None else [g / 1000 for g in gaps_mm],
-                              t0=now if t0 is None else float(t0), dt=dt, now=self.clock(), blend_s=blend_s,
-                              joint_vel=self.soft.joint_vel, q_now=q_now)
-        except PlanError as e:
-            raise RequestError(422, f"refused, nothing moved: {e}")
-        if traj.t[0] < now:
-            traj.shift(now - traj.t[0])
-        return self._start(traj, "chunk")
+        now = self.clock()
+        traj = self._plan(lambda: plan_chunk(
+            self.kin, q_now, poses, None if gaps_mm is None else [g / 1000 for g in gaps_mm],
+            t0=now if t0 is None else float(t0), dt=dt, now=now, blend_s=blend_s,
+            joint_vel=self.soft.joint_vel, q_now=q_now))
+        return self._start(traj, "chunk", q_now)
 
     def cancel(self, token) -> dict:
         self._ready(token)
         with self._lock:
             m = self.motion
             self.track = None
-            self.hold_q = self.q_cmd.copy()
+            self.hold_q = self._stopping_point()
             if m is not None:
-                m.phase, m.reason = "aborted", "cancelled: holding"
+                m.phase, m.reason = "aborted", "cancelled: decelerating to a hold"
                 self.last_motion, self.motion = m, None
         if m is not None:
             self.events.add(f"{m.traj.kind} {m.traj.id}: cancelled")
@@ -763,13 +919,14 @@ class ArmNode:
         for k, v in kw.items():
             if v is None:
                 continue
-            if k == "joint_vel":
+            if k in ("joint_vel", "joint_acc"):
                 v = np.asarray(v, float)
-                if v.shape != (N,) or np.any(v <= 0) or np.any(v > h.joint_vel):
-                    raise ValueError(f"joint_vel must be {N} speeds within 0..{h.joint_vel.tolist()} rad/s")
-            elif not 0 < float(v) <= getattr(h, k):
+                cap = getattr(h, k)
+                if v.shape != (N,) or not np.all(np.isfinite(v)) or np.any(v <= 0) or np.any(v > cap):
+                    raise ValueError(f"{k} must be {N} finite values within 0..{cap.tolist()}")
+            elif not (math.isfinite(float(v)) and 0 < float(v) <= getattr(h, k)):
                 raise ValueError(f"{k} must be within 0..{getattr(h, k):g}")
-            setattr(s, k, v if k == "joint_vel" else float(v))
+            setattr(s, k, v if k in ("joint_vel", "joint_acc") else float(v))
         self.soft = s
         self.events.add("soft limits changed")
         return self.limits()
@@ -799,6 +956,8 @@ class ArmNode:
     def kinematics(self, q, frame: str = "base") -> dict:
         kin = self._need_kin()
         q = np.asarray(q, float)
+        if q.shape != (N,) or not np.all(np.isfinite(q)):
+            raise ValueError(f"a configuration is {N} finite joint angles (rad)")
         T = kin.fk(q)
         J = kin.jacobian(q, frame)
         return {"q": q.tolist(), "within_limits": kin.within_limits(q), "tcp": pose_public(T),

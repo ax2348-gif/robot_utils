@@ -8,6 +8,7 @@ Nothing moves until a lease holder enables it; the first enable closes the gripp
 """
 import argparse
 import logging
+import sys
 
 from ..common.serve import add_serve_args, serve
 
@@ -22,6 +23,9 @@ def main() -> None:
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "arm")
     args = p.parse_args()
+    # Request threads (IK, planning) and the 100 Hz control thread share one interpreter: switch
+    # more often (default 5 ms) so the control tick waits less behind them.
+    sys.setswitchinterval(0.001)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 

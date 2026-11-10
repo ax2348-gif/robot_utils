@@ -47,6 +47,9 @@ class IKOut:
 def se3(pos, quat_xyzw=None, rpy=None) -> pin.SE3:
     """A pose from a position and a quaternion [x, y, z, w] or roll/pitch/yaw (rad, fixed X-Y-Z)."""
     p = np.asarray(pos, dtype=float).reshape(3)
+    o = quat_xyzw if quat_xyzw is not None else rpy
+    if not (np.all(np.isfinite(p)) and (o is None or np.all(np.isfinite(np.asarray(o, dtype=float))))):
+        raise ValueError("a pose must be finite numbers")
     if quat_xyzw is not None:
         x, y, z, w = (float(v) for v in quat_xyzw)
         n = math.sqrt(x * x + y * y + z * z + w * w)

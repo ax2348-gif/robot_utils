@@ -165,16 +165,32 @@ def test_track_twist_feedforward_times_out(rig):
     T = rig.tcp()
     n.track_cmd(rig.tok, T, twist=[0.05, 0, 0, 0, 0, 0])
     rig.step(5)
-    assert np.any(np.abs(n.qd_ff) > 1e-3)
-    rig.keep(0.3)
-    assert np.allclose(n.qd_ff, 0.0) and rig.row()["twist_age"] > 0.25
+    assert np.any(np.abs(n.qd_ff) > 1e-3)          # the goal runs ahead along the twist
+    ahead = rig.node.kin.fk(n.q_cmd).translation[0] - T.translation[0]
+    assert 0 < ahead <= 0.05 * 0.08
+    rig.keep(1.0)                                   # timed out: back to the pose, and still
+    assert np.allclose(n.qd_ff, 0.0, atol=1e-6) and rig.row()["twist_age"] > 0.25
+    assert np.linalg.norm(rig.tcp().translation - T.translation) < 1e-3
+
+
+def test_twist_alone_cannot_drag_the_arm(rig):
+    # audit: a big twist with a pose that never moves, resent every 0.1 s
+    n = ready(rig).node
+    T = rig.tcp()
+    out = None
+    for _ in range(10):
+        out = n.track_cmd(rig.tok, T, twist=[0, 0, 1.0, 0, 0, 5.0])
+        rig.step(10)
+    assert out["twist_scaled"]
+    # capped at the soft servo speeds (0.15 m/s), ahead by at most 0.1 s of it
+    assert np.linalg.norm(rig.tcp().translation - T.translation) < 0.025
 
 
 def test_step_limit_clips_and_flags(rig):
     n = ready(rig).node
     n.set_limits(rig.tok, joint_vel=[0.2] * 6)
     T = rig.tcp()
-    T.translation = T.translation + np.array([0.0, 0.05, 0.0])
+    T.translation = T.translation + np.array([0.0, 0.02, 0.0])
     q_before = n.q_cmd.copy()
     assert n.track_cmd(rig.tok, T)["ok"]
     rig.step(2)
@@ -411,3 +427,165 @@ def test_http_api_end_to_end(tmp_path):
         assert c.post("/estop", json={"reason": "t"}).json()["latched"]
         _time.sleep(0.05)
         assert not c.get("/state").json()["motors_on"]
+
+
+# -- audit regressions (physical safety) ----------------------------------------------------------
+
+def _disable(rig):
+    rig.node.disable(rig.tok)
+    rig.step(2)
+
+
+def test_reenable_far_outside_limits_is_refused_not_snapped(rig):
+    n = ready(rig).node
+    _disable(rig)
+    rig.sim.q[0] = math.radians(-40.0)               # pushed past joint1's -36° while limp
+    with pytest.raises(RequestError) as e:
+        rig.enable()
+    assert e.value.status == 409 and "outside its limits" in str(e.value) and not rig.sim.enabled
+    rig.sim.q[0] = math.radians(-37.0)               # within the 3° tolerance: clamped, no snap
+    rig.enable()
+    assert math.isclose(n.q_cmd[0], math.radians(-36.0), abs_tol=1e-9)
+    rig.keep(0.5)
+    assert n.state == "enabled" and rig.sim.q[0] > math.radians(-37.1)
+
+
+def test_encoder_mismatch_refuses_enable_and_faults_running(rig):
+    rig.sim.mot_offset[5] = 2 * math.pi              # joint6 output vs motor: a 2π wrap
+    rig.lease()
+    with pytest.raises(RequestError) as e:
+        rig.enable()
+    assert "disagree" in str(e.value) and not rig.sim.enabled
+    rig.sim.mot_offset[5] = 0.0
+    rig.enable()
+    rig.sim.mot_offset[2] = 0.3
+    rig.step(1)
+    assert rig.node.state == "fault" and "disagree" in rig.node.error
+
+
+def test_enable_holds_the_motor_side_pose(rig):
+    rig.sim.mot_offset[:] = 0.01                     # backlash: the motors sit 0.01 rad off the output
+    q_out = rig.sim.q.copy()
+    rig.lease()
+    rig.enable()
+    # the first frame asks each motor for where it already is (no correction torque)
+    assert np.allclose(rig.node.q_cmd, np.clip(q_out + 0.01, rig.node.kin.lo, rig.node.kin.hi), atol=1e-3)
+
+
+def test_driver_refusal_faults(rig):
+    n = ready(rig).node
+    with pytest.raises(Exception):
+        rig.sim.send(np.array([-1.0, 0, 0, 0, 0, 0]), np.zeros(6), np.ones(6), np.ones(6), np.zeros(6), 0, 0, 1, 0, 0)
+    assert n.kin.within_limits(n.q_cmd)
+
+
+def test_acceleration_limit_and_braking(rig):
+    n = ready(rig).node
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.0, 0.03])
+    assert n.track_cmd(rig.tok, T)["ok"]
+    vs = []
+    for _ in range(150):
+        rig.step(1)
+        vs.append(n.v_cmd.copy())
+    dv = np.abs(np.diff(np.array(vs), axis=0)).max(axis=0)
+    assert np.all(dv <= n.soft.joint_acc * DT + 1e-9)
+    assert np.allclose(vs[-1], 0.0, atol=1e-6)
+
+
+def test_cancel_decelerates(rig):
+    n = ready(rig).node
+    rig.blocking(n.home, rig.tok)
+    rig.keep(0.4)
+    v0 = n.v_cmd.copy()
+    assert np.abs(v0).max() > 0.05
+    n.cancel(rig.tok)
+    prev = v0
+    for _ in range(100):
+        rig.step(1)
+        assert np.all(np.abs(n.v_cmd - prev) <= n.soft.joint_acc * DT + 1e-9)
+        prev = n.v_cmd.copy()
+    assert np.allclose(n.v_cmd, 0.0, atol=1e-6)
+
+
+def test_servo_planned_from_a_stale_pose_is_refused(rig):
+    n = ready(rig).node
+    from robot_utils.nodes.arm.motion import plan_joint
+    q_stale = n.q_cmd.copy()
+    rig.blocking(n.home, rig.tok)
+    rig.keep(0.5)                                    # the command moved on
+    traj = plan_joint(q_stale, [np.zeros(6)], 0.5, n.soft.joint_vel, n.kin)
+    with pytest.raises(RequestError) as e:
+        n._start(traj, "servo", q_stale)
+    assert e.value.status == 409 and "while planning" in str(e.value)
+
+
+def test_plans_run_one_at_a_time(rig):
+    n = ready(rig).node
+    n._plan_lock.acquire()
+    try:
+        with pytest.raises(RequestError) as e:
+            n.home(rig.tok)
+        assert e.value.status == 409
+    finally:
+        n._plan_lock.release()
+
+
+def test_chunk_far_from_the_arm_is_refused(rig):
+    n = ready(rig).node
+    T = rig.tcp()
+    far = pin.SE3(T)
+    far.translation = T.translation + np.array([0.0, 0.08, 0.0])
+    with pytest.raises(RequestError) as e:
+        rig.blocking(n.chunk, rig.tok, [far] * 10, dt=0.02, blend_s=0.02)
+    assert e.value.status == 422
+
+
+def test_track_refuses_large_jumps(rig):
+    n = ready(rig).node
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.08, -0.05])
+    out = n.track_cmd(rig.tok, T)
+    if out["ik"]["ok"]:
+        assert not out["ok"] and "too far for track" in out["reason"]
+
+
+def test_wide_object_still_force_limited(rig):
+    n = ready(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=48.0)
+    rig.keep(1.5)
+    rig.sim.object_gap_rad = C.gap_to_rad(0.046)      # 46 mm: inside the 5 mm open margin
+    n.gripper_cmd(rig.tok, gap_mm=0.0, max_force_n=10.0)
+    rig.keep(2.0)
+    row = rig.row()
+    assert row["g_limiting"] == 1.0 and row["g_tau_ff"] == 0.0
+    assert C.force_of_torque(rig.sim.g_tau) <= 10.0 + 0.5
+
+
+def test_gripper_command_stops_short_of_the_open_stops(rig):
+    n = ready(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=C.GAP_MAX * 1000)
+    rig.keep(2.0)
+    assert rig.row()["g_gap_cmd"] <= C.GAP_CMD_MAX + 1e-12
+
+
+def test_gripper_force_limit_is_sticky_and_validated_first(rig):
+    n = ready(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=20.0, max_force_n=10.0)
+    n.gripper_cmd(rig.tok, gap_mm=10.0)
+    assert n.gripper.max_force == 10.0
+    T = rig.tcp()
+    before = n.track
+    with pytest.raises(ValueError):
+        n.track_cmd(rig.tok, T, gripper={"gap_mm": 10.0, "max_force_n": -5.0})
+    assert n.track is before                          # nothing changed
+
+
+def test_nan_limits_rejected(rig):
+    n = ready(rig).node
+    for bad in ([math.nan] * 6, [1, 1, 1, 1, 1, math.inf]):
+        with pytest.raises(ValueError):
+            n.set_limits(rig.tok, joint_vel=bad)
+    with pytest.raises(ValueError):
+        n.set_limits(rig.tok, lin_vel=math.nan)
+    assert np.all(np.isfinite(n.soft.joint_vel))

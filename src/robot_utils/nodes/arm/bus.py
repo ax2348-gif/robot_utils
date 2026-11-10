@@ -96,6 +96,11 @@ class HardwareBus(ArmBus):
 
     def enable(self) -> None:
         for g in (self.arm.arm, self.arm.gripper):
+            # RebotArm remembers the last setpoint per joint and, when it refuses a new one (outside
+            # the limits), resends that instead: across a disable that could be a pose the arm left
+            # long ago. Forget it, so nothing from a previous session is ever sent.
+            g._q_last[:] = np.nan
+            g._q_refused[:] = False
             g.clear_error()
             g.enable()
 
@@ -130,6 +135,9 @@ class HardwareBus(ArmBus):
         self.arm.arm.send_mit(q, vel=qd, kp=kp, kd=kd, tau=tau)
         self.arm.gripper.send_mit(np.array([g_q]), vel=np.array([g_qd]), kp=np.array([g_kp]),
                                   kd=np.array([g_kd]), tau=np.array([g_tau]))
+        refused = [n for g in (self.arm.arm, self.arm.gripper) for n, r in zip(g.joint_names, g._q_refused) if r]
+        if refused:   # the node keeps its command inside the limits, so this is a bug: stop
+            raise BusError(f"the driver refused setpoints for {', '.join(refused)}")
 
     def close(self) -> None:
         self.arm.disconnect()
@@ -156,6 +164,7 @@ class SimBus(ArmBus):
         self.cmd = None
         self.t = None
         self.object_gap_rad: Optional[float] = None   # e.g. -1.0: something between the jaws
+        self.mot_offset = np.zeros(N)                # motor side minus output (backlash, a slipped zero)
         self.fail_reads = False                      # tests: make the next reads fail
         self.fault_code = 0                          # tests: a motor fault on joint1
         self.setpoint_limits = dict(limits or {})
@@ -213,10 +222,15 @@ class SimBus(ArmBus):
         self.t = now
         status = np.full(N + 1, 1.0 if self.enabled else 0.0)
         status[0] = self.fault_code or status[0]
-        return Reading(now, self.q.copy(), self.q.copy(), self.qd.copy(), self.tau.copy(), status,
+        return Reading(now, self.q.copy(), self.q + self.mot_offset, self.qd.copy(), self.tau.copy(), status,
                        np.full(N + 1, 35.0), np.full(N + 1, 38.0), self.g_q, self.g_q, self.g_qd, self.g_tau)
 
     def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau) -> None:
+        names = [f"joint{i}" for i in range(1, N + 1)]
+        bad = [n for n, v in zip(names, q) if not (self.setpoint_limits.get(n, (-math.inf, math.inf))[0] - 1e-9 <= v
+                                                     <= self.setpoint_limits.get(n, (-math.inf, math.inf))[1] + 1e-9)]
+        if bad:      # as the real driver: refused (it would hold an old setpoint)
+            raise BusError(f"the driver refused setpoints for {', '.join(bad)}")
         if self.enabled:
             self.cmd = (np.array(q, float), np.array(qd, float), np.array(kp, float), np.array(kd, float),
                         np.array(tau, float), float(g_q), float(g_qd), float(g_kp), float(g_kd), float(g_tau))

@@ -35,10 +35,10 @@ TAGS = [
 
 
 class Pose(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, json_schema_extra={"examples": [{"pos": [0.25, 0.0, 0.2], "rpy": [0.0, 1.57, 0.0]}]})
     pos: list[float] = Field(min_length=3, max_length=3, description="m, arm base frame.")
     quat: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, z, w].")
     rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[roll, pitch, yaw] rad, fixed X-Y-Z.")
-    model_config = ConfigDict(json_schema_extra={"examples": [{"pos": [0.25, 0.0, 0.2], "rpy": [0.0, 1.57, 0.0]}]})
 
     @model_validator(mode="after")
     def _one_orientation(self):
@@ -58,6 +58,7 @@ class GripperIn(BaseModel):
 
 
 class TrackIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     pose: Pose
     twist: Optional[list[float]] = Field(None, min_length=6, max_length=6,
                                          description=f"TCP velocity [vx, vy, vz, wx, wy, wz] (m/s, rad/s): joint velocity "
@@ -85,6 +86,7 @@ class ServoIn(BaseModel):
 
 
 class ChunkIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     poses: list[Pose] = Field(min_length=1, max_length=1000)
     dt: float = Field(gt=0, le=1.0, allow_inf_nan=False, description="s between poses.")
     t0: Optional[float] = Field(None, allow_inf_nan=False,
@@ -100,6 +102,7 @@ class IKIn(BaseModel):
 
 
 class KinIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     q: list[list[float]] = Field(min_length=1, max_length=200,
                                  description="Joint configurations (6 rad each). Inputs to a computation only.")
     frame: Literal["base", "tcp"] = "base"
@@ -114,12 +117,15 @@ class TcpIn(BaseModel):
 
 
 class LimitsIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     joint_vel: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s per joint.")
+    joint_acc: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s² per joint.")
     lin_vel: Optional[float] = None
     lin_acc: Optional[float] = None
     ang_vel: Optional[float] = None
     ang_acc: Optional[float] = None
     gripper_vel: Optional[float] = Field(None, description="m/s of gap.")
+    gripper_acc: Optional[float] = Field(None, description="m/s² of gap.")
     home_vel: Optional[float] = Field(None, description="rad/s, joint-space moves.")
 
 

@@ -156,7 +156,9 @@ def plan_servo(kin: ArmKinematics, q_start, goal: pin.SE3, *, lin_vel: float, li
         if duration < T_min - 1e-6:
             raise PlanError(f"duration {duration:g} s is too short for the speed limits (at least {T_min:.2f} s)")
         T = float(duration)
-        v_s, a_s = 1.0 / (0.75 * T), 1.0 / (0.75 * T) / (0.25 * T)   # 25 % accel, 50 % cruise, 25 % decel
+        # keep the acceleration limit, lower the cruise speed to take exactly T:
+        # 1 = v·T − v²/a  →  v = (a·T − sqrt(a²T² − 4a)) / 2   (a·T² ≥ 4 since T ≥ T_min)
+        v_s = (a_s * T - math.sqrt(max(a_s * a_s * T * T - 4.0 * a_s, 0.0))) / 2.0
     else:
         T = T_min
     for attempt in range(5):
@@ -222,7 +224,11 @@ def plan_chunk(kin: ArmKinematics, q_seed, poses: list, gaps: Optional[list], *,
         raise PlanError(f"chunk is stale: its last sample was due {now - times[-1]:.3f} s ago (or within the blend)")
     first = int(keep[0])
     q = _ik_path(kin, [poses[i] for i in keep], q_seed)
-    _branch_check(q)
+    _branch_check(np.vstack([np.asarray(q_now, float)[None], q]))
+    lead = np.abs(q[0] - np.asarray(q_now, float)) / max(times[first] - now, 1e-6)
+    if np.any(lead > joint_vel):
+        raise PlanError(f"the first sample is too far from the arm for the blend ({(lead / joint_vel).max():.2f}× "
+                        "the joint speed limit); increase blend_s or start nearer", first)
     ratio, idx = _check_speeds(times[keep], q, joint_vel, first)
     if ratio > 1.0:
         raise PlanError(f"chunk is faster than the joint speed limits ({ratio:.2f}×)", idx)
@@ -235,4 +241,4 @@ def plan_chunk(kin: ArmKinematics, q_seed, poses: list, gaps: Optional[list], *,
     qd = _qd(t, qq)
     qd[0] = 0.0
     return Trajectory("chunk", t, qq, qd, gap=gap, goal=poses[-1],
-                      info={"skipped": first, "n": len(poses), "t0": t0, "dt": dt})
+                      info={"skipped": first, "n": len(poses), "t0": t0, "dt": dt, "blend_s": blend_s})

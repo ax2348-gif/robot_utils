@@ -1,6 +1,6 @@
 # Arm node — design draft
 
-Status: **draft for review**, nothing implemented. The hardware backend for the reBot Arm
+Status: implemented (sim-tested; not yet run on the hardware). The hardware backend for the reBot Arm
 B601-DM (6 Damiao joints + gripper on the dm-serial bridge), in the shape of the swerve node:
 one process owns the bus, requests never touch it, a lease gates motion, e-stop is for anyone.
 Teleop and any other "what should the arm do" logic stay in clients.
@@ -36,8 +36,12 @@ estop: latched flag over any state; motors disabled until the holder clears it
 - **initializing** (first `enable` after connect): clear faults, close the gripper and check it
   reads near zero (up to 2 tries, about 0.5 s each). Later enables skip it while the connection
   lasts.
-- **enabled**: the arm holds the measured pose it was enabled at (`q_cmd = q_out`), gravity
-  compensated; commands move it.
+- **enabled**: the arm holds the pose it was enabled at, gravity compensated; commands move it.
+  Enable holds the *motor-side* positions (the motors' MIT loops run on those, so the first frame
+  asks for no correction), clamped into the joint limits, and the driver's remembered setpoints
+  are forgotten. It is refused when an output encoder disagrees with its motor by more than
+  0.05 rad (a 2π wrap or slipped zero), or a joint is more than 3° outside its limits (clamping
+  would snap it back: move it by hand). While running, a disagreement over 0.15 rad faults.
 - **disabled**: motors off, no torque. The arm falls under gravity. `disable` and e-stop both
   land here.
 - **fault**: a motor read failed, a motor reported an error, or the control loop overran.
@@ -55,7 +59,11 @@ Each tick:
    velocity, torque). A missing reading is a **fault**, never a 0.
 2. Pick the motion source in force (hold / track / servo / chunk) and get its joint goal
    `q_goal` and joint velocity feedforward `qd_ff` for this tick.
-3. Step-limit: `q_cmd += clip(q_goal − q_cmd, ±v_max·dt)` per joint; `qd_ff` clipped to `v_max`.
+3. Command step (every source goes through it): `q_cmd` moves toward `q_goal` with per-joint
+   speed (`v_max`) and acceleration (`a_max`) limits, braking so it stops at the goal, the goal's
+   own velocity (trajectory, twist) fed forward; never outside the joint limits. The MIT velocity
+   reference is `q_cmd`'s own velocity, so no source change, cancel or preemption steps the
+   commanded velocity, and a velocity reference can't drag the arm off its position command.
 4. Gravity: `tau = g(q_out) · tau_scale` (profile; 0.84 on joints 4 and 5).
 5. `send_mit(q_cmd, qd_ff, kp, kd, tau)` for the arm; the gripper's own command (below).
 6. Publish one state row.
@@ -77,10 +85,13 @@ one ends as `preempted`, logged in events). With none, the arm **holds** `q_cmd`
 The rapid, stateless primitive. Each call: a TCP pose (arm base frame) and optionally a TCP twist
 and a gripper command. There is no "done": clients close their own loop on the streamed errors.
 
-- IK is solved in the request, warm-started from `q_cmd` (≤ 50 iterations). On failure the call
-  returns `ik_failed` with the residuals and the previous goal stays in force: never a partial
+- IK is solved in the request, warm-started from the previous track goal (else `q_cmd`; ≤ 50
+  iterations). On failure the call answers 200 with `ok: false` and the residuals and the previous goal stays in force: never a partial
   solution.
 - The pose never times out: the last accepted pose is held indefinitely.
+- The pose was the goal when sent; a fresh twist moves the goal on from it (at most 0.25 s
+  worth), and is capped at the soft servo speeds. A goal more than 20° (any joint) from the
+  previous one is refused: track is for small steps, servo for large moves.
 - The twist is the TCP's velocity, by default in the arm base frame's axes (`twist_frame: "base"`, the
   frame poses are given in), or in the TCP's own axes (`"tcp"`). It maps to
   `qd_ff = J⁺(q_cmd)·twist`. It is used for 0.25 s after the call,
@@ -103,9 +114,13 @@ The high-level move, a refined end-pose controller. "Reached" only makes sense h
    the trajectory's derivative.
 4. **Settle**: done when the output-side TCP error is under the tolerance (default 2 mm, 1°) for
    0.2 s; `not_reached` if that hasn't happened by the trajectory's end + a settle timeout.
-5. **Abort** (arm holds where its command is, after a short deceleration ramp) on: output-side
+5. **Abort** on: output-side
    tracking error over a threshold (an obstruction or collision), cancel, preemption, disable,
-   e-stop, lease end.
+   e-stop, lease end. An obstruction abort holds where the arm actually is (releasing the force);
+   cancel and preemption decelerate at the acceleration limit to a stop.
+6. Plans run one at a time. A servo / home planned while the command kept moving (a track or
+   motion in force) is refused rather than started from a stale pose; a chunk's lead-in is
+   re-anchored on the command when it is accepted and speed-checked.
 
 Observable: `servo {id, phase: planning|executing|settling|reached|not_reached|aborted|refused,
 progress, t, duration, reason}` in every state row.
@@ -126,7 +141,9 @@ Time-indexed TCP poses (+ gripper per step) at a fixed `dt`, the output of a chu
 
 ### Home and named poses (`POST /home`, `POST /servo {pose_name}`)
 
-Named poses are joint configurations defined in config (`home`, `stow`, ...): the one place joint
+Named poses are joint configurations defined in config (`home`, `stow`, ...; the packaged
+default is only `home` = all zeros, as rebot_ctl's `safe_home`; an admin adds more in
+`~/.config/robot_utils/arm.yaml`, see nodes/arm/config.py): the one place joint
 positions are inputs, and only an admin writes them. Servo accepts a name in place of a pose
 (planned in joint space, same validation, observability and aborts).
 
@@ -142,14 +159,19 @@ left wherever it was:
 
 ### Gripper (part of any command, or `POST /gripper`)
 
-- Command: `gap_mm` (jaw gap; 0 = closed) and optional `max_force_n` (default 50 N from config).
+- Command: `gap_mm` (jaw gap; 0 = closed) and optional `max_force_n` (50 N after enable; an
+  omitted limit keeps the one in force). The gap command is rate and acceleration limited and
+  stops 1 mm short of fully open (the printed stops); no velocity reference is sent, so kd only
+  damps.
 - Geometry: module 1, 16 teeth, pitch radius 8 mm; one pinion drives both racks, so
   `gap_mm = 16 · |θ|` (θ in rad, closed 0, opening negative) and squeeze force
   `F = τ / (2 · 0.008 m)`.
 - Force limit, every tick: `τ_est = kp·(θ_cmd − θ) + kd·(θ̇_cmd − θ̇)` from motor-side
   feedback; if `F(τ_est)` exceeds `max_force_n` in the closing direction, a feedforward
   `τ_ff` opposes the excess. `|τ_ff| ≤ |τ_est|` and it only ever opposes closing, so it can never
-  drive the jaws open. Off within 5 mm of fully open, to protect the printed hard stops.
+  drive the jaws open. Within 5 mm of fully open there is no feedforward (protecting the printed
+  stops); there the position command is pulled back toward the jaws instead, so wide objects are
+  force-limited too.
   `max_force_n ≥ 0`.
 - Its own step limit (mm/s).
 
@@ -171,8 +193,8 @@ Available three ways:
 
 - `POST /ik`: IK check only. Pose + seed (`command` | `measured`) → `{ok, q, pos_err_mm,
   rot_err_deg, within_limits}`. Never moves anything.
-- `GET/POST /tcp`: the TCP offset in `end_link` (default −0.15 m along x, as in teleop). Changing
-  it while enabled re-anchors the goal to the current command, so nothing moves.
+- `GET/POST /tcp`: the TCP offset in `end_link` (default −0.15 m along x, as in teleop). Only
+  while disabled.
 - `GET/POST /profile`: gain profiles from yaml (`soft` production, `safe` debug). Switching only
   while disabled.
 - `GET/POST /limits`: joint speed caps `v_max` (defaults below the teleop's 6 / 18 rad/s), TCP
