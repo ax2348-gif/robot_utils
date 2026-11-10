@@ -28,6 +28,19 @@ class BusError(RuntimeError):
     """A read or write failed; the node faults (motors disabled)."""
 
 
+class ReadMiss(BusError):
+    """Some replies did not arrive in time this tick (``missing``: motor names). On a serial bus an
+    occasional dropped reply is ordinary: the node keeps the latest complete reading for a short
+    while and faults only if it gets too old."""
+
+    def __init__(self, missing: list, msg: str):
+        super().__init__(msg)
+        self.missing = list(missing)
+
+
+READ_WAIT_S = 0.005   # s to wait for this tick's replies (a lost one must not hold the tick up)
+
+
 @dataclass
 class Reading:
     t: float
@@ -74,6 +87,7 @@ class HardwareBus(ArmBus):
         self.arm = RebotArm(hw_yaml, channel=channel)
         self.setpoint_limits = dict(self.arm.setpoint_limits)
         self.names = [j.name for j in self.arm._all_joints]
+        self.on: set = set()          # groups whose motors are on
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
@@ -84,11 +98,18 @@ class HardwareBus(ArmBus):
         self.arm.connect(check_gripper=False)
         self.arm.disable_all()
 
-    @staticmethod
-    def _prepare(g) -> None:
+    def _guard_setup(self, what: str) -> None:
+        """Setup steps (mode switches, the gripper check) block for a while: callers put the motors
+        into the state the step needs first (off). This backstop refuses instead of silently
+        stalling the frames of motors that are on."""
+        if self.on:
+            raise BusError(f"{what} with motors on ({', '.join(sorted(self.on))}): refused (would stall their frames)")
+
+    def _prepare(self, g) -> None:
         """Before a group's motors go on: forget the driver's remembered setpoints (RebotArm resends
         the last one when it refuses a new one: across a disable that could be a pose the arm left
         long ago), clear latched faults, and switch to MIT mode, confirmed."""
+        self._guard_setup(f"{g.name}: MIT mode switch")
         g._q_last[:] = np.nan
         g._q_refused[:] = False
         g.clear_error()
@@ -98,6 +119,7 @@ class HardwareBus(ArmBus):
     def check_gripper(self) -> float:
         """Close the gripper and require it to read near zero (rebot_ctl; up to 2 tries)."""
         from reBotArm_control_py.actuator import GripperCheckError
+        self._guard_setup("gripper check")
         for attempt in (1, 2):
             try:
                 return float(self.arm.check_gripper_closed())
@@ -113,6 +135,7 @@ class HardwareBus(ArmBus):
             self._prepare(g)
         for g in groups:
             g.enable()
+            self.on.add(g.name)
 
     def gripper_motor(self, on: bool) -> None:
         """The gripper motor alone on (gainless until commanded) or off (damping)."""
@@ -125,8 +148,10 @@ class HardwareBus(ArmBus):
             g._q_refused[:] = False
             g.clear_error()            # 20 ms settle
             g.enable()
+            self.on.add(g.name)
         else:
             g.disable()
+            self.on.discard(g.name)
 
     def seed(self, q) -> None:
         """Tell the driver the arm's setpoints start at ``q`` (the pose enable holds), so holding a
@@ -136,24 +161,37 @@ class HardwareBus(ArmBus):
 
     def disable(self) -> None:
         self.arm.disable_all()
+        self.on.clear()
 
     def read(self) -> Reading:
         from motorbridge import CallError
         from reBotArm_control_py.actuator import rebotarm as rb
         mm, cm = self.arm._motor_map, self.arm._ctrl_map
         try:
-            batched = rb._request_xout(mm, self.names)
+            if not rb._request_xout(mm, self.names):
+                raise BusError("motorbridge without non-blocking register reads: upgrade it")
             for n in self.names:
                 mm[n].request_feedback()
-            for c in cm.values():
-                c.poll_feedback_once()
-            xout = rb._collect_xout(mm, list(cm.values()), self.names, batched, rb.XOUT_TIMEOUT_S)
+            # this tick's replies, waiting at most READ_WAIT_S (a reply to an older request never
+            # counts: fresh only)
+            xout: dict = {}
+            deadline = time.monotonic() + READ_WAIT_S
+            while True:
+                for c in cm.values():
+                    c.poll_feedback_once()
+                for n in self.names:
+                    if n not in xout:
+                        cached = mm[n].get_cached_register_f32(rb.DM_RID_XOUT)
+                        if cached is not None:
+                            xout[n] = float(cached[0])
+                if len(xout) == len(self.names) or time.monotonic() > deadline:
+                    break
         except CallError as e:
             raise BusError(f"read failed: {e}") from e
         sts = [mm[n].get_state() for n in self.names]
-        missing = [n for n, s in zip(self.names, sts) if s is None]
+        missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
         if missing:
-            raise BusError(f"no feedback from {', '.join(missing)}")
+            raise ReadMiss(missing, f"no reply within {READ_WAIT_S * 1e3:.0f} ms from {', '.join(dict.fromkeys(missing))}")
         a = lambda f: np.array([getattr(s, f) for s in sts[:N]], dtype=float)   # noqa: E731
         g = sts[N]
         return Reading(time.monotonic(), np.array([xout[n] for n in self.names[:N]]), a("pos"), a("vel"), a("torq"),
@@ -240,6 +278,7 @@ class SimBus(ArmBus):
         self.object_gap_rad: Optional[float] = None   # e.g. -1.0: something between the jaws
         self.mot_offset = np.zeros(N)                # motor side minus output (backlash, a slipped zero)
         self.fail_reads = False                      # tests: make the next reads fail
+        self.drop_reads = 0                          # tests: this many reads miss joint4's reply
         self.fault_code = 0                          # tests: a motor fault on joint1
         self.setpoint_limits = dict(limits or {})
 
@@ -320,7 +359,10 @@ class SimBus(ArmBus):
 
     def read(self) -> Reading:
         if self.fail_reads:
-            raise BusError("sim: no xout reply within 5 ms from: joint3")
+            raise ReadMiss(["joint3"], "sim: no reply within 5 ms from joint3")
+        if self.drop_reads > 0:
+            self.drop_reads -= 1
+            raise ReadMiss(["joint4"], "sim: no reply within 5 ms from joint4")
         now = self.clock()
         if self.t is not None:
             dt = min(max(now - self.t, 0.0), 0.2)

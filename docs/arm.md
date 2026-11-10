@@ -74,8 +74,14 @@ Each tick:
 5. One MIT frame per motor; the gripper's own command (below) unless it is in damping.
 6. Publish one state row.
 
-A tick later than 60 ms, or 90 ms since the last frame (the motors' watchdog is 100 ms), is a
-fault. Planning, IK checks and kinematics lookups run in a separate planner process (one job at a
+**Robustness.** Replies are awaited at most 5 ms per tick. A missed reply (an ordinary event on a
+serial bus) keeps the latest complete reading for that tick; the node faults only when that
+reading is older than 50 ms with the motors on (1 s with them off). Misses are counted, per motor,
+in `/state` and the stream (`read_age`, `read_misses`). A late tick is reported (an event, the
+`late_ticks` count), not a fault: the motors' own 100 ms watchdog protects them, and if it trips
+they report "communication lost", which faults. Setup steps that block (mode switches, the gripper
+check) are only ever run with every motor off; the bus refuses them otherwise. The lease
+heartbeat is 3 s (a browser shares 6 connections across all its tabs on the robot). Planning, IK checks and kinematics lookups run in a separate planner process (one job at a
 time): in the node's own interpreter they starve the control loop.
 
 ## Motion layers

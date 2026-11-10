@@ -332,7 +332,7 @@ def test_lease_lapse_disables_arm_floats_gripper_damps(rig):
     n = engaged(rig).node
     n.gripper_cmd(rig.tok, gap_mm=20.0)
     rig.step(3)
-    rig.run_s(1.5)                          # no renew
+    rig.run_s(3.5)                          # no renew (3 s heartbeat)
     assert not n.lease.held and n.state == "disabled" and n.motors_on and not n.servo
     assert rig.sim.enabled and not rig.sim.g_enabled and n.gripper_state()["mode"] == "damping"
     assert np.all(rig.sim.cmd[2] == 0)      # arm gainless (floating), still sent frames
@@ -352,8 +352,10 @@ def test_chock_refuses_enable_and_disables(rig, tmp_path):
 def test_read_failure_faults_and_reset_reinitializes(rig):
     n = ready(rig).node
     rig.sim.fail_reads = True
-    rig.step(1)
-    assert n.state == "fault" and not n.motors_on and "xout" in n.error
+    rig.step(3)
+    assert n.state != "fault"                          # a few missed replies: kept the latest reading
+    rig.step(5)
+    assert n.state == "fault" and not n.motors_on and "no complete reading" in n.error
     with pytest.raises(RequestError) as e:
         rig.enable()
     assert e.value.status == 503
@@ -843,3 +845,31 @@ def test_command_never_rounds_past_a_limit(rig):
                 n._command_step(np.where(np.arange(6) == 1, hi, n.q_cmd))
                 assert n.q_cmd[1] <= hi
     assert found > 0                                  # the case exists
+
+
+
+def test_occasional_missed_replies_are_tolerated_and_reported(rig):
+    n = engaged(rig).node
+    for _ in range(5):
+        rig.sim.drop_reads = 2                         # two ticks in a row miss joint4's reply
+        rig.step(6)
+    assert n.state == "servoing" and n.read_misses == 10 and n.misses_by_motor == {"joint4": 10}
+    assert rig.row()["read_misses"] == 10 and rig.row()["read_age"] == 0.0
+
+
+def test_a_late_tick_is_reported_not_a_fault(rig):
+    n = engaged(rig).node
+    rig.clock.t += 0.07                                # the loop stalled 80 ms (motors' watchdog: 100 ms)
+    rig.step(2)
+    assert n.state == "servoing" and n.late_ticks == 1
+    assert any("late" in e["msg"] for e in n.events.list())
+
+
+def test_setup_steps_refuse_with_motors_on():
+    from robot_utils.nodes.arm.bus import BusError, HardwareBus
+    b = HardwareBus.__new__(HardwareBus)
+    b.on = {"arm"}
+    with pytest.raises(BusError, match="motors on"):
+        b._guard_setup("gripper check")
+    b.on = set()
+    b._guard_setup("gripper check")                    # all off: allowed

@@ -45,7 +45,7 @@ from ..common.lease import Lease, RequestError
 from ..common.locks import LockStore, describe as describe_locks
 from ..common.server import EventLog
 from . import config as C
-from .bus import ArmBus, BusError
+from .bus import ArmBus, BusError, ReadMiss
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from .planner import Planner
@@ -55,9 +55,12 @@ log = logging.getLogger(__name__)
 RATE_HZ = 100.0
 DT = 1.0 / RATE_HZ
 TWIST_TIMEOUT = 0.25          # s a track twist feedforward stays in force
-LEASE_HEARTBEAT = 1.0         # s (a lapse disables: the arm floats, it does not drop)
-LATE_TICK = 0.06              # s between ticks with the motors on = fault (motor watchdog 100 ms)
-LATE_SEND = 0.09              # s since the last frame, checked just before sending
+LEASE_HEARTBEAT = 3.0         # s: a browser sharing its 6 connections across robot tabs can't renew
+                              # reliably within 1 s, and a lapse disables (gripper into damping)
+STALE_ON = 0.05               # s the latest complete reading may age (missed replies) with the motors on
+STALE_OFF = 1.0               # s ... with the motors off
+LATE_WARN = 0.08              # s between ticks reported as an event (the motors' own 100 ms watchdog
+                              # protects them: they drop to damping and report it, which faults)
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
 ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor feedback that refuses enable
 PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
@@ -75,7 +78,8 @@ JOINT_COLS = [("q", "rad"), ("q_mot", "rad"), ("qd", "rad/s"), ("tau", "Nm"), ("
               ("t_mos", "C"), ("status", "enum")]
 _BASE = [("t_tick", "s"), ("tick", "count"), ("state", "enum"), ("enabled", "bool"), ("motors_on", "bool"),
          ("servo", "bool"), ("g_servo", "bool"), ("estop", "bool"), ("lease_id", "id"), ("source", "enum"),
-         ("seq", "count"), ("overruns", "count"), ("tick_dt", "s"), ("limited", "bool"), ("twist_age", "s")]
+         ("seq", "count"), ("overruns", "count"), ("tick_dt", "s"), ("limited", "bool"), ("twist_age", "s"),
+         ("read_age", "s"), ("read_misses", "count")]
 _TCP = [("x", "m"), ("y", "m"), ("z", "m"), ("qx", ""), ("qy", ""), ("qz", ""), ("qw", ""),
         ("cmd_x", "m"), ("cmd_y", "m"), ("cmd_z", "m"),
         ("err_pos", "m"), ("err_rot", "rad"), ("goal_err_pos", "m"), ("goal_err_rot", "rad"),
@@ -109,6 +113,8 @@ FIELD_DOC = {
     "goal_err_pos / rot": "commanded TCP vs the goal of the source",
     "w / w_lin / sigma_min": "manipulability sqrt(det(J J^T)) of the 6x6 TCP Jacobian, of its translational rows, and its smallest singular value, at the measured pose",
     "limited": "the joint speed limit held q_cmd back this tick (the step limit)",
+    "read_age": "age of the reading this tick used: 0 normally; > 0 when replies were missed and the latest complete reading was kept (fault beyond 50 ms with the motors on)",
+    "read_misses": "ticks with missed replies since the node started (per motor in /state)",
     "twist_age": "s since the track twist feedforward was written (NaN if none)",
     "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
     "g_force": "squeeze force estimated from the gripper's MIT law (N)",
@@ -223,6 +229,11 @@ class ArmNode:
         self._g_engage = False
         self.reading = None
         self.latched: list[str] = []      # motor fault codes latched while the motors are off (enable clears them)
+        self._fresh_t: Optional[float] = None   # when the latest complete reading was taken
+        self.read_age = 0.0
+        self.read_misses = 0
+        self.misses_by_motor: dict = {}
+        self.late_ticks = 0
         self._tick = 0
         self._last_t: Optional[float] = None
         self.overruns = 0
@@ -330,22 +341,34 @@ class ArmNode:
         now = self.clock()
         dt_tick = math.nan if self._last_t is None else now - self._last_t
         self._last_t = now
-        if self.motors_on and dt_tick > LATE_TICK:
-            self._fault(f"control tick {dt_tick * 1e3:.0f} ms late (the motors' watchdog is 100 ms)")
-            return
         if dt_tick > SLOW_TICK:
             self.overruns += 1
+        if dt_tick > LATE_WARN:
+            self.late_ticks += 1
+            self.events.add(f"control tick {dt_tick * 1e3:.0f} ms late", "warn")
+        stale = False
         try:
             r = self.bus.read()
+            self.reading, self._fresh_t, self.read_age = r, now, 0.0
+        except ReadMiss as e:
+            self.read_misses += 1
+            for m in e.missing:
+                self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
+            age = math.inf if self._fresh_t is None else now - self._fresh_t
+            limit = STALE_ON if self.motors_on else STALE_OFF
+            if self.reading is None or age > limit:
+                self._fault(f"{e} (no complete reading for {age * 1e3:.0f} ms)")
+                return
+            r, stale, self.read_age = self.reading, True, age     # the latest complete reading, briefly
         except BusError as e:
             self._fault(str(e))
             return
-        self.reading = r
         if self._base == "fault":
             self._publish(now, dt_tick, r)
             return
-        faults = r.faults(self.bus.names)
-        self.latched = [] if self.motors_on else faults
+        faults = [] if stale else r.faults(self.bus.names)
+        if not stale:
+            self.latched = [] if self.motors_on else faults
         if faults and self.motors_on:
             self._fault("motor fault: " + "; ".join(faults))
             return
@@ -500,10 +523,6 @@ class ArmNode:
         """One frame per motor (motors on). Arm: servoing (profile gains) or floating (kp = kd = 0);
         gravity feedforward either way. Gripper: holding its goal (with the force limit) or free."""
         kin, p = self.kin, self.profile
-        if now - self._last_send > LATE_SEND:
-            self._fault(f"{(now - self._last_send) * 1e3:.0f} ms since the last command frame "
-                        "(the motors' watchdog is 100 ms)")
-            return
         src = None
         with self._lock:
             if self._has_source() and self.enabled and not self.servo and not self.estop.active:
@@ -660,7 +679,7 @@ class ArmNode:
         row[:len(_BASE)] = [now, self._tick, STATES.index(self.state), float(self.enabled), float(on),
                             float(servo), float(g_on), float(self.estop.active), float(info.lease_id if info else 0),
                             SOURCES.index(src), seq, self.overruns, dt_tick, float(self._limited and servo),
-                            (now - tr.t) if tr and tr.twist is not None else nan]
+                            (now - tr.t) if tr and tr.twist is not None else nan, self.read_age, self.read_misses]
         tau_g = self._g.get("tau_g") if on else None
         p = self.profile
         for i in range(N):
@@ -1271,6 +1290,7 @@ class ArmNode:
             "limits": self.limits(),
             "twist_timeout": TWIST_TIMEOUT, "lease_heartbeat": LEASE_HEARTBEAT,
             "loop_hz": None if rate is None else round(rate, 1), "overruns": self.overruns,
+            "late_ticks": self.late_ticks, "read_misses": self.read_misses, "read_misses_by_motor": dict(self.misses_by_motor),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],
             "latest": latest,
