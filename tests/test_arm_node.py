@@ -793,3 +793,11 @@ def test_servo_uses_the_geodesic_and_clik(rig):
     dp, dr = pose_error(n.kin.fk(tr.q[-1]), goal)
     assert dp < 2e-3 and dr < math.radians(1.0)
     assert np.allclose(tr.qd[-1], 0.0)
+
+
+def test_fast_gripper_reading_skew_does_not_fault(rig):
+    # on the robot: the gripper's output and motor readings differed by 12.7° while it moved fast
+    n = engaged(rig).node
+    rig.sim.g_mot_offset = math.radians(15.0)
+    rig.step(3)
+    assert n.state == "servoing", n.error

@@ -60,7 +60,7 @@ LATE_TICK = 0.06              # s between ticks with the motors on = fault (moto
 LATE_SEND = 0.09              # s since the last frame, checked just before sending
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
 ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor that refuses enable
-ENC_MISMATCH_RUN = 0.15       # rad that faults while the motors are on
+ENC_MISMATCH_RUN = 0.15       # rad that faults while the motors are on (arm joints)
 PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
 TRACK_IK_ITER = 30            # the Quest teleop's per-command IK iterations (warm-started)
 TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is refused
@@ -340,7 +340,9 @@ class ArmNode:
         if faults:
             self._fault("motor fault: " + "; ".join(faults))
             return
-        mism = np.abs(np.append(r.q - r.q_mot, r.g_q - r.g_q_mot))
+        # arm joints only: the gripper moves fast, and its output and motor readings are not taken
+        # at the same instant (its encoders are checked at enable, at rest)
+        mism = np.abs(r.q - r.q_mot)
         if self.motors_on and mism.max() > ENC_MISMATCH_RUN:
             i = int(np.argmax(mism))
             self._fault(f"{self.bus.names[i]}: output encoder and motor disagree by {math.degrees(mism[i]):.1f}°")
