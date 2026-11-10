@@ -183,6 +183,13 @@ class HardwareBus(ArmBus):
             except Exception:  # noqa: BLE001
                 pass
         _t.sleep(0.2)
+        # Every motor handle references its controller: the serial port is released only when the
+        # handles are freed too (RebotArm never frees them, so its port stays open in the process).
+        for m in list(a._motor_map.values()):
+            try:
+                m.close()
+            except Exception:  # noqa: BLE001
+                pass
         for ctrl in list(a._ctrl_map.values()):
             for step in (ctrl.shutdown, ctrl.close):
                 try:
