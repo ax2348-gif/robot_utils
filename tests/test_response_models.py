@@ -73,6 +73,13 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     st = call("GET", "/state")                                          # idle: lease, command, estop null
     assert st["command"] is None and st["lease"]["holder"] is None and st["estop"]["t"] is None
 
+    wait_for(lambda: node.encoders()["epoch"] >= 1)                     # the auto rebase at start
+    assert call("GET", "/encoders")["auto"]["enabled"]
+    assert call("GET", "/encoders/auto")["enabled"]
+    assert call("POST", "/encoders/auto", json={"interval_s": 300})["interval_s"] == 300.0
+    wait_for(lambda: (node.encoders()["stationary_s"] or 0) > 0.6)
+    assert call("POST", "/encoders/rebase")["epoch"] >= 2
+
     tok = call("POST", "/lease", json={"client": "test"})["token"]
     h = {"X-Lease-Token": tok}
     call("GET", "/lease")

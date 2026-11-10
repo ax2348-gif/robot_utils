@@ -48,6 +48,7 @@ with SwerveClient("http://botcore/nodes/swerve") as base:   # on the robot: Swer
 | `POST /estop` (no body needed) | **anyone** | stops at once, latches; `{"latched": true}` |
 | `POST /estop/clear` | holder | unlatch; stays disabled until `POST /enable` |
 | `POST /reset` | holder | rebuild the drive after a loop error (ends disabled) |
+| `GET /encoders`, `POST /encoders/rebase`, `GET`/`POST /encoders/auto` | anyone | drive-encoder rebase (below) |
 
 Holder requests carry the lease token as the `X-Lease-Token` header.
 
@@ -96,7 +97,7 @@ On the node's own page, `common/ui.js` provides all of this (`RU.leaseWidget`, `
 
 ## Telemetry stream
 
-`GET /stream[?batch_ms=0&max_backlog_s=20]`: one `schema` record (kind `"tick"`, 74 fields, units),
+`GET /stream[?batch_ms=0&max_backlog_s=20]`: one `schema` record (kind `"tick"`, 77 fields, units),
 then a `rows` record per control tick (float64). `GET /fields` lists the columns with units and
 notes. All times are the Pi's `time.monotonic()` seconds.
 
@@ -104,12 +105,13 @@ notes. All times are the Pi's `time.monotonic()` seconds.
 |---|---|
 | `t_tick`, `tick` | start of the control tick; tick counter (consecutive: gaps = lost rows) |
 | `motors_enabled`, `enabled`, `estop`, `lease_id`, `loop_ok` | flags |
+| `enc_epoch`, `enc_rebasing`, `rebase_age` | drive-encoder rebases confirmed since start; 1 while one is in flight (`drive_pos` may jump); s since the last (below) |
 | `cmd_seq`, `cmd_source`, `cmd_age` | the command in force: its seq, writer (1 slow, 2 fast), age |
 | `req_vx`, `req_vy`, `req_omega` | twist as requested |
 | `cmd_vx`, `cmd_vy`, `cmd_omega` | twist after the soft-limit clamp, as sent (NaN when stopped) |
 | `soft_max_speed`, `soft_max_omega` | soft limits in force |
 | `<M>_steer_angle`, `<M>_steer_vel` | wheel angle (rad, 0 = forward, CCW +) and its rate, from the absolute encoder (STATUS_5) |
-| `<M>_drive_vel`, `<M>_drive_pos` | wheel speed (m/s) and travel since the SPARK booted (m; float32 on the wire) (STATUS_2) |
+| `<M>_drive_vel`, `<M>_drive_pos` | wheel speed (m/s) and travel since the SPARK booted or the last rebase (m; float32 on the wire) (STATUS_2) |
 | `<M>_steer_sp`, `<M>_drive_sp` | setpoints sent this tick, after kinematics and the 180° flip (NaN if none) |
 | `<M>_steer_out`, `<M>_steer_current`, `<M>_drive_out`, `<M>_drive_current` | applied duty cycle and current (STATUS_0) |
 | `<M>_t_steer`, `<M>_t_drive`, `<M>_t_steer_s0`, `<M>_t_drive_s0` | arrival time of each status frame (per-signal sample time) |
@@ -120,6 +122,43 @@ Odometry and other estimates are not computed here (an estimator node's job).
 
 Record by saving the stream (`base.record("/stream", "run.bin", seconds=60)`) and read it with
 `common.protocol.iter_rows(iter_records(open("run.bin", "rb")))`.
+
+## Drive-encoder rebase
+
+**Why.** `drive_pos` is a float32 on the CAN wire, so its resolution falls as travel accumulates:
+about 0.06 mm at 1 km and 1 mm at 10 km of wheel travel (the estimator integrates its per-tick
+differences). Setting the four drive encoders back to 0 now and then keeps it fine. The drive
+SPARKs run velocity closed loop, so redefining their position changes nothing in control; the
+steering (absolute encoder) is never touched.
+
+**How.** A rebase is only done while the base is **stationary**: every |`drive_vel`| below
+0.01 m/s from fresh STATUS_2 frames, and no non-zero command in force (stopped, timed out,
+disabled, or enabled and holding zero are all fine). The control thread sends
+`SET_PRIMARY_ENCODER_POSITION 0` to the four drives with the tick's other frames (one batched
+write), then waits for STATUS_2 frames that arrive at least 15 ms after the send and read
+|`drive_pos`| ≤ 1 mm on all four. Only then does `enc_epoch` increment (about 20-30 ms in the
+simulator). Not confirmed within 0.5 s → the rebase failed (`last_error`, a warning event; the
+epoch stays). While a rebase is in flight `enc_rebasing` = 1 and a fresh command is **held at
+zero** (it goes through once the rebase ends), so the base never moves while `drive_pos` jumps.
+
+| request | who | what |
+|---|---|---|
+| `GET /encoders` | anyone | `{epoch, last_rebase_t, last_rebase_age, rebasing, last_error, auto, max_abs_drive_pos, stationary_s, motion}` (times: Pi monotonic s); also `encoders` in `/state` |
+| `POST /encoders/rebase` | anyone | rebase now; needs the base stationary for 0.5 s, else **409** with the reason (`motion`); → `/encoders` with the new epoch; 503 if not confirmed |
+| `GET /encoders/auto` | anyone | `{enabled, interval_s, still_s}` |
+| `POST /encoders/auto {"enabled", "interval_s", "still_s"}` | anyone | change any of them (runtime only: the defaults return when the node restarts) |
+
+Anyone may rebase (no lease): it moves nothing, and the estimator re-references across it (a
+rebase is invisible in the estimator's pose, frame and history; docs/estimator_node.md).
+
+**Automatic (default on).** When the base has been stationary for `still_s` (default 1 s) and
+the last rebase is older than `interval_s` (default 600 s), the node rebases by itself; with no
+rebase yet, that is once at start as soon as the base is still. A failed automatic rebase is
+retried after 10 s at the earliest.
+
+Not confirmed on hardware yet: that a SPARK applies `SET_PRIMARY_ENCODER_POSITION` while
+disabled and that the next STATUS_2 already carries the new position (the 15 ms settle and the
+0.5 s timeout allow for some delay; a failure is reported, never silently counted).
 
 ## Measured latency
 
