@@ -127,6 +127,7 @@ class AgentNav:
         self.memory = {"notes": [], "places": {}}
         self.latch: Optional[dict] = None       # human disable / e-stop: the agent cannot re-enable
         self.enabled_by: Optional[str] = None
+        self.enabled_at = 0.0                   # monotonic s when our last /enable returned (watcher ignores older polls)
         self.caps: Optional[dict] = None
         self.reflex = {"enabled": True, "armed": False, "last": None, "blind": None, "stops": 0}
         self._n_snap = self._n_img = self._n_q = 0
@@ -342,6 +343,7 @@ class AgentNav:
                                                            "config": {**cfg, "require_imu": self.require_imu}}, timeout=8)
         with self.lock:
             self.enabled_by, self.caps = actor, cfg
+            self.enabled_at = time.monotonic()
             if actor == "human":
                 self.latch = None
         reply = {"enabled": True, "profile": self.profile, "caps": cfg}
@@ -752,6 +754,7 @@ class AgentNav:
             time.sleep(0.1)
             if not self.targets.get("pose_servo"):
                 continue
+            t_poll = time.monotonic()
             try:
                 with self._client("pose_servo", 2) as c:
                     st = c.get("/state")
@@ -770,7 +773,9 @@ class AgentNav:
                 rec.done.set()
                 self._robot_turn(f"goal {rec.gid} {g['result']}" + (f": {g.get('reason')}" if g.get("reason") else ""),
                                  level="info" if g["result"] == "reached" else "warn", goal_id=rec.gid, **rec.result)
-            if self.enabled_by is not None and st.get("status") == "disabled" and last_status not in (None, "disabled"):
+            # a poll that started before our latest enable returned may still say "disabled": not an outside disable
+            if (self.enabled_by is not None and st.get("status") == "disabled" and last_status not in (None, "disabled")
+                    and t_poll > self.enabled_at):
                 why = st.get("disabled_reason")
                 with self.lock:
                     self.enabled_by = None
