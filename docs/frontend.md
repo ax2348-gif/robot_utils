@@ -377,8 +377,10 @@ theme, colour scheme (light, dark) and width (1280, 390 px):
 - **Text:** body and muted text in panels at 4.5:1 or more against the nearest solid background.
   Background images such as grids aren't sampled, so check those by eye.
 
-`tests/test_visual_safety.py` runs them for every packaged theme. A new theme lands only when they
-pass.
+`tests/test_visual_safety.py` runs them for every packaged theme when asked (`RU_VISUAL=1 pytest
+tests/test_visual_safety.py`; several minutes); a plain test run only checks the static layout
+contract. Run them after adding or changing a theme or the shared styles: a new theme lands only
+when they pass. For a single page, `python -m robot_utils.dev.preview check --pages <name>` is faster.
 
 ## Editing pages
 

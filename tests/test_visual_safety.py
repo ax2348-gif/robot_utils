@@ -1,9 +1,12 @@
 """Layout contract (static) and visual safety under every packaged theme (browser; dev/visual_safety.py).
 
-The browser tests start the whole robot in simulation in a temp folder (dev/preview.py) and need
-Playwright with Chromium (``pip install playwright && python -m playwright install chromium``);
-without it they are skipped. They never touch the real robot.
+The static layout-contract tests always run. The browser tests (every page under every packaged
+theme, light and dark, two widths: several minutes) are opt-in: run them after a theme or shared
+style change with ``RU_VISUAL=1``. They start the whole robot in simulation in a temp folder
+(dev/preview.py), need Playwright with Chromium (``pip install playwright && python -m playwright
+install chromium``) and never touch the real robot.
 """
+import os
 import re
 from pathlib import Path
 
@@ -73,7 +76,8 @@ def _chromium_ok() -> bool:
         return False
 
 
-browser = pytest.mark.skipif(not _chromium_ok(), reason="Playwright + Chromium not installed")
+browser = pytest.mark.skipif(not os.environ.get("RU_VISUAL") or not _chromium_ok(),
+                             reason="browser visual checks are opt-in (RU_VISUAL=1) and need Playwright + Chromium")
 
 BAD_THEME = """/*
 title: Bad (test only)
