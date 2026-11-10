@@ -34,6 +34,7 @@ PAGES = {
     "estimator": lambda: node_page("estimator"),
     "3d_perception": lambda: node_page("perception3d"),
     "power": lambda: node_page("power"),
+    "arm": lambda: node_page("arm"),
 }
 
 
@@ -52,7 +53,7 @@ def has(pattern: str, text: str) -> bool:
 
 # -- every page that can move the robot has a working e-stop ----------------------------------------
 
-@pytest.mark.parametrize("page", ["swerve", "pose_servo", "description"])
+@pytest.mark.parametrize("page", ["swerve", "pose_servo", "description", "arm"])
 def test_node_pages_with_actuation_use_the_shared_estop_button(page):
     html = PAGES[page]()
     assert has(r'id="estop"', html), "the e-stop element is gone"
@@ -101,6 +102,27 @@ def test_swerve_page_keyboard_teleop_stops_on_release_and_blur():
     assert has(r'addEventListener\("keyup", e => press\(e\.key\.toLowerCase\(\), false\)\)', html)
     assert has(r'addEventListener\("blur", \(\) => \{ held\.clear\(\)', html)
     assert has(r"onpointerup = b\.onpointerleave = \(\) => press\(k, false\)", html)
+
+
+def test_arm_page_jog_stops_on_release_blur_and_hide():
+    html = PAGES["arm"]()
+    # each hold-to-move control springs back to zero on release, cancel or lost capture
+    assert has(r'for \(const type of \["pointerup", "pointercancel", "lostpointercapture"\]\) svg\.addEventListener\(type, release\)', html)
+    assert has(r"function release\(\)\{ id = null; svg\.classList\.remove\(\"on\"\); set\(0, 0\); \}", html), "releasing must zero the control"
+    assert has(r'svg\.addEventListener\("blur", \(\) => \{ keys\.clear\(\); release\(\); \}\)', html)
+    assert has(r'window\.addEventListener\("blur", releaseAll\)', html)
+    assert has(r'addEventListener\("visibilitychange", \(\) => \{ if \(document\.hidden\) releaseAll\(\); \}\)', html)
+    # track posts only while a control is held (the node's twist then times out into a hold)
+    assert has(r"setInterval\(async \(\) => \{\s*if \(!held\(\)\)\{ jp = null; return; \}", html)
+    assert has(r'RU\.api\("track", \{body: \{pose:', html)
+    # each hold starts from the measured pose, and a stale target is dropped when the arm stops servoing,
+    # the page can't command, or the node refuses a target
+    assert has(r'async function jogBase\(\)\{.*?RU\.api\("kinematics"\);', html)
+    assert "jogBase(){\n  // each hold starts from the MEASURED" in html and 'jogBase' in html
+    assert not has(r'async function jogBase\(\)\{[^}]*which=command', html)
+    assert has(r"if \(!ready\(\)\)\{ jp = null; return; \}", html)
+    assert has(r"if \(\(wasServo && !st\.servo\) \|\| !ready\(\)\) jp = null;", html)
+    assert has(r"else \{ jp = null;", html), "a refused track target must not be integrated from"
 
 
 @pytest.mark.parametrize("page", ["swerve_teleop_tool", "remote_teleop_tool"])
