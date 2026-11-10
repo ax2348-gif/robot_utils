@@ -38,7 +38,10 @@ class ReadMiss(BusError):
         self.missing = list(missing)
 
 
-READ_WAIT_S = 0.005   # s to wait for this tick's replies (a lost one must not hold the tick up)
+FIRST_READ_WAIT_S = 0.05   # s the first read after connecting waits for its replies
+# Measured on the robot (7 motors, batched xout + feedback requests over the serial bridge): replies
+# take 5.3 ms median, 8.5 ms p99. So reads are pipelined: each tick collects the replies to the
+# requests sent the tick before (~10 ms to arrive, no waiting) and then sends the next requests.
 
 
 @dataclass
@@ -88,15 +91,25 @@ class HardwareBus(ArmBus):
         self.setpoint_limits = dict(self.arm.setpoint_limits)
         self.names = [j.name for j in self.arm._all_joints]
         self.on: set = set()          # groups whose motors are on
+        self._requested = False       # requests in flight for the next read
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
         """Open the bus and check, nothing more: every motor's CAN watchdog (100 ms) and the joint
         readings against the limits (2π power-on wraps). Then disable-all, so motors a crashed
         process left enabled are off. No mode change, no fault clearing: those are part of
-        switching the motors on (enable)."""
-        self.arm.connect(check_gripper=False)
-        self.arm.disable_all()
+        switching the motors on (enable). The same steps as RebotArm.connect, but a failure goes
+        through close() (RebotArm's own cleanup leaks the motor handles, and with them the port)."""
+        a = self.arm
+        a._setup_motors()
+        a._connected = True
+        try:
+            a.check_can_timeout()
+            a.check_joint_limits()
+            a.disable_all()
+        except Exception:
+            self.close()
+            raise
 
     def _guard_setup(self, what: str) -> None:
         """Setup steps (mode switches, the gripper check) block for a while: callers put the motors
@@ -167,31 +180,40 @@ class HardwareBus(ArmBus):
         from motorbridge import CallError
         from reBotArm_control_py.actuator import rebotarm as rb
         mm, cm = self.arm._motor_map, self.arm._ctrl_map
-        try:
+
+        def request():
             if not rb._request_xout(mm, self.names):
                 raise BusError("motorbridge without non-blocking register reads: upgrade it")
             for n in self.names:
                 mm[n].request_feedback()
-            # this tick's replies, waiting at most READ_WAIT_S (a reply to an older request never
-            # counts: fresh only)
-            xout: dict = {}
-            deadline = time.monotonic() + READ_WAIT_S
-            while True:
-                for c in cm.values():
-                    c.poll_feedback_once()
-                for n in self.names:
-                    if n not in xout:
-                        cached = mm[n].get_cached_register_f32(rb.DM_RID_XOUT)
-                        if cached is not None:
-                            xout[n] = float(cached[0])
-                if len(xout) == len(self.names) or time.monotonic() > deadline:
-                    break
+            self._requested = True
+
+        def collect() -> dict:
+            for c in cm.values():
+                c.poll_feedback_once()
+            out = {}
+            for n in self.names:
+                cached = mm[n].get_cached_register_f32(rb.DM_RID_XOUT)   # replies to the last request only
+                if cached is not None:
+                    out[n] = float(cached[0])
+            return out
+
+        try:
+            if not self._requested:                  # first read: request and wait
+                request()
+                deadline = time.monotonic() + FIRST_READ_WAIT_S
+                xout = collect()
+                while len(xout) < len(self.names) and time.monotonic() < deadline:
+                    xout = collect()
+            else:                                    # the replies to last tick's requests
+                xout = collect()
+            sts = [mm[n].get_state() for n in self.names]
+            request()                                # for the next tick
         except CallError as e:
             raise BusError(f"read failed: {e}") from e
-        sts = [mm[n].get_state() for n in self.names]
         missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
         if missing:
-            raise ReadMiss(missing, f"no reply within {READ_WAIT_S * 1e3:.0f} ms from {', '.join(dict.fromkeys(missing))}")
+            raise ReadMiss(missing, f"no reply since the last tick from {', '.join(dict.fromkeys(missing))}")
         a = lambda f: np.array([getattr(s, f) for s in sts[:N]], dtype=float)   # noqa: E731
         g = sts[N]
         return Reading(time.monotonic(), np.array([xout[n] for n in self.names[:N]]), a("pos"), a("vel"), a("torq"),
