@@ -99,7 +99,10 @@ class ArmKinematics:
         self.hi = np.array(self.model.upperPositionLimit[:N])
         self._local = threading.local()
         self._lock = threading.Lock()
-        self.ik_params = IKParams(max_iter=100, tolerance=1e-6, rot_weight=1.0)
+        # rebot_ctl's end-pose controller IK (max_iter 200, tolerance 1e-4, step 0.5, damping 1e-6)
+        # with the teleop's rotation weight 0.02: at a wrist limit, keep the TCP position rather
+        # than use other joints for the orientation
+        self.ik_params = IKParams(max_iter=200, tolerance=1e-4, step_size=0.5, damping=1e-6, rot_weight=0.02)
         self.ik_pos_tol = 0.002              # m
         self.ik_rot_tol = math.radians(1.0)  # rad
 
@@ -180,8 +183,9 @@ class ArmKinematics:
     def ik(self, target: pin.SE3, seed, max_iter: Optional[int] = None) -> IKOut:
         """Full-pose IK from ``seed``. ``ok`` only if within the position and rotation tolerances and
         the joint limits; otherwise ``q`` is the closest found and ``reason`` says why."""
-        params = self.ik_params if max_iter is None else IKParams(
-            max_iter=max_iter, tolerance=self.ik_params.tolerance, rot_weight=self.ik_params.rot_weight)
+        p = self.ik_params
+        params = p if max_iter is None else IKParams(max_iter=max_iter, tolerance=p.tolerance, step_size=p.step_size,
+                                                     damping=p.damping, rot_weight=p.rot_weight)
         seed = np.clip(np.asarray(seed, dtype=float)[:N], self.lo, self.hi)
         r = solve_ik(self.model, self._data(), self.tcp, target, seed, params, controlled_joints=N)
         q = np.asarray(r.q, dtype=float)[:N]

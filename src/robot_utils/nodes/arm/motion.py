@@ -1,9 +1,11 @@
 """Planned motions for the arm node: servo (a Cartesian move to a pose), joint-space moves to named
 poses (home), and action chunks. Pure computation; the node executes the result.
 
-Every plan is complete and checked before anything moves: IK at every sample (warm-started along
-the path), joint limits, joint speeds against the step limit, and no IK branch jumps. A plan that
-fails anywhere raises ``PlanError`` with the reason and the sample index.
+Servo is rebot_ctl's end-pose controller pipeline (min-jerk SE(3) geodesic + CLIK tracker), as
+tested on the arm; home and named poses are min-jerk joint-space moves like its safe_home; chunks
+are IK per sample (warm-started along the chunk). Every plan is complete before anything moves and
+is refused (``PlanError``, with the reason and sample index) if it would break a joint's speed
+limit, or (chunks) an IK sample fails or jumps branch.
 
 A ``Trajectory`` is time-indexed joint samples (server monotonic time) with velocity feedforward
 from finite differences; the node samples it every control tick (linear interpolation) and still
@@ -18,6 +20,9 @@ from typing import Optional
 
 import numpy as np
 import pinocchio as pin
+
+from reBotArm_control_py.trajectory import IKParams as ClikIKParams
+from reBotArm_control_py.trajectory import TrajPlanParams, TrajProfile, plan_cartesian_geodesic_trajectory, track_trajectory
 
 from .kin import ArmKinematics, N, pose_error
 
@@ -68,27 +73,9 @@ class Trajectory:
         return q, qd, gap, False
 
 
-# -- time scaling ------------------------------------------------------------------------------
-
-def trapezoid(v: float, a: float) -> float:
-    """Duration of a 0→1 move with peak speed v and acceleration a (normalized units)."""
-    if v * v / a >= 1.0:            # never reaches v: triangle
-        return 2.0 * math.sqrt(1.0 / a)
-    return 1.0 / v + v / a
-
-
-def trapezoid_s(t: np.ndarray, T: float, v: float, a: float) -> np.ndarray:
-    """Normalized progress s(t) in [0, 1] of a symmetric trapezoid (or triangle) of duration T."""
-    if v * v / a >= 1.0:
-        v = math.sqrt(a)             # triangle peak
-    ta = v / a
-    s = np.where(t < ta, 0.5 * a * t ** 2,
-                 np.where(t < T - ta, 0.5 * a * ta ** 2 + v * (t - ta),
-                          1.0 - 0.5 * a * np.maximum(T - t, 0.0) ** 2))
-    return np.clip(s, 0.0, 1.0)
-
-
 def min_jerk(s: np.ndarray) -> np.ndarray:
+    """10s³ − 15s⁴ + 6s⁵: the profile of rebot_ctl's safe_home (zero velocity and acceleration at
+    both ends; peak speed 1.875× the mean)."""
     return 10 * s ** 3 - 15 * s ** 4 + 6 * s ** 5
 
 
@@ -115,7 +102,7 @@ def _branch_check(q: np.ndarray) -> None:
         i = int(np.argmax(jump))
         if jump[i] > BRANCH_JUMP:
             raise PlanError(f"IK changes branch mid-path ({math.degrees(jump[i]):.0f}° in one step): "
-                            "the straight-line path passes a singularity or a joint limit", i + 1)
+                            "the path passes a singularity or a joint limit", i + 1)
 
 
 def _ik_path(kin: ArmKinematics, poses: list, seed: np.ndarray) -> np.ndarray:
@@ -131,57 +118,66 @@ def _ik_path(kin: ArmKinematics, poses: list, seed: np.ndarray) -> np.ndarray:
 
 # -- planners --------------------------------------------------------------------------------
 
+# rebot_ctl's end-pose controller (RebotArmEndPose.move_to_traj), as tested on the arm
+SERVO_DT = 0.01
+CLIK = ClikIKParams(max_iter=200, tolerance=1e-4, damping=1e-6, step_size=0.8)
+NULL_GAIN = 0.1
+MJ_PEAK_VEL = 1.875          # min-jerk: peak speed = 1.875·D/T
+MJ_PEAK_ACC = 5.7735         # min-jerk: peak acceleration = 5.7735·D/T²
+
+
 def plan_servo(kin: ArmKinematics, q_start, goal: pin.SE3, *, lin_vel: float, lin_acc: float,
                ang_vel: float, ang_acc: float, joint_vel: np.ndarray,
                duration: Optional[float] = None) -> Trajectory:
-    """A straight TCP line (position linear, orientation slerp) from FK(q_start) to ``goal``, timed
-    by a trapezoid within the linear and angular limits (or exactly ``duration``, refused if that
-    breaks them), then slowed further if a joint would exceed its speed limit. Times start at 0."""
+    """rebot_ctl's end-pose controller pipeline (RebotArmEndPose.move_to_traj): IK for the goal from
+    ``q_start``; a min-jerk SE(3) geodesic from FK(q_start) to FK(IK solution); CLIK
+    (``track_trajectory``, null-space joint-limit avoidance) into joint samples; finite-difference
+    velocities, zero at the end. The node adds only: the duration from the TCP speed and
+    acceleration limits (min-jerk peaks, linear and angular parts of the geodesic), or the
+    requested one if it keeps within them; and a refusal if a joint would exceed its speed limit
+    (the step limit would otherwise distort the path). Times start at 0."""
     q_start = np.asarray(q_start, float)
     end = kin.ik(goal, q_start)
     if not end.ok:
         raise PlanError(f"goal unreachable: {end.reason}")
-    start = kin.fk(q_start)
-    d, th = pose_error(start, goal)
-    dlog = pin.log3(start.rotation.T @ goal.rotation)
+    T_start, T_end = kin.fk(q_start), kin.fk(end.q)
+    xi = pin.log6(T_start.inverse() * T_end)
+    d, th = float(np.linalg.norm(xi.linear)), float(np.linalg.norm(xi.angular))
     if d < 1e-5 and th < 1e-4:
-        t = np.array([0.0, PLAN_DT])
+        t = np.array([0.0, SERVO_DT])
         q = np.array([q_start, q_start])
         return Trajectory("servo", t, q, np.zeros_like(q), goal=goal, info={"distance_m": d, "angle_rad": th})
-    # normalized limits: s'' and s' bounded by every component's limit
-    v_s = min(lin_vel / d if d > 1e-9 else math.inf, ang_vel / th if th > 1e-9 else math.inf)
-    a_s = min(lin_acc / d if d > 1e-9 else math.inf, ang_acc / th if th > 1e-9 else math.inf)
-    T_min = trapezoid(v_s, a_s)
+    T_min = max(MJ_PEAK_VEL * d / lin_vel, math.sqrt(MJ_PEAK_ACC * d / lin_acc),
+                MJ_PEAK_VEL * th / ang_vel, math.sqrt(MJ_PEAK_ACC * th / ang_acc))
     if duration is not None:
         if duration < T_min - 1e-6:
-            raise PlanError(f"duration {duration:g} s is too short for the speed limits (at least {T_min:.2f} s)")
+            raise PlanError(f"duration {duration:g} s is too short for the speed / acceleration limits "
+                            f"(at least {T_min:.2f} s)")
         T = float(duration)
-        # keep the acceleration limit, lower the cruise speed to take exactly T:
-        # 1 = v·T − v²/a  →  v = (a·T − sqrt(a²T² − 4a)) / 2   (a·T² ≥ 4 since T ≥ T_min)
-        v_s = (a_s * T - math.sqrt(max(a_s * a_s * T * T - 4.0 * a_s, 0.0))) / 2.0
     else:
         T = T_min
-    for attempt in range(5):
-        n = max(2, int(math.ceil(T / PLAN_DT)) + 1)
-        if n > MAX_SAMPLES:
-            raise PlanError(f"move too long ({T:.1f} s)")
-        t = np.linspace(0.0, T, n)
-        s = trapezoid_s(t, T, v_s, a_s)
-        poses = [pin.SE3(start.rotation @ pin.exp3(si * dlog), start.translation + si * (goal.translation - start.translation))
-                 for si in s]
-        q = _ik_path(kin, poses, q_start)
-        _branch_check(q)
-        ratio, idx = _check_speeds(t, q, joint_vel)
-        if ratio <= 1.0:
-            return Trajectory("servo", t, q, _qd(t, q), goal=goal,
-                              info={"distance_m": round(d, 5), "angle_rad": round(th, 5), "slowed": attempt > 0})
-        if duration is not None:
-            j = int(np.argmax(np.abs(q[idx + 1] - q[idx]) / joint_vel)) + 1
-            raise PlanError(f"joint{j} would exceed its speed limit ({ratio:.2f}× at this duration)", idx)
-        # slow down: stretch time (the trapezoid keeps its shape)
-        T *= ratio * 1.05
-        v_s, a_s = v_s / (ratio * 1.05), a_s / (ratio * 1.05) ** 2
-    raise PlanError("could not keep the joints within their speed limits")
+    if T / SERVO_DT > MAX_SAMPLES:
+        raise PlanError(f"move too long ({T:.1f} s)")
+    cart = plan_cartesian_geodesic_trajectory(T_start, T_end, T, TrajPlanParams(dt=SERVO_DT, profile=TrajProfile.MIN_JERK))
+    full = np.zeros(kin.model.nq)
+    full[:N] = q_start
+    pts = track_trajectory(kin.model, kin.tcp, cart.trajectory, full, CLIK, null_gain=NULL_GAIN, controlled_joints=N)
+    if not pts:
+        raise PlanError("empty trajectory")
+    t = np.array([p.time for p in pts])
+    q = np.array([p.q[:N] for p in pts])
+    # finite-difference velocity feedforward, zero at the end (as RebotArmEndPose: dt = T / len)
+    dt_pt = T / len(q)
+    qd = np.zeros_like(q)
+    qd[:-1] = (q[1:] - q[:-1]) / dt_pt
+    ratio, idx = _check_speeds(t, q, joint_vel)
+    if ratio > 1.0:
+        j = int(np.argmax(np.abs(q[idx + 1] - q[idx]) / joint_vel)) + 1
+        raise PlanError(f"joint{j} would exceed its speed limit ({ratio:.2f}×): lower the TCP speed or "
+                        "give a longer duration", idx)
+    return Trajectory("servo", t, q, qd, goal=goal,
+                      info={"distance_m": round(d, 5), "angle_rad": round(th, 5),
+                            "clik_unconverged": int(sum(not p.ik_success for p in pts))})
 
 
 def plan_joint(q_start, waypoints: list, vel: float, joint_vel: np.ndarray, kin: ArmKinematics,

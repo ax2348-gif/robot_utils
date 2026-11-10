@@ -61,8 +61,9 @@ LATE_SEND = 0.09              # s since the last frame, checked just before send
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
 ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor that refuses enable
 ENC_MISMATCH_RUN = 0.15       # rad that faults while the motors are on
-PLAN_DRIFT = 0.02             # rad the arm (or its command) may move while a motion is planned
-TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the previous one is refused
+PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
+TRACK_IK_ITER = 30            # the Quest teleop's per-command IK iterations (warm-started)
+TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is refused
 STOW_NEAR = math.radians(3.0)  # every joint this close to home: stow turns the motors off at once
 SLOW_TICK = 0.015             # s between ticks counted as an overrun
 ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
@@ -455,15 +456,22 @@ class ArmNode:
             self._drop_sources(f"not engaged: {why}")
             self.events.add(f"arm not engaged: {why}", "warn")
             return False
-        self.q_cmd = r.q_mot.copy()
         # the command starts moving as the arm does: speeding up from there is acceleration
         # limited, slowing down is not
-        self.v_cmd = np.clip(r.qd, -self.soft.joint_vel, self.soft.joint_vel)
-        self.hold_q = None
-        self.bus.seed(self.q_cmd)       # the driver accepts holding here even just outside a limit
+        self._command_from_reading(r, np.clip(r.qd, -self.soft.joint_vel, self.soft.joint_vel))
         self.servo = True
         self.events.add("arm engaged (servoing from the measured pose)")
         return True
+
+    def _command_from_reading(self, r, v: np.ndarray) -> None:
+        """The command becomes the arm's motor-side positions (the MIT loops run on those) and the
+        driver is told so: it judges each setpoint against the last one it sent, and would
+        otherwise refuse a pose outside the limits and resend an old command instead. The only way
+        the command is ever replaced by where the arm is (call under _lock, control thread)."""
+        self.q_cmd = r.q_mot.copy()
+        self.v_cmd = np.asarray(v, float).copy()
+        self.hold_q = None
+        self.bus.seed(self.q_cmd)
 
     def _command_step(self, q_goal: np.ndarray) -> None:
         """Move q_cmd one tick toward the (literal) goal (call under _lock): at most the joint speed
@@ -582,9 +590,7 @@ class ArmNode:
             m.bad_since = m.bad_since or now
             if now - m.bad_since >= s.abort_hold_s:
                 with self._lock:   # hold where the arm is, not where it was told to be
-                    lo, hi = np.minimum(self.kin.lo, r.q_mot), np.maximum(self.kin.hi, r.q_mot)
-                    self.q_cmd = np.clip(r.q_mot, lo, hi)
-                    self.v_cmd = np.zeros(N)
+                    self._command_from_reading(r, np.zeros(N))
                 self._end_motion("aborted", f"tracking error {dp * 1e3:.0f} mm / {math.degrees(dr):.0f}° "
                                             "(obstructed?): holding where it is")
                 return
@@ -886,7 +892,7 @@ class ArmNode:
         if prev is not None and seq and prev.seq and seq < prev.seq:
             return {"ok": False, "seq": seq, "ik": None, "limited": self._limited,
                     "reason": f"stale: seq {seq} is older than {prev.seq} already applied"}
-        r = self.kin.ik(pose, seed, max_iter=50)
+        r = self.kin.ik(pose, seed, max_iter=TRACK_IK_ITER)
         out = {"ok": r.ok, "seq": seq, "ik": r.public(), "limited": self._limited, "twist_scaled": scaled,
                "reason": r.reason}
         if r.ok:

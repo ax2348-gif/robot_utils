@@ -103,17 +103,20 @@ and a gripper command. There is no "done": clients close their own loop on the s
 
 ### Servo — go to a pose (`POST /servo`)
 
-The high-level move, a refined end-pose controller. "Reached" only makes sense here.
+The high-level move: rebot_ctl's end-pose controller (`RebotArmEndPose.move_to_traj`), as tested
+on the arm. "Reached" only makes sense here.
 
-1. **Plan** (planner process): IK for the goal from the measured pose; an SE(3) path from the
-   measured TCP to the goal, timed by a velocity/acceleration profile (per request: linear and
-   angular `max_vel` and `max_acc`, defaulting to the node's limits and never above them; or a
-   requested duration, refused if it breaks them); CLIK-track it into a joint trajectory.
-2. **Validate the whole path before moving**: CLIK residual at every sample, joint limits,
-   joint speeds within `v_max`, first sample at the measured pose. Any failure means the
-   request is refused with the reason and the sample index; nothing moves.
-3. **Execute** in the loop, indexed by monotonic time (not a sleeping thread), with `qd_ff` from
-   the trajectory's derivative.
+1. **Plan** (planner process), as the end-pose controller: IK for the goal from the measured pose
+   (200 iterations, tolerance 1e-4, rotation weight 0.02); a min-jerk SE(3) geodesic from the
+   measured TCP to the IK solution's pose; `track_trajectory` (CLIK with null-space joint-limit
+   avoidance, gain 0.1) into joint samples every 10 ms; finite-difference velocities, zero at the
+   end. The node adds the duration: from the TCP speed and acceleration limits (per request, never
+   above the node's: min-jerk peaks 1.875·d/T and 5.77·d/T², linear and angular parts of the
+   geodesic), or a requested duration, refused if it breaks them.
+2. **Refused before moving** if the goal is unreachable or a joint would exceed its speed limit;
+   nothing moves.
+3. **Execute** in the loop, indexed by monotonic time (not a sleeping thread), with the
+   trajectory's velocity as the MIT velocity reference.
 4. **Settle**: done when the output-side TCP error is under the tolerance (default 2 mm, 1°) for
    0.2 s; `not_reached` if that hasn't happened by the trajectory's end + a settle timeout.
 5. **Abort** on: output-side

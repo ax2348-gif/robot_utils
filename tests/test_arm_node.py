@@ -729,3 +729,67 @@ def test_stow_near_home_cuts_at_once(rig):
     assert out["stowed"]
     rig.step(2)
     assert n.state == "off" and not rig.sim.enabled
+
+
+def test_obstruction_abort_past_a_limit_holds_without_a_driver_refusal(rig):
+    # audit: the abort replaced the command by the reading without telling the driver, which then
+    # refused it (outside the limits) and would resend its old setpoint
+    n = engaged(rig).node
+    goal = rig.sim.q.copy()
+    goal[0] = n.kin.lo[0] + math.radians(1.0)
+    m = n.servo_cmd(rig.tok, n.kin.fk(goal))
+    rig.keep(m["duration"] * 0.9)
+    past = n.kin.lo[0] - math.radians(20.0)               # pushed well past the limit (obstruction)
+    for _ in range(40):
+        rig.sim.q[0], rig.sim.qd[0] = past, 0.0
+        rig.step(1)
+    assert n.last_motion is not None and n.last_motion.phase == "aborted", n.state
+    assert n.state == "servoing", (n.state, n.error)                    # no driver refusal, no fault
+    assert abs(n.q_cmd[0] - past) < 0.02
+
+
+
+def test_twist_reference_is_zero_without_a_twist(rig):
+    n = engaged(rig).node
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.0, 0.01])
+    n.track_cmd(rig.tok, T)
+    for _ in range(30):
+        rig.step(1)
+        assert np.all(n.qd_ff == 0.0)
+
+
+def test_home_trajectory_is_a_proper_min_jerk_move(rig):
+    n = ready(rig).node
+    from robot_utils.nodes.arm.motion import plan_joint
+    with n._lock:
+        q0 = n._arm_start()
+    vel = n.soft.home_vel
+    via = np.radians([10.0, -30.0, -40.0, 5.0, 20.0, -10.0])
+    tr = plan_joint(q0, [via, np.zeros(6)], vel, n.soft.joint_vel, n.kin)
+    assert np.allclose(tr.q[0], q0) and np.allclose(tr.q[-1], 0.0)        # starts here, ends at home
+    assert np.all(np.diff(tr.t) > 0)
+    v = np.diff(tr.q, axis=0) / np.diff(tr.t)[:, None]
+    assert np.abs(v).max() <= vel * 1.001                                   # never faster than the home speed
+    i_via = int(np.argmin(np.linalg.norm(tr.q - via, axis=1)))
+    assert np.allclose(tr.q[i_via], via, atol=1e-9)                         # passes exactly through the via pose
+    assert np.allclose(tr.qd[0], 0) and np.allclose(tr.qd[-1], 0)           # at rest at both ends
+    assert np.abs(v[i_via - 1]).max() < 0.02 * vel and np.abs(v[i_via]).max() < 0.02 * vel   # and at the via
+    assert all(n.kin.within_limits(q) for q in tr.q[1:])
+
+
+def test_servo_uses_the_geodesic_and_clik(rig):
+    n = engaged(rig).node
+    from robot_utils.nodes.arm.motion import plan_servo
+    T = rig.tcp()
+    goal = pin.SE3(T.rotation @ pin.exp3(np.array([0.0, 0.0, 0.3])), T.translation + np.array([0.03, 0.02, 0.0]))
+    with n._lock:
+        q0 = n._arm_start()
+    s = n.soft
+    tr = plan_servo(n.kin, q0, goal, lin_vel=s.lin_vel, lin_acc=s.lin_acc, ang_vel=s.ang_vel, ang_acc=s.ang_acc,
+                    joint_vel=s.joint_vel)
+    assert np.allclose(tr.q[0], q0, atol=1e-3) and tr.info["clik_unconverged"] == 0
+    from robot_utils.nodes.arm.kin import pose_error
+    dp, dr = pose_error(n.kin.fk(tr.q[-1]), goal)
+    assert dp < 2e-3 and dr < math.radians(1.0)
+    assert np.allclose(tr.qd[-1], 0.0)
