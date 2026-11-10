@@ -77,13 +77,23 @@ class HardwareBus(ArmBus):
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
-        # Watchdog (100 ms) and joint-limit (2π wrap) checks; the gripper check runs on enable.
+        """Open the bus and check, nothing more: every motor's CAN watchdog (100 ms) and the joint
+        readings against the limits (2π power-on wraps). Then disable-all, so motors a crashed
+        process left enabled are off. No mode change, no fault clearing: those are part of
+        switching the motors on (enable)."""
         self.arm.connect(check_gripper=False)
-        for g in (self.arm.arm, self.arm.gripper):
-            g.clear_error()
-            if not g.mode_mit():
-                raise BusError(f"{g.name}: a motor did not confirm MIT mode")
         self.arm.disable_all()
+
+    @staticmethod
+    def _prepare(g) -> None:
+        """Before a group's motors go on: forget the driver's remembered setpoints (RebotArm resends
+        the last one when it refuses a new one: across a disable that could be a pose the arm left
+        long ago), clear latched faults, and switch to MIT mode, confirmed."""
+        g._q_last[:] = np.nan
+        g._q_refused[:] = False
+        g.clear_error()
+        if not g.mode_mit():
+            raise BusError(f"{g.name}: a motor did not confirm MIT mode; not enabling")
 
     def check_gripper(self) -> float:
         """Close the gripper and require it to read near zero (rebot_ctl; up to 2 tries)."""
@@ -97,22 +107,18 @@ class HardwareBus(ArmBus):
         raise AssertionError
 
     def enable(self) -> None:
-        for g in (self.arm.arm, self.arm.gripper):
-            # RebotArm remembers the last setpoint per joint and, when it refuses a new one (outside
-            # the limits), resends that instead: across a disable that could be a pose the arm left
-            # long ago. Forget it, so nothing from a previous session is ever sent.
-            g._q_last[:] = np.nan
-            g._q_refused[:] = False
-            g.clear_error()
+        """Motors on (arm and gripper), each group prepared first (MIT mode confirmed)."""
+        groups = (self.arm.arm, self.arm.gripper)
+        for g in groups:
+            self._prepare(g)
+        for g in groups:
             g.enable()
 
     def gripper_motor(self, on: bool) -> None:
         """The gripper motor alone on (gainless until commanded) or off (damping)."""
         g = self.arm.gripper
         if on:
-            g._q_last[:] = np.nan
-            g._q_refused[:] = False
-            g.clear_error()
+            self._prepare(g)
             g.enable()
         else:
             g.disable()

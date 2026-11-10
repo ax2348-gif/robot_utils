@@ -34,8 +34,10 @@ calibration (stay as `rebot_ctl` CLI tools), payload identification.
 | **servoing** | closed loop | as commanded | the first closed-loop arm command (track, servo, chunk, home, stow) |
 | fault | off | off | read failure, motor fault code, late tick, encoder mismatch, refused setpoint; `reset` reconnects |
 
-- **Enable** (lease; refused while the arm's chock is held or the e-stop is latched): motors on,
-  gravity compensation on, the arm floating. The first enable after connecting closes the gripper
+- **Connect** only opens the bus and checks (watchdog settings, joint readings for 2π wraps), then
+  disables all motors; no mode change.
+- **Enable** (lease; refused while the arm's chock is held or the e-stop is latched): faults
+  cleared, MIT mode set and confirmed, motors on, gravity compensation on, the arm floating. The first enable after connecting closes the gripper
   and checks it reads near zero (up to 2 tries). Refused (409) when an output encoder disagrees
   with its motor by more than 0.05 rad (a 2π wrap or slipped zero); while the motors are on, a
   disagreement over 0.15 rad faults.
