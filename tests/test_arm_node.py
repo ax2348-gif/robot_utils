@@ -785,3 +785,27 @@ def test_encoder_disagreement_refuses_enable_only(rig):
     rig.sim.g_mot_offset = 0.3
     rig.step(3)
     assert rig.node.state == "floating"
+
+
+def test_latched_motor_codes_with_motors_off_do_not_fault_and_enable_clears_them(rig):
+    # on the robot: after a restart every joint still reported "communication lost" (latched from the
+    # previous session); with the motors off that is not a live fault
+    n = rig.node
+    rig.sim.fault_code = 0xD
+    rig.step(3)
+    assert n.state == "uninitialized" and n.latched and "communication lost" in n.latched[0]
+    rig.lease()
+    rig.enable()                                       # clear_error on the way to motors on
+    rig.step(2)
+    assert n.state == "floating" and not n.latched
+
+
+def test_close_releases_the_port_even_if_disable_fails(rig):
+    n = engaged(rig).node
+    calls = []
+    sim = rig.sim
+    sim.disable = lambda: (_ for _ in ()).throw(RuntimeError("bus broken"))
+    orig_close = sim.close
+    sim.close = lambda: (calls.append("close"), orig_close())
+    n._close_bus()
+    assert calls == ["close"] and n.bus is None

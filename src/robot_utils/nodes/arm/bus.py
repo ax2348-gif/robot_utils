@@ -168,7 +168,30 @@ class HardwareBus(ArmBus):
             raise BusError(f"the driver refused setpoints for {', '.join(refused)}")
 
     def close(self) -> None:
-        self.arm.disconnect()
+        """Release the serial port whatever state the motors are in. (RebotArm.disconnect disables
+        all motors first and, if that raises, never closes the port: after a fault the next
+        connect then finds it busy.)"""
+        import time as _t
+        a = self.arm
+        try:
+            a.stop_control_loop()
+        except Exception:  # noqa: BLE001
+            pass
+        for g in (a.arm, a.gripper):
+            try:
+                g.disable()
+            except Exception:  # noqa: BLE001
+                pass
+        _t.sleep(0.2)
+        for ctrl in list(a._ctrl_map.values()):
+            for step in (ctrl.shutdown, ctrl.close):
+                try:
+                    step()
+                except Exception:  # noqa: BLE001
+                    pass
+        a._ctrl_map.clear()
+        a._motor_map.clear()
+        a._connected = False
 
 
 class SimBus(ArmBus):
@@ -220,6 +243,7 @@ class SimBus(ArmBus):
         return self.g_q
 
     def enable(self) -> None:
+        self.fault_code = 0            # clear_error, as the real enable does
         self.enabled = True
         self.g_enabled = True
         self._q_last = np.full(N, np.nan)

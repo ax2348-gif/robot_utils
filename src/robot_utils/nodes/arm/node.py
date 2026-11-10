@@ -222,6 +222,7 @@ class ArmNode:
         self.gripper = Gripper()
         self._g_engage = False
         self.reading = None
+        self.latched: list[str] = []      # motor fault codes latched while the motors are off (enable clears them)
         self._tick = 0
         self._last_t: Optional[float] = None
         self.overruns = 0
@@ -261,13 +262,14 @@ class ArmNode:
         self._close_bus()
 
     def _close_bus(self) -> None:
+        """Best effort, step by step: a failing disable must never keep the serial port open."""
         if self.bus is not None:
-            try:
-                self.bus.disable()
-                self.bus.close()
-            except Exception as e:  # noqa: BLE001
-                log.warning("closing the bus: %s", e)
-        self.bus, self.motors_on = None, False
+            for step in (self.bus.disable, self.bus.close):
+                try:
+                    step()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("closing the bus (%s): %s", step.__name__, e)
+        self.bus, self.motors_on, self.g_motor_on = None, False, False
 
     def _run(self) -> None:
         next_t = time.monotonic()
@@ -336,7 +338,8 @@ class ArmNode:
             self._publish(now, dt_tick, r)
             return
         faults = r.faults(self.bus.names)
-        if faults:
+        self.latched = [] if self.motors_on else faults
+        if faults and self.motors_on:
             self._fault("motor fault: " + "; ".join(faults))
             return
         ch = self.chocks()
@@ -1241,6 +1244,7 @@ class ArmNode:
             "state": self.state, "error": self.error, "sim": bool(self.bus and self.bus.sim),
             "initialized": self.initialized, "enabled": self.enabled, "motors_on": self.motors_on,
             "servo": self.servo, "gripper_engaged": self.g_servo,
+            "latched_motor_faults": self.latched,
             "chocked": bool(ch), "locks": [l.public() for l in ch],
             "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source, "t": e and e.t},
             "lease": {"held": info is not None, "holder": info and info.client, "lease_id": info and info.lease_id,
