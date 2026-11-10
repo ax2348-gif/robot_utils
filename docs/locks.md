@@ -32,7 +32,8 @@ it has been removed.
   a reason, as does `POST /api/locks {kind, target, reason}`. The placer is recorded by Tailscale
   identity. To keep a runaway agent from spamming locks:
   - an identical active lock is reused;
-  - each client may place one lock per 30 s and 10 per day;
+  - each client may place the same lock (kind and target) once per 30 s, and 10 locks per day;
+    different locks (chock the base, then cover the camera) can follow each other at once;
   - at most 5 web-placed locks can be active at once.
 - **Over SSH, unlimited:**
 

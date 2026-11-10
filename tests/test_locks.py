@@ -52,9 +52,12 @@ def test_web_placement_is_deduplicated_rate_limited_and_capped():
     a, created = s.place("chock", "all", "web user", "x", source="web 1.2.3.4", now=1000.0)
     b, created2 = s.place("chock", "all", "web user", "x", source="web 5.6.7.8", now=1001.0)
     assert created and not created2 and a.id == b.id               # the same lock, not a second one
-    with pytest.raises(RequestError) as e:
+    s.place("cover", "camera", "web user", "", source="web 1.2.3.4", now=1002.0)   # a different lock: at once
+    cam = [l for l in s.active(force=True) if l.kind == "cover"][0]
+    s.remove(cam.id)
+    with pytest.raises(RequestError) as e:                         # the same lock again within 30 s
         s.place("cover", "camera", "web user", "", source="web 1.2.3.4", now=1010.0)
-    assert e.value.status == 429                                   # 30 s per client
+    assert e.value.status == 429
     s.place("cover", "camera", "web user", "", source="web 1.2.3.4", now=1040.0)
     for i, t in enumerate(("t1", "t2", "t3")):
         s.place("chock", t, "agent", "", source=f"web 10.0.0.{i}", now=1100.0 + i)
@@ -200,8 +203,11 @@ def test_landing_page_places_but_never_removes():
         lid = r.json()["lock"]["id"]
         again = c.post("/api/locks", json={"kind": "chock", "target": "all"}, headers={"X-Forwarded-For": "1.1.1.1"})
         assert again.status_code == 200 and not again.json()["created"]           # reused
+        cover = c.post("/api/locks", json={"kind": "cover", "target": "camera"}, headers={"X-Forwarded-For": "100.65.75.106"})
+        assert cover.status_code == 201                            # a different lock right after: allowed
+        LockStore().remove(cover.json()["lock"]["id"])             # (admin, over SSH)
         spam = c.post("/api/locks", json={"kind": "cover", "target": "camera"}, headers={"X-Forwarded-For": "100.65.75.106"})
-        assert spam.status_code == 429
+        assert spam.status_code == 429                             # the same lock again within 30 s
         d = c.delete(f"/api/locks/{lid}")
         assert d.status_code == 403 and "ssh" in d.json()["error"].lower()
         assert [l["id"] for l in c.get("/api/locks").json()["locks"]] == [lid]

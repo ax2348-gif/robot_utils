@@ -25,12 +25,12 @@ canvas.ru-plot{width:100%;height:100px}
 <div id="err" class="ru-err"></div>
 <div class="layout ru-body">
   <div class="ru-card" data-panel="map" data-role="view">
-    <b>Map</b> <span class="ru-muted">(estimator world frame, grid 0.5 m; click to place a global goal; trail kept in this page)</span>
+    <b>Map</b> <span class="ru-muted">(estimator world frame, grid 0.5 m; hover to preview, click to set a global goal, then Go; trail kept in this page)</span>
     <canvas id="map"></canvas>
     <div class="ctl">
       <button class="ru" id="center" title="Back to the default scale (the view always follows the robot)">Reset zoom</button><button class="ru" id="zin">+</button><button class="ru" id="zout">−</button>
       <button class="ru" id="clear">Clear trail</button>
-      <span class="ru-muted">the view follows the robot; robot in blue, goal with its acceptance circle</span>
+      <span class="ru-muted">the view follows the robot; robot in blue; dashed = under the cursor, outline = entered goal (not sent), green = active goal</span>
     </div>
     <b>Twist sent</b> <span class="ru-muted">vx, vy m/s · omega rad/s, 20 s</span><canvas class="ru-plot" id="pv"></canvas>
     <b>Twist rate</b> <span class="ru-muted">|a| m/s² · alpha rad/s²</span><canvas class="ru-plot" id="pa"></canvas>
@@ -84,6 +84,7 @@ $("#go").onclick = async () => {
   if (num("#g_speed") !== null) b.speed = num("#g_speed");
   if (num("#g_accel") !== null) b.accel = num("#g_accel");
   const r = await call("goal", b);
+  if (r) pending = false;
   if (r) $("#goalinfo").textContent = `goal ${r.goal_id}: ${r.distance.toFixed(3)} m, ${(r.rotation * D).toFixed(1)}°`;
 };
 // config form
@@ -109,6 +110,7 @@ const plots = {
   e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "dist"}, {name: "heading"}]}),
 };
 let last = null, trail = [], goal = null;
+let hover = null, pending = false;   // cursor point on the map (world); the goal form edited since the last Go
 RU.rows("stream?batch_ms=100", d => {
   for (let i = 0; i < d.n; i++){
     const p = {}; for (const f of d.fields) p[f] = d.col(f)[i];
@@ -151,8 +153,23 @@ RU.sse("events", s => {
 const cv = $("#map"); let scale = 150;
 function w2s(x, y){ const c = last && isFinite(last.x) ? last : {x: 0, y: 0}; return [cv.clientWidth / 2 - (y - c.y) * scale, cv.clientHeight / 2 - (x - c.x) * scale]; }
 function s2w(sx, sy){ const c = last && isFinite(last.x) ? last : {x: 0, y: 0}; return [c.x + (cv.clientHeight / 2 - sy) / scale, c.y + (cv.clientWidth / 2 - sx) / scale]; }
-cv.addEventListener("click", e => { const r = cv.getBoundingClientRect(), [x, y] = s2w(e.clientX - r.left, e.clientY - r.top);
-  $("#g_frame").value = "global"; $("#g_x").value = x.toFixed(3); $("#g_y").value = y.toFixed(3); });
+const mapXY = e => { const r = cv.getBoundingClientRect(); return s2w(e.clientX - r.left, e.clientY - r.top); };
+cv.addEventListener("click", e => { const [x, y] = mapXY(e);
+  if ($("#g_frame").value !== "global" && last && isFinite(last.theta))    // keep the entered heading, now in world terms
+    $("#g_th").value = (((formGoal() || {theta: 0}).theta * D + 540) % 360 - 180).toFixed(1);
+  $("#g_frame").value = "global"; $("#g_x").value = x.toFixed(3); $("#g_y").value = y.toFixed(3); pending = true; });
+cv.addEventListener("mousemove", e => { hover = mapXY(e); });
+cv.addEventListener("mouseleave", () => { hover = null; });
+for (const id of ["#g_frame", "#g_x", "#g_y", "#g_th"]) $(id).addEventListener("input", () => pending = true);
+// the goal the form describes, in the world frame (a local goal is relative to the robot's current pose)
+function formGoal(){
+  const x = num("#g_x") || 0, y = num("#g_y") || 0, th = (num("#g_th") || 0) / D;
+  if ($("#g_frame").value === "global") return {x, y, theta: th};
+  if (!last || !isFinite(last.x)) return null;
+  const c = Math.cos(last.theta), s = Math.sin(last.theta);
+  return {x: last.x + c * x - s * y, y: last.y + s * x + c * y, theta: last.theta + th};
+}
+function posTol(){ const v = num("#c_pos_tol"); return v === null ? 0.05 : v; }
 cv.addEventListener("wheel", e => { e.preventDefault(); scale = Math.max(20, Math.min(2000, scale * Math.exp(-e.deltaY * 0.0015))); }, {passive: false});
 $("#zin").onclick = () => scale = Math.min(2000, scale * 1.5);
 $("#zout").onclick = () => scale = Math.max(20, scale / 1.5);
@@ -174,6 +191,12 @@ function draw(){
   if (goal){ robot(g, goal.x, goal.y, goal.theta, RU.token("--live", "#157A45")); const [x, y] = w2s(goal.x, goal.y);
     g.strokeStyle = RU.token("--live", "#157A45"); g.lineWidth = 1; g.beginPath(); g.arc(x, y, Math.max(2, goal.motion.pos_tol * scale), 0, 2 * Math.PI); g.stroke();
     if (last && isFinite(last.x)){ const [p, q] = w2s(last.x, last.y); g.setLineDash([4, 4]); g.beginPath(); g.moveTo(p, q); g.lineTo(x, y); g.stroke(); g.setLineDash([]); } }
+  const ink = RU.token("--ink", "#222");
+  const fg = pending ? formGoal() : null;
+  if (fg){ robot(g, fg.x, fg.y, fg.theta, ink); const [x, y] = w2s(fg.x, fg.y);
+    g.strokeStyle = ink; g.lineWidth = 1; g.beginPath(); g.arc(x, y, Math.max(2, posTol() * scale), 0, 2 * Math.PI); g.stroke(); }
+  if (hover){ const th = $("#g_frame").value === "global" ? (num("#g_th") || 0) / D : (formGoal() || {theta: 0}).theta;
+    g.setLineDash([3, 3]); robot(g, hover[0], hover[1], th, ink); g.setLineDash([]); }
   if (last && isFinite(last.x)) robot(g, last.x, last.y, last.theta, RU.token("--signal", "#1F5FBF"));
   Object.values(plots).forEach(p => p.draw());
   requestAnimationFrame(draw);

@@ -33,7 +33,7 @@ from .lease import RequestError
 KINDS = ("chock", "cover")
 CHECK_EVERY_S = 0.2           # nodes re-check the directory at most this often
 WEB_MAX_ACTIVE = 5            # web-placed locks active at once (all clients)
-WEB_MIN_INTERVAL_S = 30.0     # per client between web placements
+WEB_MIN_INTERVAL_S = 30.0     # per client between web placements of the same kind and target
 WEB_MAX_PER_DAY = 10          # per client
 MAX_REASON = 200
 MAX_BY = 80
@@ -76,7 +76,7 @@ class LockStore:
         self._cache: list[Lock] = []
         self._sig = None
         self._checked = -1e9
-        self._web_log: dict[str, list[float]] = {}     # client -> placement times (wall)
+        self._web_log: dict[str, list[tuple[float, str]]] = {}   # client -> [(wall time, kind:target)]
 
     # -- reading -------------------------------------------------------------------------------
 
@@ -133,13 +133,17 @@ class LockStore:
                                         "an admin must remove some over SSH")
             client = source[4:] or "?"
             with self._lock:
-                times = [t for t in self._web_log.get(client, []) if now - t < 86400]
-                if times and now - times[-1] < WEB_MIN_INTERVAL_S:
-                    raise RequestError(429, f"one lock per {WEB_MIN_INTERVAL_S:.0f} s per client; try again in "
-                                            f"{WEB_MIN_INTERVAL_S - (now - times[-1]):.0f} s")
+                # Different locks (chock the base, cover the camera, chock the arm) in quick
+                # succession are normal; the interval only stops re-placing the same one.
+                key = f"{kind}:{target}"
+                times = [(t, k) for t, k in self._web_log.get(client, []) if now - t < 86400]
+                same = [t for t, k in times if k == key]
+                if same and now - same[-1] < WEB_MIN_INTERVAL_S:
+                    raise RequestError(429, f"one {kind} on {target} per {WEB_MIN_INTERVAL_S:.0f} s per client; "
+                                            f"try again in {WEB_MIN_INTERVAL_S - (now - same[-1]):.0f} s")
                 if len(times) >= WEB_MAX_PER_DAY:
                     raise RequestError(429, f"{WEB_MAX_PER_DAY} web lock placements per client per day")
-                times.append(now)
+                times.append((now, key))
                 self._web_log[client] = times
         lock = Lock(f"{kind}-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{secrets.token_hex(2)}",
                     kind, target, by, reason, now, source)

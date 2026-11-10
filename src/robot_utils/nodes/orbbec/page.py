@@ -30,6 +30,11 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 .tile .hd{display:flex;gap:8px;align-items:center;padding:4px 8px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .tile .hd b{font-size:13px}.tile .hd .st{color:var(--dim);flex:1;font-variant-numeric:tabular-nums}
 .tile .hd a{color:var(--acc);text-decoration:none;font-size:12px}
+.tile .hd{cursor:zoom-in;user-select:none}.tile.max .hd{cursor:zoom-out}
+#tiles.has-max{grid-template-columns:1fr}#tiles.has-max .tile:not(.max){display:none}
+.tile.max .wrap{width:fit-content;max-width:100%;margin:0 auto}
+.tile.max .wrap img{width:auto;max-width:100%;max-height:calc(100vh - 120px)}
+.tile.max.viz canvas{height:calc(100vh - 140px)!important}
 .wrap{position:relative;background:#000;line-height:0}
 .wrap img{width:100%;height:auto;display:block;min-height:120px;cursor:crosshair}
 .ro{position:absolute;left:6px;top:6px;background:#000a;padding:2px 6px;border-radius:4px;line-height:1.4;font-variant-numeric:tabular-nums;pointer-events:none;white-space:pre}
@@ -164,6 +169,13 @@ function makeTile(n){
   img.onmouseleave=()=>{t.hover=null;t.ro.textContent=pinText(t)};
   img.onclick=e=>{if(n!=="depth")return;t.pinxy=t.pinxy?null:xy(e);t.pinval=null;placePin(t)};
   t.box=box;return t}
+// any pane (image tiles, orientation, point cloud): click its title bar to maximize, again to restore
+$("#tiles").addEventListener("click",e=>{const hd=e.target.closest(".tile > .hd");
+  if(!hd||e.target.closest("a,button,input,select,label"))return;
+  const box=hd.parentElement,on=!box.classList.contains("max");
+  for(const o of $("#tiles").querySelectorAll(".tile.max"))o.classList.remove("max");
+  box.classList.toggle("max",on);$("#tiles").classList.toggle("has-max",on)});
+new MutationObserver(()=>{if(!$("#tiles .tile.max"))$("#tiles").classList.remove("has-max")}).observe($("#tiles"),{childList:true});
 function placePin(t){t.pin.style.display=t.pinxy?"":"none";if(t.pinxy){t.pin.style.left=(t.pinxy[0]*100)+"%";t.pin.style.top=(t.pinxy[1]*100)+"%"}}
 const fmtmm=r=>r&&r.mm!=null?`${r.mm} mm (5x5 median ${r.median5??"-"})`:"no depth";
 function pinText(t){return t.pinxy&&t.pinval?"pin: "+fmtmm(t.pinval):""}
@@ -180,7 +192,7 @@ const med=a=>{if(!a.length)return null;const s=a.slice().sort((x,y)=>x-y);return
 function renderTiles(){
   const want=ORDER.filter(n=>S.settings.streams[n]&&S.streams[n].available);
   for(const n of Object.keys(tiles))if(!want.includes(n)){tiles[n].box.remove();if(tiles[n].url)URL.revokeObjectURL(tiles[n].url);delete tiles[n]}
-  for(const n of want){if(!tiles[n]){tiles[n]=makeTile(n);syncControls()}}
+  for(const n of want){if(!tiles[n]){tiles[n]=makeTile(n);tiles[n].box.firstChild.title="click to maximize / restore";syncControls()}}
   const box=$("#tiles");for(const n of want)box.append(tiles[n].box);
   for(const n of want){const t=tiles[n],x=S.streams[n],now=performance.now();
     t.frames=t.frames.filter(f=>now-f<2000);const dfps=t.frames.length>1?(t.frames.length-1)*1000/(t.frames[t.frames.length-1]-t.frames[0]):0;
