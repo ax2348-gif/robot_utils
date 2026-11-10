@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections import deque
 from typing import Annotated, Any, Callable, Optional, Sequence
 
 from fastapi import FastAPI, Header, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -133,6 +136,22 @@ def setup_app(app: FastAPI) -> None:
     @app.exception_handler(RequestError)
     async def _request_error(request: Request, exc: RequestError):
         return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError):
+        # FastAPI's default 422 echoes the offending input, and a non-finite one (JSON 1e400 ->
+        # inf) can't be encoded, turning the 422 into a 500: send those as strings instead.
+        return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+
+
+def _json_safe(v):
+    if isinstance(v, float) and not math.isfinite(v):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    return v
 
 
 def add_base_routes(app: FastAPI, health: Callable[[], dict]) -> None:

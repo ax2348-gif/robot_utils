@@ -367,8 +367,8 @@ class SwerveNode:
 
     def set_auto_rebase(self, enabled: Optional[bool] = None, interval_s: Optional[float] = None,
                         still_s: Optional[float] = None) -> dict:
-        if interval_s is not None and not interval_s >= 1.0:
-            raise ValueError("interval_s must be at least 1 s")
+        if interval_s is not None and not (math.isfinite(interval_s) and interval_s >= 1.0):
+            raise ValueError("interval_s must be a finite number of seconds, at least 1")
         if still_s is not None and not REBASE_STILL_S <= still_s <= 60.0:
             raise ValueError(f"still_s must be within {REBASE_STILL_S}..60 s")
         with self._enc:

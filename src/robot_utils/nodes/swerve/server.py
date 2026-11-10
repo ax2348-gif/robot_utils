@@ -62,7 +62,7 @@ class LimitsIn(BaseModel):
 
 class AutoRebaseIn(BaseModel):
     enabled: Optional[bool] = Field(None, description="Rebase automatically when due and stationary.")
-    interval_s: Optional[float] = Field(None, ge=1.0, description="Due when the last rebase is older than this (s).")
+    interval_s: Optional[float] = Field(None, ge=1.0, allow_inf_nan=False, description="Due when the last rebase is older than this (s).")
     still_s: Optional[float] = Field(None, ge=REBASE_STILL_S, le=60.0,
                                      description="Stationary for this long first (s).")
     model_config = ConfigDict(json_schema_extra={"examples": [{"enabled": False}, {"interval_s": 300, "still_s": 2.0}]})

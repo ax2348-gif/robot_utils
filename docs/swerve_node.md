@@ -156,9 +156,12 @@ the last rebase is older than `interval_s` (default 600 s), the node rebases by 
 rebase yet, that is once at start as soon as the base is still. A failed automatic rebase is
 retried after 10 s at the earliest.
 
-Not confirmed on hardware yet: that a SPARK applies `SET_PRIMARY_ENCODER_POSITION` while
-disabled and that the next STATUS_2 already carries the new position (the 15 ms settle and the
-0.5 s timeout allow for some delay; a failure is reported, never silently counted).
+Measured on the robot (2026-11-10, disabled, wheels on the floor): a SPARK applies
+`SET_PRIMARY_ENCODER_POSITION` while disabled, and the first STATUS_2 after the 15 ms settle
+already reads exactly 0 (a real 41 mm → 0 rebase confirmed); confirmation takes 27-30 ms
+(3 ticks), `POST /encoders/rebase` about 36 ms end to end. At rest |`drive_vel`| peaked at
+0.004 m/s (p99 0.0004), well under the 0.01 m/s stationary threshold. A rebase that starts
+below 1 mm cannot tell "applied" from "already 0" (still counted: the reading is 0 either way).
 
 ## Measured latency
 

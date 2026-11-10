@@ -1,8 +1,10 @@
 """Drive-encoder rebase on the swerve node: simulated SPARKs, no hardware."""
+import math
 import socket
 import threading
 import time
 
+import httpx
 import pytest
 import uvicorn
 from sparkcan import protocol
@@ -194,6 +196,12 @@ def test_http_endpoints():
             with pytest.raises(NodeError) as e:
                 a.post("/encoders/auto", {"still_s": 0.1})
             assert e.value.status == 422
+            r = httpx.post(f"http://127.0.0.1:{port}/encoders/auto", content=b'{"interval_s": 1e400}',
+                           headers={"content-type": "application/json"})   # JSON 1e400 = inf
+            assert r.status_code == 422                        # (it used to switch auto off)
+            with pytest.raises(ValueError):
+                node.set_auto_rebase(interval_s=math.inf)
+            assert a.get("/encoders/auto")["interval_s"] == 300.0
             out = a.rebase_encoders()                          # anyone, no lease
             assert out["epoch"] == 2 and a.state()["encoders"]["epoch"] == 2
             assert a.state()["latest"]["enc_epoch"] == 2
