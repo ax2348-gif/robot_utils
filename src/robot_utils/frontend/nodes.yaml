@@ -24,7 +24,9 @@ nodes:
   # power: the UPS HAT (and later the main / aux batteries); replaced ~/ups-dashboard (docs/power.md).
   # boot: its low-voltage shutdown must run without anyone pressing Start (frontend/boot.py)
   - {name: power, kind: power, boot: true, start: {module: robot_utils.nodes.power}}
-  - {name: arm, kind: arm, enabled: false}        # future
+  # arm: the reBot Arm B601-DM on its serial bridge (docs/arm.md). Starting it moves nothing: the
+  # motors stay off until a lease holder enables it (the first enable closes the gripper to check it).
+  - {name: arm, kind: arm, start: {module: robot_utils.nodes.arm}}
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}

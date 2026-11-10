@@ -1,0 +1,350 @@
+"""HTTP API of the arm node (FastAPI). Design: docs/arm.md; conventions: docs/nodes.md.
+
+Controlling requests carry the lease token (``X-Lease-Token``). Handlers only touch the node's
+locked state; the bus belongs to the control thread. Blocking work (enable's gripper check,
+planning) runs in a worker thread. Poses are in the arm base frame (URDF ``base_link``): a
+position [x, y, z] m plus either ``quat`` [x, y, z, w] or ``rpy`` [roll, pitch, yaw] rad.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from contextlib import asynccontextmanager
+from typing import Literal, Optional
+
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ..common.server import LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
+from . import config as C
+from .kin import se3
+from .node import FIELD_DOC, FIELDS, JAC_FIELDS, JAC_UNITS, LEASE_HEARTBEAT, RATE_HZ, TWIST_TIMEOUT, UNITS, ArmNode
+
+TAGS = [
+    {"name": "state", "description": "Status, clock sync, events."},
+    {"name": "lease", "description": "One controller at a time: acquire a lease, send its token as `X-Lease-Token`."},
+    {"name": "control", "description": "Enable (runs the gripper check the first time), disable, e-stop, reset."},
+    {"name": "motion", "description": "Track (streamed, low level), servo / named poses / home (planned), chunks "
+                                      "(time-indexed poses), gripper. One source at a time; a new one preempts."},
+    {"name": "kinematics", "description": "IK checks, TCP pose, Jacobian and manipulability; lookups at any joint "
+                                          "configuration (computation only, nothing moves, no lease)."},
+    {"name": "settings", "description": "Gain profile, TCP offset, speed limits."},
+    {"name": "stream", "description": "Every control tick (100 Hz) as binary float64 rows."},
+]
+
+
+class Pose(BaseModel):
+    pos: list[float] = Field(min_length=3, max_length=3, description="m, arm base frame.")
+    quat: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, z, w].")
+    rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[roll, pitch, yaw] rad, fixed X-Y-Z.")
+    model_config = ConfigDict(json_schema_extra={"examples": [{"pos": [0.25, 0.0, 0.2], "rpy": [0.0, 1.57, 0.0]}]})
+
+    @model_validator(mode="after")
+    def _one_orientation(self):
+        if (self.quat is None) == (self.rpy is None):
+            raise ValueError("give exactly one of quat or rpy")
+        return self
+
+    def se3(self):
+        return se3(self.pos, self.quat, self.rpy)
+
+
+class GripperIn(BaseModel):
+    gap_mm: Optional[float] = Field(None, ge=0, le=round(C.GAP_MAX * 1000, 1), allow_inf_nan=False,
+                                    description="Jaw gap goal (0 = closed).")
+    max_force_n: Optional[float] = Field(None, ge=0, le=C.HARD_MAX_FORCE, allow_inf_nan=False,
+                                         description=f"Squeeze force limit (default {C.DEFAULT_MAX_FORCE:g} N when omitted).")
+
+
+class TrackIn(BaseModel):
+    pose: Pose
+    twist: Optional[list[float]] = Field(None, min_length=6, max_length=6,
+                                         description=f"TCP velocity [vx, vy, vz, wx, wy, wz] (m/s, rad/s): joint velocity "
+                                                     f"feedforward for {TWIST_TIMEOUT} s.")
+    twist_frame: Literal["base", "tcp"] = Field("base", description="Axes of the twist: arm base frame or the TCP's own.")
+    gripper: Optional[GripperIn] = None
+    seq: int = Field(0, description="Echoed in the stream (`seq`); debugging only.")
+
+
+class ServoIn(BaseModel):
+    pose: Optional[Pose] = None
+    name: Optional[str] = Field(None, description="A named pose (joint-space move) instead of `pose`.")
+    lin_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s (default: the soft limit).")
+    lin_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s².")
+    ang_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s.")
+    ang_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s².")
+    duration: Optional[float] = Field(None, gt=0, le=60, allow_inf_nan=False,
+                                      description="Exact duration (s); refused if it breaks the limits.")
+
+    @model_validator(mode="after")
+    def _one_target(self):
+        if (self.pose is None) == (self.name is None):
+            raise ValueError("give exactly one of pose or name")
+        return self
+
+
+class ChunkIn(BaseModel):
+    poses: list[Pose] = Field(min_length=1, max_length=1000)
+    dt: float = Field(gt=0, le=1.0, allow_inf_nan=False, description="s between poses.")
+    t0: Optional[float] = Field(None, allow_inf_nan=False,
+                                description="Server monotonic s when poses[0] is due (GET /time); default now. "
+                                            "Samples already past are skipped.")
+    gaps_mm: Optional[list[float]] = Field(None, description="Gripper gap per pose (mm).")
+    blend_s: float = Field(0.1, ge=0, le=1.0, description="Join the chunk this long from now.")
+
+
+class IKIn(BaseModel):
+    pose: Pose
+    seed: Literal["command", "measured"] = "command"
+
+
+class KinIn(BaseModel):
+    q: list[list[float]] = Field(min_length=1, max_length=200,
+                                 description="Joint configurations (6 rad each). Inputs to a computation only.")
+    frame: Literal["base", "tcp"] = "base"
+
+
+class ProfileIn(BaseModel):
+    name: Literal["soft", "safe"]
+
+
+class TcpIn(BaseModel):
+    offset: list[float] = Field(min_length=3, max_length=3, description="m in end_link.")
+
+
+class LimitsIn(BaseModel):
+    joint_vel: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s per joint.")
+    lin_vel: Optional[float] = None
+    lin_acc: Optional[float] = None
+    ang_vel: Optional[float] = None
+    ang_acc: Optional[float] = None
+    gripper_vel: Optional[float] = Field(None, description="m/s of gap.")
+    home_vel: Optional[float] = Field(None, description="rad/s, joint-space moves.")
+
+
+class LeaseIn(BaseModel):
+    client: str = "anonymous"
+
+
+class EStopIn(BaseModel):
+    reason: str = ""
+    source: str = ""
+
+
+STREAM_DOC = ("Binary records as every node's /stream (docs/nodes.md): a `schema` record then float64 `rows`. "
+              "`channel=tick` (default): one row per control tick, columns as GET /fields. `channel=jacobian`: "
+              "t_tick and the 36 entries of the TCP Jacobian (row-major, base-frame axes) at the measured pose.")
+
+
+def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app):
+        node.hub.attach(asyncio.get_running_loop())
+        name = getattr(app.state, "node_meta", {}).get("name")
+        if name:
+            node.lock_names.add(name)
+        if start:
+            node.start()
+        yield
+        await asyncio.to_thread(node.close)
+
+    app = FastAPI(
+        title="Arm node",
+        description=(
+            "Gravity-compensated Cartesian control of the reBot Arm B601-DM and its 100 Hz telemetry.\n\n"
+            "`POST /lease` → token; `POST /enable` (the first enable closes the gripper to check it); then "
+            "`POST /track` (stream poses; the optional twist feedforward lasts "
+            f"{TWIST_TIMEOUT} s, the pose holds), `POST /servo` (planned move, reports reached), `POST /chunk`, "
+            "`POST /home`, `POST /gripper`. Disable and e-stop switch the motors off: the arm falls under "
+            f"gravity. The lease lapses after {LEASE_HEARTBEAT} s without a renew or command, which disables. "
+            "No joint commands exist by design; joint positions are readings, named poses and lookup inputs only."),
+        version="0.1.0", lifespan=lifespan, openapi_tags=TAGS)
+    setup_app(app)
+
+    @app.exception_handler(ValueError)
+    async def _value_error(request: Request, exc: ValueError):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    add_base_routes(app, lambda: {"node": "arm", "state": node.state})
+    add_page_routes(app, node_meta("arm", "Arm", app.version, "arm", actuated=True, rate_hz=RATE_HZ,
+                                   fake=sim))
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def index():
+        from .page import PAGE
+        return PAGE
+
+    # -- state ------------------------------------------------------------------------------------
+
+    @app.get("/state", tags=["state"], summary="Status, lease, motion, gripper, settings, latest telemetry")
+    async def get_state():
+        return node.state_dict()
+
+    @app.get("/events", tags=["state"], response_class=StreamingResponse,
+             summary="Server-Sent Events: /state on every change and every 1 s")
+    async def events():
+        return StreamingResponse(sse(node.hub, node.state_dict), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store"})
+
+    @app.get("/fields", tags=["stream"], summary="Columns of the stream rows")
+    async def fields(channel: Literal["tick", "jacobian"] = "tick"):
+        if channel == "jacobian":
+            return {"fields": JAC_FIELDS, "units": JAC_UNITS, "doc": FIELD_DOC}
+        return {"fields": FIELDS, "units": UNITS, "doc": FIELD_DOC}
+
+    @app.get("/stream", tags=["stream"], response_class=StreamingResponse, summary="Telemetry rows",
+             responses={200: {"content": {"application/octet-stream": {}}, "description": STREAM_DOC}})
+    async def stream(channel: Literal["tick", "jacobian"] = "tick",
+                     batch_ms: float = Query(0.0, ge=0, le=1000),
+                     max_hz: float = Query(0.0, ge=0, le=100, description="At most this many rows per second (0 = all)."),
+                     max_backlog_s: float = Query(20.0, gt=0, le=600)):
+        f, u = (JAC_FIELDS, JAC_UNITS) if channel == "jacobian" else (FIELDS, UNITS)
+        gen = rows_stream(node.hub, f, u, channel=channel, kind=channel, batch_ms=batch_ms,
+                          max_rows=int(max_backlog_s * RATE_HZ),
+                          schema_extra={"node": "arm", "rate_hz": RATE_HZ}, max_hz=max_hz)
+        return StreamingResponse(gen, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+    @app.get("/joints", tags=["state"], summary="Joint readings (output encoders, motor side, temperatures, limits)")
+    async def joints():
+        return node.joints()
+
+    @app.get("/tracking", tags=["state"], summary="Tracking errors of the last tick")
+    async def tracking():
+        return node.tracking()
+
+    @app.get("/gains", tags=["settings"], summary="The gain profile in force")
+    async def gains():
+        return node.profile.public()
+
+    @app.get("/gripper", tags=["motion"], summary="Gripper gap, force and limit")
+    async def get_gripper():
+        return node.gripper_state()
+
+    # -- lease and control ---------------------------------------------------------------------------
+
+    @app.get("/lease", tags=["lease"], summary="Who holds the lease (no token)")
+    async def get_lease():
+        info = node.lease.info
+        return None if info is None else {"client": info.client, "lease_id": info.lease_id,
+                                          "expires_in": info.expires - time.monotonic()}
+
+    @app.post("/lease", tags=["lease"], summary="Acquire the lease (409 if held)")
+    async def acquire(body: LeaseIn):
+        token, info = node.acquire(body.client)
+        return {"token": token, "client": info.client, "lease_id": info.lease_id, "heartbeat": node.lease.heartbeat}
+
+    @app.post("/lease/renew", tags=["lease"], summary="Keep the lease (any accepted command also renews it)")
+    async def renew(token: LeaseToken = None):
+        info = node.renew(token)
+        return {"lease_id": info.lease_id, "expires_in": info.expires - time.monotonic()}
+
+    @app.delete("/lease", tags=["lease"], summary="Release the lease (disables)")
+    async def release(token: LeaseToken = None):
+        node.release(token)
+        return {"released": True}
+
+    @app.post("/enable", tags=["control"], summary="Motors on, holding the measured pose (holder; first time: gripper check)")
+    async def enable(token: LeaseToken = None):
+        return await asyncio.to_thread(node.enable, token)
+
+    @app.post("/disable", tags=["control"], summary="Motors off: the arm falls under gravity (holder)")
+    async def disable(token: LeaseToken = None):
+        node.disable(token)
+        return {"enabled": False}
+
+    @app.post("/estop", tags=["control"], summary="E-stop: anyone; motors off; latches until the holder clears it")
+    async def estop(request: Request, body: Optional[EStopIn] = None):
+        body = body or EStopIn()
+        src = body.source or (request.client.host if request.client else "")
+        info = node.trigger_estop(body.reason, src)
+        return {"latched": True, "reason": info.reason, "source": info.source}
+
+    @app.post("/estop/clear", tags=["control"], summary="Clear the e-stop (holder; stays disabled)")
+    async def clear_estop(token: LeaseToken = None):
+        node.clear_estop(token)
+        return {"latched": False}
+
+    @app.post("/reset", tags=["control"], summary="Reconnect after a fault (holder; ends uninitialized)")
+    async def reset(token: LeaseToken = None):
+        node.reset(token)
+        return {"state": node.state}
+
+    # -- motion -----------------------------------------------------------------------------------------
+
+    @app.post("/track", tags=["motion"], summary="Stream a TCP pose (+ twist feedforward, gripper); 200 with ok=false if IK fails")
+    async def track(body: TrackIn, token: LeaseToken = None):
+        """Low level and rapid: IK from the previous goal; on failure the previous goal stays and
+        `ok` is false (with the residuals). The pose holds until replaced; the twist feeds forward
+        for 0.25 s. There is no "reached": watch the streamed errors."""
+        g = body.gripper.model_dump() if body.gripper else None
+        return await asyncio.to_thread(node.track_cmd, token, body.pose.se3(), body.twist, body.twist_frame,
+                                       body.seq, g)
+
+    @app.post("/servo", tags=["motion"], summary="Planned move to a pose or a named pose (422 if refused; nothing moves)")
+    async def servo(body: ServoIn, token: LeaseToken = None):
+        return await asyncio.to_thread(node.servo, token, body.pose.se3() if body.pose else None, body.name,
+                                       body.lin_vel, body.lin_acc, body.ang_vel, body.ang_acc, body.duration)
+
+    @app.post("/home", tags=["motion"], summary="Slow joint-space move to the home pose (through home_via)")
+    async def home(token: LeaseToken = None):
+        return await asyncio.to_thread(node.home, token)
+
+    @app.post("/chunk", tags=["motion"], summary="Time-indexed TCP poses (an action chunk); 422 if any sample fails")
+    async def chunk(body: ChunkIn, token: LeaseToken = None):
+        return await asyncio.to_thread(node.chunk, token, [p.se3() for p in body.poses], body.dt, body.t0,
+                                       body.gaps_mm, body.blend_s)
+
+    @app.post("/cancel", tags=["motion"], summary="End the planned motion or track: hold the current command")
+    async def cancel(token: LeaseToken = None):
+        return node.cancel(token)
+
+    @app.post("/gripper", tags=["motion"], summary="Gripper gap (mm) with a force limit")
+    async def gripper(body: GripperIn, token: LeaseToken = None):
+        return node.gripper_cmd(token, body.gap_mm, body.max_force_n)
+
+    # -- kinematics ---------------------------------------------------------------------------------
+
+    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease)")
+    async def ik(body: IKIn):
+        return await asyncio.to_thread(node.ik_check, body.pose.se3(), body.seed)
+
+    @app.get("/kinematics", tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
+    async def kin_now(frame: Literal["base", "tcp"] = "base", which: Literal["measured", "command"] = "measured"):
+        return node.kinematics_now(frame, which)
+
+    @app.post("/kinematics", tags=["kinematics"], summary="The same at given joint configurations (planning lookups)")
+    async def kin_lookup(body: KinIn):
+        for q in body.q:
+            if len(q) != 6:
+                raise ValueError("each configuration has 6 joint angles")
+        return {"results": await asyncio.to_thread(lambda: [node.kinematics(q, body.frame) for q in body.q])}
+
+    @app.get("/links", tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
+    async def links():
+        return {"frames": node.links(), "names": [f"joint{i}" for i in range(1, 7)] + ["end_link", "tcp"]}
+
+    # -- settings ---------------------------------------------------------------------------------------
+
+    @app.post("/profile", tags=["settings"], summary="Switch the gain profile (holder; only while disabled)")
+    async def profile(body: ProfileIn, token: LeaseToken = None):
+        return node.set_profile(token, body.name)
+
+    @app.get("/tcp", tags=["settings"], summary="TCP offset in end_link (m)")
+    async def get_tcp():
+        return {"offset": None if node.kin is None else node.kin.tcp_offset}
+
+    @app.post("/tcp", tags=["settings"], summary="Set the TCP offset (holder; only while disabled)")
+    async def set_tcp(body: TcpIn, token: LeaseToken = None):
+        return node.set_tcp(token, body.offset)
+
+    @app.get("/limits", tags=["settings"], summary="Hard and soft speed limits")
+    async def get_limits():
+        return node.limits()
+
+    @app.post("/limits", tags=["settings"], summary="Soft limits within the hard ones (holder; reset when the lease ends)")
+    async def set_limits(body: LimitsIn, token: LeaseToken = None):
+        return node.set_limits(token, **body.model_dump())
+
+    return app

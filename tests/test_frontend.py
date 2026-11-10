@@ -20,7 +20,7 @@ def test_packaged_default_config():
     nodes = {n.name: n for n in load_config()}
     assert (nodes["camera"].node_kind, nodes["camera"].enabled) == ("camera", True)
     assert (nodes["swerve"].node_kind, nodes["swerve"].enabled) == ("swerve", True)
-    assert (nodes["arm"].node_kind, nodes["arm"].enabled) == ("arm", False)
+    assert (nodes["arm"].node_kind, nodes["arm"].enabled) == ("arm", True)
     assert (nodes["estimator"].node_kind, nodes["estimator"].enabled) == ("estimator", True)
     assert (nodes["pose_servo"].node_kind, nodes["pose_servo"].enabled) == ("pose_servo", True)
     assert (nodes["3d_perception"].node_kind, nodes["3d_perception"].enabled) == ("3d_perception", True)

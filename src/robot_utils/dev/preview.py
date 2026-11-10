@@ -45,6 +45,7 @@ NODES = [  # (instance name, module, extra args): everything in simulation
     ("swerve", "robot_utils.nodes.swerve", ["--sim"]),
     ("camera", "robot_utils.nodes.orbbec", ["--fake"]),
     ("power", "robot_utils.nodes.power", ["--fake"]),
+    ("arm", "robot_utils.nodes.arm", ["--sim"]),
     ("estimator", "robot_utils.nodes.estimator", []),
     ("description", "robot_utils.nodes.description", []),
     ("pose_servo", "robot_utils.nodes.pose_servo", []),
@@ -53,6 +54,7 @@ NODES = [  # (instance name, module, extra args): everything in simulation
 ]
 LOCAL = {"127.0.0.1", "localhost", "::1"}
 SRC = Path(__file__).resolve().parents[2]          # .../src
+REBOT = SRC.parent / "rebot_ctl"                   # the arm node's rebot_ctl (submodule) at its pinned commit
 
 
 def free_port() -> int:
@@ -75,7 +77,8 @@ def stack(port: int | None = None, themes_dir: Path | None = None, quiet: bool =
     port = port or free_port()
     env = dict(os.environ, XDG_RUNTIME_DIR=str(root), XDG_CONFIG_HOME=str(root / "cfg"),
                XDG_STATE_HOME=str(root / "state"), ROBOT_LOCKS_DIR=str(root / "locks"),
-               PYTHONPATH=str(SRC) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+               PYTHONPATH=os.pathsep.join([str(SRC)] + ([str(REBOT)] if REBOT.is_dir() else [])
+                                          + [os.environ.get("PYTHONPATH", "")]))
     sync_themes(themes_dir, root / "cfg" / "robot_utils" / "themes")
     # a registry without start: entries, so the landing page never tries systemd here
     (root / "nodes.yaml").write_text("nodes:\n" + "".join(f"  - {{name: {n}}}\n" for n, _, _ in NODES))

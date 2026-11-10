@@ -20,7 +20,7 @@ def test_start_recipe_parsed_and_packaged():
     nodes = {n.name: n for n in load_config()}
     assert nodes["camera"].start == StartRecipe("robot_utils.nodes.orbbec")
     assert nodes["swerve"].start == StartRecipe("robot_utils.nodes.swerve")
-    assert nodes["arm"].start is None
+    assert nodes["arm"].start == StartRecipe("robot_utils.nodes.arm")
     n = parse_config({"nodes": [{"name": "a", "port": 1, "start": {"module": "x.y", "args": ["--v"]}}]})[0]
     assert n.start.argv("/py", "a") == ["/py", "-m", "x.y", "--name", "a", "--v"]
 
