@@ -47,7 +47,7 @@ class Event(BaseModel):
     t: float = Field(description="Server time.monotonic() (s) when it happened (the clock of /time `mono`).")
     wall: float = Field(description="Server time.time() (Unix epoch s) when it happened.")
     msg: str
-    level: str = Field("info", description="info | warning | error.")
+    level: str = Field("info", description="info | warn | error (a few older entries say `warning`: treat it as warn).")
 
 
 class Health(BaseModel):
