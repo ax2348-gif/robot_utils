@@ -17,6 +17,7 @@ from ..common.lease import RequestError
 from ..common.server import add_base_routes, add_page_routes, node_meta, setup_app, sse
 from . import __version__
 from . import chat as chatmod
+from . import models as M
 from .node import AgentNav
 
 Operator = Header(None, alias="X-Operator", description="'human' for the page / a person; omit as an agent.")
@@ -178,7 +179,9 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     # -- guide / page -------------------------------------------------------------------------------
 
-    @app.get("/guide.md", tags=["guide"], response_class=PlainTextResponse, summary="How to drive with agent_nav (read first)")
+    @app.get("/guide.md", tags=["guide"], response_class=Response,
+             summary="How to drive with agent_nav (read first)",
+             responses={200: {"content": {"text/markdown": {}}, "description": "The guide (Markdown)."}})
     async def guide():
         return PlainTextResponse(GUIDE, media_type="text/markdown; charset=utf-8")
 
@@ -189,11 +192,13 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     # -- state / log --------------------------------------------------------------------------------
 
-    @app.get("/state", tags=["session"], summary="Session, ownership, profile, pose, pose_servo, reflex, memory")
+    @app.get("/state", response_model=M.NavState, tags=["session"], summary="Session, ownership, profile, pose, pose_servo, reflex, memory")
     async def get_state():
         return node.state()
 
-    @app.get("/events", tags=["log"], response_class=StreamingResponse, summary="SSE: a small state on every new turn")
+    @app.get("/events", tags=["log"], response_class=StreamingResponse,
+             summary="SSE: a small state on every new turn",
+             responses={200: {"content": {"text/event-stream": {}}, "description": M.EVENTS_DOC}})
     async def events():
         def small():
             return {"turns": node.n_turn, "session": node.session, "enabled_by": node.enabled_by, "latch": node.latch,
@@ -202,83 +207,96 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
                     "latest": (node._ps_status or {}).get("latest"), **node.safety()}
         return StreamingResponse(sse(hub, small), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
-    @app.get("/log", tags=["log"], summary="Dialogue turns after `since` (live session, in memory)")
+    @app.get("/log", response_model=M.LogOut, response_model_exclude_unset=True, tags=["log"], summary="Dialogue turns after `since` (live session, in memory)")
     async def get_log(since: int = 0, limit: int = Query(200, le=1000)):
         turns = [t for t in list(node.turns) if t["n"] > since][-limit:]
         return {"turns": turns, "last": node.n_turn, "session": node.session}
 
-    @app.get("/sessions", tags=["log"], summary="Stored session transcripts (newest first)")
+    @app.get("/sessions", response_model=list[M.StoredSession], response_model_exclude_unset=True, tags=["log"], summary="Stored session transcripts (newest first)")
     async def sessions():
         return await run(node.list_sessions)
 
-    @app.get("/sessions/{sid}", tags=["log"], summary="A stored session: metadata + all its turns")
+    @app.get("/sessions/{sid}", response_model=M.StoredSessionOut, response_model_exclude_unset=True, tags=["log"], summary="A stored session: metadata + all its turns")
     async def session_read(sid: str):
         return await run(node.read_session, sid)
 
-    @app.get("/sessions/{sid}/export.zip", tags=["log"], summary="Download a session (log.jsonl, thumbnails, metadata)")
+    @app.get("/sessions/{sid}/export.zip", tags=["log"], response_class=Response,
+             summary="Download a session (log.jsonl, thumbnails, metadata)",
+             responses={200: {"content": {"application/zip": {}},
+                              "description": "agent_nav_<id>/: session.json, log.jsonl, thumbs/*.jpg."}})
     async def session_export(sid: str):
         data = await run(node.export_session, sid)
         return Response(data, media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="agent_nav_{sid}.zip"'})
 
-    @app.delete("/sessions/{sid}", tags=["log"], summary="(human) Delete a stored session (not the live one)")
+    @app.delete("/sessions/{sid}", response_model=M.Deleted, tags=["log"], summary="(human) Delete a stored session (not the live one)")
     async def session_delete(sid: str, x_operator: Optional[str] = Operator):
         if actor(x_operator) != "human":
             raise RequestError(403, "only the human operator deletes sessions")
         return await run(node.delete_session, sid)
 
-    @app.get("/sessions/{sid}/log.jsonl", tags=["log"], summary="A session's transcript (JSON lines)")
+    @app.get("/sessions/{sid}/log.jsonl", tags=["log"], response_class=FileResponse,
+             summary="A session's transcript (JSON lines)",
+             responses={200: {"content": {"application/x-ndjson": {}},
+                              "description": "One turn per line (the Turn of GET /log)."}})
     async def session_log(sid: str):
         p = _safe_path(node.data_dir, sid, "log.jsonl")
         return FileResponse(p, media_type="application/x-ndjson")
 
-    @app.get("/sessions/{sid}/thumbs/{fn}", tags=["log"], summary="A stored thumbnail")
+    @app.get("/sessions/{sid}/thumbs/{fn}", tags=["log"], response_class=FileResponse,
+             summary="A stored thumbnail",
+             responses={200: {"content": {"image/jpeg": {}}, "description": "JPEG, 320 px wide."}})
     async def session_thumb(sid: str, fn: str):
         return FileResponse(_safe_path(node.data_dir, sid, "thumbs", fn), media_type="image/jpeg")
 
-    @app.get("/images/{name}", tags=["perception"], summary="A rendered image (snapshot, overlay, BEV)")
+    @app.get("/images/{name}", tags=["perception"], response_class=Response,
+             summary="A rendered image (snapshot, overlay, BEV)",
+             responses={200: {"content": {"image/jpeg": {}, "image/png": {}},
+                              "description": "JPEG (snapshots, overlays) or PNG (BEV, diagrams), by the name's extension."}})
     async def image(name: str):
         img = node.images.get(name)
         if img is None:
             raise RequestError(404, f"image {name!r} unknown or expired (the last few hundred are kept)")
         return Response(img[0], media_type=img[1], headers={"Cache-Control": "no-store"})
 
-    @app.get("/images/{sid}/grid.jpg", tags=["perception"], summary="A snapshot with a labelled pixel grid")
+    @app.get("/images/{sid}/grid.jpg", tags=["perception"], response_class=Response,
+             summary="A snapshot with a labelled pixel grid",
+             responses={200: {"content": {"image/jpeg": {}}}})
     async def grid(sid: str):
         return Response(await run(node.grid_image, sid), media_type="image/jpeg")
 
     # -- session --------------------------------------------------------------------------------------
 
-    @app.post("/session", tags=["session"], summary="Open a session: your name and avatar")
+    @app.post("/session", response_model=M.OpenSessionOut, response_model_exclude_unset=True, tags=["session"], summary="Open a session: your name and avatar")
     async def open_session(body: SessionIn, x_operator: Optional[str] = Operator):
         return await run(node.open_session, body.agent, body.avatar, body.comment, actor(x_operator))
 
-    @app.delete("/session", tags=["session"], summary="Close the session (disables)")
+    @app.delete("/session", response_model=M.Closed, tags=["session"], summary="Close the session (disables)")
     async def close_session(x_operator: Optional[str] = Operator):
         return await run(node.close_session, "closed", actor(x_operator))
 
-    @app.post("/enable", tags=["session"], summary="Enable motion (pose_servo + swerve lease) with the profile's caps")
+    @app.post("/enable", response_model=M.EnableOut, response_model_exclude_unset=True, tags=["session"], summary="Enable motion (pose_servo + swerve lease) with the profile's caps")
     async def enable(body: EnableIn = EnableIn(), x_operator: Optional[str] = Operator):
         """423 while the human operator holds it (disabled or e-stopped on the page)."""
         return await run(node.enable, actor(x_operator), body.caps, body.comment)
 
-    @app.post("/disable", tags=["session"], summary="Disable at once (no braking); releases the swerve")
+    @app.post("/disable", response_model=M.DisableOut, tags=["session"], summary="Disable at once (no braking); releases the swerve")
     async def disable(body: Commented = Commented(), x_operator: Optional[str] = Operator):
         return await run(node.disable, actor(x_operator), body.comment)
 
-    @app.post("/release", tags=["session"], summary="(human) Release the hold so the agent may enable again")
+    @app.post("/release", response_model=M.Released, tags=["session"], summary="(human) Release the hold so the agent may enable again")
     async def release(body: Commented = Commented(), x_operator: Optional[str] = Operator):
         if actor(x_operator) != "human":
             raise RequestError(403, "only the human operator releases the hold")
         return await run(node.release, body.comment)
 
-    @app.post("/profile/{name}", tags=["session"], summary="(human) Choose the safety profile (applies at the next enable)")
+    @app.post("/profile/{name}", response_model=M.ProfileOut, tags=["session"], summary="(human) Choose the safety profile (applies at the next enable)")
     async def profile(name: str, x_operator: Optional[str] = Operator):
         if actor(x_operator) != "human":
             raise RequestError(403, "only the human operator chooses the profile")
         return await run(node.set_profile, name)
 
-    @app.post("/reflex", tags=["session"], summary="(human) Turn the stop reflex on / off")
+    @app.post("/reflex", response_model=M.ReflexOut, tags=["session"], summary="(human) Turn the stop reflex on / off")
     async def reflex(enabled: bool, x_operator: Optional[str] = Operator):
         if actor(x_operator) != "human":
             raise RequestError(403, "only the human operator changes the reflex")
@@ -288,26 +306,26 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     # -- robot ------------------------------------------------------------------------------------------
 
-    @app.get("/robot", tags=["perception"], summary="The robot: body, camera pose / view / blind zone, frames, limits, diagram")
+    @app.get("/robot", response_model=M.RobotOut, response_model_exclude_unset=True, tags=["perception"], summary="The robot: body, camera pose / view / blind zone, frames, limits, diagram")
     async def robot(comment: str = "", x_operator: Optional[str] = Operator):
         """Read-only. `diagram` is a side + top view of the base and what the camera sees."""
         return await run(node.describe_robot, actor(x_operator), comment)
 
     # -- perception -------------------------------------------------------------------------------------
 
-    @app.post("/look", tags=["perception"], summary="Capture a snapshot (colour + registered depth + pose)")
+    @app.post("/look", response_model=M.LookOut, tags=["perception"], summary="Capture a snapshot (colour + registered depth + pose)")
     async def look(body: LookIn = LookIn(), x_operator: Optional[str] = Operator):
         return await run(node.look, actor(x_operator), body.scale, body.grid, body.settle, body.comment)
 
-    @app.post("/query/region", tags=["perception"], summary="3D extent of a selection (base / world frames)")
+    @app.post("/query/region", response_model=M.RegionOut, response_model_exclude_unset=True, tags=["perception"], summary="3D extent of a selection (base / world frames)")
     async def q_region(body: QueryIn, x_operator: Optional[str] = Operator):
         return await run(node.query, actor(x_operator), "region", body.snapshot, body.select, body.exclude, body.comment)
 
-    @app.post("/query/plane", tags=["perception"], summary="Fit a plane to a selection (centre, extent, normal)")
+    @app.post("/query/plane", response_model=M.PlaneOut, response_model_exclude_unset=True, tags=["perception"], summary="Fit a plane to a selection (centre, extent, normal)")
     async def q_plane(body: QueryIn, x_operator: Optional[str] = Operator):
         return await run(node.query, actor(x_operator), "plane", body.snapshot, body.select, body.exclude, body.comment)
 
-    @app.post("/query/line", tags=["perception"], summary="Fit a 3D line (edge, row of legs): direction, heading, length")
+    @app.post("/query/line", response_model=M.LineOut, response_model_exclude_unset=True, tags=["perception"], summary="Fit a 3D line (edge, row of legs): direction, heading, length")
     async def q_line(body: LineIn, x_operator: Optional[str] = Operator):
         """Use `points` on the edge itself (preferred) or a thin `select`ion. Gives the heading to align with."""
         return await run(node.query, actor(x_operator), "line", body.snapshot, body.select, body.exclude, body.comment,
@@ -315,28 +333,28 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     # -- planning -----------------------------------------------------------------------------------------
 
-    @app.post("/plan/check", tags=["planning"], summary="Check a straight move against a snapshot (loud, advisory)")
+    @app.post("/plan/check", response_model=M.PlanCheckOut, response_model_exclude_unset=True, tags=["planning"], summary="Check a straight move against a snapshot (loud, advisory)")
     async def plan_check(body: CheckIn, x_operator: Optional[str] = Operator):
         return await run(node.plan_check, actor(x_operator), body.frame, body.x, body.y, body.theta, body.snapshot, body.comment)
 
-    @app.post("/plan/approach", tags=["planning"], summary="Propose a goal in front of a queried surface (moves nothing)")
+    @app.post("/plan/approach", response_model=M.ApproachOut, response_model_exclude_unset=True, tags=["planning"], summary="Propose a goal in front of a queried surface (moves nothing)")
     async def plan_approach(body: ApproachIn, x_operator: Optional[str] = Operator):
         return await run(node.plan_approach, actor(x_operator), body.query, body.standoff, body.face, body.comment)
 
     # -- motion -----------------------------------------------------------------------------------------------
 
-    @app.post("/goal", tags=["motion"], summary="Move: start (or replace) a goal; returns at once")
+    @app.post("/goal", response_model=M.GoalOut, response_model_exclude_unset=True, tags=["motion"], summary="Move: start (or replace) a goal; returns at once")
     async def goal(body: GoalIn, x_operator: Optional[str] = Operator):
         """The path is checked against the latest (or given) snapshot and the result reported loudly in
         `warnings`; the goal is executed as issued. Wait with `GET /goals/{id}/wait` in the background."""
         opts = body.model_dump(exclude={"frame", "x", "y", "theta", "snapshot", "comment"})
         return await run(node.goal, actor(x_operator), body.frame, body.x, body.y, body.theta, opts, body.snapshot, body.comment)
 
-    @app.get("/goals/{gid}", tags=["motion"], summary="A goal's state")
+    @app.get("/goals/{gid}", response_model=M.GoalState, response_model_exclude_unset=True, tags=["motion"], summary="A goal's state")
     async def goal_state(gid: int):
         return node.goal_state(gid)
 
-    @app.get("/goals/{gid}/wait", tags=["motion"], summary="Long-poll until the goal ends (or timeout)")
+    @app.get("/goals/{gid}/wait", response_model=M.GoalState, response_model_exclude_unset=True, tags=["motion"], summary="Long-poll until the goal ends (or timeout)")
     async def goal_wait(gid: int, timeout: float = Query(60.0, gt=0, le=600)):
         node.goal_state(gid)
         rec = node.goals[gid]
@@ -345,32 +363,34 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
             await asyncio.sleep(0.1)
         return node.goal_state(gid)
 
-    @app.post("/stop", tags=["motion"], summary="Brake to a stop (stays enabled)")
+    @app.post("/stop", response_model=M.ServoStop, tags=["motion"], summary="Brake to a stop (stays enabled)")
     async def stop(body: Commented = Commented(), x_operator: Optional[str] = Operator):
         return await run(node.stop, actor(x_operator), body.comment)
 
-    @app.post("/estop", tags=["motion"], summary="E-stop (anyone): forwarded to the swerve; latches")
+    @app.post("/estop", response_model=M.ServoEStop, response_model_exclude_unset=True, tags=["motion"], summary="E-stop (anyone): forwarded to the swerve; latches")
     async def estop(body: StopIn = StopIn(), x_operator: Optional[str] = Operator):
         return await run(node.estop, actor(x_operator), body.reason, body.comment)
 
     # -- memory -----------------------------------------------------------------------------------------------
 
-    @app.get("/memory", tags=["memory"], summary="This session's notes and places")
+    @app.get("/memory", response_model=M.Memory, tags=["memory"], summary="This session's notes and places")
     async def memory():
         return node.memory
 
-    @app.post("/memory/note", tags=["memory"], summary="Add a note")
+    @app.post("/memory/note", response_model=M.NoteOut, tags=["memory"], summary="Add a note")
     async def note(body: NoteIn, x_operator: Optional[str] = Operator):
         return await run(node.note, actor(x_operator), body.text, body.comment)
 
-    @app.post("/memory/place", tags=["memory"], summary="Name a pose (default: here)")
+    @app.post("/memory/place", response_model=M.PlaceOut, tags=["memory"], summary="Name a pose (default: here)")
     async def place(body: PlaceIn, x_operator: Optional[str] = Operator):
         return await run(node.place, actor(x_operator), body.name, body.frame, body.x, body.y, body.theta, body.comment)
 
     # -- chat (humans) -------------------------------------------------------------------------------------------
 
-    @app.post("/chat", tags=["log"], summary="(human) One command line, e.g. 'look grid' or 'goal 0.5 0 90d'")
+    @app.post("/chat", response_model=M.ChatOut, response_model_exclude_unset=True, tags=["log"], summary="(human) One command line, e.g. 'look grid' or 'goal 0.5 0 90d'")
     async def chat(body: ChatIn):
+        """Replies as the endpoint the command maps to (look: POST /look, plane: POST /query/plane, goal:
+        POST /goal, ...), or `{help}` for `help`."""
         text = body.text.strip()
         try:
             method, kw = chatmod.parse(text)
