@@ -170,6 +170,13 @@ Record `type`s:
 | `rows` | little-endian float64 `(n, len(fields))` | `n`, `schema`, `dropped`, `t_send`, optional `kind` |
 | `frame` / `imu` | camera-specific (see orbbec_node.md); `imu` records carry `fields` inline | |
 
+Every stream of rows has a **fields endpoint** beside it that describes its columns without
+opening the stream, always the same shape: `{"fields": [...], "units": [...], "doc": {field: meaning}}`
+(`units` aligned with `fields`; `doc` says which clock a time is on, what an enum's values mean).
+Swerve and estimator: `GET /fields` (for `/stream`); camera IMU: `GET /imu/fields[?raw=true]`
+(for `/imu/stream[?raw=true]`). The stream's own schema record (or inline header) stays the
+authority for decoding; the fields endpoint adds the meaning.
+
 Every-sample streams (swerve ticks, camera IMU) deliver **every** sample; a client that falls
 too far behind loses the oldest rows and the next record's `dropped` says how many. `batch_ms`
 (query parameter) coalesces rows per client. Video is latest-frame-wins instead.

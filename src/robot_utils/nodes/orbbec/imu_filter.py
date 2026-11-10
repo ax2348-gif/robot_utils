@@ -52,6 +52,29 @@ STATE_FIELDS = (
     "accel_used",           # fraction of samples whose accel corrected the attitude
     "temperature",          # degC
 )
+# (unit, meaning) per column, served by GET /imu/fields (the comments above, as data)
+STATE_FIELD_INFO = {
+    "seq": ("count", "output record counter"),
+    "t_start": ("s", "server monotonic time (sensor time) of the window's first sample"),
+    "t_end": ("s", "server monotonic time (sensor time) of the window's last sample; the orientation is at this time"),
+    "t_capture": ("s", "server monotonic time the SDK received the window's last sample on the host"),
+    "n": ("count", "1 kHz samples in the window"),
+    "qw": ("1", "orientation IMU -> world as a unit quaternion (w, x, y, z), world z up; scalar part"),
+    "qx": ("1", "orientation quaternion, x"), "qy": ("1", "orientation quaternion, y"),
+    "qz": ("1", "orientation quaternion, z (yaw is relative to the last reset/start, not north)"),
+    **{f"da{k}": ("rad", f"delta angle about IMU {k} over the window (bias-corrected gyro integrated)") for k in "xyz"},
+    **{f"dv{k}": ("m/s", f"delta velocity along IMU {k} over the window (raw accel integrated, incl. gravity)")
+       for k in "xyz"},
+    **{f"a{k}": ("m/s^2", f"mean accelerometer {k} over the window, IMU frame") for k in "xyz"},
+    **{f"g{k}": ("rad/s", f"mean bias-corrected gyro {k} over the window, IMU frame") for k in "xyz"},
+    **{f"bg{k}": ("rad/s", f"current gyro bias estimate {k}") for k in "xyz"},
+    "flags": ("bits", "1 calibrated (bias/gravity from a still calibration), 2 still at t_end, "
+                      "4 initializing (orientation not meaningful yet), 8 sample gap inside the window"),
+    "accel_used": ("fraction", "share of the window's samples whose accelerometer corrected the attitude"),
+    "temperature": ("degC", "IMU temperature"),
+}
+assert tuple(STATE_FIELD_INFO) == STATE_FIELDS
+
 FLAG_CALIBRATED = 1     # bias/g_ref from a successful still calibration (this run or stored)
 FLAG_STILL = 2          # the IMU was still at the end of the window
 FLAG_INITIALIZING = 4   # startup calibration not finished yet (orientation not meaningful)

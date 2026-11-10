@@ -26,8 +26,8 @@ from .models import (STREAM_NAMES, Catalog, ErrorResponse, PropertyInfo, Propert
                      SettingsError, SettingsPatch, SettingsResult, State, TimeResponse,
                      ImuCalibrateRequest)
 from .owner import DeviceError, Owner
-from .imu_filter import STATE_FIELDS
-from .protocol import IMU_FIELDS, imu_payload, pack_record
+from .imu_filter import STATE_FIELD_INFO, STATE_FIELDS
+from .protocol import IMU_FIELD_INFO, IMU_FIELDS, imu_payload, pack_record
 
 log = logging.getLogger("orbbec_node.api")
 
@@ -469,6 +469,16 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                 hub.unsubscribe_imu(sub)
                 hub.clients -= 1
         return StreamingResponse(gen(), media_type="application/octet-stream", headers=stream_headers)
+
+    @app.get("/imu/fields", tags=["stream"], summary="Columns of the IMU records: names, units, meaning")
+    async def imu_fields(raw: bool = Query(False, description="Columns of the raw samples (`/imu/stream?raw=true`) "
+                                                              "instead of the filter records.")):
+        """Same shape as every node's column description (swerve and estimator `GET /fields`): `fields`
+        in payload order, `units` aligned with them, `doc` per field. The stream headers carry the
+        names and a shorter unit map themselves; this needs no open stream."""
+        info = IMU_FIELD_INFO if raw else STATE_FIELD_INFO
+        return {"kind": "raw" if raw else "state", "fields": list(info), "units": [u for u, _ in info.values()],
+                "doc": {k: d for k, (_, d) in info.items()}}
 
     @app.get("/imu/latest", tags=["stream"], summary="The most recent IMU records as JSON")
     async def imu_latest(n: int = Query(100, ge=1, le=5000),

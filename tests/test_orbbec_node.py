@@ -328,3 +328,15 @@ def test_meta_and_shared_toolkit_served(fake_node):
     assert "RU.TimeSync" in httpx.get(fake_node + "/common/ui.js").text
     st = httpx.get(fake_node + "/state").json()
     assert isinstance(st["state"], str) and "error" in st
+
+
+def test_imu_fields_describe_every_column(fake_node):
+    import httpx
+    from robot_utils.nodes.orbbec.imu_filter import STATE_FIELDS
+    from robot_utils.nodes.orbbec.protocol import IMU_FIELDS
+    for raw, names in ((False, STATE_FIELDS), (True, IMU_FIELDS)):
+        d = httpx.get(fake_node + "/imu/fields", params={"raw": raw}).json()
+        assert d["fields"] == list(names) and len(d["units"]) == len(names)       # payload column order
+        assert all(u for u in d["units"]) and all(d["doc"][f] for f in names)
+        latest = httpx.get(fake_node + "/imu/latest", params={"n": 1, "raw": raw}).json()
+        assert latest["fields"] == d["fields"]                                  # same columns as the data

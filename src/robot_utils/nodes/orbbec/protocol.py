@@ -38,6 +38,19 @@ IMU_FIELDS = (
     "gx", "gy", "gz",   # gyroscope, rad/s
     "temperature",      # IMU temperature, deg C
 )
+# (unit, meaning) per column, served by GET /imu/fields?raw=true (the comments above, as data)
+IMU_FIELD_INFO = {
+    "seq": ("count", "per-sample counter on the server (gaps = samples the SDK dropped)"),
+    "t_capture": ("s", "server monotonic time the SDK received the sample on the host (system timestamp)"),
+    "t_sensor": ("s", "server monotonic time of the sample: device timestamp mapped to the host clock by the SDK "
+                      "(global timestamp); NaN if not available. Use this one for timing"),
+    "t_device_us": ("us", "raw device timestamp, camera clock (not synchronised to the host)"),
+    **{f"a{k}": ("m/s^2", f"accelerometer {k}, camera IMU frame (specific force: reads +g up when still)")
+       for k in "xyz"},
+    **{f"g{k}": ("rad/s", f"gyroscope {k}, camera IMU frame (raw: not bias-corrected)") for k in "xyz"},
+    "temperature": ("degC", "IMU temperature"),
+}
+assert tuple(IMU_FIELD_INFO) == IMU_FIELDS
 
 # numpy dtype of raw payloads by pixel format
 RAW_DTYPES = {"Y16": "<u2", "Y8": "|u1", "RGB": "|u1", "BGR": "|u1", "RGBA": "|u1", "BGRA": "|u1",

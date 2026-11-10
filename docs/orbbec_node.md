@@ -132,6 +132,7 @@ All responses are JSON unless noted. `<pi>` = `100.80.153.120:8101` (Tailscale) 
 | `GET /depth_at?x=&y=` | depth in mm at a point (fractions of width/height) of the latest depth frame |
 | `GET /calibration` | factory intrinsics of the active depth/colour profiles, depth→colour extrinsic, IMU→depth extrinsic |
 | `GET /imu/stream[?raw=false&batch_ms=0&max_backlog=20000]` | IMU attitude-filter records (~100 Hz), or every raw 1 kHz sample with `raw=true` |
+| `GET /imu/fields[?raw=true]` | columns of the IMU records: names, units, meaning (same shape as other nodes' `/fields`) |
 | `GET /imu/latest?n=100[&raw=true]` | recent IMU filter records (or raw samples) as JSON |
 | `POST /imu/calibrate` | calibrate gyro bias + gravity from the next `seconds` of still data |
 | `POST /imu/reset` | restart the orientation from gravity (yaw 0) |
