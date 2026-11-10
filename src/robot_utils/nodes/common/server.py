@@ -8,6 +8,8 @@
   (schema record first, then rows records; pings when idle).
 - ``sse(...)``: Server-Sent Events of a JSON state on every change and every second.
 - ``LeaseToken``: the ``X-Lease-Token`` header as a FastAPI dependency parameter.
+- Response models of what every node serves (``Health``, ``NodeMeta``, ``TimeResponse``, ``Event``,
+  ``EStopState`` / ``EStopTriggered`` / ``EStopCleared``, ``LockOut``), for nodes to reuse.
 """
 from __future__ import annotations
 
@@ -41,10 +43,73 @@ class TimeResponse(BaseModel):
 
 
 class Event(BaseModel):
-    t: float = Field(description="Server monotonic s.")
-    wall: float
+    """One ``EventLog`` entry."""
+    t: float = Field(description="Server time.monotonic() (s) when it happened (the clock of /time `mono`).")
+    wall: float = Field(description="Server time.time() (Unix epoch s) when it happened.")
     msg: str
-    level: str = "info"
+    level: str = Field("info", description="info | warning | error.")
+
+
+class Health(BaseModel):
+    """``GET /health``. Open-ended: each node adds its own keys (agent_nav: `session`)."""
+    ok: bool = Field(description="Always true: the node answers.")
+    node: Optional[str] = Field(None, description="Node kind, e.g. `swerve`.")
+    state: Optional[str] = Field(None, description="The node's status word (the `state` of its /state).")
+    model_config = ConfigDict(extra="allow", json_schema_extra={"examples": [
+        {"ok": True, "node": "swerve", "state": "running"}]})
+
+
+class MetaEndpoints(BaseModel):
+    """Paths relative to the node root; null if the node lacks it."""
+    health: str
+    state: str
+    events: str
+    estop: Optional[str] = Field(description="`estop` on actuated nodes, else null.")
+
+
+class NodeMeta(BaseModel):
+    """``GET /meta`` (built by ``node_meta``). Open-ended: nodes add their own keys (e.g. `rate_hz`,
+    the telemetry rate in Hz; `fake`, a simulated backend)."""
+    name: str = Field(description="Instance name (the proxy path /nodes/<name>/); the kind unless renamed at startup.")
+    title: str = Field(description="Human-readable title.")
+    version: str
+    kind: str = Field(description="Node type, e.g. `swerve`.")
+    has_page: bool = Field(description="Serves a browser page at its root.")
+    page: Optional[str] = Field(description="`./` if it has a page, else null.")
+    actuated: bool = Field(description="Moves hardware (has a lease and an e-stop).")
+    endpoints: MetaEndpoints
+    model_config = ConfigDict(extra="allow")
+
+
+class EStopState(BaseModel):
+    """The e-stop as reported in an actuated node's /state."""
+    latched: bool
+    reason: Optional[str] = Field(description="Why it was pressed; null if not latched.")
+    source: Optional[str] = Field(description="Who pressed it (free text, or the client IP); null if not latched.")
+    t: Optional[float] = Field(description="Server time.monotonic() (s) when it latched; null if not latched.")
+
+
+class EStopTriggered(BaseModel):
+    """``POST /estop``. A second press keeps the first reason and source."""
+    latched: bool = Field(description="Always true.")
+    reason: str = Field(description="Reason of the press in force (`e-stop` if none was given).")
+    source: str = Field(description="Source of the press in force (`unknown` if none).")
+
+
+class EStopCleared(BaseModel):
+    latched: bool = Field(description="Always false.")
+
+
+class LockOut(BaseModel):
+    """A lock in force (common/locks.py ``Lock.public()``)."""
+    id: str
+    kind: str = Field(description="chock | cover.")
+    target: str = Field(description="Node kind, instance name, or `all`.")
+    by: str = Field(description="Who placed it.")
+    reason: str
+    placed: float = Field(description="Unix epoch s (wall clock) when placed.")
+    source: str = Field(description="How it was placed: `ssh` or `web <client>`.")
+    age_s: float = Field(description="Seconds since placed (wall clock, 0.1 s resolution).")
 
 
 class EventLog:
@@ -80,7 +145,8 @@ def add_base_routes(app: FastAPI, health: Callable[[], dict]) -> None:
         w = time.time()
         return {"mono": m, "wall": w, "epoch_minus_mono": w - m}
 
-    @app.get("/health", tags=["state"], summary="Liveness")
+    @app.get("/health", response_model=Health, response_model_exclude_unset=True, tags=["state"],
+             summary="Liveness")
     async def get_health():
         return {"ok": True, **health()}
 
@@ -184,7 +250,7 @@ def add_page_routes(app: FastAPI, meta: dict) -> None:
     app.state.node_meta = meta   # serve() sets meta["name"] to the instance name
     add_viz_routes(app)
 
-    @app.get("/meta", tags=["state"], summary="What this node is (for dashboards)")
+    @app.get("/meta", response_model=NodeMeta, tags=["state"], summary="What this node is (for dashboards)")
     async def get_meta():
         return meta
 
