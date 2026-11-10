@@ -809,3 +809,18 @@ def test_close_releases_the_port_even_if_disable_fails(rig):
     sim.close = lambda: (calls.append("close"), orig_close())
     n._close_bus()
     assert calls == ["close"] and n.bus is None
+
+
+def test_failed_connect_releases_the_port(tmp_path):
+    clock = Clock()
+    closed = []
+
+    class Failing(SimBus):
+        def connect(self):
+            raise RuntimeError("JointLimitError: joint2 reads -191.7°")
+
+        def close(self):
+            closed.append(1)
+    n = ArmNode(lambda: Failing(Q0, clock=clock), locks=LockStore(tmp_path / "locks"), clock=clock)
+    n.step()
+    assert n.state == "connecting" and "joint2" in n.error and closed == [1]

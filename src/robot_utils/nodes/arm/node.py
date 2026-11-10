@@ -304,7 +304,14 @@ class ArmNode:
     def _connect(self) -> None:
         try:
             self.bus = self.bus_factory()
-            self.bus.connect()
+            try:
+                self.bus.connect()
+            except Exception:
+                try:
+                    self.bus.close()       # a failed connect may have opened the port: release it
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
             Planner.warm(self.kin)          # start the planner process now, not on the first plan
             self._base, self.error = "uninitialized", None
