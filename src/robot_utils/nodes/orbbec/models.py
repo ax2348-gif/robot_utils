@@ -392,3 +392,124 @@ class PropertySet(_Strict):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class CameraIntrinsics(BaseModel):
+    """Pinhole intrinsics of one active profile, in pixels of that profile's width x height (factory values)."""
+    fx: float = Field(description="Focal length along x, px.")
+    fy: float = Field(description="Focal length along y, px.")
+    cx: float = Field(description="Principal point x, px from the left edge.")
+    cy: float = Field(description="Principal point y, px from the top edge.")
+    width: int = Field(description="Image width of the profile, px.")
+    height: int = Field(description="Image height of the profile, px.")
+    distortion: Optional[dict[str, float]] = Field(None, description="Lens distortion coefficients as the SDK "
+                                                   "reports them (k1..k6 radial, p1, p2 tangential; unitless). "
+                                                   "Absent when the SDK gives none.")
+
+
+class Extrinsic(BaseModel):
+    """Rigid transform from frame A into frame B: ``p_B = rotation @ p_A + translation_mm``."""
+    rotation: list[list[float]] = Field(description="3x3 rotation, row-major.")
+    translation_mm: list[float] = Field(description="[x, y, z] translation, mm.")
+
+
+class CalibrationImu(BaseModel):
+    accel_to_depth: Optional[Extrinsic] = Field(description="Maps an IMU (accelerometer) frame point into the "
+                                                            "depth frame; null if the device reports none.")
+
+
+class CameraCalibration(BaseModel):
+    """``GET /calibration``: factory calibration of the profiles in use, recomputed when the pipeline (re)starts.
+    Frames: x right, y down, z out of the lens. Empty (`{}`) until the first pipeline start; keys a profile
+    does not provide are absent."""
+    depth: Optional[CameraIntrinsics] = Field(None, description="Intrinsics of the active depth/IR profile; "
+                                              "absent if none.")
+    color: Optional[CameraIntrinsics] = Field(None, description="Intrinsics of the active color profile; "
+                                              "absent if none.")
+    depth_to_color: Optional[Extrinsic] = Field(None, description="Maps a depth-frame point into the color frame; "
+                                                "absent unless both depth and color profiles are known.")
+    aligned_depth: Optional[bool] = Field(None, description="Depth is aligned to color (depth pixels use the "
+                                          "color intrinsics).")
+    imu: Optional[CalibrationImu] = None
+    settings_version: Optional[int] = Field(None, description="`settings_version` (GET /state) the values "
+                                            "belong to.")
+
+
+class DescriptionDevice(BaseModel):
+    name: str = Field(description="Device name reported by the SDK.")
+    serial: str
+    firmware: str
+
+
+class DescriptionConventions(BaseModel):
+    optical: str = Field(description="Axis convention of every frame: `x right, y down, z out of the lens`.")
+    units: str = Field(description="Length unit of the translations: `m`.")
+    transform: str = Field(description="How a frame's pose is applied: `p_parent = rotation @ p_child + translation`.")
+
+
+class DescriptionFrame(BaseModel):
+    """One frame of the tree. The root has only `parent` (null)."""
+    parent: Optional[str] = Field(description="Parent frame name; null for the root.")
+    rotation: Optional[list[list[float]]] = Field(None, description="3x3 row-major rotation of this frame in "
+                                                  "its parent (1e-9 resolution); absent on the root.")
+    translation: Optional[list[float]] = Field(None, description="[x, y, z] position of this frame's origin in "
+                                               "its parent, m (1 µm resolution); absent on the root.")
+
+
+class CameraDescription(BaseModel):
+    """``GET /description``: the camera's frame tree (metres, optical convention) and intrinsics."""
+    kind: str = Field(description="Always `orbbec`.")
+    root: str = Field(description="Root frame, always `depth_optical` (the frame depth pixels unproject into).")
+    device: Optional[DescriptionDevice] = Field(description="The connected camera; null before one was opened.")
+    conventions: DescriptionConventions
+    frames: dict[str, DescriptionFrame] = Field(description="By name: `depth_optical` (root), `color_optical` "
+                                                "and `imu` when the calibration has them.")
+    intrinsics: dict[str, CameraIntrinsics] = Field(description="`depth` / `color` pinhole intrinsics of the "
+                                                    "active profiles, as GET /calibration.")
+    aligned_depth: bool = Field(description="Depth is aligned to color (use the color intrinsics for depth).")
+    settings_version: Optional[int] = Field(description="`settings_version` the values belong to; null before "
+                                            "the first pipeline start.")
+
+
+class DepthAt(BaseModel):
+    """``GET /depth_at``. Only `mm` (null) when there is no depth frame yet."""
+    u: Optional[int] = Field(None, description="Pixel column in the latest depth frame (absent without a frame).")
+    v: Optional[int] = Field(None, description="Pixel row in the latest depth frame (absent without a frame).")
+    seq: Optional[int] = Field(None, description="Sequence number of that depth frame (absent without a frame).")
+    mm: Optional[float] = Field(description="Depth at (u, v), mm (raw x depth_scale, 0.1 mm resolution); null if "
+                                            "the pixel has no depth or there is no depth frame.")
+    median5: Optional[float] = Field(None, description="Median of the valid depths in the 5x5 window around "
+                                     "(u, v), mm (0.1 mm resolution); null if none is valid.")
+
+
+class ImuFieldsOut(BaseModel):
+    """``GET /imu/fields``: the column description shared with the other nodes' ``GET /fields``."""
+    kind: Literal["state", "raw"] = Field(description="`state`: filter records; `raw`: raw samples.")
+    fields: list[str] = Field(description="Column names, in payload order.")
+    units: list[str] = Field(description="Unit of each column (s, us, m/s^2, rad/s, rad, m/s, degC; count, bits, "
+                                         "fraction, 1 = unitless).")
+    doc: dict[str, str] = Field(description="Meaning of each column.")
+
+
+class ImuLatest(BaseModel):
+    """``GET /imu/latest``: the last n IMU rows as JSON (oldest first)."""
+    kind: Literal["state", "raw"] = Field(description="`state`: filter records; `raw`: raw samples.")
+    fields: list[str] = Field(description="Column names, in row order (STATE_FIELDS or IMU_FIELDS).")
+    units: dict[str, str] = Field(description="Short unit map, as in the /imu/stream headers. Keys are column "
+                                              "names or, for `state`, patterns (`q*`, `da*`, `a*`, ...).")
+    samples: list[list[Optional[float]]] = Field(description="Rows of len(fields) values; NaN sent as null.")
+
+
+class ImuCalibrationOut(BaseModel):
+    """``POST /imu/calibrate``: the gyro bias / gravity calibration now in use (saved per camera serial)."""
+    gyro_bias: list[float] = Field(description="[x, y, z] gyro bias, rad/s, IMU frame (mean of the still window).")
+    g_ref: float = Field(description="Gravity magnitude the accelerometer reads, m/s^2 (mean |a| of the window).")
+    gyro_std: list[float] = Field(description="[x, y, z] gyro standard deviation over the window, rad/s.")
+    accel_std: float = Field(description="Standard deviation of |a| over the window, m/s^2.")
+    temperature: Optional[float] = Field(description="Mean IMU temperature over the window, degC; null if not "
+                                                   "reported (and on the default calibration).")
+    source: str = Field(description="default | stored | startup | request.")
+
+
+class ImuResetOut(BaseModel):
+    ok: bool = Field(description="Always true (the reset happens on the next IMU batch).")

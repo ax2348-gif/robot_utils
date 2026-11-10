@@ -76,7 +76,8 @@ class FakeBackend:
             w, h = row[1], row[2]
             f = w / 2.0
             out[name] = {"fx": f, "fy": f, "cx": w / 2.0, "cy": h / 2.0, "width": w, "height": h}
-        out["depth_to_color"] = {"rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "translation_mm": [-25.0, 0.0, 0.0]}
+        out["depth_to_color"] = {"rotation": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],   # floats, as the SDK
+                                 "translation_mm": [-25.0, 0.0, 0.0]}
         return out
 
     def _fps(self, n):

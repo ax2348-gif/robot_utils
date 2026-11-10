@@ -18,11 +18,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
-from ..common.server import add_page_routes, node_meta
+from ..common.server import Health, add_page_routes, node_meta
 from . import __version__
 from .encode import encode_frame
 from .hub import Frame, Hub
-from .models import (STREAM_NAMES, Catalog, ErrorResponse, PropertyInfo, PropertySet, Settings,
+from .models import (STREAM_NAMES, CameraCalibration, CameraDescription, Catalog, DepthAt, ErrorResponse,
+                     ImuCalibrationOut, ImuFieldsOut, ImuLatest, ImuResetOut, PropertyInfo, PropertySet, Settings,
                      SettingsError, SettingsPatch, SettingsResult, State, TimeResponse,
                      ImuCalibrateRequest)
 from .owner import DeviceError, Owner
@@ -165,11 +166,13 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         w = time.time()
         return {"mono": m, "wall": w, "epoch_minus_mono": w - m}
 
-    @app.get("/health", tags=["state"], summary="Liveness")
+    @app.get("/health", response_model=Health, response_model_exclude_unset=True, tags=["state"],
+             summary="Liveness")
     async def health():
         return {"ok": True, "state": owner.state}
 
-    @app.get("/calibration", tags=["state"], summary="Camera intrinsics/extrinsics of the active profiles")
+    @app.get("/calibration", response_model=CameraCalibration, response_model_exclude_unset=True, tags=["state"],
+             summary="Camera intrinsics/extrinsics of the active profiles")
     async def calibration():
         """Factory calibration for the profiles in use (updated when the pipeline restarts):
         `depth` / `color` pinhole intrinsics {fx, fy, cx, cy, width, height, distortion} in pixels of
@@ -180,7 +183,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         with owner.lock:
             return dict(owner.calibration)
 
-    @app.get("/description", tags=["state"], summary="The camera's frames, conventions and intrinsics (for a robot description)")
+    @app.get("/description", response_model=CameraDescription, response_model_exclude_unset=True, tags=["state"],
+             summary="The camera's frames, conventions and intrinsics (for a robot description)")
     async def description():
         """A small frame tree for this camera. Every frame is in **metres**, optical convention
         **x right, y down, z out of the lens**. ``root`` is ``depth_optical`` (the frame depth
@@ -350,7 +354,10 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
             await asyncio.wait({fut}, timeout=left)
 
     @app.get("/frame/{name}", tags=["stream"], summary="The latest frame of one stream as a single record",
-             responses={200: {"content": {"application/octet-stream": {}}}, 503: {"model": ErrorResponse}})
+             response_class=Response,
+             responses={200: {"content": {"application/octet-stream": {}},
+                              "description": "One record `[u32 BE header length][JSON header][payload]`, "
+                                             "as on /stream (`dropped` 0)."}, 503: {"model": ErrorResponse}})
     async def frame(name: str, mode: Literal["jpeg", "raw"] = "raw", compress: Literal["none", "zlib"] = "none"):
         """Same record format as `/stream` (one record). Handy for scripts and curl."""
         f = await latest_frame(name)
@@ -360,6 +367,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/snapshot/{name}", tags=["stream"], summary="The latest frame as an image file",
+             response_class=Response,
              responses={200: {"content": {"image/jpeg": {}, "image/png": {}}}, 503: {"model": ErrorResponse}})
     async def snapshot(name: str, format: Literal["jpg", "png"] = Query(
             "jpg", description="`jpg`: monitoring JPEG (color: camera MJPEG). `png`: lossless 16-bit PNG of "
@@ -382,7 +390,11 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         return Response(body, media_type=ctype, headers=headers)
 
     @app.get("/mjpeg/{name}", tags=["stream"], summary="Plain multipart MJPEG of one stream (for <img>, VLC, OpenCV)",
-             response_class=StreamingResponse)
+             response_class=StreamingResponse,
+             responses={200: {"content": {"multipart/x-mixed-replace; boundary=frame": {}},
+                              "description": "Parts `--frame`, each `Content-Type: image/jpeg` + `Content-Length` "
+                                             "and one JPEG (the `mode=jpeg` encoding); no frame headers."},
+                        404: {"model": ErrorResponse}})
     async def mjpeg(name: str):
         if name not in STREAM_NAMES:
             raise HTTPException(404, f"unknown stream {name!r}")
@@ -397,7 +409,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                 yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(body) + body + b"\r\n"
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers=stream_headers)
 
-    @app.get("/depth_at", tags=["stream"], summary="Depth (mm) at a point of the latest depth frame")
+    @app.get("/depth_at", response_model=DepthAt, response_model_exclude_unset=True, tags=["stream"],
+             summary="Depth (mm) at a point of the latest depth frame")
     async def depth_at(x: float = Query(0.5, ge=0, le=1, description="Fraction of the width."),
                        y: float = Query(0.5, ge=0, le=1, description="Fraction of the height.")):
         f = hub.latest(["depth"]).get("depth")
@@ -470,7 +483,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                 hub.clients -= 1
         return StreamingResponse(gen(), media_type="application/octet-stream", headers=stream_headers)
 
-    @app.get("/imu/fields", tags=["stream"], summary="Columns of the IMU records: names, units, meaning")
+    @app.get("/imu/fields", response_model=ImuFieldsOut, tags=["stream"],
+             summary="Columns of the IMU records: names, units, meaning")
     async def imu_fields(raw: bool = Query(False, description="Columns of the raw samples (`/imu/stream?raw=true`) "
                                                               "instead of the filter records.")):
         """Same shape as every node's column description (swerve and estimator `GET /fields`): `fields`
@@ -480,7 +494,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         return {"kind": "raw" if raw else "state", "fields": list(info), "units": [u for u, _ in info.values()],
                 "doc": {k: d for k, (_, d) in info.items()}}
 
-    @app.get("/imu/latest", tags=["stream"], summary="The most recent IMU records as JSON")
+    @app.get("/imu/latest", response_model=ImuLatest, tags=["stream"], summary="The most recent IMU records as JSON")
     async def imu_latest(n: int = Query(100, ge=1, le=5000),
                          raw: bool = Query(False, description="Raw samples instead of filter records.")):
         rows = hub.recent_imu(n, "raw" if raw else "state")
@@ -488,7 +502,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                 "units": imu_units if raw else state_units,
                 "samples": [[None if x != x else float(x) for x in r] for r in rows]}
 
-    @app.post("/imu/calibrate", tags=["control"], responses=errors,
+    @app.post("/imu/calibrate", response_model=ImuCalibrationOut, tags=["control"], responses=errors,
               summary="Calibrate gyro bias and gravity from the next few seconds of still data")
     async def imu_calibrate(req: ImuCalibrateRequest = ImuCalibrateRequest()):
         """Keep the camera still. Returns the new calibration (also saved on the Pi and used as the
@@ -496,7 +510,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         fut = owner.request_imu_calibration(req.seconds)
         return await run_cmd(fut, timeout=(req.seconds or 1.0) + 10.0)
 
-    @app.post("/imu/reset", tags=["control"], summary="Restart the orientation from gravity (yaw 0)")
+    @app.post("/imu/reset", response_model=ImuResetOut, tags=["control"],
+              summary="Restart the orientation from gravity (yaw 0)")
     async def imu_reset():
         """Roll/pitch snap to the current gravity direction, yaw becomes 0; the calibration is kept."""
         owner.request_imu_reset()
