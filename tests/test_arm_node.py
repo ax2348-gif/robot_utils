@@ -824,3 +824,22 @@ def test_failed_connect_releases_the_port(tmp_path):
     n = ArmNode(lambda: Failing(Q0, clock=clock), locks=LockStore(tmp_path / "locks"), clock=clock)
     n.step()
     assert n.state == "connecting" and "joint2" in n.error and closed == [1]
+
+
+def test_command_never_rounds_past_a_limit(rig):
+    # on the robot: homing joint2 to 0 (its upper limit) produced +0.0° (a hair above 0), which the
+    # driver refused: the node faulted mid-move
+    n = engaged(rig).node
+    hi = n.kin.hi[1]
+    assert hi == 0.0
+    rng = np.random.default_rng(1)
+    found = 0
+    for _ in range(2000):
+        q0 = -rng.uniform(1e-6, 0.019)
+        if q0 + ((hi - q0) / DT) * DT > hi:          # the unclipped step would round past the limit
+            found += 1
+            with n._lock:
+                n.q_cmd[1], n.v_cmd[1] = q0, (hi - q0) / DT
+                n._command_step(np.where(np.arange(6) == 1, hi, n.q_cmd))
+                assert n.q_cmd[1] <= hi
+    assert found > 0                                  # the case exists

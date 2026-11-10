@@ -333,7 +333,7 @@ class SimBus(ArmBus):
         last = getattr(self, "_q_last", np.full(N, np.nan))
         last_out = np.maximum(lo - last, last - hi)
         checked = np.asarray(kp, float) != 0.0       # kp = 0 (floating): position ignored, not checked
-        ok = ~checked | (out <= 1e-9) | (out <= last_out + 1e-12)
+        ok = ~checked | (out <= 0.0) | (out <= last_out)      # exactly as strict as the driver
         if not np.all(ok):
             raise BusError(f"the driver refused setpoints for {', '.join(n for n, k in zip(names, ok) if not k)}")
         self._q_last = np.where(checked, q, last)

@@ -491,7 +491,9 @@ class ArmNode:
         self._limited = bool(np.any(np.abs(want) > s.joint_vel + 1e-12))
         v = clip_increase(self.v_cmd, v_des, s.joint_acc * DT)
         self.acc_lim = np.abs(v) < np.abs(v_des) - 1e-12
-        self.q_cmd = self.q_cmd + v * DT
+        # clipped: exact in arithmetic, but rounding can land a hair past a limit, and the driver
+        # refuses any setpoint past one (home is exactly on joints 2 and 3's upper limits)
+        self.q_cmd = np.clip(self.q_cmd + v * DT, lo, hi)
         self.v_cmd = v
 
     def _control(self, now: float, r) -> None:
