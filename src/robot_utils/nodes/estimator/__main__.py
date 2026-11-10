@@ -1,4 +1,4 @@
-"""python -m robot_utils.nodes.estimator [--name estimator] [--swerve NAME|URL] [--camera NAME|URL] [--port 8110]
+"""python -m robot_utils.nodes.estimator [--name estimator] [--swerve NAME|URL] [--camera NAME|URL] [--history-s 14400] [--port 8110]
 
 Runs the estimator node: planar pose from the swerve node's wheel odometry and the camera node's
 IMU heading (docs/estimator_node.md). Upstreams are instance names on this machine (their unix
@@ -16,6 +16,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--swerve", default="swerve", help="swerve node: instance name or URL ('none' to disable)")
     p.add_argument("--camera", default="camera", help="camera node: instance name or URL ('none' to disable)")
+    p.add_argument("--history-s", type=float, default=4 * 3600.0,
+                   help="pose history window in s (default 4 h, ~86 MB; cleared by POST /reset)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "estimator")
     a = p.parse_args()
@@ -25,7 +27,7 @@ def main() -> None:
     from .node import EstimatorNode
     from .server import create_app
     off = lambda u: None if u.lower() == "none" else u   # noqa: E731
-    node = EstimatorNode(off(a.swerve), off(a.camera))
+    node = EstimatorNode(off(a.swerve), off(a.camera), history_s=a.history_s)
     app = create_app(node)
     serve(app, a, banner=f"estimator node {a.name!r} (swerve {a.swerve}, camera {a.camera})")
 

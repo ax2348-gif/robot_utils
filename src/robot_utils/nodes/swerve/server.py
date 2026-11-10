@@ -19,7 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from ..common.server import (EStopCleared, EStopState, EStopTriggered, Event, LeaseToken, LockOut, add_base_routes,
                              add_page_routes, node_meta, rows_stream, setup_app, sse)
 from .constants import COMMAND_TIMEOUT, MODULES
-from .node import FIELD_DOC, FIELDS, HARD_MAX_OMEGA, HARD_MAX_SPEED, LEASE_HEARTBEAT, UNITS, SwerveNode
+from .node import (AUTO_INTERVAL_S, AUTO_STILL_S, FIELD_DOC, FIELDS, HARD_MAX_OMEGA, HARD_MAX_SPEED, LEASE_HEARTBEAT,
+                   REBASE_STILL_S, UNITS, SwerveNode)
 
 TAGS = [
     {"name": "state", "description": "Status, clock sync, events."},
@@ -27,6 +28,8 @@ TAGS = [
                                      "as `X-Lease-Token` with every controlling request."},
     {"name": "control", "description": "Enable, command, limits, e-stop, reset."},
     {"name": "stream", "description": "Every control tick (100 Hz) as binary float64 rows."},
+    {"name": "encoders", "description": "Drive-encoder rebase: drive_pos back to 0 while stationary (float32 "
+                                        "precision). Moves nothing; anyone may call."},
 ]
 
 
@@ -55,6 +58,14 @@ class LimitsIn(BaseModel):
     max_speed: Optional[float] = Field(None, ge=0, le=HARD_MAX_SPEED, description="m/s, translation norm.")
     max_omega: Optional[float] = Field(None, ge=0, le=HARD_MAX_OMEGA, description="rad/s.")
     model_config = ConfigDict(json_schema_extra={"examples": [{"max_speed": 0.5, "max_omega": 1.0}]})
+
+
+class AutoRebaseIn(BaseModel):
+    enabled: Optional[bool] = Field(None, description="Rebase automatically when due and stationary.")
+    interval_s: Optional[float] = Field(None, ge=1.0, description="Due when the last rebase is older than this (s).")
+    still_s: Optional[float] = Field(None, ge=REBASE_STILL_S, le=60.0,
+                                     description="Stationary for this long first (s).")
+    model_config = ConfigDict(json_schema_extra={"examples": [{"enabled": False}, {"interval_s": 300, "still_s": 2.0}]})
 
 
 class EStopIn(BaseModel):
@@ -120,6 +131,29 @@ class CommandOut(BaseModel):
     soft_limits: SpeedLimits = Field(description="The soft limits applied.")
 
 
+class AutoRebase(BaseModel):
+    """Opportunistic rebase policy (runtime only; back to the defaults when the node restarts)."""
+    enabled: bool = Field(description="On by default.")
+    interval_s: float = Field(description=f"Rebase when the last one is older than this (default {AUTO_INTERVAL_S:g} s; "
+                                          "also once at node start).")
+    still_s: float = Field(description=f"... and the base has been stationary this long (default {AUTO_STILL_S:g} s).")
+
+
+class Encoders(BaseModel):
+    """Drive-encoder rebase state. Stationary = every |drive_vel| < 0.01 m/s, fresh readings,
+    and no non-zero command in force."""
+    epoch: int = Field(description="Confirmed rebases since the node started (= `enc_epoch` in /stream).")
+    last_rebase_t: Optional[float] = Field(description="Server monotonic s of the last confirmed rebase; null if none.")
+    last_rebase_age: Optional[float] = Field(description="s since then (1 ms resolution); null if none.")
+    rebasing: bool = Field(description="A rebase was sent and is not confirmed yet.")
+    last_error: Optional[str] = Field(description="Why the last rebase failed; null after a success.")
+    auto: AutoRebase
+    max_abs_drive_pos: Optional[float] = Field(description="m, largest |drive_pos| of the four drives now (float32 "
+                                                           "resolution degrades as it grows); null without readings.")
+    stationary_s: Optional[float] = Field(description="s the base has been stationary; null while it is not.")
+    motion: Optional[str] = Field(description="Why the base is not stationary; null when it is.")
+
+
 class ResetOut(BaseModel):
     state: str = Field(description="Drive status after the rebuild: running | no drive (it failed) | error.")
     error: Optional[str] = Field(description="Why the drive failed to start; null if it started.")
@@ -152,11 +186,14 @@ _TELEMETRY_DOC = {
     "soft_max_speed": "soft translation limit in force",
     "soft_max_omega": "soft yaw-rate limit in force",
     "loop_ok": "0 once the control loop stopped on an error",
+    "enc_epoch": "confirmed drive-encoder rebases since the node started; drive_pos restarts near 0 when it changes",
+    "enc_rebasing": "1 from sending a rebase until it is confirmed or fails (drive_pos may jump: don't integrate it)",
+    "rebase_age": "t_tick minus the last confirmed rebase; null if none yet",
     "steer_angle": "wheel angle from the absolute encoder (0 = forward, CCW +), STATUS_5",
     "steer_vel": "steering rate from the absolute encoder's velocity, STATUS_5",
     "t_steer": "server monotonic arrival time of the steer SPARK's STATUS_5",
     "drive_vel": "wheel speed, STATUS_2",
-    "drive_pos": "wheel travel since the SPARK booted (float32 on the wire), STATUS_2",
+    "drive_pos": "wheel travel since the SPARK booted or the last rebase (float32 on the wire), STATUS_2",
     "t_drive": "server monotonic arrival time of the drive SPARK's STATUS_2",
     "steer_sp": "wheel angle setpoint sent this tick",
     "drive_sp": "wheel speed setpoint sent this tick",
@@ -198,6 +235,7 @@ class SwerveState(BaseModel):
     loop_hz: Optional[float] = Field(description="Control tick rate measured over the last ~100 ticks (Hz); null "
                                                  "while there are too few.")
     clients: int = Field(description="Open /stream subscribers.")
+    encoders: Encoders
     events: list[Event] = Field(description="Latest node events (up to 20), oldest first.")
     latest: Optional[Telemetry] = Field(description="The last tick's telemetry; null before the first tick.")
     server_mono: float = Field(description="Server time.monotonic() (s) when this state was built.")
@@ -329,6 +367,28 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     async def clear_estop(token: LeaseToken = None):
         node.clear_estop(token)
         return {"latched": False}
+
+    @app.get("/encoders", response_model=Encoders, tags=["encoders"], summary="Drive-encoder rebase state")
+    async def get_encoders():
+        return node.encoders()
+
+    @app.post("/encoders/rebase", response_model=Encoders, tags=["encoders"],
+              summary="Set the four drive encoders to 0 now (anyone; 409 unless stationary)")
+    async def rebase_encoders():
+        """Needs the base stationary for 0.5 s (409 with the reason otherwise). Waits for
+        fresh STATUS_2 frames to confirm |drive_pos| ~ 0 on all four drives, then `epoch` increments (503 if
+        they don't confirm within 0.5 s). Moves nothing, so any client may call it; a lease holder's command
+        that arrives during the ~20-30 ms in flight is held at zero until it confirms."""
+        return await asyncio.to_thread(node.rebase)
+
+    @app.get("/encoders/auto", response_model=AutoRebase, tags=["encoders"], summary="Automatic rebase policy")
+    async def get_auto_rebase():
+        return node.encoders()["auto"]
+
+    @app.post("/encoders/auto", response_model=AutoRebase, tags=["encoders"],
+              summary="Change the automatic rebase policy (anyone; runtime only)")
+    async def set_auto_rebase(body: AutoRebaseIn):
+        return node.set_auto_rebase(body.enabled, body.interval_s, body.still_s)
 
     @app.post("/reset", response_model=ResetOut, tags=["control"], summary="Rebuild the drive after a loop error (holder; ends disabled)")
     async def reset(token: LeaseToken = None):

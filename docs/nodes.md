@@ -106,6 +106,14 @@ Take ~16 samples over a kept-alive connection and intersect the bounds of the fa
 `common.client.NodeClient.sync()` (Python), `RU.TimeSync` (browser). `common.timesync.ClockSync`
 also fits clock drift for long sessions.
 
+**Where was the robot at time t?** Ask the estimator, on this same clock: `GET /pose_at?t=...`
+and `GET /relative?from=...&to=...` answer from its pose history (every pose since its last
+reset, up to 4 h; [estimator_node.md](estimator_node.md#one-frame-reset-and-history)). Stamp
+camera frames, detections and the like with their Pi monotonic time and look the pose up later,
+rather than reading `/pose` when the data arrives. An estimator `POST /reset` clears that
+history and starts a new frame, so no client should reset it mid-task; the swerve node's
+drive-encoder rebases ([swerve_node.md](swerve_node.md#drive-encoder-rebase)) are invisible there.
+
 ## Endpoints every node has
 
 | endpoint | what |

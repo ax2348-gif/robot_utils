@@ -43,7 +43,8 @@ input[type=number]{width:70px}
   </div>
   <div class="ru-card" data-panel="modules" data-role="view"><b>Modules</b> <span class="ru-muted">top view, to scale (x forward is up)</span><div id="swv"></div></div>
 </div>
-<div class="ru-card" data-panel="table" data-role="telemetry"><table class="ru-table" id="mods"></table></div>
+<div class="ru-card" data-panel="table" data-role="telemetry"><table class="ru-table" id="mods"></table>
+  <div class="ru-muted" id="enc"></div></div>
 <div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
@@ -90,6 +91,9 @@ RU.sse("events", st => {
   $("#enable").title = st.chocked ? "Chocked: an admin removes the chock over SSH" : latched ? "Clear the e-stop first" : "";
   $("#clear").hidden = !latched;
   if (st.error) err(st.error);
+  const en = st.encoders; if (en) $("#enc").textContent = `drive encoders: epoch ${en.epoch}` +
+    (en.rebasing ? ", rebasing…" : en.last_rebase_age !== null ? `, rebased ${Math.round(en.last_rebase_age)} s ago` : ", not rebased yet") +
+    ` · auto ${en.auto.enabled ? "every " + en.auto.interval_s + " s when still" : "off"}` + (en.last_error ? ` · ${en.last_error}` : "");
   const l = st.limits; $("#lim").textContent = `hard ${l.hard.max_speed} m/s, ${l.hard.max_omega} rad/s · soft ${l.soft.max_speed} m/s, ${l.soft.max_omega} rad/s`;
   if (!$("#lv").value) { $("#lv").value = l.soft.max_speed; $("#lw").value = l.soft.max_omega; }
   $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : (e.level === "warn" || e.level === "warning") ? "ru-ev-warn" : ""}">${new Date(e.wall*1000).toLocaleTimeString()} ${e.msg}</div>`).join("");

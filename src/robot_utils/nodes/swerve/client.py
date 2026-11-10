@@ -106,3 +106,16 @@ class SwerveClient(NodeClient):
 
     def state(self) -> dict:
         return self.get("/state")
+
+    # -- drive encoders (anyone; moves nothing) ----------------------------------------------------
+
+    def encoders(self) -> dict:
+        return self.get("/encoders")
+
+    def rebase_encoders(self) -> dict:
+        """Drive encoders to 0 now; NodeError 409 unless the base is stationary."""
+        return self.post("/encoders/rebase")
+
+    def set_auto_rebase(self, enabled: Optional[bool] = None, interval_s: Optional[float] = None,
+                        still_s: Optional[float] = None) -> dict:
+        return self.post("/encoders/auto", {"enabled": enabled, "interval_s": interval_s, "still_s": still_s})

@@ -10,7 +10,9 @@ Threads (no web code here; server.py serves it):
   master: each tick waits until the IMU heading track covers its sample time (the IMU arrives a
   few ms later) or ``IMU_WAIT_S`` passes (then the wheel heading is used for that tick), and is
   fused at its own timestamp. With no swerve data for ``ODOM_STALE_S``, IMU records become the
-  master (heading only).
+  master (heading only). Every row it publishes also goes into the ``PoseHistory`` (history.py);
+  applying a reset clears the history in the same step, so the history, ``/stream`` and the live
+  pose are always in the frame of the current ``reset_id``.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from ..common.hub import RowHub
 from ..common.protocol import RowsDecoder
 from ..common.server import EventLog
 from .fusion import FIELDS, MASTER_IMU, PoseFusion, odometry_sample
+from .history import PoseHistory
 
 log = logging.getLogger("estimator")
 
@@ -114,9 +117,12 @@ class Upstream(threading.Thread):
 
 
 class EstimatorNode:
-    def __init__(self, swerve_url: Optional[str] = "swerve", camera_url: Optional[str] = "camera"):
-        """Upstreams: instance names on this machine (unix sockets) or URLs; None = off."""
+    def __init__(self, swerve_url: Optional[str] = "swerve", camera_url: Optional[str] = "camera",
+                 history_s: float = 4 * 3600.0):
+        """Upstreams: instance names on this machine (unix sockets) or URLs; None = off.
+        ``history_s``: how far back the pose history reaches (s)."""
         self.hub = RowHub({"pose": len(FIELDS)}, recent=1000)
+        self.history = PoseHistory(history_s)
         self.events = EventLog(on_add=self.hub.state_changed)
         self.q: queue.Queue = queue.Queue(maxsize=10000)
         self.fusion = PoseFusion()
@@ -148,7 +154,8 @@ class EstimatorNode:
             u.stop.set()
 
     def reset(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0):
-        """Set the pose (applied by the fusion thread before the next sample)."""
+        """Set the pose: a new world frame and an empty history (applied by the fusion thread
+        before the next sample)."""
         with self.lock:
             self._reset = (x, y, theta)
         self.events.add(f"pose reset to x={x:.3f} m, y={y:.3f} m, theta={math.degrees(theta):.1f}°")
@@ -165,6 +172,7 @@ class EstimatorNode:
                 r, self._reset = self._reset, None
             if r is not None:
                 self.fusion.reset(*r)
+                self.history.clear(self.fusion.reset_id)
                 self._pending.clear()
             out = []
             while item is not None:
@@ -182,7 +190,9 @@ class EstimatorNode:
                 now = time.monotonic()
                 with self.lock:
                     self._out_times.extend([now] * len(out))
-                self.hub.publish_rows(np.array(out, dtype=np.float64), "pose")
+                rows = np.array(out, dtype=np.float64)
+                self.history.append(rows)
+                self.hub.publish_rows(rows, "pose")
 
     def _imu(self, rows, offset) -> list:
         out = []
@@ -216,7 +226,12 @@ class EstimatorNode:
             if not covered and imu_live and now - arrived < IMU_WAIT_S:
                 break                                   # wait a little for the IMU to catch up
             self._pending.popleft()
+            d0, r0 = self.fusion.discontinuities, self.fusion.rebases_seen
             row = self.fusion.odom(s, end)
+            if self.fusion.discontinuities != d0:
+                self.events.add(f"odometry discontinuity skipped: {self.fusion.last_discontinuity['reason']}", "warn")
+            if self.fusion.rebases_seen != r0:
+                self.events.add(f"swerve drive encoders rebased (epoch {s.epoch[0]:.0f}): odometry re-referenced")
             if row is not None:
                 out.append(row)
                 with self.lock:
@@ -256,5 +271,9 @@ class EstimatorNode:
             "imu_coverage": None if not used else round(sum(used) / len(used), 4),   # last 5 s of ticks
             "imu_still": self.fusion.heading.still,
             "inputs": inputs,
+            "odometry": {"discontinuities": self.fusion.discontinuities,
+                         "last_discontinuity": self.fusion.last_discontinuity,
+                         "rebases_seen": self.fusion.rebases_seen},
+            "history": self.history.info(),
             "events": self.events.list(),
         }

@@ -137,3 +137,66 @@ def test_heading_track_gap_is_not_bridged():
 def test_initializing_records_are_ignored():
     h = HeadingTrack()
     assert h.add(0.0, 0.01, yaw_q(0.0), (0, 0, 0.1), flags=4) is None and h.end is None
+
+
+def drive_rows(segments, epoch_of=None, pos=None):
+    """Swerve rows for (seconds, vx) segments at 100 Hz, wheels straight ahead. ``epoch_of(k, pos)``
+    may return (enc_epoch, enc_rebasing) and edit ``pos`` in place (a rebase); else no epoch columns."""
+    pos = [0.0] * 4 if pos is None else pos
+    out, k = [], 0
+    for seconds, vx in segments:
+        for _ in range(int(round(seconds * 100))):
+            row = swerve_row(k * 0.01, vx, 0.0, 0.0, pos, 0.01 if k else 0.0)
+            if epoch_of is not None:
+                ep = epoch_of(k, pos)
+                if ep is not None:
+                    for i, m in enumerate(MODULES):
+                        row[f"{m.name}_drive_pos"] = pos[i]
+                    row["enc_epoch"], row["enc_rebasing"] = ep
+            out.append(row)
+            k += 1
+    return out
+
+
+def fuse(f, rows):
+    out = [r for r in (f.odom(odometry_sample(row)) for row in rows) if r is not None]
+    xs = [r[F["x"]] for r in out]
+    return out, max(abs(b - a) for a, b in zip(xs, xs[1:]))
+
+
+def test_rebase_is_invisible_in_the_pose():
+    """Drive 1 m, stop, the swerve node rebases (3 ticks in flight, then epoch 1 with travel 0), drive 1 m."""
+    def epoch_of(k, pos):
+        if k < 250:
+            return (0.0, 0.0)
+        if k < 253:                    # in flight (while stopped): the SPARKs apply it in here
+            if k == 251:
+                pos[:] = [0.0] * 4
+            return (0.0, 1.0)
+        return (1.0, 0.0)
+    f = PoseFusion()
+    rows, step = fuse(f, drive_rows([(2.0, 0.5), (1.0, 0.0), (2.0, 0.5)], epoch_of))
+    assert rows[-1][F["x"]] == pytest.approx(2.0 - 0.005, abs=1e-6)     # the first tick only references
+    assert step < 0.0051 and f.rebases_seen == 1 and f.discontinuities == 0
+    assert rows[-1][F["discontinuities"]] == 0
+
+
+def test_unflagged_jump_is_skipped_not_integrated():
+    """A SPARK brownout: one wheel's travel drops to 0 while driving; no epoch column (old recordings)."""
+    pos = [0.0] * 4
+    rows = drive_rows([(1.0, 0.5)], pos=pos)
+    rows[60][f"{MODULES[2].name}_drive_pos"] = 0.0
+    for r in rows[61:]:                              # that wheel counts on from 0
+        r[f"{MODULES[2].name}_drive_pos"] -= rows[59][f"{MODULES[2].name}_drive_pos"] + 0.005
+    f = PoseFusion()
+    out, step = fuse(f, rows)
+    assert step < 0.0051                             # no false motion
+    assert out[-1][F["x"]] == pytest.approx(0.5 - 0.005 - 0.005, abs=1e-6)   # one tick of motion lost
+    assert f.discontinuities == 1 and out[-1][F["discontinuities"]] == 1
+    assert "jumped" in f.last_discontinuity["reason"] and f.last_discontinuity["t"] == pytest.approx(0.6)
+
+
+def test_large_but_plausible_steps_are_integrated():
+    f = PoseFusion()
+    out, _ = fuse(f, drive_rows([(1.0, 4.0)]))       # 4 m/s: 4 cm per tick, below the jump limit
+    assert f.discontinuities == 0 and out[-1][F["x"]] == pytest.approx(4.0 - 0.04, abs=1e-6)

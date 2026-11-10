@@ -55,7 +55,7 @@ def nodes(tmp_path):
                                                      calibration_file=str(tmp_path / "imu.json")), hub))
     est = EstimatorNode(sw_url, cam_url)
     est_url, est_srv, est_t = serve(estimator_app(est))
-    yield {"est": est_url, "swerve": sw_url, "camera": cam_url, "node": est}
+    yield {"est": est_url, "swerve": sw_url, "camera": cam_url, "node": est, "sims": sims, "sw": sw}
     for srv, t in ((est_srv, est_t), (cam_srv, cam_t), (sw_srv, sw_t)):
         srv.should_exit = True
         t.join(10)
@@ -104,3 +104,57 @@ def test_runs_without_the_camera(nodes):
     finally:
         srv.should_exit = True
         t.join(10)
+
+
+def test_rebase_and_brownout_are_invisible_and_history_answers(nodes):
+    from robot_utils.nodes.estimator.client import EstimatorClient, HistoryUnavailable
+    from robot_utils.nodes.swerve.client import SwerveClient
+    from robot_utils.nodes.swerve.constants import MODULES
+
+    wait_for(lambda: httpx.get(nodes["est"] + "/state").json()["state"] == "running", 15)
+    with EstimatorClient(nodes["est"]) as est, SwerveClient(nodes["swerve"]) as base:
+        est.reset()
+        wait_for(lambda: est.history()["n"] > 20 and est.history()["reset_id"] == est.state()["pose"]["reset_id"])
+        t_before = est.pose()["t"]
+        with base.control("test"):
+            base.drive_for((0.4, 0.0, 0.0), seconds=1.0)
+        wait_for(lambda: (base.encoders()["stationary_s"] or 0) > 0.6, 5)
+        time.sleep(0.2)
+        p0 = est.pose()
+        assert p0["x"] > 0.2
+        # brownout: one drive SPARK's travel back to 0, no epoch change
+        sim = nodes["sims"][MODULES[1].drive_id]
+        with sim._lock:
+            sim.position = 0.0
+        wait_for(lambda: est.state()["odometry"]["discontinuities"] >= 1, 3)
+        # a rebase: epoch change, re-referenced
+        seen = est.state()["odometry"]["rebases_seen"]
+        assert base.rebase_encoders()["max_abs_drive_pos"] < 1e-3
+        wait_for(lambda: est.state()["odometry"]["rebases_seen"] > seen, 3)
+        time.sleep(0.1)
+        p1 = est.pose()
+        assert abs(p1["x"] - p0["x"]) < 1e-3 and abs(p1["y"] - p0["y"]) < 1e-3, (p0, p1)
+        assert est.state()["odometry"]["discontinuities"] == 1
+
+        # history: the drive, relative motion, the same frame throughout
+        h = est.history()
+        assert h["t_start"] <= t_before < h["t_end"] and h["window_s"] == 4 * 3600.0
+        got = est.pose_at([t_before, p0["t"], "now"])
+        assert got["frame"] == "world" and {p["source"] for p in got["poses"][:2]} <= {"exact", "interpolated"}
+        assert got["poses"][2]["source"] == "latest"
+        assert got["poses"][1]["x"] == pytest.approx(p0["x"], abs=1e-9)
+        rel = est.relative(t_before)
+        a = got["poses"][0]
+        assert rel["from_pose"]["x"] == pytest.approx(a["x"]) and rel["reset_id"] == got["reset_id"]
+        assert rel["dx"] == pytest.approx(p1["x"] - a["x"], abs=0.02) and abs(rel["dy"]) < 0.02
+
+        # reset: a clean start; times before it are refused
+        est.reset()
+        wait_for(lambda: est.history()["reset_id"] == got["reset_id"] + 1 and est.history()["n"] > 0)
+        with pytest.raises(HistoryUnavailable) as e:
+            est.pose_at(t_before)
+        assert e.value.status == 404 and e.value.available["reset_id"] == got["reset_id"] + 1
+        with pytest.raises(HistoryUnavailable) as e:
+            est.relative(est.history()["t_end"] + 5.0, "now")
+        assert e.value.status == 409
+        assert httpx.get(nodes["est"] + "/pose_at", params={"t": "soon"}).status_code == 422

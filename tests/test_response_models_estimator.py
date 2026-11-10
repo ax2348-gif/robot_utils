@@ -119,6 +119,13 @@ def test_every_json_endpoint_is_typed_and_lossless_running(raw, swerve_url):
         assert set(st["pose"]) == set(FIELDS) == set(EstimatorPose.model_fields)
         p = call("GET", "/pose")
         assert set(p) == set(FIELDS) and p["omega_imu"] is None                 # NaN -> null
+        assert st["odometry"]["last_discontinuity"] is None and st["history"]["n"] > 0
+        h = call("GET", "/history")
+        t = (h["t_start"] + h["t_end"]) / 2
+        got = call("GET", "/pose_at", params={"t": [str(t), str(h["t_end"]), "now"]})
+        assert [p["source"] for p in got["poses"]][:2] == ["interpolated", "exact"]
+        rel = call("GET", "/relative", params={"from": str(t)})
+        assert rel["to_pose"]["source"] == "latest"
         call("POST", "/reset", json={"x": 1.0})
         assert call("GET", "/health")["state"] == "running"
 

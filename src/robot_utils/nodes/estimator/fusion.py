@@ -19,6 +19,12 @@ difference is the heading increment; the wheel-derived increment is the fallback
 does not cover the interval (``imu_ok`` = 0). Position integrates the body displacement rotated
 by the mid-interval heading. A parallel odometry-only pose (heading from the wheels) is kept for
 comparison; ``omega_wheel - omega_imu`` shows wheel slip / scrub.
+
+Discontinuities in ``drive_pos`` are never integrated: a change of the swerve node's encoder
+epoch (``enc_epoch``, a drive-encoder rebase to 0) or a rebase in flight (``enc_rebasing``)
+re-references the odometry like a gap, and so does any wheel whose travel changed by more than
+``JUMP_SPEED * dt + JUMP_MARGIN`` in one tick (a SPARK brownout resets it to 0; an unflagged
+rebase). The pose is kept; that tick's motion (at most a few cm at full speed) is lost.
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-from ..swerve.constants import MODULES
+from ..swerve.constants import MAX_WHEEL_SPEED, MODULES
 from ..swerve.kinematics import robot_twist
 
 MODULE_NAMES = [m.name for m in MODULES]
@@ -37,11 +43,11 @@ IMU_FLAG_STILL = 2
 FIELDS = ["t", "x", "y", "theta", "vx", "vy", "omega",
           "vx_world", "vy_world", "speed", "distance",
           "x_odom", "y_odom", "theta_odom", "omega_wheel", "omega_imu",
-          "imu_ok", "odom_ok", "imu_lead", "dt", "master", "reset_id"]
+          "imu_ok", "odom_ok", "imu_lead", "dt", "master", "reset_id", "discontinuities"]
 UNITS = ["s", "m", "m", "rad", "m/s", "m/s", "rad/s",
          "m/s", "m/s", "m/s", "m",
          "m", "m", "rad", "rad/s", "rad/s",
-         "bool", "bool", "s", "s", "enum", "count"]
+         "bool", "bool", "s", "s", "enum", "count", "count"]
 FIELD_DOC = {
     "t": "sample time (master: swerve drive-reading time; IMU record end in heading-only mode), Pi monotonic s",
     "x": "position in the world frame (m); world = robot pose at the last reset, x forward, y left",
@@ -62,9 +68,13 @@ FIELD_DOC = {
     "dt": "interval since the previous sample (s)",
     "master": "1 = swerve odometry tick, 2 = IMU record (heading-only mode, no swerve data)",
     "reset_id": "number of pose resets since the node started: a change means the world frame moved",
+    "discontinuities": "wheel-travel jumps skipped since the node started (brownout, unflagged rebase): "
+                       "an increase means a tick's motion was dropped, not integrated",
 }
 MASTER_ODOM, MASTER_IMU = 1.0, 2.0
 MAX_DT = 0.25    # s: a longer gap between master samples is not integrated across (flagged)
+JUMP_SPEED = 1.2 * MAX_WHEEL_SPEED   # m/s: a wheel's travel changing faster than this is a discontinuity
+JUMP_MARGIN = 0.01                   # m, added to JUMP_SPEED * dt
 
 
 def quat_rotate(q, v):
@@ -83,10 +93,17 @@ class OdomSample:
     angle: tuple                   # per module steering angle (rad)
     vel: tuple                     # per module wheel speed (m/s)
     ok: bool
+    epoch: Optional[tuple] = None  # (enc_epoch, enc_rebasing); None for rows without them (old recordings)
+
+
+def _column(row, name: str) -> Optional[float]:
+    names = row.dtype.names if hasattr(row, "dtype") else row
+    return float(row[name]) if name in names else None
 
 
 def odometry_sample(row: dict) -> OdomSample:
-    """Build a sample from a swerve telemetry row (dict or record with the swerve FIELDS)."""
+    """Build a sample from a swerve telemetry row (dict or record with the swerve FIELDS;
+    ``enc_epoch`` / ``enc_rebasing`` are used when present)."""
     pos, ang, vel, ts = [], [], [], []
     for n in MODULE_NAMES:
         pos.append(float(row[f"{n}_drive_pos"]))
@@ -96,7 +113,9 @@ def odometry_sample(row: dict) -> OdomSample:
     ok = all(math.isfinite(v) for v in pos + ang + vel)
     good_t = sorted(t for t in ts if math.isfinite(t))
     t = good_t[len(good_t) // 2] if good_t else float(row["t_tick"])
-    return OdomSample(t, tuple(pos), tuple(ang), tuple(vel), ok)
+    ep, rb = _column(row, "enc_epoch"), _column(row, "enc_rebasing")
+    epoch = None if ep is None else (ep, rb or 0.0)
+    return OdomSample(t, tuple(pos), tuple(ang), tuple(vel), ok, epoch)
 
 
 class HeadingTrack:
@@ -158,6 +177,9 @@ class PoseFusion:
     def __init__(self):
         self.heading = HeadingTrack()
         self.reset_id = -1
+        self.discontinuities = 0          # since construction (not reset): skipped wheel jumps
+        self.rebases_seen = 0             # swerve enc_epoch changes re-referenced across
+        self.last_discontinuity: Optional[dict] = None    # {t, reason}
         self.reset()
 
     def reset(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0):
@@ -177,9 +199,22 @@ class PoseFusion:
         p, self.prev = self.prev, s
         if p is None or not s.ok or not p.ok:
             return None
+        if s.epoch != p.epoch or (s.epoch is not None and s.epoch[1]):
+            # encoder rebase started / confirmed / failed: s is the new reference
+            if s.epoch is not None and p.epoch is not None and s.epoch[0] != p.epoch[0]:
+                self.rebases_seen += 1
+            return None                 # (and nothing is integrated while one is in flight)
         dt = s.t - p.t
         if not (0 < dt <= MAX_DT):
             return None
+        limit = JUMP_SPEED * dt + JUMP_MARGIN
+        for i, n in enumerate(MODULE_NAMES):
+            d = s.pos[i] - p.pos[i]
+            if abs(d) > limit:
+                self.discontinuities += 1
+                self.last_discontinuity = {"t": s.t, "reason": f"{n} drive_pos jumped {d:+.3f} m in {dt * 1e3:.0f} ms "
+                                                               f"({p.pos[i]:.3f} -> {s.pos[i]:.3f} m)"}
+                return None             # re-referenced at s; the pose is kept
         disp = []
         for i in range(len(MODULE_NAMES)):
             d = s.pos[i] - p.pos[i]
@@ -211,7 +246,7 @@ class PoseFusion:
                ct * vx - st * vy, st * vx + ct * vy, math.hypot(vx, vy), self.distance,
                self.xo, self.yo, self.thetao, dth_wheel / dt,
                (dth_imu / dt) if imu_ok else float("nan"),
-               float(imu_ok), 1.0, lead, dt, MASTER_ODOM, float(self.reset_id)]
+               float(imu_ok), 1.0, lead, dt, MASTER_ODOM, float(self.reset_id), float(self.discontinuities)]
         self.last_row = row
         return row
 
@@ -233,6 +268,7 @@ class PoseFusion:
         self.theta += dth
         nan = float("nan")
         row = [t, self.x, self.y, self.theta, 0.0, 0.0, dth / dt, 0.0, 0.0, 0.0, self.distance,
-               self.xo, self.yo, self.thetao, nan, dth / dt, 1.0, 0.0, 0.0, dt, MASTER_IMU, float(self.reset_id)]
+               self.xo, self.yo, self.thetao, nan, dth / dt, 1.0, 0.0, 0.0, dt, MASTER_IMU, float(self.reset_id),
+               float(self.discontinuities)]
         self.last_row = row
         return row
