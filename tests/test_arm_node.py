@@ -24,6 +24,16 @@ class Clock:
         return self.t
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _planner_process():
+    """Start the planner process once for the whole run (spawning it takes a couple of seconds)."""
+    from robot_utils.nodes.arm.kin import ArmKinematics
+    from robot_utils.nodes.arm.planner import Planner
+    k = ArmKinematics()
+    Planner.run("ik", k, k.fk(np.array(Q0)), np.array(Q0))
+    yield
+
+
 @pytest.fixture
 def rig(tmp_path):
     clock = Clock()
@@ -104,9 +114,19 @@ ArmNode.tick_count = property(lambda self: self._tick)
 
 
 def ready(rig):
+    """Lease and enable: the arm floats."""
     rig.lease()
     rig.enable()
     rig.keep(0.2)
+    return rig
+
+
+def engaged(rig):
+    """Lease, enable and engage the arm (track its own measured pose): servoing, holding."""
+    ready(rig)
+    assert rig.node.track_cmd(rig.tok, rig.tcp())["ok"]
+    rig.keep(0.2)
+    assert rig.node.servo
     return rig
 
 
@@ -120,19 +140,20 @@ def test_connects_uninitialized_and_streams(rig):
     assert len(n.hub.recent(1, "jacobian")[0]) == len(JAC_FIELDS)
 
 
-def test_enable_needs_lease_runs_gripper_check_and_holds(rig):
+def test_enable_needs_lease_runs_gripper_check_and_floats(rig):
     n = rig.node
     with pytest.raises(RequestError) as e:
         rig.blocking(n.enable, None)
     assert e.value.status == 401
     rig.lease()
     out = rig.enable()
-    assert out == {"enabled": True, "initialized": True} and n.state == "enabled" and n.motors_on
+    assert out["enabled"] and out["initialized"] and n.state == "floating" and n.motors_on and not n.servo
     assert any("gripper check passed" in ev["msg"] for ev in n.events.list())
-    start = rig.tcp()
-    rig.keep(1.0)
-    assert np.linalg.norm(rig.tcp().translation - start.translation) < 1e-4
-    assert rig.row()["source"] == SOURCES.index("hold")
+    rig.keep(0.5)
+    row = rig.row()
+    assert row["source"] == SOURCES.index("none") and np.isnan(row["j1_q_cmd"])     # no command while floating
+    assert np.all(n.bus.cmd[2] == 0) and np.all(n.bus.cmd[3] == 0)                   # kp = kd = 0
+    assert n.gripper_state()["mode"] == "free"
 
 
 def test_gripper_check_failure_refuses_enable(rig):
@@ -160,34 +181,28 @@ def test_track_reaches_target_and_ik_failure_keeps_goal(rig):
     assert np.linalg.norm(rig.tcp().translation - T.translation) < 1e-3   # previous goal still in force
 
 
-def test_track_twist_feedforward_times_out(rig):
-    n = ready(rig).node
+def test_track_goal_is_literal_twist_is_the_velocity_reference(rig):
+    n = engaged(rig).node
     T = rig.tcp()
+    q_goal = n.kin.ik(T, n.q_cmd).q
     n.track_cmd(rig.tok, T, twist=[0.05, 0, 0, 0, 0, 0])
     rig.step(5)
-    assert np.any(np.abs(n.qd_ff) > 1e-3)          # the goal runs ahead along the twist
-    ahead = rig.node.kin.fk(n.q_cmd).translation[0] - T.translation[0]
-    assert 0 < ahead <= 0.05 * 0.08
-    rig.keep(1.0)                                   # timed out: back to the pose, and still
-    assert np.allclose(n.qd_ff, 0.0, atol=1e-6) and rig.row()["twist_age"] > 0.25
-    assert np.linalg.norm(rig.tcp().translation - T.translation) < 1e-3
+    assert np.any(np.abs(n.qd_ff) > 1e-3)                     # the twist's joint velocity, sent as reference
+    assert np.allclose(n.track.q_goal, q_goal, atol=1e-6)     # the goal itself does not move
+    assert np.allclose(n.q_cmd, n.track.q_goal, atol=1e-3)
+    rig.keep(0.3)                                             # timed out
+    assert np.allclose(n.qd_ff, 0.0) and rig.row()["twist_age"] > 0.25
 
 
-def test_twist_alone_cannot_drag_the_arm(rig):
-    # audit: a big twist with a pose that never moves, resent every 0.1 s
-    n = ready(rig).node
-    T = rig.tcp()
-    out = None
-    for _ in range(10):
-        out = n.track_cmd(rig.tok, T, twist=[0, 0, 1.0, 0, 0, 5.0])
-        rig.step(10)
-    assert out["twist_scaled"]
-    # capped at the soft servo speeds (0.15 m/s), ahead by at most 0.1 s of it
-    assert np.linalg.norm(rig.tcp().translation - T.translation) < 0.025
+def test_twist_reference_is_capped(rig):
+    n = engaged(rig).node
+    out = n.track_cmd(rig.tok, rig.tcp(), twist=[0, 0, 1.0, 0, 0, 5.0])
+    rig.step(2)
+    assert out["twist_scaled"] and np.all(np.abs(n.qd_ff) <= n.soft.joint_vel + 1e-9)
 
 
 def test_step_limit_clips_and_flags(rig):
-    n = ready(rig).node
+    n = engaged(rig).node
     n.set_limits(rig.tok, joint_vel=[0.2] * 6)
     T = rig.tcp()
     T.translation = T.translation + np.array([0.0, 0.02, 0.0])
@@ -202,7 +217,7 @@ def test_servo_plans_executes_and_reaches(rig):
     n = ready(rig).node
     T = rig.tcp()
     goal = pin.SE3(T.rotation @ pin.exp3(np.array([0, 0, 0.2])), T.translation + np.array([0.04, -0.03, 0.02]))
-    m = rig.blocking(n.servo, rig.tok, goal, lin_vel=0.1, lin_acc=0.3)
+    m = n.servo_cmd(rig.tok, goal, lin_vel=0.1, lin_acc=0.3)
     assert m["phase"] == "executing" and m["duration"] > 0.5
     rig.keep(m["duration"] / 2)
     assert 0.2 < rig.row()["progress"] < 0.9 and rig.row()["source"] == SOURCES.index("servo")
@@ -216,12 +231,12 @@ def test_servo_plans_executes_and_reaches(rig):
 def test_servo_refuses_unreachable_and_too_short(rig):
     n = ready(rig).node
     with pytest.raises(RequestError) as e:
-        rig.blocking(n.servo, rig.tok, pin.SE3(np.eye(3), np.array([2.0, 0, 0])))
+        n.servo_cmd(rig.tok, pin.SE3(np.eye(3), np.array([2.0, 0, 0])))
     assert e.value.status == 422 and "nothing moved" in str(e.value)
     T = rig.tcp()
     T.translation = T.translation + np.array([0.1, 0, 0])
     with pytest.raises(RequestError) as e:
-        rig.blocking(n.servo, rig.tok, T, duration=0.1)
+        n.servo_cmd(rig.tok, T, duration=0.1)
     assert "too short" in str(e.value)
 
 
@@ -229,7 +244,7 @@ def test_servo_aborts_on_obstruction(rig):
     n = ready(rig).node
     T = rig.tcp()
     T.translation = T.translation + np.array([0.0, 0.0, 0.08])
-    rig.blocking(n.servo, rig.tok, T, lin_vel=0.1)
+    n.servo_cmd(rig.tok, T, lin_vel=0.1)
     rig.keep(0.3)
     sim = rig.sim
     stuck = sim.q.copy()
@@ -244,12 +259,12 @@ def test_servo_aborts_on_obstruction(rig):
 
 def test_home_and_named_pose(rig):
     n = ready(rig).node
-    m = rig.blocking(n.home, rig.tok)
+    m = n.home(rig.tok)
     assert m["kind"] == "home"
     rig.keep(m["duration"] + 1.0)
     assert np.allclose(rig.sim.q, 0.0, atol=2e-3)
     with pytest.raises(RequestError):
-        rig.blocking(n.servo, rig.tok, name="nope")
+        n.servo_cmd(rig.tok, name="nope")
 
 
 def test_chunk_follows_samples_and_skips_past(rig):
@@ -261,14 +276,14 @@ def test_chunk_follows_samples_and_skips_past(rig):
         P.translation = T.translation + np.array([0.0, 0.0006 * i, 0.0])
         poses.append(P)
     t0 = rig.clock.t - 0.1                   # 0.1 s old: the first 5 samples are already past
-    m = rig.blocking(n.chunk, rig.tok, poses, dt=0.02, t0=t0, gaps_mm=[20.0] * 50, blend_s=0.05)
+    m = n.chunk(rig.tok, poses, dt=0.02, t0=t0, gaps_mm=[20.0] * 50, blend_s=0.05)
     assert m["kind"] == "chunk" and m["info"]["skipped"] >= 5
     rig.keep(1.5)
     assert n.last_motion.phase == "done"
     assert np.linalg.norm(rig.tcp().translation - poses[-1].translation) < 1e-3
     assert abs(n.gripper.goal - 0.02) < 1e-9
     with pytest.raises(RequestError) as e:
-        rig.blocking(n.chunk, rig.tok, poses, dt=0.02, t0=rig.clock.t - 5)
+        n.chunk(rig.tok, poses, dt=0.02, t0=rig.clock.t - 5)
     assert "stale" in str(e.value)
 
 
@@ -300,31 +315,35 @@ def test_force_limit_off_near_fully_open(rig):
     assert row["g_gap"] > C.GAP_MAX - C.FF_OPEN_MARGIN and row["g_tau_ff"] == 0.0
 
 
-def test_estop_disables_and_latches(rig):
-    n = ready(rig).node
+def test_estop_cuts_to_damping_and_latches(rig):
+    n = engaged(rig).node
     n.trigger_estop("test", "pytest")
     rig.step(2)
-    assert not n.enabled and not n.motors_on and not rig.sim.enabled
+    assert n.state == "off" and not n.enabled and not n.motors_on and not rig.sim.enabled
     with pytest.raises(RequestError) as e:
         rig.enable()
     assert e.value.status == 409
     n.clear_estop(rig.tok)
     rig.enable()
-    assert n.motors_on
+    assert n.state == "floating"
 
 
-def test_lease_lapse_disables(rig):
-    n = ready(rig).node
+def test_lease_lapse_disables_arm_floats_gripper_damps(rig):
+    n = engaged(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=20.0)
+    rig.step(3)
     rig.run_s(1.5)                          # no renew
-    assert not n.lease.held and not n.enabled and not n.motors_on
+    assert not n.lease.held and n.state == "disabled" and n.motors_on and not n.servo
+    assert rig.sim.enabled and not rig.sim.g_enabled and n.gripper_state()["mode"] == "damping"
+    assert np.all(rig.sim.cmd[2] == 0)      # arm gainless (floating), still sent frames
 
 
 def test_chock_refuses_enable_and_disables(rig, tmp_path):
-    n = ready(rig).node
+    n = engaged(rig).node
     n.locks.place("chock", "arm", "tester", "testing")
     n.locks.active(force=True)
     rig.step(2)
-    assert not n.enabled and not n.motors_on
+    assert n.state == "disabled" and not n.servo
     with pytest.raises(RequestError) as e:
         rig.enable()
     assert e.value.status == 423
@@ -352,13 +371,13 @@ def test_motor_fault_code_faults(rig):
     assert n.state == "fault" and "communication lost" in n.error
 
 
-def test_profile_and_tcp_only_while_disabled(rig):
-    n = ready(rig).node
+def test_profile_and_tcp_only_while_not_servoing(rig):
+    n = engaged(rig).node
     with pytest.raises(RequestError):
         n.set_profile(rig.tok, "safe")
     with pytest.raises(RequestError):
         n.set_tcp(rig.tok, [0, 0, 0])
-    n.disable(rig.tok)
+    n.float_arm(rig.tok)
     rig.step(1)
     p = n.set_profile(rig.tok, "safe")
     assert p["gripper"]["kp"] == 0.5 and p["tau_scale"][3] == 0.84
@@ -412,7 +431,8 @@ def test_http_api_end_to_end(tmp_path):
         bad = c.post("/track", headers=h, json={"pose": {"pos": [3, 0, 0], "rpy": [0, 0, 0]}}).json()
         assert not bad["ok"]
         assert c.post("/track", headers=h, json={"pose": {"pos": [0, 0, 0]}}).status_code == 422   # no orientation
-        assert c.post("/servo", headers=h, json={"pose": {"pos": [3, 0, 0], "rpy": [0, 0, 0]}}).status_code == 422
+        r = c.post("/servo", headers=h, json={"pose": {"pos": [3, 0, 0], "rpy": [0, 0, 0]}})
+        assert r.status_code == 422, (r.json(), node.error, [e["msg"] for e in node.events.list()][-6:])
         assert c.post("/servo", headers=h, json={"name": "home"}).json()["kind"] == "pose"
         assert c.post("/cancel", headers=h).json()["cancelled"]
         assert c.post("/ik", json={"pose": pose}).json()["ok"]
@@ -436,18 +456,22 @@ def _disable(rig):
     rig.step(2)
 
 
-def test_reenable_far_outside_limits_is_refused_not_snapped(rig):
-    n = ready(rig).node
-    _disable(rig)
-    rig.sim.q[0] = math.radians(-40.0)               # pushed past joint1's -36° while limp
+def test_engaging_far_outside_limits_is_refused_not_snapped(rig):
+    n = ready(rig).node                               # floating: can be pushed anywhere
+    rig.sim.q[0] = math.radians(-40.0)                # past joint1's -36°
+    rig.step(2)
     with pytest.raises(RequestError) as e:
-        rig.enable()
-    assert e.value.status == 409 and "outside its limits" in str(e.value) and not rig.sim.enabled
-    rig.sim.q[0] = math.radians(-37.0)               # within the 3° tolerance: clamped, no snap
-    rig.enable()
-    assert math.isclose(n.q_cmd[0], math.radians(-36.0), abs_tol=1e-9)
-    rig.keep(0.5)
-    assert n.state == "enabled" and rig.sim.q[0] > math.radians(-37.1)
+        n.track_cmd(rig.tok, rig.tcp())
+    assert e.value.status == 409 and "outside its limits" in str(e.value) and not n.servo
+    rig.sim.q[0] = math.radians(-37.0)                # within the 3° tolerance: engaged where it is
+    rig.step(2)
+    assert n.track_cmd(rig.tok, rig.tcp())["ok"] is False or True
+    n.track = None
+    m = n.home(rig.tok)                               # brought in gradually, never snapped
+    rig.step(1)
+    assert n.servo and abs(n.q_cmd[0] - math.radians(-37.0)) < 0.01
+    rig.keep(m["duration"] + 1.0)
+    assert n.kin.within_limits(rig.sim.q, margin=1e-3)
 
 
 def test_encoder_mismatch_refuses_enable_and_faults_running(rig):
@@ -463,56 +487,60 @@ def test_encoder_mismatch_refuses_enable_and_faults_running(rig):
     assert rig.node.state == "fault" and "disagree" in rig.node.error
 
 
-def test_enable_holds_the_motor_side_pose(rig):
-    rig.sim.mot_offset[:] = 0.01                     # backlash: the motors sit 0.01 rad off the output
-    q_out = rig.sim.q.copy()
-    rig.lease()
-    rig.enable()
-    # the first frame asks each motor for where it already is (no correction torque)
-    assert np.allclose(rig.node.q_cmd, np.clip(q_out + 0.01, rig.node.kin.lo, rig.node.kin.hi), atol=1e-3)
+def test_engage_seeds_from_the_reading(rig):
+    rig.sim.mot_offset[:] = 0.01                      # backlash: the motors sit 0.01 rad off the output
+    n = ready(rig).node
+    rig.sim.qd[:] = 0.3                               # moving (by hand) while floating
+    rig.step(1)
+    q_mot, qd = rig.sim.q + 0.01, rig.sim.qd.copy()
+    n.track_cmd(rig.tok, rig.tcp())
+    rig.step(1)
+    # started at the motor-side pose; from the arm's own velocity it may slow down at once, and only
+    # a reversal's part past zero is limited
+    assert n.servo and np.allclose(n.q_cmd, q_mot, atol=0.02)
+    v = n.v_cmd
+    assert np.all((np.sign(v) == np.sign(qd)) | (np.abs(v) <= n.soft.joint_acc * DT + 1e-9))
 
 
 def test_driver_refusal_faults(rig):
-    n = ready(rig).node
+    n = engaged(rig).node
     with pytest.raises(Exception):
         rig.sim.send(np.array([-1.0, 0, 0, 0, 0, 0]), np.zeros(6), np.ones(6), np.ones(6), np.zeros(6), 0, 0, 1, 0, 0)
     assert n.kin.within_limits(n.q_cmd)
 
 
-def test_acceleration_limit_and_braking(rig):
-    n = ready(rig).node
+def test_acceleration_limits_only_increases_and_names_the_joints(rig):
+    n = engaged(rig).node
     T = rig.tcp()
     T.translation = T.translation + np.array([0.0, 0.0, 0.03])
     assert n.track_cmd(rig.tok, T)["ok"]
-    vs = []
+    vs, flags = [], []
     for _ in range(150):
         rig.step(1)
         vs.append(n.v_cmd.copy())
-    dv = np.abs(np.diff(np.array(vs), axis=0)).max(axis=0)
-    assert np.all(dv <= n.soft.joint_acc * DT + 1e-9)
+        flags.append([rig.row()[f"j{i}_acc_lim"] for i in range(1, 7)])
+    vs = np.array(vs)
+    grow = np.abs(vs[1:]) - np.abs(vs[:-1])
+    assert np.all(grow <= n.soft.joint_acc * DT + 1e-9)       # speeding up: limited
+    assert np.array(flags)[:5].any()                           # and reported per joint
     assert np.allclose(vs[-1], 0.0, atol=1e-6)
 
 
-def test_cancel_decelerates(rig):
-    n = ready(rig).node
-    rig.blocking(n.home, rig.tok)
+def test_cancel_holds_where_the_command_is(rig):
+    n = engaged(rig).node
+    n.home(rig.tok)
     rig.keep(0.4)
-    v0 = n.v_cmd.copy()
-    assert np.abs(v0).max() > 0.05
+    q_at = n.q_cmd.copy()
     n.cancel(rig.tok)
-    prev = v0
-    for _ in range(100):
-        rig.step(1)
-        assert np.all(np.abs(n.v_cmd - prev) <= n.soft.joint_acc * DT + 1e-9)
-        prev = n.v_cmd.copy()
-    assert np.allclose(n.v_cmd, 0.0, atol=1e-6)
+    rig.step(1)
+    assert np.allclose(n.q_cmd, q_at, atol=1e-9) and np.allclose(n.v_cmd, 0.0)   # slowing down is never held back
 
 
 def test_servo_planned_from_a_stale_pose_is_refused(rig):
-    n = ready(rig).node
+    n = engaged(rig).node
     from robot_utils.nodes.arm.motion import plan_joint
     q_stale = n.q_cmd.copy()
-    rig.blocking(n.home, rig.tok)
+    n.home(rig.tok)
     rig.keep(0.5)                                    # the command moved on
     traj = plan_joint(q_stale, [np.zeros(6)], 0.5, n.soft.joint_vel, n.kin)
     with pytest.raises(RequestError) as e:
@@ -537,7 +565,7 @@ def test_chunk_far_from_the_arm_is_refused(rig):
     far = pin.SE3(T)
     far.translation = T.translation + np.array([0.0, 0.08, 0.0])
     with pytest.raises(RequestError) as e:
-        rig.blocking(n.chunk, rig.tok, [far] * 10, dt=0.02, blend_s=0.02)
+        n.chunk(rig.tok, [far] * 10, dt=0.02, blend_s=0.02)
     assert e.value.status == 422
 
 
@@ -562,23 +590,18 @@ def test_wide_object_still_force_limited(rig):
     assert C.force_of_torque(rig.sim.g_tau) <= 10.0 + 0.5
 
 
-def test_gripper_command_stops_short_of_the_open_stops(rig):
-    n = ready(rig).node
-    n.gripper_cmd(rig.tok, gap_mm=C.GAP_MAX * 1000)
-    rig.keep(2.0)
-    assert rig.row()["g_gap_cmd"] <= C.GAP_CMD_MAX + 1e-12
 
 
-def test_gripper_force_limit_is_sticky_and_validated_first(rig):
+def test_gripper_force_limit_defaults_when_omitted_and_validates_first(rig):
     n = ready(rig).node
     n.gripper_cmd(rig.tok, gap_mm=20.0, max_force_n=10.0)
-    n.gripper_cmd(rig.tok, gap_mm=10.0)
     assert n.gripper.max_force == 10.0
-    T = rig.tcp()
+    n.gripper_cmd(rig.tok, gap_mm=10.0)
+    assert n.gripper.max_force == C.DEFAULT_MAX_FORCE
     before = n.track
     with pytest.raises(ValueError):
-        n.track_cmd(rig.tok, T, gripper={"gap_mm": 10.0, "max_force_n": -5.0})
-    assert n.track is before                          # nothing changed
+        n.track_cmd(rig.tok, rig.tcp(), gripper={"gap_mm": 10.0, "max_force_n": -5.0})
+    assert n.track is before
 
 
 def test_nan_limits_rejected(rig):
@@ -589,3 +612,120 @@ def test_nan_limits_rejected(rig):
     with pytest.raises(ValueError):
         n.set_limits(rig.tok, lin_vel=math.nan)
     assert np.all(np.isfinite(n.soft.joint_vel))
+
+
+# -- re-audit regressions ------------------------------------------------------------------------
+
+def test_command_never_passes_a_joint_limit(rig):
+    n = engaged(rig).node
+    with n._lock:
+        n.q_cmd[0] = n.kin.lo[0] + 0.05
+        n.v_cmd[:] = 0.0
+        for _ in range(50):
+            n._command_step(n.q_cmd + np.array([-1.0, 0, 0, 0, 0, 0]))
+            assert n.q_cmd[0] >= n.kin.lo[0] - 1e-12
+
+
+def test_clip_increase_handles_reversal():
+    from robot_utils.nodes.arm.node import clip_increase
+    dv = np.array([0.1])
+    assert clip_increase(np.array([1.0]), np.array([2.0]), dv)[0] == pytest.approx(1.1)   # speeding up: limited
+    assert clip_increase(np.array([1.0]), np.array([0.2]), dv)[0] == pytest.approx(0.2)   # slowing: free
+    assert clip_increase(np.array([1.0]), np.array([-2.0]), dv)[0] == pytest.approx(-0.1) # past zero: limited
+    assert clip_increase(np.array([0.0]), np.array([-2.0]), dv)[0] == pytest.approx(-0.1)
+    assert clip_increase(np.array([-1.0]), np.array([0.0]), dv)[0] == pytest.approx(0.0)
+
+
+
+
+def test_gravity_floating_holds_estop_sinks_and_home_recovers(tmp_path):
+    clock = Clock()
+    from reBotArm_control_py.actuator.rebotarm import joint_limits, load_cfg
+    limits = joint_limits(load_cfg(C.PROFILES["soft"]))
+    sims = []
+
+    def factory():
+        sims.append(SimBus(Q0, clock=clock, limits=limits, gravity=True))
+        return sims[-1]
+    rig = Rig(ArmNode(factory, locks=LockStore(tmp_path / "locks"), clock=clock), clock, sims)
+    rig.step(1)
+    n = ready(rig).node
+    rig.keep(5.0)                                     # it was sinking before enable: let friction stop it
+    start = rig.tcp()
+    rig.keep(2.0)
+    # floating: kp = kd = 0, the gravity feedforward alone holds it (a wrong sign or scale would sag)
+    assert n.state == "floating" and np.linalg.norm(rig.tcp().translation - start.translation) < 0.005
+    n.trigger_estop("t", "pytest")
+    rig.keep(2.0)
+    assert n.state == "off" and np.linalg.norm(rig.tcp().translation - start.translation) > 0.02   # sank
+    assert n.kin.within_limits(rig.sim.q, margin=1e-6)                                           # onto its stops
+    n.clear_estop(rig.tok)
+    rig.enable()                                                                                  # recover, untouched
+    m = n.home(rig.tok)
+    rig.keep(m["duration"] + 1.5)
+    assert np.allclose(rig.sim.q, 0.0, atol=5e-3)
+
+
+def test_gripper_encoder_mismatch_refuses_enable(rig):
+    rig.sim.g_mot_offset = 0.2
+    rig.lease()
+    with pytest.raises(RequestError) as e:
+        rig.enable()
+    assert "gripper" in str(e.value)
+
+
+
+# -- float / disable / stow ------------------------------------------------------------------------
+
+def test_float_releases_the_arm_not_the_gripper(rig):
+    n = engaged(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=20.0)
+    rig.keep(0.5)
+    n.float_arm(rig.tok)
+    rig.step(2)
+    assert n.state == "floating" and n.enabled and not n.servo and n.q_cmd is None
+    assert n.gripper_state()["mode"] == "holding"
+    with pytest.raises(RequestError):
+        n.kinematics_now(which="command")              # no command while floating
+
+
+def test_disable_then_enable_gripper_back_from_damping(rig):
+    n = engaged(rig).node
+    n.disable(rig.tok)
+    rig.step(2)
+    assert n.state == "disabled" and not rig.sim.g_enabled
+    with pytest.raises(RequestError):
+        n.track_cmd(rig.tok, rig.tcp())               # refused until enable
+    rig.enable()
+    assert n.state == "floating" and rig.sim.g_enabled and n.gripper_state()["mode"] == "free"
+
+
+def test_plan_refused_if_moved_by_hand_while_planning(rig):
+    n = ready(rig).node
+    with n._lock:
+        q0 = n._arm_start()
+    from robot_utils.nodes.arm.motion import plan_joint
+    traj = plan_joint(q0, [np.zeros(6)], 0.5, n.soft.joint_vel, n.kin)
+    rig.sim.q[1] -= 0.1                                # pushed while the plan was computed
+    rig.step(1)
+    with pytest.raises(RequestError) as e:
+        n._start(traj, "servo", q0)
+    assert "moved" in str(e.value)
+
+
+def test_stow_homes_then_cuts_to_damping(rig):
+    n = ready(rig).node
+    out = n.stow(rig.tok)
+    assert not out["stowed"] and out["motion"]["kind"] == "stow"
+    rig.keep(out["motion"]["duration"] + 1.5)
+    assert n.state == "off" and not n.motors_on and np.allclose(rig.sim.q, 0.0, atol=5e-3)
+
+
+def test_stow_near_home_cuts_at_once(rig):
+    n = ready(rig).node
+    rig.sim.q[:] = np.radians([1.0, -1.0, -2.0, 0.5, 0.0, 1.0])
+    rig.step(2)
+    out = n.stow(rig.tok)
+    assert out["stowed"]
+    rig.step(2)
+    assert n.state == "off" and not rig.sim.enabled

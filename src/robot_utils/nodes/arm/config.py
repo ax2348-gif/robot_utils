@@ -34,7 +34,6 @@ PITCH_RADIUS = 0.008                 # m
 GAP_PER_RAD = 2 * PITCH_RADIUS       # m of jaw gap per rad
 GRIPPER_OPEN_RAD = -3.1              # fully open (calibrated on the robot; 0 = closed)
 GAP_MAX = -GRIPPER_OPEN_RAD * GAP_PER_RAD   # 49.6 mm
-GAP_CMD_MAX = GAP_MAX - 0.001        # the command stops 1 mm short of the printed open stops
 FF_OPEN_MARGIN = 0.005               # m: the force-limit feedforward is off this close to fully open
                                      # (the position command is pulled back instead)
 DEFAULT_MAX_FORCE = 50.0             # N squeeze
@@ -96,23 +95,21 @@ class Limits:
     lin_acc: float = 0.5         # m/s²
     ang_vel: float = 1.0         # rad/s
     ang_acc: float = 3.0         # rad/s²
-    gripper_vel: float = 0.1     # m/s of gap
-    gripper_acc: float = 1.0     # m/s² of gap
     home_vel: float = 0.5        # rad/s, joint-space moves (home, named poses)
 
     def public(self) -> dict:
         return {"joint_vel": [round(float(v), 4) for v in self.joint_vel],
                 "joint_acc": [round(float(v), 4) for v in self.joint_acc], "lin_vel": self.lin_vel,
                 "lin_acc": self.lin_acc, "ang_vel": self.ang_vel, "ang_acc": self.ang_acc,
-                "gripper_vel": self.gripper_vel, "gripper_acc": self.gripper_acc, "home_vel": self.home_vel}
+                "home_vel": self.home_vel}
 
     def copy(self) -> "Limits":
         return Limits(self.joint_vel.copy(), self.joint_acc.copy(), self.lin_vel, self.lin_acc, self.ang_vel,
-                      self.ang_acc, self.gripper_vel, self.gripper_acc, self.home_vel)
+                      self.ang_acc, self.home_vel)
 
 
 HARD = Limits(joint_vel=np.array([2.0, 2.0, 2.0, 6.0, 6.0, 6.0]), joint_acc=np.array([20.0, 20.0, 20.0, 60.0, 60.0, 60.0]),
-              lin_vel=0.5, lin_acc=2.0, ang_vel=3.0, ang_acc=10.0, gripper_vel=0.15, gripper_acc=2.0, home_vel=1.0)
+              lin_vel=0.5, lin_acc=2.0, ang_vel=3.0, ang_acc=10.0, home_vel=1.0)
 DEFAULT_SOFT = Limits(joint_vel=HARD.joint_vel.copy())
 
 

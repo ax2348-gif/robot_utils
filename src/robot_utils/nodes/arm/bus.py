@@ -57,9 +57,11 @@ class ArmBus:
     def connect(self) -> None: ...
     def check_gripper(self) -> float: ...
     def enable(self) -> None: ...
+    def gripper_motor(self, on: bool) -> None: ...
+    def seed(self, q) -> None: ...
     def disable(self) -> None: ...
     def read(self) -> Reading: ...
-    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau) -> None: ...
+    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None: ...
     def close(self) -> None: ...
 
 
@@ -104,6 +106,23 @@ class HardwareBus(ArmBus):
             g.clear_error()
             g.enable()
 
+    def gripper_motor(self, on: bool) -> None:
+        """The gripper motor alone on (gainless until commanded) or off (damping)."""
+        g = self.arm.gripper
+        if on:
+            g._q_last[:] = np.nan
+            g._q_refused[:] = False
+            g.clear_error()
+            g.enable()
+        else:
+            g.disable()
+
+    def seed(self, q) -> None:
+        """Tell the driver the arm's setpoints start at ``q`` (the pose enable holds), so holding a
+        joint that sits just outside its limits is accepted (it refuses setpoints further outside
+        than the last one sent) and nothing is ever corrected toward an old one."""
+        self.arm.arm._q_last[:] = np.asarray(q, float)
+
     def disable(self) -> None:
         self.arm.disable_all()
 
@@ -131,11 +150,14 @@ class HardwareBus(ArmBus):
                        np.array([s.t_mos for s in sts], dtype=float), np.array([s.t_rotor for s in sts], dtype=float),
                        float(xout["gripper"]), float(g.pos), float(g.vel), float(g.torq))
 
-    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau) -> None:
+    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
         self.arm.arm.send_mit(q, vel=qd, kp=kp, kd=kd, tau=tau)
-        self.arm.gripper.send_mit(np.array([g_q]), vel=np.array([g_qd]), kp=np.array([g_kp]),
-                                  kd=np.array([g_kd]), tau=np.array([g_tau]))
-        refused = [n for g in (self.arm.arm, self.arm.gripper) for n, r in zip(g.joint_names, g._q_refused) if r]
+        groups = [self.arm.arm]
+        if gripper:          # a gripper in damping (motor off) gets no frames
+            self.arm.gripper.send_mit(np.array([g_q]), vel=np.array([g_qd]), kp=np.array([g_kp]),
+                                      kd=np.array([g_kd]), tau=np.array([g_tau]))
+            groups.append(self.arm.gripper)
+        refused = [n for g in groups for n, r in zip(g.joint_names, g._q_refused) if r]
         if refused:   # the node keeps its command inside the limits, so this is a bug: stop
             raise BusError(f"the driver refused setpoints for {', '.join(refused)}")
 
@@ -153,15 +175,26 @@ class SimBus(ArmBus):
     G_INERTIA = 0.002
     G_OPEN = -3.1
 
-    def __init__(self, q0=(0.0, -0.3, -0.6, 0.0, 0.0, 0.0), clock=time.monotonic, limits: Optional[dict] = None):
+    # the "true" gravity of the simulated arm: the model's, with the hardware's measured scaling
+    TRUE_TAU_SCALE = np.array([1.0, 1.0, 1.0, 0.84, 0.84, 1.0])
+
+    def __init__(self, q0=(0.0, -0.3, -0.6, 0.0, 0.0, 0.0), clock=time.monotonic, limits: Optional[dict] = None,
+                 gravity: bool = False):
+        """``gravity``: simulate gravity (the node's feedforward must cancel it; disabled joints
+        fall onto stops at the joint limits). Off by default: the arm floats where it is."""
         self.clock = clock
+        self.gravity = gravity
+        self._kin = None
+        self.g_mot_offset = 0.0
         self.q = np.array(q0, dtype=float)
         self.qd = np.zeros(N)
         self.tau = np.zeros(N)
         self.g_q, self.g_qd, self.g_tau = -0.5, 0.0, 0.0
         self.enabled = False
+        self.g_enabled = False
         self.connected = False
         self.cmd = None
+        self.gcmd = None
         self.t = None
         self.object_gap_rad: Optional[float] = None   # e.g. -1.0: something between the jaws
         self.mot_offset = np.zeros(N)                # motor side minus output (backlash, a slipped zero)
@@ -182,27 +215,60 @@ class SimBus(ArmBus):
 
     def enable(self) -> None:
         self.enabled = True
+        self.g_enabled = True
+        self._q_last = np.full(N, np.nan)
+
+    def gripper_motor(self, on: bool) -> None:
+        self.g_enabled = on
+
+    def seed(self, q) -> None:
+        self._q_last = np.asarray(q, float).copy()
 
     def disable(self) -> None:
         self.enabled = False
+        self.g_enabled = False
         self.cmd = None
+        self.gcmd = None
+
+    def _g(self) -> np.ndarray:
+        if not self.gravity:
+            return np.zeros(N)
+        if self._kin is None:
+            from .kin import ArmKinematics
+            self._kin = ArmKinematics(self.setpoint_limits)
+        return self._kin.gravity(self.q) * self.TRUE_TAU_SCALE
+
+    def _stops(self) -> None:
+        if self._kin is not None:      # hard stops at the joint limits
+            lo, hi = self._kin.lo, self._kin.hi
+            hit = (self.q < lo) | (self.q > hi)
+            self.q = np.clip(self.q, lo, hi)
+            self.qd[hit] = 0.0
 
     def _step(self, dt: float) -> None:
+        g = self._g()                  # torque the motors must supply to hold still
         c = self.cmd if self.enabled else None
-        if c is None:
+        if c is None:                  # off: damping
             self.tau[:] = 0.0
-            self.qd *= math.exp(-dt / 0.05)
-            self.q += self.qd * dt
-            self.g_qd = 0.0
-            self.g_tau = 0.0
-            return
-        q, qd, kp, kd, _tau, g_q, g_qd, g_kp, g_kd, g_tau = c
-        self.tau = kp * (q - self.q) + kd * (qd - self.qd)     # gravity cancels the feedforward
-        self.qd += self.tau / self.INERTIA * dt
+            if self.gravity:           # sinks (viscous joint friction)
+                self.qd += (-g - 0.5 * self.qd) / self.INERTIA * dt
+            else:
+                self.qd *= math.exp(-dt / 0.05)
+        else:
+            q, qd, kp, kd, tau_ff = c
+            self.tau = kp * (q - self.q) + kd * (qd - self.qd) + (tau_ff if self.gravity else 0.0)
+            self.qd += (self.tau - g - 0.1 * self.qd) / self.INERTIA * dt     # + a little joint friction
         self.q += self.qd * dt
-        gt = g_kp * (g_q - self.g_q) + g_kd * (g_qd - self.g_qd) + g_tau
-        self.g_tau = gt
-        self.g_qd += gt / self.G_INERTIA * dt
+        self._stops()
+        gc = self.gcmd if (self.enabled and self.g_enabled) else None
+        if gc is None:                 # damping: comes to rest
+            self.g_tau = 0.0
+            self.g_qd *= math.exp(-dt / 0.02)
+        else:
+            g_q, g_qd, g_kp, g_kd, g_tau = gc
+            gt = g_kp * (g_q - self.g_q) + g_kd * (g_qd - self.g_qd) + g_tau
+            self.g_tau = gt
+            self.g_qd += gt / self.G_INERTIA * dt
         self.g_q += self.g_qd * dt
         stop = 0.0 if self.object_gap_rad is None else self.object_gap_rad
         if self.g_q > stop:                      # closed onto the stop / the object
@@ -223,17 +289,29 @@ class SimBus(ArmBus):
         status = np.full(N + 1, 1.0 if self.enabled else 0.0)
         status[0] = self.fault_code or status[0]
         return Reading(now, self.q.copy(), self.q + self.mot_offset, self.qd.copy(), self.tau.copy(), status,
-                       np.full(N + 1, 35.0), np.full(N + 1, 38.0), self.g_q, self.g_q, self.g_qd, self.g_tau)
+                       np.full(N + 1, 35.0), np.full(N + 1, 38.0), self.g_q, self.g_q + self.g_mot_offset,
+                       self.g_qd, self.g_tau)
 
-    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau) -> None:
+    def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
+        # as the real driver (JointGroup._legal): a setpoint outside the limits is refused unless
+        # it is no further outside than the last one sent
         names = [f"joint{i}" for i in range(1, N + 1)]
-        bad = [n for n, v in zip(names, q) if not (self.setpoint_limits.get(n, (-math.inf, math.inf))[0] - 1e-9 <= v
-                                                     <= self.setpoint_limits.get(n, (-math.inf, math.inf))[1] + 1e-9)]
-        if bad:      # as the real driver: refused (it would hold an old setpoint)
-            raise BusError(f"the driver refused setpoints for {', '.join(bad)}")
+        lo = np.array([self.setpoint_limits.get(n, (-math.inf, math.inf))[0] for n in names])
+        hi = np.array([self.setpoint_limits.get(n, (-math.inf, math.inf))[1] for n in names])
+        q = np.asarray(q, float)
+        out = np.maximum(lo - q, q - hi)
+        last = getattr(self, "_q_last", np.full(N, np.nan))
+        last_out = np.maximum(lo - last, last - hi)
+        checked = np.asarray(kp, float) != 0.0       # kp = 0 (floating): position ignored, not checked
+        ok = ~checked | (out <= 1e-9) | (out <= last_out + 1e-12)
+        if not np.all(ok):
+            raise BusError(f"the driver refused setpoints for {', '.join(n for n, k in zip(names, ok) if not k)}")
+        self._q_last = np.where(checked, q, last)
         if self.enabled:
             self.cmd = (np.array(q, float), np.array(qd, float), np.array(kp, float), np.array(kd, float),
-                        np.array(tau, float), float(g_q), float(g_qd), float(g_kp), float(g_kd), float(g_tau))
+                        np.array(tau, float))
+            if gripper:
+                self.gcmd = (float(g_q), float(g_qd), float(g_kp), float(g_kd), float(g_tau))
 
     def close(self) -> None:
         self.connected = False

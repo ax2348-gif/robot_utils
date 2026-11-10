@@ -119,13 +119,12 @@ class TcpIn(BaseModel):
 class LimitsIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     joint_vel: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s per joint.")
-    joint_acc: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s² per joint.")
+    joint_acc: Optional[list[float]] = Field(None, min_length=6, max_length=6,
+                                             description="rad/s² per joint: limits only increases of commanded speed.")
     lin_vel: Optional[float] = None
     lin_acc: Optional[float] = None
     ang_vel: Optional[float] = None
     ang_acc: Optional[float] = None
-    gripper_vel: Optional[float] = Field(None, description="m/s of gap.")
-    gripper_acc: Optional[float] = Field(None, description="m/s² of gap.")
     home_vel: Optional[float] = Field(None, description="rad/s, joint-space moves.")
 
 
@@ -159,11 +158,15 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
         title="Arm node",
         description=(
             "Gravity-compensated Cartesian control of the reBot Arm B601-DM and its 100 Hz telemetry.\n\n"
+            "States: off (motors off, damping) → enable → floating (gravity compensated, no servoing; the "
+            "first arm command engages servoing from the measured pose) ⇄ servoing; `POST /float` back to "
+            "floating; `POST /disable` (or a lapsed lease, a chock): arm floating, gripper in damping, commands "
+            "refused; `POST /stow`: safe homing then off; `POST /estop`: off, latched.\n\n"
             "`POST /lease` → token; `POST /enable` (the first enable closes the gripper to check it); then "
             "`POST /track` (stream poses; the optional twist feedforward lasts "
             f"{TWIST_TIMEOUT} s, the pose holds), `POST /servo` (planned move, reports reached), `POST /chunk`, "
-            "`POST /home`, `POST /gripper`. Disable and e-stop switch the motors off: the arm falls under "
-            f"gravity. The lease lapses after {LEASE_HEARTBEAT} s without a renew or command, which disables. "
+            "`POST /home`, `POST /gripper`. "
+            f"The lease lapses after {LEASE_HEARTBEAT} s without a renew or command, which disables. "
             "No joint commands exist by design; joint positions are readings, named poses and lookup inputs only."),
         version="0.1.0", lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
@@ -251,16 +254,27 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
         node.release(token)
         return {"released": True}
 
-    @app.post("/enable", tags=["control"], summary="Motors on, holding the measured pose (holder; first time: gripper check)")
+    @app.post("/enable", tags=["control"], summary="Enable: the arm floats until a command engages it (holder; first time: gripper check)")
     async def enable(token: LeaseToken = None):
+        """Motors on, gravity compensated. The arm floats (kp = kd = 0) until the first closed-loop arm
+        command (track, servo, chunk, home, stow) engages servoing from the measured pose; the gripper
+        is free until a gripper command makes it hold (disable puts it into damping; enable frees it again). 409 with the reason if an output encoder
+        disagrees with its motor."""
         return await asyncio.to_thread(node.enable, token)
 
-    @app.post("/disable", tags=["control"], summary="Motors off: the arm falls under gravity (holder)")
+    @app.post("/disable", tags=["control"], summary="Disable: the arm floats, the gripper goes into damping, commands refused (holder)")
     async def disable(token: LeaseToken = None):
-        node.disable(token)
-        return {"enabled": False}
+        return node.disable(token)
 
-    @app.post("/estop", tags=["control"], summary="E-stop: anyone; motors off; latches until the holder clears it")
+    @app.post("/float", tags=["control"], summary="Float the arm: stays enabled, servoing off, gravity on (holder); the gripper is untouched")
+    async def float_arm(token: LeaseToken = None):
+        return node.float_arm(token)
+
+    @app.post("/stow", tags=["control"], summary="Safe homing, then motors off (damping) at home; at once if already within 3° of home (holder)")
+    async def stow(token: LeaseToken = None):
+        return await asyncio.to_thread(node.stow, token)
+
+    @app.post("/estop", tags=["control"], summary="E-stop: anyone; all motors off (damping); latches until the holder clears it")
     async def estop(request: Request, body: Optional[EStopIn] = None):
         body = body or EStopIn()
         src = body.source or (request.client.host if request.client else "")
@@ -290,7 +304,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/servo", tags=["motion"], summary="Planned move to a pose or a named pose (422 if refused; nothing moves)")
     async def servo(body: ServoIn, token: LeaseToken = None):
-        return await asyncio.to_thread(node.servo, token, body.pose.se3() if body.pose else None, body.name,
+        return await asyncio.to_thread(node.servo_cmd, token, body.pose.se3() if body.pose else None, body.name,
                                        body.lin_vel, body.lin_acc, body.ang_vel, body.ang_acc, body.duration)
 
     @app.post("/home", tags=["motion"], summary="Slow joint-space move to the home pose (through home_via)")
@@ -306,7 +320,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def cancel(token: LeaseToken = None):
         return node.cancel(token)
 
-    @app.post("/gripper", tags=["motion"], summary="Gripper gap (mm) with a force limit")
+    @app.post("/gripper", tags=["motion"], summary="Gripper gap (mm) with a force limit: makes it hold")
     async def gripper(body: GripperIn, token: LeaseToken = None):
         return node.gripper_cmd(token, body.gap_mm, body.max_force_n)
 
@@ -322,10 +336,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/kinematics", tags=["kinematics"], summary="The same at given joint configurations (planning lookups)")
     async def kin_lookup(body: KinIn):
-        for q in body.q:
-            if len(q) != 6:
-                raise ValueError("each configuration has 6 joint angles")
-        return {"results": await asyncio.to_thread(lambda: [node.kinematics(q, body.frame) for q in body.q])}
+        return {"results": await asyncio.to_thread(node.kinematics_batch, body.q, body.frame)}
 
     @app.get("/links", tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
     async def links():
