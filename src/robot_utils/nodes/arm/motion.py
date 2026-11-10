@@ -166,10 +166,10 @@ def plan_servo(kin: ArmKinematics, q_start, goal: pin.SE3, *, lin_vel: float, li
         raise PlanError("empty trajectory")
     t = np.array([p.time for p in pts])
     q = np.array([p.q[:N] for p in pts])
-    # finite-difference velocity feedforward, zero at the end (as RebotArmEndPose: dt = T / len)
-    dt_pt = T / len(q)
+    # finite-difference velocity feedforward, zero at the end (as RebotArmEndPose, but over the
+    # samples' actual spacing: it divided T by the number of points, not of intervals)
     qd = np.zeros_like(q)
-    qd[:-1] = (q[1:] - q[:-1]) / dt_pt
+    qd[:-1] = (q[1:] - q[:-1]) / np.diff(t)[:, None]
     ratio, idx = _check_speeds(t, q, joint_vel)
     if ratio > 1.0:
         j = int(np.argmax(np.abs(q[idx + 1] - q[idx]) / joint_vel)) + 1
