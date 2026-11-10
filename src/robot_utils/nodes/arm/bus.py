@@ -118,7 +118,12 @@ class HardwareBus(ArmBus):
         """The gripper motor alone on (gainless until commanded) or off (damping)."""
         g = self.arm.gripper
         if on:
-            self._prepare(g)
+            # The arm motors are on (floating) meanwhile and need a frame every tick: no mode switch
+            # here (its MIT mode was set and confirmed at the full enable, and switching the motor
+            # off does not change it; mode_mit blocks for ~0.3 s, past the arm's 100 ms watchdog).
+            g._q_last[:] = np.nan
+            g._q_refused[:] = False
+            g.clear_error()            # 20 ms settle
             g.enable()
         else:
             g.disable()
