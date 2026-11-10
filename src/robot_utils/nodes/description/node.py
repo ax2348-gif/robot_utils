@@ -261,12 +261,12 @@ class DescriptionNode:
                 job.state = "done"
                 self.events.add(f"job {job.id} ({kind}) done: {job.result.get('summary', '')}")
             except Aborted as e:
-                job.state, job.error = "aborted", str(e)
-                if e.raw:
+                if e.raw:               # saved before the state flips, so a final state has its recording
                     try:
                         job.raw_path = self.store.save_aborted(kind, job.id, e.raw)
                     except Exception:
                         log.exception("could not save the aborted run's recording")
+                job.state, job.error = "aborted", str(e)
                 self.events.add(f"job {job.id} ({kind}) aborted: {e}"
                                 + (f" (recording: {job.raw_path.name})" if job.raw_path else ""), "warn")
             except Exception as e:
