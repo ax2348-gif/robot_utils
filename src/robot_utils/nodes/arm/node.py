@@ -326,6 +326,8 @@ class ArmNode:
             self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
             Planner.warm(self.kin)          # start the planner process now, not on the first plan
             self._base, self.error = "uninitialized", None
+            self._last_t = None             # the tick clock starts afresh (no bogus "late" tick)
+            self._fresh_t = None
             self.events.add("connected (watchdog and joint readings checked); enable runs the gripper check")
         except Exception as e:  # noqa: BLE001 - stay in connecting and retry
             self.bus = None
