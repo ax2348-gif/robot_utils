@@ -19,6 +19,11 @@ dependencies = [
     # Nodes (src/robot_utils/nodes) and the landing frontend (src/robot_utils/frontend)
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # uvicorn's "auto" loop/http pick these when importable (25-35 % less server CPU per request
+    # than asyncio + h11, lower stream tail latency on the Pi); not uvicorn[standard], whose
+    # watchfiles / websockets / dotenv the nodes don't use
+    "uvloop>=0.19; sys_platform != 'win32'",
+    "httptools>=0.6.3",
     "httpx>=0.27",
     "pyyaml>=6",
     "numpy",
