@@ -14,6 +14,43 @@ it stops sending, and the twist feedforward times out (0.25 s) into a hold. A po
 is not integrated past.
 """
 
+import json
+
+# The arm drawn as wireframe boxes: [frame, cx, cy, cz, sx, sy, sz], centre and size in mm, axis-aligned
+# in the frame. Derived offline from the visual meshes of rebot_ctl/urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf
+# (meshes/visual + meshes/shared, read with numpy): every vertex in its link frame (the visual origin
+# applied: base_link yaw -pi/2; link6's meshes moved into end_link through end_joint), and each box the
+# bounding box of the vertices in one region of the link:
+#   base:  plate = vertices outside |x|, |y| <= 47 mm; column = inside (up to joint 1)
+#   link1, link2, link5: the whole link
+#   link3, link4 (L-shaped): hub at the joint = y > -21 mm (link3) / y > -30 mm (link4); beam = the rest
+#   gripper (end_link frame; x points out between the jaws, origin at the fingertips, y = jaw travel):
+#     motor block = link6 (the gripper motor and its flange; it turns with joint 6) plus the gripper
+#       base's central housing (|y| < 32 mm, x < -81 mm);
+#     rail = the gripper base's bar (|y| >= 32 mm), its full width;
+#   finger (finger_left_link at gap 0; the right one is its mirror in y), moved along end_link y by
+#     half the measured gap:
+#     jaw root = the carriage and travel stop + the finger mesh behind x = -55 mm (the rear plate);
+#     jaw = the finger mesh in front of it (the prong), extended back to the root's front face (x -59
+#       mm: the mesh has no vertices in between). The prong tapers from +-16.5 mm (z) at its root
+#       to +-4 mm at the tip; the box bounds it. The crossed rack moves with the finger but runs
+#       inside the rail, so it is not drawn.
+ARM_BOXES = [
+    ["base", 0.0, 0.0, 7.0, 200.0, 140.0, 14.0],        # mounting plate
+    ["base", 0.0, -0.2, 43.8, 92.0, 92.3, 87.7],        # column, joint 1 motor
+    ["link1", 6.7, 0.0, 42.0, 83.8, 77.2, 83.9],        # shoulder bracket, joint 2 motor
+    ["link2", -132.0, 0.0, -31.6, 321.0, 57.0, 67.4],   # upper arm
+    ["link3", 6.5, 2.6, -31.1, 57.8, 39.9, 80.2],       # elbow hub
+    ["link3", 122.2, -52.0, -31.1, 297.8, 60.9, 80.2],  # forearm, joint 4 motor
+    ["link4", 5.1, -0.2, -30.0, 66.3, 56.2, 66.8],      # wrist hub
+    ["link4", 54.0, -59.4, -30.0, 127.5, 57.3, 66.8],   # wrist beam, joint 5 motor
+    ["link5", -2.8, 0.0, 35.5, 70.0, 77.0, 85.0],       # joint 6 motor housing
+    ["end", -121.0, 0.0, 0.0, 78.5, 63.6, 77.0],        # gripper motor block
+    ["end", -88.2, 0.0, 0.0, 30.0, 184.1, 20.6],        # gripper linear rail
+    ["finger", -70.8, 17.1, 0.0, 23.7, 34.3, 39.2],     # jaw root (carriage)
+    ["finger", -29.4, 6.8, 0.0, 58.9, 13.6, 32.9],      # jaw (prong; inner face at y = 0)
+]
+
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Arm</title>
@@ -91,7 +128,7 @@ canvas.ru-plot{height:110px}
   <div class="ru-card a-view" data-panel="view" data-role="view">
     <div class="sub"><b>View</b>
       <span class="ctl"><button class="ru" data-v="iso">3D</button><button class="ru" data-v="top">Top</button><button class="ru" data-v="side">Side</button><button class="ru" data-v="front">Front</button></span></div>
-    <canvas id="view" role="img" aria-label="The arm in its base frame: links, joint axes, gripper, TCP frames and the velocity ellipsoid"></canvas>
+    <canvas id="view" role="img" aria-label="The arm in its base frame: links and gripper as wireframe boxes, joint axes, TCP frames and the velocity ellipsoid"></canvas>
     <div class="legend ru-muted">
       <span><i style="border-color:var(--ink)"></i>measured</span>
       <span><i style="border-top-style:dashed;border-color:var(--muted)"></i>commanded TCP</span>
@@ -204,6 +241,7 @@ const col = (R, j) => [R[0][j], R[1][j], R[2][j]];
 const VIEWS = {iso: {az: Math.PI - 0.7, el: 0.5}, top: {az: Math.PI, el: Math.PI / 2 - 1e-4}, side: {az: -Math.PI / 2, el: 0.02}, front: {az: 0, el: 0.02}};
 const AXC = ["#ef4444", "#22c55e", "#3b82f6"];        // x y z, as on the description page
 const SIG = {warn: 0.02, crit: 0.007};                  // sigma_min thresholds (6x6 TCP Jacobian)
+const ARM_BOXES = __ARM_BOXES__;                       // [frame, centre xyz, size xyz] mm (page.py ARM_BOXES)
 class ArmView {
   constructor(cv){
     this.cv = cv; this.g = cv.getContext("2d"); this.d = {}; this.raf = 0; this.view = Object.assign({zoom: 1}, VIEWS.iso);
@@ -248,28 +286,31 @@ class ArmView {
     for (const R0 of [0.2, 0.4, 0.6]){ const pts = []; for (let k = 0; k <= 72; k++){ const t = k / 72 * 2 * Math.PI; pts.push([R0 * Math.cos(t), R0 * Math.sin(t), 0]); }
       path(pts, C.rule, 1); text([R0, 0, 0], R0.toFixed(1) + " m", C.muted, 4, 14); }
     triad({p: [0, 0, 0], R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}, 0.08, 1.5);
-    // the base: a cylinder up to joint 1
-    const zb = 0.06, rb = 0.045, ring = z => { const pts = []; for (let k = 0; k <= 36; k++){ const t = k / 36 * 2 * Math.PI; pts.push([rb * Math.cos(t), rb * Math.sin(t), z]); } return pts; };
+    // the arm as wireframe boxes (ARM_BOXES, mm, from the URDF meshes): each box's 12 edges in its frame
+    const box = (Tf, b, colr, w, sy) => { const Q = [];
+      for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) Q.push(P(tp(Tf, [(b[1] + i * b[4] / 2) / 1000, sy * (b[2] + j * b[5] / 2) / 1000, (b[3] + k * b[6] / 2) / 1000])));
+      g.strokeStyle = colr; g.lineWidth = w; g.setLineDash([]); g.beginPath();
+      for (const [a, c] of [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]]){ g.moveTo(Q[a][0], Q[a][1]); g.lineTo(Q[c][0], Q[c][1]); }
+      g.stroke(); };
+    const I3 = {p: [0, 0, 0], R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]};
     const ink = fresh ? C.ink : C.muted;
-    path(ring(0), ink, 1.25); path(ring(zb), ink, 1.25);
-    const hn = Math.hypot(r[0], r[1]) || 1, sx = r[0] / hn * rb, sy = r[1] / hn * rb;
-    seg([sx, sy, 0], [sx, sy, zb], ink, 1.25); seg([-sx, -sy, 0], [-sx, -sy, zb], ink, 1.25);
+    for (const b of ARM_BOXES) if (b[0] === "base") box(I3, b, ink, 1.25, 1);
     if (!frames){ g.font = "13px " + C.font; g.fillStyle = C.muted; g.fillText("waiting for the arm's joint readings", 12, 22); return; }
     const T = frames.map(fr => ({p: fr.pos, R: qToR(fr.quat)}));
-    const E = T[6], tcp = T[7], gap = fin(D_.gap) ? D_.gap : 0;
-    const palm = tp(E, [-0.07, 0, 0]);
-    const chain = [[0, 0, zb], T[0].p, T[1].p, T[2].p, T[3].p, T[4].p, T[5].p, palm];
+    const E = T[6], tcp = T[7], gap = fin(D_.gap) ? Math.max(0, Math.min(D_.gap, 0.057)) : 0;
+    const FR = {link1: T[0], link2: T[1], link3: T[2], link4: T[3], link5: T[4], link6: T[5], end: E};
     // shadow on the base plane: where the arm is over the floor
-    path(chain.map(q => [q[0], q[1], 0]).concat([[E.p[0], E.p[1], 0]]), C.rule, 1.5, [4, 4]);
-    // links, joint axes, joints
-    path(chain, ink, 2.5);
-    for (let k = 0; k < 6; k++){ const z = col(T[k].R, 2); seg(add(T[k].p, z, -0.024), add(T[k].p, z, 0.024), C.muted, 1.5); }
+    const chain = [[0, 0, 0], T[0].p, T[1].p, T[2].p, T[3].p, T[4].p, T[5].p, E.p];
+    path(chain.map(q => [q[0], q[1], 0]), C.rule, 1.5, [4, 4]);
+    // links and the gripper's motor block and rail
+    for (const b of ARM_BOXES) if (FR[b[0]]) box(FR[b[0]], b, ink, 1.25, 1);
+    // the jaws at the measured gap: each moves gap/2 along end_link y (the right one mirrored)
+    for (const sgn of [1, -1]){ const Tj = {p: tp(E, [0, sgn * gap / 2, 0]), R: E.R};
+      for (const b of ARM_BOXES) if (b[0] === "finger") box(Tj, b, ink, 1.5, sgn); }
+    // joint axes and joints
+    for (let k = 0; k < 6; k++){ const z = col(T[k].R, 2); seg(add(T[k].p, z, -0.05), add(T[k].p, z, 0.05), C.muted, 1.25, [3, 3]); }
     g.setLineDash([]);
-    for (let k = 0; k < 6; k++){ const a = P(T[k].p); g.beginPath(); g.arc(a[0], a[1], 4, 0, 2 * Math.PI); g.fillStyle = C.panel; g.fill(); g.strokeStyle = ink; g.lineWidth = 1.5; g.stroke(); }
-    // gripper at its measured gap: palm across, two fingers along end_link x, jaws apart along its y
-    const gy = Math.min(gap, 0.06) / 2 + 0.003, hw = Math.max(0.03, gy + 0.004);
-    seg(tp(E, [-0.07, -hw, 0]), tp(E, [-0.07, hw, 0]), ink, 2);
-    for (const sgn of [-1, 1]) path([tp(E, [-0.07, sgn * gy, 0]), tp(E, [0, sgn * gy, 0]), tp(E, [0, sgn * (gy - 0.004), 0])], ink, 2);
+    for (let k = 0; k < 6; k++){ const a = P(T[k].p); g.beginPath(); g.arc(a[0], a[1], 3.5, 0, 2 * Math.PI); g.fillStyle = C.panel; g.fill(); g.strokeStyle = ink; g.lineWidth = 1.5; g.stroke(); }
     // the velocity ellipsoid at the TCP: principal sections, semi-axes = singular values x 0.25 m per (m/s per rad/s)
     const K = D_.kin;
     if (K && K.lin_axes && now - D_.kinAt < 2000){
@@ -610,4 +651,4 @@ function frame(){ plot.draw(); requestAnimationFrame(frame); }
 requestAnimationFrame(frame);
 render();
 </script></body></html>
-"""
+""".replace("__ARM_BOXES__", json.dumps(ARM_BOXES))
