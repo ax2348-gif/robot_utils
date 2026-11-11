@@ -352,6 +352,7 @@ class GoalOut(BaseModel):
     warnings: list[str] = Field(description="The check's warnings (the goal is executed regardless).")
     bev: Optional[str] = Field(description="Relative URL of a bird's-eye PNG of the check; null if unchecked.")
     wait: str = Field(description="Relative URL to long-poll for the result.")
+    reflex_margin_m: Optional[float] = Field(None, description="The stop reflex's margin for this goal (m).")
 
 
 class GoalResult(BaseModel):
@@ -493,7 +494,10 @@ class PoseServoBrief(BaseModel):
 class ReflexTick(BaseModel):
     t: float = Field(description="Unix epoch s.")
     v: float = Field(description="m/s: translation speed.")
-    lookahead_m: float = Field(description="m: braking distance + latency + margin checked ahead.")
+    lookahead_m: float = Field(description="m checked ahead of the bumper: the stopping distance (one check interval "
+                                           "+ latency at v, then jerk-limited braking) + the margin.")
+    margin_m: Optional[float] = Field(None, description="m: the margin in force (the goal's reflex_margin_m).")
+    tick_s: Optional[float] = Field(None, description="s: measured interval between checks.")
     points: int = Field(description="Obstacle points found in that zone.")
 
 
@@ -504,6 +508,8 @@ class Reflex(BaseModel):
     last: Union[ReflexTick, str, None] = Field(description="The last check, or `error: ...`; null before the first.")
     blind: Optional[str] = Field(description="Set while moving outside the camera's view.")
     stops: int = Field(description="Stops so far.")
+    margin: float = Field(description="m: the margin of the current goal (default 0.12).")
+    tick_errors: int = Field(description="Checks that failed (no frame, ...): the reflex did not look that time.")
 
 
 class GoalBrief(BaseModel):

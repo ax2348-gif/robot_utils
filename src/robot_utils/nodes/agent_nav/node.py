@@ -46,7 +46,16 @@ POSE_HISTORY_S = 30.0
 REFLEX_HZ = 6.0
 REFLEX_POINTS = 25           # obstacle points ahead needed to trigger the reflex
 REFLEX_LATENCY = 0.35        # s: depth age + reaction, added to the braking distance
-REFLEX_MARGIN = 0.12         # m
+REFLEX_MARGIN = 0.12         # m: default gap left in front of what stops the reflex (beyond braking + latency)
+REFLEX_MARGIN_MAX = 1.0      # m: a goal may set its margin anywhere in (0, this]
+
+
+def stopping_distance(v: float, accel: float, jerk: float, tick_s: float = 1.0 / REFLEX_HZ) -> float:
+    """m travelled from the moment an obstacle enters the zone until the base stands still:
+    detection (up to one reflex tick) + latency (depth age, reaction) at speed v, then pose_servo's
+    jerk-limited braking (v²/2a, plus v·a/2j while the deceleration ramps up). The reflex margin
+    is added on top of this, so a small margin still stops before what it sees."""
+    return v * (tick_s + REFLEX_LATENCY) + v * v / (2 * accel) + v * accel / (2 * jerk)
 MAX_AVATAR = 64 * 1024       # bytes (data URI)
 CHECK_SNAPSHOTS = 6          # path checks also use this many recent snapshots (coverage, obstacles)
 STALE_MOVE_M = 0.10          # a snapshot is stale once the robot moved this far / turned this much since
@@ -129,7 +138,9 @@ class AgentNav:
         self.enabled_by: Optional[str] = None
         self.enabled_at = 0.0                   # monotonic s when our last /enable returned (watcher ignores older polls)
         self.caps: Optional[dict] = None
-        self.reflex = {"enabled": True, "armed": False, "last": None, "blind": None, "stops": 0}
+        self.reflex = {"enabled": True, "armed": False, "last": None, "blind": None, "stops": 0,
+                       "margin": REFLEX_MARGIN, "tick_errors": 0}
+        self._reflex_tick_s = 1.0 / REFLEX_HZ      # measured interval between reflex checks (EMA)
         self._n_snap = self._n_img = self._n_q = 0
         self._ps_status = None
         self._threads = [threading.Thread(target=self._read_poses, name="poses", daemon=True),
@@ -711,6 +722,11 @@ class AgentNav:
         self._need_session(actor)
         if self.latch is not None and actor != "human":
             raise RequestError(423, f"held by the human operator ({self.latch['why']})")
+        options = dict(options)
+        margin = options.pop("reflex_margin_m", None)          # agent_nav's own (the reflex); not pose_servo's
+        if margin is not None and not (0 < float(margin) <= REFLEX_MARGIN_MAX):
+            raise ValueError(f"reflex_margin_m must be > 0 and <= {REFLEX_MARGIN_MAX:g} m")
+        margin = REFLEX_MARGIN if margin is None else float(margin)
         bad = set(options) - set(GOAL_OPTIONS)
         if bad:
             raise ValueError(f"unknown goal options {sorted(bad)}")
@@ -719,15 +735,16 @@ class AgentNav:
         lx, ly, lth = r["local"]
         body = {"frame": "local", "x": lx, "y": ly, "theta": lth, **{k: v for k, v in options.items() if v is not None}}
         ps = self._call("pose_servo", "POST", "/goal", body)
-        rec = GoalRec(ps["goal_id"], {"frame": frame, "x": x, "y": y, "theta": theta, **options}, r, chk, actor,
-                      time.monotonic())
+        rec = GoalRec(ps["goal_id"], {"frame": frame, "x": x, "y": y, "theta": theta, **options,
+                                      "reflex_margin_m": margin}, r, chk, actor, time.monotonic())
         with self.lock:
             self.goals[rec.gid] = rec
             self.reflex["armed"] = True
+            self.reflex["margin"] = margin                     # for this goal (and until the next one)
         imgs = self._check_images(chk, s, r, f"goal{rec.gid}")
         out = {"goal_id": rec.gid, "status": "moving", "goal": r, "check": _public(chk),
                "warnings": chk.get("warnings", []), "bev": f"images/{imgs[0]}" if imgs else None,
-               "wait": f"goals/{rec.gid}/wait"}
+               "wait": f"goals/{rec.gid}/wait", "reflex_margin_m": margin}
         self.turn(actor, "goal", rec.request, out, comment, imgs, level="warn" if chk.get("warnings") else "info")
         return out
 
@@ -789,14 +806,21 @@ class AgentNav:
     # -- the stop reflex (the only automatic action: it can only stop) ------------------------------------
 
     def _reflex_loop(self):
+        prev = None
         while not self.stop_ev.is_set():
             time.sleep(1 / REFLEX_HZ)
             if not (self.reflex["enabled"] and self._servo_moving() and self.reflex["armed"]):
+                prev = None
                 continue
+            now = time.monotonic()
+            if prev is not None:      # the real interval between checks (sleep + the last check's own time)
+                self._reflex_tick_s = max(1.0 / REFLEX_HZ, 0.7 * self._reflex_tick_s + 0.3 * (now - prev))
+            prev = now
             try:
                 self._reflex_tick()
             except Exception as e:
                 self.reflex["last"] = f"error: {type(e).__name__}: {e}"
+                self.reflex["tick_errors"] += 1
 
     def _reflex_tick(self):
         st = self._ps_status or {}
@@ -806,7 +830,9 @@ class AgentNav:
         if v < 0.03:
             return
         caps = self.caps or PROFILES[self.profile]
-        dist = v * v / (2 * caps["max_accel"]) + v * REFLEX_LATENCY + REFLEX_MARGIN
+        margin = self.reflex.get("margin", REFLEX_MARGIN)   # per goal (POST /goal reflex_margin_m)
+        tick = self._reflex_tick_s
+        dist = stopping_distance(v, caps["max_accel"], caps["max_jerk"], tick) + margin
         ang = math.atan2(vy, vx)
         if abs(wrap(ang)) > math.radians(40):
             self.reflex["blind"] = f"moving at {math.degrees(ang):.0f}° (outside the camera's view): reflex blind"
@@ -820,15 +846,17 @@ class AgentNav:
         if not cal.get("base_to_color"):
             return
         cl = G.Cloud(depth, cam, np.array(cal["base_to_color"]), None)
-        P = cl.p_b[np.isfinite(cl.z)]
-        P = P[(P[:, 2] > G.OBST_Z[0]) & (P[:, 2] < G.OBST_Z[1])]
-        c, s = math.cos(ang), math.sin(ang)
-        a = c * P[:, 0] + s * P[:, 1]                  # along the motion
-        b = -s * P[:, 0] + c * P[:, 1]
-        h_ = G.HALF + 0.03
-        hit = (a > G.HALF) & (a < G.HALF + dist) & (np.abs(b) < h_)
+        P = cl.p_b                                     # (H, W, 3); NaN where there is no depth
+        with np.errstate(invalid="ignore"):
+            c, s = math.cos(ang), math.sin(ang)
+            a = c * P[..., 0] + s * P[..., 1]          # along the motion
+            b = -s * P[..., 0] + c * P[..., 1]
+            h_ = G.HALF + 0.03
+            hit = ((P[..., 2] > G.OBST_Z[0]) & (P[..., 2] < G.OBST_Z[1])
+                   & (a > G.HALF) & (a < G.HALF + dist) & (np.abs(b) < h_))   # (H, W) on the depth grid
         n = int(hit.sum())
-        self.reflex["last"] = {"t": time.time(), "v": round(v, 3), "lookahead_m": round(dist, 3), "points": n}
+        self.reflex["last"] = {"t": time.time(), "v": round(v, 3), "lookahead_m": round(dist, 3),
+                               "margin_m": round(margin, 3), "tick_s": round(tick, 3), "points": n}
         if n >= REFLEX_POINTS:
             near = float(a[hit].min() - G.HALF)
             try:
@@ -836,9 +864,30 @@ class AgentNav:
             finally:
                 self.reflex["stops"] += 1
                 self.reflex["armed"] = False          # re-armed by the next goal
-                self._robot_turn(f"REFLEX STOP: {n} obstacle points {near:.2f} m ahead of the base within the "
-                                 f"braking distance ({dist:.2f} m at {v:.2f} m/s). Braking; issue a new goal to continue.",
-                                 level="warn", points=n, distance_m=round(near, 3))
+                self._reflex_event(n, near, dist, v, margin, hit, P, h, payload)
+
+    def _reflex_event(self, n, near, dist, v, margin, hit, P, h, payload):
+        """Log a reflex stop (after the stop was sent): what the reflex counted, and its mask."""
+        H = P[hit]
+        pct = lambda k: [round(float(q), 3) for q in np.percentile(H[:, k], [5, 50, 95])]
+        reply = {"message": f"Reflex stop: {n} depth points in the stopping zone ({dist:.2f} m ahead at {v:.2f} m/s, "
+                            f"margin {margin:.2f} m), nearest {near:.2f} m ahead of the base. They may include false "
+                            "positives; see the mask. The goal has ended; a new goal continues.",
+                 "points": n, "distance_m": round(near, 3), "lookahead_m": round(dist, 3), "margin_m": round(margin, 3),
+                 "speed_m_s": round(v, 3), "tick_s": self.reflex["last"]["tick_s"],
+                 "tick_errors": self.reflex["tick_errors"],
+                 "points_base": {"x": pct(0), "y": pct(1), "z": pct(2)}}
+        imgs = []
+        try:
+            c = h["color"]
+            jpeg = payload[c["offset"]: c["offset"] + c["len"]]
+            name = self.store_image(G.mask_image(jpeg, hit, label=f"reflex: {n} points in the stopping zone"),
+                                    "reflex", "jpg")
+            reply["mask"] = f"images/{name}"
+            imgs = [name]
+        except Exception as e:      # the stop is already sent; a missing image must not hide the event
+            reply["mask_error"] = f"{type(e).__name__}: {e}"
+        self.turn("robot", "event", {}, reply, images=imgs, level="warn")
 
     # -- memory ---------------------------------------------------------------------------------
 

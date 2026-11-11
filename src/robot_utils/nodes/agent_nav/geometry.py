@@ -610,6 +610,21 @@ def overlay_image(jpeg: bytes, *, grid: bool = False, shapes=(), plane: Optional
     return b.getvalue()
 
 
+def mask_image(jpeg: bytes, mask: np.ndarray, label: str = "", color=(255, 40, 40)) -> bytes:
+    """The colour image with ``mask`` (a boolean grid of any size, e.g. the registered depth grid)
+    tinted: the pixels the caller counted, drawn as they were, true positives or not."""
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    m = Image.fromarray(np.asarray(mask, bool).astype(np.uint8) * 255).resize(img.size, Image.NEAREST)
+    tint = Image.new("RGB", img.size, color)
+    img = Image.composite(Image.blend(img, tint, 0.65), img, m)
+    if label:
+        ImageDraw.Draw(img).text((10, img.size[1] - 26), label, fill=(255, 255, 255), font=_font(16),
+                                 stroke_width=3, stroke_fill=(0, 0, 0))
+    b = io.BytesIO()
+    img.save(b, "JPEG", quality=85)
+    return b.getvalue()
+
+
 def thumbnail(jpeg: bytes, width: int = 320) -> bytes:
     img = Image.open(io.BytesIO(jpeg)).convert("RGB")
     img.thumbnail((width, width))

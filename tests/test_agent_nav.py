@@ -251,6 +251,19 @@ def test_human_hold_and_chat(stack):
 WALL_AHEAD = Scene(boxes=[Box(1.05, -0.6, 1.35, 0.6, 0.8)])
 
 
+def _reflex_event(st, timeout=3.0):
+    """The latest reflex-stop event: logged just after the stop is sent (with its mask), so it can land a
+    moment after the goal's result."""
+    deadline = time.monotonic() + timeout
+    while True:
+        turns = get(st, "/log").json()["turns"]
+        ev = [t for t in turns if t["actor"] == "robot" and t["reply"].get("message", "").startswith("Reflex stop")]
+        if ev or time.monotonic() > deadline:
+            assert ev, turns
+            return ev[-1]["reply"]
+        time.sleep(0.1)
+
+
 @pytest.mark.parametrize("stack", [WALL_AHEAD], indirect=True)
 def test_reflex_stops_before_an_obstacle(stack):
     st = stack
@@ -263,8 +276,27 @@ def test_reflex_stops_before_an_obstacle(stack):
     assert res["result"]["result"] == "stopped", res
     x = get(st, "/state").json()["pose_world"][0]
     assert x + G.HALF < 1.05, x                                          # front edge short of the box face
-    turns = get(st, "/log").json()["turns"]
-    assert any(t["actor"] == "robot" and "REFLEX STOP" in t["reply"].get("message", "") for t in turns)
+    r = _reflex_event(st)
+    assert r["margin_m"] == 0.12 and r["points"] >= 25 and set(r["points_base"]) == {"x", "y", "z"}
+    assert get(st, "/" + r["mask"]).headers["content-type"] == "image/jpeg"     # the mask of what it counted
+
+
+@pytest.mark.parametrize("stack", [WALL_AHEAD], indirect=True)
+def test_reflex_margin_brings_the_robot_closer_without_contact(stack):
+    """A small per-goal margin on a slow final leg ends a few cm from the box face, never touching it
+    (the default 0.12 m margin leaves ~0.15 m at full speed in the sim)."""
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    post(st, "/enable", {"caps": {"max_distance": 2.0}})
+    post(st, "/look")
+    assert post(st, "/goal", {"x": 0.5, "reflex_margin_m": 0}).status_code == 422          # must be > 0
+    g = post(st, "/goal", {"x": 1.5, "speed": 0.05, "reflex_margin_m": 0.02, "comment": "close to the box face"}).json()
+    assert g["reflex_margin_m"] == 0.02
+    res = get(st, f"/goals/{g['goal_id']}/wait", timeout=40).json()
+    assert res["result"]["result"] == "stopped", res
+    gap = 1.05 - (get(st, "/state").json()["pose_world"][0] + G.HALF)
+    assert 0 < gap < 0.08, gap                       # measured 0.042-0.048 m
+    assert _reflex_event(st)["margin_m"] == 0.02
 
 
 def test_page_meta_and_refusals(stack):

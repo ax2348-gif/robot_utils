@@ -94,6 +94,11 @@ class GoalIn(CheckIn):
     ang_jerk: Optional[float] = None
     min_wheel_speed: Optional[float] = None
     stall_s: Optional[float] = None
+    reflex_margin_m: Optional[float] = Field(
+        None, gt=0, le=1.0, allow_inf_nan=False,
+        description="The gap (m) the stop reflex leaves in front of what it sees, for this goal (default 0.12). "
+                    "Braking and latency are added as always; a small margin lets the robot end close to a surface "
+                    "(e.g. flush against a wall) and still stop before touching it.")
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
         {"x": 0.5, "comment": "half a metre forward, toward the gap"},
         {"frame": "snapshot:s3", "x": 1.4, "y": 0.2, "theta": -0.5}]})

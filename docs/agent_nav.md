@@ -122,10 +122,17 @@ agent (curl) ──HTTP──► agent_nav ──► 3d_perception  /frame, /cal
     magenta border; the swept path is green or red; never-seen samples are grey.
 - **Stop reflex:** active while pose_servo is moving and a goal is armed.
   - About 6 times a second it registers a fresh frame and looks along the commanded velocity's
-    direction for points in the band beyond the front edge. The band's length is
-    `v²/(2·max_accel) + 0.35 s·v + 0.12 m`, and its width the footprint plus 3 cm.
-  - 25 or more points there → pose_servo `/stop` (it brakes within the caps), a `REFLEX STOP`
-    turn in the dialogue, and the goal ends `stopped`. It re-arms on the next goal.
+    direction for points in the band beyond the front edge. The band's length is the stopping
+    distance plus a margin: `v·(tick + 0.35 s) + v²/(2·max_accel) + v·max_accel/(2·max_jerk) + margin`,
+    where `tick` is the measured interval between checks (≥ 1/6 s; about 0.21 s in practice) and
+    the jerk term covers pose_servo's deceleration ramp. Its width is the footprint plus 3 cm.
+  - The margin is the gap left in front of what it sees: 0.12 m by default, or any value in
+    (0, 1] m per goal (`reflex_margin_m`), so a slow final leg can end a few cm from a wall
+    (sim, 0.05 m/s, margin 0.02: 4-5 cm) without touching it.
+  - 25 or more points there → pose_servo `/stop` (it brakes within the caps), then a `Reflex stop`
+    event in the dialogue with the counted points (`points_base`: 5/50/95 % x, y, z) and a `mask`
+    image of them, and the goal ends `stopped`. The points can be false positives (the robot's own
+    arm or load, depth noise): the mask shows what was counted. It re-arms on the next goal.
   - It is blind when the motion points more than 40° off the camera's view (it says so in
     `/state`), and within the camera's near blind zone.
 - **Profiles** (server side; the human chooses, the agent may only lower):

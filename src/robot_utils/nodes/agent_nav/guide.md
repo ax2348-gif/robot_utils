@@ -12,7 +12,8 @@ this node's base URL, e.g. `http://botcore/nodes/agent_nav` (all paths in replie
 2. **Stopping is the only automatic action.** The stop reflex brakes if depth shows an
    obstacle within the braking distance ahead of the motion. It only sees what the camera sees
    (forward, beyond the blind zone: `GET /robot`, about 0.8 m from the base centre). It is a guardrail, not your obstacle avoidance: **you** avoid
-   obstacles.
+   obstacles. It counts depth points ahead of the bumper, whatever they are, so its stops can
+   include false positives; each stop's event has a `mask` image of the points it counted.
 3. **Look before you move, and look at the images.** Every perception and planning reply has an
    overlay image and a bird's-eye view (BEV). Fetch and inspect them. They show what the tool
    actually selected, fitted or checked. If the overlay is not what you meant, your numbers are wrong.
@@ -149,7 +150,8 @@ curl -s "$N/goals/7/wait?timeout=60"          # run this in the background; it r
 
 The result is one of:
 - `reached`;
-- `stopped` (someone called `/stop`, or the reflex braked);
+- `stopped` (someone called `/stop`, or the reflex braked: the transcript's event has the points it
+  counted, `points_base`, and a `mask` image);
 - `stalled` (no progress: the base isn't following, so look at why);
 - `aborted` (the estimator was lost or reset, or someone disabled).
 
@@ -167,7 +169,11 @@ Goal options (each within the caps):
 - `speed`, `omega`, `accel`, `alpha`, `jerk`, `ang_jerk`;
 - `pos_tol` (0.02 m), `heading_tol` (0.035 rad);
 - `mode`: `synchronized` (default) or `independent`;
-- `on_reach`: `terminate` or `hold`.
+- `on_reach`: `terminate` or `hold`;
+- `reflex_margin_m` (default 0.12 m, any value > 0): the gap the stop reflex leaves in front of
+  what it sees, for this goal. Braking and latency are added as always, so a small margin (e.g.
+  0.02) lets the robot end close to a surface, even flush against a wall, and still stop before
+  touching it.
 
 **Patterns that work.**
 - **Scan:** turn in place in steps of about 90° (`theta` 1.57, `local`), looking after each, to
@@ -195,8 +201,8 @@ then `GET /memory`. Places are lost when the estimator resets.
 - **Caps:** the human picks the safety profile (`cautious` by default: 0.15 m/s, 0.5 rad/s,
   0.2 m/s², goals ≤ 2 m / 3.2 rad away). You may lower caps (`POST /enable {"caps": {...}}`) but
   never raise them.
-- **Rejected goals:** too far or turning too much → `422`. Not enabled → `409`. Human hold → `423`.
-  Estimator unusable → `503`.
+- **Goals that don't start (nothing moves):** too far or turning too much for the caps → `422`
+  (split it into legs). Not enabled → `409`. Human hold → `423`. Estimator unusable → `503`.
 - **What the camera sees:** forward only, about 93°x61°, pitched about 23° down, with the floor
   visible from about 0.8 m out (exact numbers: `GET /robot`).
   The reflex and the path checks see nothing beside or behind the robot, so turn and look.
