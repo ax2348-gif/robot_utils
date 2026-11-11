@@ -119,7 +119,7 @@ class NodeSettings:
     home_via: list = field(default_factory=list)
     hard: Limits = field(default_factory=HARD.copy)
     # servo / home abort: output-side TCP error from the command beyond these for ABORT_HOLD_S
-    abort_pos: float = 0.03            # m
+    abort_pos: float = 0.10            # m (soft gains track loosely; 30 mm tripped named-pose moves)
     abort_rot: float = math.radians(15)
     abort_hold_s: float = 0.1
     reach_pos: float = 0.002           # m, servo "reached"
