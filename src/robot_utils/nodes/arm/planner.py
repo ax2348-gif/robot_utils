@@ -47,6 +47,16 @@ def _job(kind: str, limits: dict, tcp: tuple, args: tuple, kwargs: dict):
         return motion.plan_chunk(kin, *args, **kwargs)
     if kind == "ik":
         return kin.ik(*args, **kwargs)
+    if kind == "ik_render":
+        # IK, then the agent picture of it (render.py): (IKOut, PNG bytes)
+        from .render import render_ik
+        target, seed, q_meas, gap, view = args
+        out = kin.ik(target, seed, **kwargs)
+        fr = lambda q: [(T.translation.copy(), T.rotation.copy()) for T in kin.frames(q)]
+        near = kin.fk(out.q)
+        png = render_ik(fr(q_meas), gap, fr(out.q), (target.translation, target.rotation),
+                        (near.translation, near.rotation), out.public(), kin.joint_names, view)
+        return out, png
     if kind == "kinematics":
         frame = kwargs.get("frame", "base")
         out = []

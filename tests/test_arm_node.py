@@ -400,6 +400,32 @@ def test_kinematics_lookups(rig):
     assert len(n.links()) == 8
 
 
+def test_ik_render_for_agents(rig):
+    """POST /ik with `render`: a PNG of the requested size, different per view, and drawn (with the
+    nearest reachable configuration) when IK fails."""
+    import base64
+    import io
+
+    from PIL import Image
+    n = rig.node
+    rig.step(2)
+    target = n.kin.fk(np.array(Q0))
+    out, png = n.ik_image(target, "measured", None, {"width": 320, "height": 240})
+    assert out["ok"] and png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert Image.open(io.BytesIO(png)).size == (320, 240)
+    _, side = n.ik_image(target, "measured", None, {"width": 320, "height": 240, "azimuth_deg": 90, "elevation_deg": 0})
+    _, top = n.ik_image(target, "measured", None, {"width": 320, "height": 240, "elevation_deg": 90})
+    assert len({png, side, top}) == 3, "the view angle must change the image"
+    far = pin.SE3(np.eye(3), np.array([0.9, 0.0, 0.1]))
+    d = n.ik_check(far, "measured", None, {})
+    assert not d["ok"] and d["nearest"] and d["view"]["width"] == 640
+    img = Image.open(io.BytesIO(base64.b64decode(d["image"].split(",", 1)[1]))).convert("RGB")
+    assert img.size == (640, 480)
+    px = np.asarray(img).reshape(-1, 3).astype(int)
+    orange = np.sum((abs(px[:, 0] - 211) < 25) & (abs(px[:, 1] - 84) < 25) & (px[:, 2] < 40))
+    assert orange > 200, "the nearest reachable configuration is drawn (orange ghost)"
+
+
 def test_ik_respects_config_joint1_limit(rig):
     n = rig.node
     assert math.isclose(math.degrees(n.kin.lo[0]), -36.0, abs_tol=1e-6)
@@ -439,6 +465,11 @@ def test_http_api_end_to_end(tmp_path):
         assert c.post("/servo", headers=h, json={"name": "home"}).json()["kind"] == "pose"
         assert c.post("/cancel", headers=h).json()["cancelled"]
         assert c.post("/ik", json={"pose": pose}).json()["ok"]
+        r = c.post("/ik", json={"pose": pose, "render": {"width": 320, "height": 240}}).json()
+        assert r["ok"] and r["image"].startswith("data:image/png;base64,") and r["view"]["width"] == 320
+        r = c.post("/ik/render", json={"pose": pose, "render": {"azimuth_deg": 90}})
+        assert r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG" and r.headers["x-ik-ok"] == "true"
+        assert c.post("/ik", json={"pose": pose, "render": {"width": 5000}}).status_code == 422
         k = c.post("/kinematics", json={"q": [list(Q0)], "frame": "tcp"}).json()["results"][0]
         assert k["within_limits"] and len(k["jacobian"]) == 6
         assert c.post("/kinematics", json={"q": [[0, 0, 0]]}).status_code == 422

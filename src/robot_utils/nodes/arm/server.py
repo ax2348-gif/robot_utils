@@ -13,12 +13,13 @@ from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..common.server import LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
 from . import config as C
 from .kin import se3
+from .render import VIEW_DEFAULTS, VIEW_DOC
 from .node import FIELD_DOC, FIELDS, JAC_FIELDS, JAC_UNITS, LEASE_HEARTBEAT, RATE_HZ, TWIST_TIMEOUT, UNITS, ArmNode
 
 TAGS = [
@@ -106,6 +107,24 @@ class IKIn(BaseModel):
     max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False,
                                          description="Accept an IK solution whose orientation is within this many degrees of the "
                                                      "request (default 10; the position must be within 2 mm). 1 asks for an exact pose.")
+
+
+class RenderIn(BaseModel):
+    """View of the agent picture (render.py). Every field is optional."""
+    model_config = ConfigDict(allow_inf_nan=False, json_schema_extra={
+        "description": VIEW_DOC, "examples": [{}, {"azimuth_deg": 0, "elevation_deg": 0}, {"azimuth_deg": 90, "elevation_deg": 90, "zoom": 1.5}]})
+    azimuth_deg: Optional[float] = Field(None, ge=-360, le=360, description=f"Look from this direction about +z: 0 = from +x toward the base, 90 = from +y (default {VIEW_DEFAULTS['azimuth_deg']:g}).")
+    elevation_deg: Optional[float] = Field(None, ge=-90, le=90, description=f"0 = level, 90 = from straight above (default {VIEW_DEFAULTS['elevation_deg']:g}).")
+    zoom: Optional[float] = Field(None, ge=0.25, le=8, description="1 = the arm, target and nearest pose fill the image; >1 magnifies about their centre.")
+    width: Optional[int] = Field(None, ge=160, le=1600, description=f"px (default {VIEW_DEFAULTS['width']}).")
+    height: Optional[int] = Field(None, ge=120, le=1200, description=f"px (default {VIEW_DEFAULTS['height']}).")
+
+
+class IKRenderIn(IKIn):
+    render: Optional[RenderIn] = Field(None, description="Also return `image`: a PNG (data URL) of the query for a vision model: "
+                                                          "the measured arm, the IK solution (or nearest reachable configuration) as a "
+                                                          "ghost arm, the target and nearest TCP frames, joints at a limit, labelled base "
+                                                          "axes and a scale. " + VIEW_DOC)
 
 
 class KinIn(BaseModel):
@@ -333,9 +352,26 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     # -- kinematics ---------------------------------------------------------------------------------
 
-    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease): always returns `nearest`, the closest reachable pose")
-    async def ik(body: IKIn):
-        return await asyncio.to_thread(node.ik_check, body.pose.se3(), body.seed, body.max_rot_deg)
+    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease): always returns `nearest`, the closest reachable pose",
+              description="Answers `{ok, exact, q, pos_err_mm, rot_err_deg, within_limits, joints_at_limit, iterations, reason, "
+                          "nearest}`. With `render` (an object, `{}` for the defaults) it also returns `image`, a PNG data URL "
+                          "showing the query, and `view`, the view used: for agents (vision models) choosing how to move. "
+                          "Ask for several views to understand depth (e.g. azimuth 0 and 90 at elevation 0, or elevation 90 "
+                          "from above). " + VIEW_DOC)
+    async def ik(body: IKRenderIn):
+        return await asyncio.to_thread(node.ik_check, body.pose.se3(), body.seed, body.max_rot_deg,
+                                       None if body.render is None else body.render.model_dump())
+
+    @app.post("/ik/render", tags=["kinematics"], summary="The IK check as a PNG image only (for agents; nothing moves, no lease)",
+              response_class=Response, responses={200: {"content": {"image/png": {}}}},
+              description="The same query and picture as `POST /ik` with `render`, answered as `image/png`; the IK result "
+                          "is in the headers `X-IK-Ok`, `X-IK-Exact`, `X-IK-Pos-Err-Mm`, `X-IK-Rot-Err-Deg`. " + VIEW_DOC)
+    async def ik_render(body: IKRenderIn):
+        out, png = await asyncio.to_thread(node.ik_image, body.pose.se3(), body.seed, body.max_rot_deg,
+                                           (body.render or RenderIn()).model_dump())
+        return Response(png, media_type="image/png", headers={
+            "X-IK-Ok": str(out["ok"]).lower(), "X-IK-Exact": str(out["exact"]).lower(),
+            "X-IK-Pos-Err-Mm": f"{out['pos_err_mm']:.3f}", "X-IK-Rot-Err-Deg": f"{out['rot_err_deg']:.3f}"})
 
     @app.get("/kinematics", tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
     async def kin_now(frame: Literal["base", "tcp"] = "base", which: Literal["measured", "command"] = "measured"):

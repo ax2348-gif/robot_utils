@@ -202,6 +202,27 @@ Available three ways:
 
 - `POST /ik`: IK check only. Pose + seed (`command` | `measured`) → `{ok, q, pos_err_mm,
   rot_err_deg, within_limits}`. Never moves anything.
+- **Agent picture of an IK query**: `POST /ik` with `render` (an object; `{}` takes the defaults)
+  also returns `image`, a PNG data URL, and `view`, the view used. `POST /ik/render` takes the same
+  body and answers the PNG itself (`image/png`; the IK result in `X-IK-Ok`, `X-IK-Exact`,
+  `X-IK-Pos-Err-Mm`, `X-IK-Rot-Err-Deg`). For agents (vision models) deciding how to move: a plain
+  white-background wireframe with the arm at its measured pose (dark grey, the page's boxes:
+  `geometry.ARM_BOXES`) and gripper gap, the IK solution as a dashed ghost arm (blue; orange when
+  IK fails: then it is the nearest reachable configuration), the target TCP frame (thick x/y/z =
+  red/green/blue) and the `nearest` TCP frame (dashed, joined to the target) when they differ,
+  joints at a limit (red rings), the measured TCP, the base frame's labelled axes, reach rings on
+  the floor (0.2 m apart), drop lines to the floor, a scale bar and annotations (ok / exact /
+  failed and why, the errors, joints at a limit, target and nearest positions, the view).
+  - View, orthographic, all optional: `azimuth_deg` (default 45) is the direction the camera looks
+    from, about +z: 0 = from +x toward the base (+y to the right), 90 = from +y (+x to the
+    left), 180 = from −x, −90 = from −y; `elevation_deg` (default 25): 0 level, 90 from straight
+    above (at azimuth 0, +y right and −x up), negative from below; `zoom` (default 1, 0.25–8):
+    1 fits both arms, the target and the nearest pose, more magnifies about their centre;
+    `width` × `height` (default 640 × 480; 160–1600 × 120–1200 px).
+  - Depth is ambiguous in one orthographic view: ask for two (e.g. azimuth 0 and 90 at
+    elevation 0) or one from above.
+  - Drawn with Pillow in the planner process, like IK (about 50 ms at 640 × 480 on a Mac), so it
+    never delays the control loop. No lease; nothing moves. Needs a joint reading (503 before).
 - `GET/POST /tcp`: the TCP offset in `end_link` (default −0.15 m along x, as in teleop). Only
   while the arm is not servoing.
 - `GET/POST /profile`: gain profiles from yaml (`soft` production, `safe` debug). Switching only

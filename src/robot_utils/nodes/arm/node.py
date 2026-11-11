@@ -29,6 +29,7 @@ requests → one MIT frame per motor (servo, float or released) → telemetry ro
 """
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import threading
@@ -49,6 +50,7 @@ from .bus import ArmBus, BusError, ReadMiss
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from .planner import Planner
+from .render import VIEW_DEFAULTS
 
 log = logging.getLogger(__name__)
 
@@ -1163,9 +1165,15 @@ class ArmNode:
             raise RequestError(503, "the arm has not connected yet (no model)")
         return self.kin
 
-    def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None) -> dict:
+    def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
+                 render: Optional[dict] = None) -> dict:
         """IK seed only (never taken as where the arm is): "command" = the command while servoing,
-        else the measured pose; "measured" = the measured pose."""
+        else the measured pose; "measured" = the measured pose. With ``render`` (view options,
+        render.VIEW_DEFAULTS) the answer also carries ``image``: a PNG data URL of the query."""
+        if render is not None:
+            out, png = self.ik_image(pose, seed, max_rot_deg, render)
+            return {**out, "image": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+                    "view": {**VIEW_DEFAULTS, **{k: v for k, v in render.items() if v is not None}}}
         kin = self._need_kin()
         r = self.reading
         with self._lock:
@@ -1179,6 +1187,23 @@ class ArmNode:
         rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
         out = Planner.run("ik", kin, pose, np.asarray(q0, float).copy(), rot_tol=rot_tol)   # in the planner process
         return out.public()
+
+    def ik_image(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
+                 view: Optional[dict] = None) -> tuple[dict, bytes]:
+        """The IK check and its picture (render.py), both in the planner process: (IK answer, PNG).
+        Shows the measured arm (and gripper gap), so it needs a reading. No lease; nothing moves."""
+        kin = self._need_kin()
+        r = self.reading
+        if r is None:
+            raise RequestError(503, "no reading yet")
+        with self._lock:
+            q_cmd = self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
+        q0 = r.q if (seed == "measured" or q_cmd is None) else q_cmd
+        gap = C.rad_to_gap(r.g_q) if math.isfinite(r.g_q) else 0.0
+        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
+        out, png = Planner.run("ik_render", kin, pose, np.asarray(q0, float).copy(), np.asarray(r.q, float).copy(),
+                               min(max(gap, 0.0), C.GAP_MAX), dict(view or {}), rot_tol=rot_tol)
+        return out.public(), png
 
     def kinematics(self, q, frame: str = "base") -> dict:
         kin = self._need_kin()
