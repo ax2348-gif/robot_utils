@@ -301,6 +301,10 @@ def test_gripper_gap_and_force_limit(rig):
     assert row["g_limiting"] == 1.0 and row["g_tau_ff"] < 0 and abs(row["g_tau_ff"]) <= row["g_tau_est"]
     # applied closing torque = estimate + feedforward = the force limit
     assert abs(C.force_of_torque(row["g_tau_est"] + row["g_tau_ff"]) - 2.0) < 1e-6
+    # reported: the applied force (at the limit), and the demand before it
+    assert abs(row["g_force"] - 2.0) < 1e-6 and row["g_force_demand"] > 2.0
+    gs = n.gripper_state()
+    assert abs(gs["force_n"] - 2.0) < 0.01 and gs["demand_n"] > 2.0 and gs["limiting"]
     with pytest.raises(ValueError):
         n.gripper_cmd(rig.tok, gap_mm=10, max_force_n=-1)
 

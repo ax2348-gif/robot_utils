@@ -541,7 +541,8 @@ RU.sse("events", x => {
   view.update({goal: G ? {p: G.pos, R: qToR(G.quat)} : null, goalLabel: gl});
   // gripper, settings
   const gr = st.gripper || {};
-  $("#g_meas").textContent = `${gr.mode || "–"}, ${f(gr.gap_mm, 1)} mm` + (fin(gr.force_n) ? `, ${f(gr.force_n, 1)} N` : "") + (gr.limiting ? ", force limited" : "");
+  $("#g_meas").textContent = `${gr.mode || "–"}, ${f(gr.gap_mm, 1)} mm` + (fin(gr.force_n) ? `, ${f(gr.force_n, 1)} N` : "")
+    + (gr.limiting ? ` (limit ${f(gr.max_force_n, 0)} N; demand ${f(gr.demand_n, 1)} N)` : "");
   $("#g_force").placeholder = f(gr.default_max_force_n, 0);
   $("#g_gap").max = gr.gap_max_mm; $("#g_force").max = 120;
   const pr = st.profiles || [];

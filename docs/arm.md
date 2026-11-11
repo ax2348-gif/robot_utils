@@ -183,6 +183,10 @@ positions are inputs, and only an admin writes them. Servo accepts a name in pla
   open. Within 5 mm of fully open there is no feedforward (protecting the printed stops); there
   the position command is pulled back toward the jaws instead, so wide objects are force-limited
   too. `max_force_n ≥ 0`.
+- Reported (`/state` gripper `force_n`, stream `g_force`): the squeeze force applied, the MIT law
+  with the position sent plus the feedforward, so at most `max_force_n` while limiting. The demand
+  before the limit is `demand_n` / `g_force_demand`. Both are model estimates (stiffness × error
+  over an ideal pinion); the motor's own torque reading is `g_tau`.
 
 ## Kinematics: Jacobian and manipulability
 

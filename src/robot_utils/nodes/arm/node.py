@@ -87,7 +87,7 @@ _TCP = [("x", "m"), ("y", "m"), ("z", "m"), ("qx", ""), ("qy", ""), ("qz", ""), 
         ("err_pos", "m"), ("err_rot", "rad"), ("goal_err_pos", "m"), ("goal_err_rot", "rad"),
         ("w", ""), ("w_lin", ""), ("sigma_min", "")]
 _GRIP = [("g_gap", "m"), ("g_gap_cmd", "m"), ("g_gap_goal", "m"), ("g_qd", "rad/s"), ("g_tau", "Nm"),
-         ("g_tau_est", "Nm"), ("g_force", "N"), ("g_tau_ff", "Nm"), ("g_force_max", "N"), ("g_limiting", "bool"),
+         ("g_tau_est", "Nm"), ("g_force", "N"), ("g_force_demand", "N"), ("g_tau_ff", "Nm"), ("g_force_max", "N"), ("g_limiting", "bool"),
          ("g_status", "enum")]
 _MOTION = [("motion_id", "id"), ("phase", "enum"), ("progress", "")]
 _ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION)
@@ -119,7 +119,8 @@ FIELD_DOC = {
     "read_misses": "ticks with missed replies since the node started (per motor in /state)",
     "twist_age": "s since the track twist feedforward was written (NaN if none)",
     "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
-    "g_force": "squeeze force estimated from the gripper's MIT law (N)",
+    "g_force": "squeeze force applied, estimated: the gripper's MIT law plus the force-limit feedforward, over the pinion (N)",
+    "g_force_demand": "squeeze force the MIT law alone asks for, before the force limit (N); above g_force_max while limiting",
     "g_tau_ff": "force-limit feedforward (opposes closing; |g_tau_ff| <= g_tau_est)",
     "J<r><c>": "jacobian channel: TCP Jacobian at the measured pose, base-frame axes (LOCAL_WORLD_ALIGNED), row r of [vx vy vz wx wy wz], column = joint",
 }
@@ -241,7 +242,7 @@ class ArmNode:
         self.overruns = 0
         self._limited = False
         self._goal_pose: Optional[pin.SE3] = None
-        self._g = {"tau_est": math.nan, "force": math.nan, "ff": 0.0, "limiting": False, "tau_g": None}
+        self._g = {"tau_est": math.nan, "force": math.nan, "demand": math.nan, "ff": 0.0, "limiting": False, "tau_g": None}
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connect_at = 0.0
@@ -568,9 +569,12 @@ class ArmNode:
                     g_ff = -(tau_est - tau_lim)                          # opposes closing; |g_ff| < tau_est
             g_kp, g_kd = p.g_kp, p.g_kd
             g.sent = C.rad_to_gap(g_q)
+            # what is applied: the MIT law with the position actually sent, plus the feedforward
+            applied = C.force_of_torque(max(g_kp * (g_q - r.g_q_mot) + g_kd * (0.0 - r.g_qd) + g_ff, 0.0))
         else:
             g_q, tau_est, force, g_ff, limiting, g_kp, g_kd = r.g_q_mot, math.nan, math.nan, 0.0, False, 0.0, 0.0
-        self._g = {"tau_est": tau_est, "force": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
+            applied = math.nan
+        self._g = {"tau_est": tau_est, "force": applied, "demand": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
         try:
             self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, g_q, 0.0, g_kp, g_kd, g_ff, gripper=self.g_motor_on)
         except BusError as e:
@@ -717,7 +721,8 @@ class ArmNode:
         row[COL["g_gap"]:COL["g_gap"] + len(_GRIP)] = [
             C.rad_to_gap(r.g_q), g.sent if (gl and g.sent is not None) else nan,
             g.goal if (gl and g.goal is not None) else nan, r.g_qd, r.g_tau,
-            gd["tau_est"] if gl else nan, gd["force"] if gl else nan, gd["ff"] if gl else nan, g.max_force,
+            gd["tau_est"] if gl else nan, gd["force"] if gl else nan, gd["demand"] if gl else nan,
+            gd["ff"] if gl else nan, g.max_force,
             float(gd["limiting"] and gl), r.status[N]]
         if m is not None:
             mp = m.public(now)
@@ -1256,6 +1261,7 @@ class ArmNode:
                 "sent_mm": None if (g.sent is None or not on) else round(g.sent * 1000, 2),
                 "goal_mm": None if g.goal is None else round(g.goal * 1000, 2),
                 "max_force_n": g.max_force, "force_n": finite(round(self._g["force"], 2)) if on else None,
+                "demand_n": finite(round(self._g["demand"], 2)) if on else None,
                 "limiting": bool(self._g["limiting"] and on), "gap_max_mm": round(C.GAP_MAX * 1000, 2),
                 "default_max_force_n": C.DEFAULT_MAX_FORCE}
 
