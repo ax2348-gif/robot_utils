@@ -26,12 +26,14 @@ DEFAULT_HEARTBEAT = 1.0   # s
 
 
 class RequestError(Exception):
-    """A request the node refuses; ``status`` is the HTTP status to answer with
-    (``common.server.setup_app`` maps it to ``{"detail": message}``)."""
+    """A request the node does not carry out; ``status`` is the HTTP status to answer with
+    (``common.server.setup_app`` maps it to ``{"detail": message, **extra}``: ``detail`` stays a
+    human-readable string, ``extra`` adds machine-readable fields beside it)."""
 
-    def __init__(self, status: int, msg: str):
+    def __init__(self, status: int, msg: str, extra: Optional[dict] = None):
         super().__init__(msg)
         self.status = status
+        self.extra = extra or {}
 
 
 class LeaseError(RequestError):

@@ -26,6 +26,10 @@ from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
 N = 6
 DEFAULT_TCP_OFFSET = (-0.15, 0.0, 0.0)   # m in end_link: the Quest teleop's TCP
 PINV_DAMPING = 0.01                       # damped pseudo-inverse for the twist feedforward
+IK_POS_TOL = 0.002                        # m: an IK solve is accepted within this position error
+IK_ROT_TOL = math.radians(10.0)           # rad: and this orientation error (see ArmKinematics.__init__)
+EXACT_ROT = math.radians(1.0)             # rad: within this (and IK_POS_TOL) the solve is "exact"
+LIMIT_NEAR = math.radians(0.5)            # rad: a joint this close to a limit is reported as at it
 
 
 @dataclass
@@ -37,11 +41,15 @@ class IKOut:
     within_limits: bool
     iterations: int
     reason: Optional[str] = None
+    exact: bool = False
+    nearest: Optional[dict] = None            # pose_public(FK(q)): where q puts the TCP (reachable as is)
+    at_limit: list = None                     # joint names at (or past) a limit
 
     def public(self) -> dict:
-        return {"ok": self.ok, "q": [round(float(v), 6) for v in self.q],
+        return {"ok": self.ok, "exact": self.exact, "q": [round(float(v), 6) for v in self.q],
                 "pos_err_mm": round(self.pos_err_mm, 3), "rot_err_deg": round(self.rot_err_deg, 3),
-                "within_limits": self.within_limits, "iterations": self.iterations, "reason": self.reason}
+                "within_limits": self.within_limits, "joints_at_limit": self.at_limit or [],
+                "iterations": self.iterations, "reason": self.reason, "nearest": self.nearest}
 
 
 def se3(pos, quat_xyzw=None, rpy=None) -> pin.SE3:
@@ -103,8 +111,13 @@ class ArmKinematics:
         # with the teleop's rotation weight 0.02: at a wrist limit, keep the TCP position rather
         # than use other joints for the orientation
         self.ik_params = IKParams(max_iter=200, tolerance=1e-4, step_size=0.5, damping=1e-6, rot_weight=0.02)
-        self.ik_pos_tol = 0.002              # m
-        self.ik_rot_tol = math.radians(1.0)  # rad
+        # Acceptance. With rot_weight 0.02 the solver keeps the TCP position and lets the orientation
+        # give at the edge of the workspace (an exact pose there may not exist: re-solving with full
+        # rotation weight trades the angle into cm of position). So a solve that holds the position
+        # but is a few degrees off in orientation is the right nearest answer: accept it up to
+        # IK_ROT_TOL, report the angle, and say whether it was exact (within EXACT_ROT).
+        self.ik_pos_tol = IK_POS_TOL
+        self.ik_rot_tol = IK_ROT_TOL
 
     # -- TCP offset ------------------------------------------------------------------------------
 
@@ -180,21 +193,41 @@ class ArmKinematics:
         JJt = J @ J.T + (PINV_DAMPING ** 2) * np.eye(6)
         return J.T @ np.linalg.solve(JJt, np.asarray(twist, dtype=float))
 
-    def ik(self, target: pin.SE3, seed, max_iter: Optional[int] = None) -> IKOut:
-        """Full-pose IK from ``seed``. ``ok`` only if within the position and rotation tolerances and
-        the joint limits; otherwise ``q`` is the closest found and ``reason`` says why."""
+    def joints_at_limit(self, q) -> list[str]:
+        q = np.asarray(q, float)[:N]
+        return [n for n, v, lo, hi in zip(self.joint_names, q, self.lo, self.hi) if v <= lo + LIMIT_NEAR or v >= hi - LIMIT_NEAR]
+
+    def ik(self, target: pin.SE3, seed, max_iter: Optional[int] = None, rot_tol: Optional[float] = None) -> IKOut:
+        """Full-pose IK from ``seed``. ``ok`` if within ``ik_pos_tol`` / ``ik_rot_tol`` and the joint
+        limits (``exact`` if also within EXACT_ROT). Always: ``q`` is the closest found, ``nearest`` the
+        pose it reaches (a target that is reachable as is: retry with it), and when not ok, ``reason``
+        says which way it missed and what to try. ``rot_tol`` (rad) overrides ``ik_rot_tol`` for this call."""
         p = self.ik_params
         params = p if max_iter is None else IKParams(max_iter=max_iter, tolerance=p.tolerance, step_size=p.step_size,
                                                      damping=p.damping, rot_weight=p.rot_weight)
         seed = np.clip(np.asarray(seed, dtype=float)[:N], self.lo, self.hi)
         r = solve_ik(self.model, self._data(), self.tcp, target, seed, params, controlled_joints=N)
         q = np.asarray(r.q, dtype=float)[:N]
-        dp, dr = pose_error(self.fk(q), target)
+        T = self.fk(q)
+        dp, dr = pose_error(T, target)
         lim = self.within_limits(q)
+        at = self.joints_at_limit(q)
+        rtol = self.ik_rot_tol if rot_tol is None else float(rot_tol)
+        tol = f"{self.ik_pos_tol * 1e3:g} mm / {math.degrees(rtol):g}°"
         reason = None
-        if dp > self.ik_pos_tol or dr > self.ik_rot_tol:
-            reason = (f"no solution within {self.ik_pos_tol * 1e3:g} mm / {math.degrees(self.ik_rot_tol):g}° "
-                      f"(closest {dp * 1e3:.1f} mm / {math.degrees(dr):.2f}°): out of reach or at a joint limit")
-        elif not lim:
-            reason = "solution outside the joint limits"
-        return IKOut(reason is None, q, dp * 1e3, math.degrees(dr), lim, int(r.iterations), reason)
+        if not lim:
+            reason = (f"the closest solution is outside the joint limits ({', '.join(at) or 'a joint'}); "
+                      f"`nearest` is where it would put the TCP")
+        elif dp > self.ik_pos_tol:
+            reason = (f"out of reach: the closest solution is {dp * 1e3:.1f} mm / {math.degrees(dr):.1f}° away"
+                      + (f", with {', '.join(at)} at a limit" if at else "")
+                      + f" (accepts {tol}). `nearest` is reachable as is: retry with it, a pose nearer the arm, "
+                        "or a different orientation (e.g. pitch), or move the base")
+        elif dr > rtol:
+            reason = (f"the position is reachable but the orientation only to within {math.degrees(dr):.1f}° "
+                      f"(accepts {tol})" + (f"; {', '.join(at)} at a limit" if at else "")
+                      + ". `nearest` keeps the position with the reachable orientation: retry with it, or "
+                        "relax the orientation (e.g. pitch)")
+        ok = reason is None
+        return IKOut(ok, q, dp * 1e3, math.degrees(dr), lim, int(r.iterations), reason,
+                     exact=ok and dr <= EXACT_ROT, nearest=pose_public(T), at_limit=at)

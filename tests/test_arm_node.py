@@ -237,7 +237,7 @@ def test_servo_refuses_unreachable_and_too_short(rig):
     T.translation = T.translation + np.array([0.1, 0, 0])
     with pytest.raises(RequestError) as e:
         n.servo_cmd(rig.tok, T, duration=0.1)
-    assert "too short" in str(e.value)
+    assert e.value.extra.get("code") == "duration_too_short" and "retry" in e.value.extra
 
 
 def test_servo_aborts_on_obstruction(rig):
@@ -285,7 +285,7 @@ def test_chunk_follows_samples_and_skips_past(rig):
     assert abs(n.gripper.goal - 0.02) < 1e-9
     with pytest.raises(RequestError) as e:
         n.chunk(rig.tok, poses, dt=0.02, t0=rig.clock.t - 5)
-    assert "stale" in str(e.value)
+    assert e.value.extra.get("code") == "chunk_stale" and e.value.status == 422
 
 
 def test_gripper_gap_and_force_limit(rig):

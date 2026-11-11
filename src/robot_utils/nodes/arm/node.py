@@ -65,7 +65,7 @@ ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this fa
 ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor feedback that refuses enable
 PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
 TRACK_IK_ITER = 30            # the Quest teleop's per-command IK iterations (warm-started)
-TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is refused
+TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is not taken (use servo)
 STOW_NEAR = math.radians(3.0)  # every joint this close to home: stow turns the motors off at once
 SLOW_TICK = 0.015             # s between ticks counted as an overrun
 ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
@@ -973,8 +973,8 @@ class ArmNode:
 
     def _start(self, traj: Trajectory, by: str, q0: np.ndarray) -> dict:
         """Put a planned motion in force. It was planned from ``q0`` (a reading): if the arm moved
-        more than PLAN_DRIFT since (latest reading), a servo / pose / home / stow is refused rather
-        than started from a stale pose; a chunk's lead-in is re-anchored on where the arm is now
+        more than PLAN_DRIFT since (latest reading), a servo / pose / home / stow is not started rather
+        than started from a stale pose (409, retryable); a chunk's lead-in is re-anchored on where the arm is now
         (latest reading) and its speed checked."""
         with self._lock:
             if not self.enabled:
@@ -984,7 +984,9 @@ class ArmNode:
             if traj.kind == "chunk":
                 k = int(np.searchsorted(traj.t[1:], now + max(traj.info.get("blend_s", 0.0), DT), side="left")) + 1
                 if k >= len(traj.t):
-                    raise RequestError(422, "refused, nothing moved: the chunk went stale while planning")
+                    raise RequestError(422, "not started (nothing moved): the chunk was over by the time it was planned",
+                                       extra={"kind": "plan", "code": "chunk_stale", "retryable": True,
+                                              "hint": "send it again with a later t0 (GET /time)"})
                 keep = np.r_[0, np.arange(k, len(traj.t))]
                 traj.t, traj.q, traj.qd = traj.t[keep], traj.q[keep], traj.qd[keep]
                 if traj.gap is not None:
@@ -994,15 +996,17 @@ class ArmNode:
                     v = np.abs(traj.q[1] - traj.q[0]) / max(traj.t[1] - traj.t[0], 1e-6)
                     if np.any(v > self.soft.joint_vel):
                         j = int(np.argmax(v / self.soft.joint_vel))
-                        raise RequestError(422, f"refused, nothing moved: the chunk's first sample is too far from "
-                                                f"the arm for its blend (joint{j + 1} at {v[j]:.2f} rad/s); "
-                                                "increase blend_s or start nearer")
+                        raise RequestError(422, f"not started (nothing moved): the chunk's first sample is too far from "
+                                                f"the arm for its blend (joint{j + 1} at {v[j]:.2f} rad/s)",
+                                           extra={"kind": "plan", "code": "chunk_blend", "retryable": True,
+                                                  "hint": "increase blend_s or start the chunk nearer the arm"})
             else:
                 moved = float(np.max(np.abs(here - q0)))
                 if moved > PLAN_DRIFT:
-                    raise RequestError(409, f"refused, nothing moved: the arm moved {math.degrees(moved):.1f}° "
+                    raise RequestError(409, f"not started (nothing moved): the arm moved {math.degrees(moved):.1f}° "
                                             "while planning (a motion in force, or moved by hand while floating); "
-                                            "retry")
+                                            "send the same request again",
+                                       extra={"kind": "plan", "code": "moved_while_planning", "retryable": True})
                 traj.shift(now - traj.t[0])
             self._preempt(by)
             self.track = None
@@ -1020,12 +1024,13 @@ class ArmNode:
         try:
             return Planner.run(job, self.kin, *args, **kwargs)
         except PlanError as e:
-            raise RequestError(422, f"refused, nothing moved: {e}")
+            raise RequestError(422, f"not planned (nothing moved): {e}", extra=getattr(e, "extra", None))
         finally:
             self._plan_lock.release()
 
     def servo_cmd(self, token, pose: Optional[pin.SE3] = None, name: Optional[str] = None,
-                  lin_vel=None, lin_acc=None, ang_vel=None, ang_acc=None, duration=None) -> dict:
+                  lin_vel=None, lin_acc=None, ang_vel=None, ang_acc=None, duration=None,
+                  max_rot_deg: Optional[float] = None) -> dict:
         """Blocking (planning): call from a worker thread."""
         self._ready(token)
         h, s = self.settings.hard, self.soft
@@ -1043,7 +1048,8 @@ class ArmNode:
             traj = self._plan("joint", q0, [self.settings.named_poses[name]], s.home_vel, s.joint_vel,
                               kind="pose", name=name)
         else:
-            traj = self._plan("servo", q0, pose, joint_vel=s.joint_vel, duration=duration, **lim)
+            rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
+            traj = self._plan("servo", q0, pose, joint_vel=s.joint_vel, duration=duration, rot_tol=rot_tol, **lim)
         return self._start(traj, "servo", q0)
 
     def _home_traj(self, kind: str):
@@ -1157,7 +1163,7 @@ class ArmNode:
             raise RequestError(503, "the arm has not connected yet (no model)")
         return self.kin
 
-    def ik_check(self, pose: pin.SE3, seed: str = "command") -> dict:
+    def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None) -> dict:
         """IK seed only (never taken as where the arm is): "command" = the command while servoing,
         else the measured pose; "measured" = the measured pose."""
         kin = self._need_kin()
@@ -1170,7 +1176,8 @@ class ArmNode:
             q0 = r.q
         else:
             q0 = q_cmd
-        out = Planner.run("ik", kin, pose, np.asarray(q0, float).copy())   # in the planner process
+        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
+        out = Planner.run("ik", kin, pose, np.asarray(q0, float).copy(), rot_tol=rot_tol)   # in the planner process
         return out.public()
 
     def kinematics(self, q, frame: str = "base") -> dict:

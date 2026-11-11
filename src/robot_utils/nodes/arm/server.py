@@ -76,7 +76,11 @@ class ServoIn(BaseModel):
     ang_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s.")
     ang_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s².")
     duration: Optional[float] = Field(None, gt=0, le=60, allow_inf_nan=False,
-                                      description="Exact duration (s); refused if it breaks the limits.")
+                                      description="Exact duration (s). Too short for the limits: nothing is planned and the "
+                                                  "response's `retry` gives the shortest that works.")
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False,
+                                         description="Accept an IK solution whose orientation is within this many degrees of the "
+                                                     "request (default 10; the position must be within 2 mm). 1 asks for an exact pose.")
 
     @model_validator(mode="after")
     def _one_target(self):
@@ -99,6 +103,9 @@ class ChunkIn(BaseModel):
 class IKIn(BaseModel):
     pose: Pose
     seed: Literal["command", "measured"] = "command"
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False,
+                                         description="Accept an IK solution whose orientation is within this many degrees of the "
+                                                     "request (default 10; the position must be within 2 mm). 1 asks for an exact pose.")
 
 
 class KinIn(BaseModel):
@@ -301,16 +308,17 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
         return await asyncio.to_thread(node.track_cmd, token, body.pose.se3(), body.twist, body.twist_frame,
                                        body.seq, g)
 
-    @app.post("/servo", tags=["motion"], summary="Planned move to a pose or a named pose (422 if refused; nothing moves)")
+    @app.post("/servo", tags=["motion"], summary="Planned move to a pose or a named pose (422 if it can't be planned: nothing moves; `code`, `retry`, `nearest` say how to adjust)")
     async def servo(body: ServoIn, token: LeaseToken = None):
         return await asyncio.to_thread(node.servo_cmd, token, body.pose.se3() if body.pose else None, body.name,
-                                       body.lin_vel, body.lin_acc, body.ang_vel, body.ang_acc, body.duration)
+                                       body.lin_vel, body.lin_acc, body.ang_vel, body.ang_acc, body.duration,
+                                       body.max_rot_deg)
 
     @app.post("/home", tags=["motion"], summary="Slow joint-space move to the home pose (through home_via)")
     async def home(token: LeaseToken = None):
         return await asyncio.to_thread(node.home, token)
 
-    @app.post("/chunk", tags=["motion"], summary="Time-indexed TCP poses (an action chunk); 422 if any sample fails")
+    @app.post("/chunk", tags=["motion"], summary="Time-indexed TCP poses (an action chunk); 422 if it can't be planned (nothing moves; `code`, `retry` say why)")
     async def chunk(body: ChunkIn, token: LeaseToken = None):
         return await asyncio.to_thread(node.chunk, token, [p.se3() for p in body.poses], body.dt, body.t0,
                                        body.gaps_mm, body.blend_s)
@@ -325,9 +333,9 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     # -- kinematics ---------------------------------------------------------------------------------
 
-    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease)")
+    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease): always returns `nearest`, the closest reachable pose")
     async def ik(body: IKIn):
-        return await asyncio.to_thread(node.ik_check, body.pose.se3(), body.seed)
+        return await asyncio.to_thread(node.ik_check, body.pose.se3(), body.seed, body.max_rot_deg)
 
     @app.get("/kinematics", tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
     async def kin_now(frame: Literal["base", "tcp"] = "base", which: Literal["measured", "command"] = "measured"):

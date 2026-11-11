@@ -135,7 +135,7 @@ def setup_app(app: FastAPI) -> None:
 
     @app.exception_handler(RequestError)
     async def _request_error(request: Request, exc: RequestError):
-        return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+        return JSONResponse(status_code=exc.status, content={"detail": str(exc), **_json_safe(jsonable_encoder(exc.extra))})
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError):
