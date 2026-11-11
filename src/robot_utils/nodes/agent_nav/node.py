@@ -89,6 +89,7 @@ class Snapshot:
     T_bc: Optional[np.ndarray]
     mode: str
     moving: bool
+    T_bc_desc: Optional[np.ndarray] = None      # the camera pose as described (T_bc: with the session's correction)
     _cloud: Optional[G.Cloud] = None
 
     @property
@@ -113,9 +114,9 @@ class GoalRec:
 class AgentNav:
     def __init__(self, pose_servo: str = "pose_servo", perception: str = "3d_perception",
                  estimator: str = "estimator", data_dir: str = DATA_DIR, profile: str = "cautious",
-                 require_imu: bool = True, description: Optional[str] = "description"):
+                 require_imu: bool = True, description: Optional[str] = "description", arm: Optional[str] = "arm"):
         self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator,
-                        "description": description}
+                        "description": description, "arm": arm}
         self.data_dir = data_dir
         self.events = EventLog()
         self.lock = threading.RLock()
@@ -141,6 +142,7 @@ class AgentNav:
         self.reflex = {"enabled": True, "armed": False, "last": None, "blind": None, "stops": 0,
                        "margin": REFLEX_MARGIN, "tick_errors": 0}
         self._reflex_tick_s = 1.0 / REFLEX_HZ      # measured interval between reflex checks (EMA)
+        self.geom_corr = _zero_corr()           # session placement corrections (display / perception only)
         self._n_snap = self._n_img = self._n_q = 0
         self._ps_status = None
         self._threads = [threading.Thread(target=self._read_poses, name="poses", daemon=True),
@@ -288,6 +290,7 @@ class AgentNav:
             self.session = {"id": sid, "agent": agent or "agent", "avatar": avatar or "🤖", "started": time.time(),
                             "profile": self.profile}
             self.memory = {"notes": [], "places": {}}
+            self.geom_corr = _zero_corr()
             self.goals.clear()
             d = self._session_dir()
             with open(os.path.join(d, "session.json"), "w") as f:
@@ -432,7 +435,9 @@ class AgentNav:
                      "drive": "swerve (holonomic): it can translate in any direction while turning, and turn in place",
                      "wheels": [{"name": w["name"], "x": round(w["x"], 4), "y": round(w["y"], 4)} for w in wheels],
                      "turn_in_place_sweep_radius_m": round(math.hypot(G.HALF, G.HALF), 3),
-                     "height_note": "low base (~0.17 m) with a camera mast; the mast is the tallest part"},
+                     "height_note": "low base (top surface 0.22 m) with a camera mast (the tallest part); the arm "
+                                    "stands on the front-right corner and its gripper can reach past the front: the arm "
+                                    "node's GET /geometry gives where it is, and /plan/check draws it"},
             "camera": camera,
             "limits": {"profile": self.profile, "caps": caps, "wheel_speed_max_m_s": WHEEL_SPEED_MAX,
                        "steer_rate_max_rad_s": round(STEER_RATE_MAX, 3)},
@@ -451,8 +456,10 @@ class AgentNav:
 
     # -- perception (read-only) -------------------------------------------------------------------
 
-    def look(self, actor: str, scale: Optional[float] = None, grid: bool = False, settle: bool = False,
+    def look(self, actor: str, scale: Optional[float] = None, grid=False, settle: bool = False,
              comment: str = "") -> dict:
+        """grid: False | True (100 px) | {"step": px, "values": x|y|z|range|xyz}."""
+        gspec = None if not grid else ({} if grid is True else dict(grid))
         self._need_session(actor)
         if settle:
             deadline = time.monotonic() + 8
@@ -481,18 +488,25 @@ class AgentNav:
             raise RequestError(503, f"3d_perception gave no depth (mode {h.get('mode')})")
         depth = np.frombuffer(payload, "<u2", d["width"] * d["height"], d["offset"]).reshape(d["height"], d["width"]).copy()
         cam = G.Camera.from_color(cal["color"], d["width"], d["height"])
-        T_bc = np.array(cal["base_to_color"]) if cal.get("base_to_color") else None
+        T_desc = np.array(cal["base_to_color"]) if cal.get("base_to_color") else None
+        T_bc = self.corrected("camera", T_desc)
         p = self.pose_at(h["t_color"])
         moving = self._servo_moving()
         with self.lock:
             self._n_snap += 1
             sid = f"s{self._n_snap}"
             snap = Snapshot(sid, h["t_color"], p[:3] if p else None, p[3] if p else None, jpeg, depth, cam, T_bc,
-                            h.get("mode", "?"), moving)
+                            h.get("mode", "?"), moving, T_desc)
             self.snapshots[sid] = snap
             while len(self.snapshots) > KEEP_SNAPSHOTS:
                 self.snapshots.popitem(last=False)
-        img = self.store_image(G.overlay_image(jpeg, grid=True, label=sid) if grid else jpeg, sid, "jpg")
+        ginfo = None
+        if gspec is not None:
+            gj, ginfo = G.view_image(jpeg, step=gspec.get("step") or 100, values=gspec.get("values"), cloud=snap.cloud,
+                                     label=sid)
+            img = self.store_image(gj, sid, "jpg")
+        else:
+            img = self.store_image(jpeg, sid, "jpg")
         bev = self.store_image(G.bev_image(snap.cloud, label=f"{sid} BEV (base frame, 0.5 m grid)"), sid + "_bev", "png")
         warnings = []
         if T_bc is None:
@@ -501,12 +515,39 @@ class AgentNav:
             warnings.append("no estimator pose at capture: no world coordinates, no snapshot-frame goals")
         if moving:
             warnings.append("the robot was moving (motion-compensated registration; geometry less exact)")
+        if self._corr_active("camera"):
+            warnings.append("session camera correction active (GET /session/geometry): base/world coordinates use it")
         out = {"snapshot": sid, "image": f"images/{img}", "bev": f"images/{bev}",
                "image_size": [cam.color_w, cam.color_h], "depth_size": [cam.width, cam.height],
                "pose_world": None if p is None else [round(v, 4) for v in p[:3]], "mode": snap.mode,
                "depth_fraction": round(float((depth > 0).mean()), 3), "moving": moving, "warnings": warnings,
                "grid_image": f"images/{sid}/grid.jpg"}
+        if ginfo and ginfo.get("values"):
+            out["grid"] = ginfo
         self.turn(actor, "look", {"scale": scale, "grid": grid, "settle": settle}, out, comment, [img, bev])
+        return out
+
+    def zoom(self, actor: str, snapshot: Optional[str], box: Optional[list], step: Optional[int] = None,
+             values: Optional[str] = None, comment: str = "") -> dict:
+        """A held snapshot (no new capture), or the crop ``box`` of it enlarged, with a grid labelled in the
+        full image's pixels and optionally depth values (base frame) at its intersections."""
+        self._need_session(actor)
+        s = self.snapshot(snapshot)
+        if box is not None and len(box) != 4:
+            raise ValueError("box: [u0, v0, u1, v1] in colour pixels")
+        with self.lock:
+            self._n_zoom = getattr(self, "_n_zoom", 0) + 1
+            zid = f"z{self._n_zoom}"
+        jpg, info = G.view_image(s.jpeg, box=box, step=step, values=values, cloud=s.cloud,
+                                 label=f"{zid} on {s.sid}" + (f" · {values} (m, base) at the dots" if values else ""))
+        img = self.store_image(jpg, zid, "jpg")
+        out = {"zoom": zid, "snapshot": s.sid, "image": f"images/{img}", **info,
+               "note": "grid labels are the full image's pixel coordinates: use them as they are in queries on "
+                       f"{s.sid}" + ("; samples: base-frame points (median of the depth around each intersection, "
+                                     "null where there is none)" if values else "")
+                       + ("; values use the session camera correction" if values and self._corr_active("camera") else "")}
+        self.turn(actor, "zoom", {"snapshot": s.sid, "box": box, "step": step, "values": values},
+                  {k: v for k, v in out.items() if k != "samples"}, comment, [img])
         return out
 
     def _frame(self, cal, want_w=None):
@@ -540,7 +581,7 @@ class AgentNav:
 
     def grid_image(self, sid: str) -> bytes:
         s = self.snapshot(sid)
-        return G.overlay_image(s.jpeg, grid=True, label=sid)
+        return G.view_image(s.jpeg, step=100, label=sid)[0]
 
     def query(self, actor: str, kind: str, snapshot: Optional[str], select: Optional[dict], exclude: list,
               comment: str = "", points: Optional[list] = None) -> dict:
@@ -663,15 +704,182 @@ class AgentNav:
         return [bev]
 
     def plan_check(self, actor: str, frame: str, x: float, y: float, theta: float, snapshot: Optional[str] = None,
-                   comment: str = "") -> dict:
+                   comment: str = "", arm: Optional[dict] = None, view: bool = True) -> dict:
         self._need_session(actor)
         r = self.resolve(frame, x, y, theta)
         chk, s = self._check(r, snapshot)
-        imgs = self._check_images(chk, s, r, f"check{self.n_turn + 1}")
+        tag = f"check{self.n_turn + 1}"
+        imgs = self._check_images(chk, s, r, tag)
         out = {"goal": r, "check": _public(chk), "bev": f"images/{imgs[0]}" if imgs else None}
-        self.turn(actor, "plan_check", {"frame": frame, "x": x, "y": y, "theta": theta}, out, comment, imgs,
-                  level="warn" if chk.get("warnings") else "info")
+        if view or arm is not None:
+            robot, vimg = self._robot_view(s, r, arm, tag)
+            out["robot"] = robot
+            if vimg:
+                imgs.append(vimg)
+        req = {"frame": frame, "x": x, "y": y, "theta": theta, **({"arm": arm} if arm is not None else {})}
+        self.turn(actor, "plan_check", req, out, comment, imgs,
+                  level="warn" if chk.get("warnings") or (out.get("robot") or {}).get("warnings") else "info")
         return out
+
+    # -- session geometry: placement corrections for display and perception (never motion) ----------
+
+    def corrected(self, which: str, T: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """A frame's pose in base (4x4) with the session's correction: its origin moved by ``xyz`` (m, base
+        axes) and turned by ``rpy_deg`` about that origin (base axes)."""
+        if T is None or not self._corr_active(which):
+            return T
+        c = self.geom_corr[which]
+        R = _rpy(*np.radians(c["rpy_deg"]))
+        out = np.array(T, float).copy()
+        out[:3, :3] = R @ out[:3, :3]
+        out[:3, 3] = out[:3, 3] + np.asarray(c["xyz"], float)
+        return out
+
+    def _corr_active(self, which: str) -> bool:
+        c = self.geom_corr[which]
+        return any(abs(v) > 0 for v in c["xyz"]) or any(abs(v) > 0 for v in c["rpy_deg"])
+
+    def session_geometry(self, actor: str = "agent", log_turn: bool = False, comment: str = "") -> dict:
+        """The placements as described, the session's corrections, and the effective placements."""
+        desc = {"camera": None, "arm": None}
+        errs = []
+        try:
+            cal = self._call("perception", "GET", "/calibration", timeout=3)
+            if cal.get("base_to_color"):
+                desc["camera"] = np.array(cal["base_to_color"], float)
+        except RequestError as e:
+            errs.append(f"camera pose unavailable: {e}")
+        try:
+            desc["arm"] = np.array(self._call("arm", "GET", "/geometry", timeout=4)["frames"]["arm_in_base"]["matrix"], float)
+        except RequestError as e:
+            errs.append(f"arm mount unavailable: {e}")
+        pose = lambda T: None if T is None else {"xyz": [round(float(v), 5) for v in T[:3, 3]],
+                                                 "rpy_deg": [round(float(v), 3) for v in np.degrees(_matrix_rpy(T[:3, :3]))]}
+        out = {
+            "frames": {"camera": "the colour camera's optical frame (x right, y down, z out of the lens) in base",
+                       "arm": "the arm frame (the arm's URDF base_link, axes parallel to base) in base"},
+            "described": {k: pose(v) for k, v in desc.items()},
+            "corrections": self.geom_corr,
+            "effective": {k: pose(self.corrected(k, v)) for k, v in desc.items()},
+            "limits": {"xyz_m": CORR_MAX_M, "rpy_deg": CORR_MAX_DEG},
+            "applies_to": "look, zoom grid values, queries (base and world coordinates) and the robot drawn by "
+                          "plan/check, for this session only",
+            "never_applies_to": "the stop reflex, goals and arm commands (motion nodes use the description)",
+        }
+        if errs:
+            out["warnings"] = errs
+        if log_turn:
+            self.turn(actor, "geometry", {}, out, comment)
+        return out
+
+    def set_session_geometry(self, actor: str, camera: Optional[dict], arm: Optional[dict], comment: str = "") -> dict:
+        """Replace the session's placement corrections (each {xyz, rpy_deg}; omitted = unchanged; {} = none)."""
+        self._need_session(actor)
+        new = {k: dict(v) for k, v in self.geom_corr.items()}
+        for name, c in (("camera", camera), ("arm", arm)):
+            if c is None:
+                continue
+            xyz = [float(v) for v in c.get("xyz", [0, 0, 0])]
+            rpy = [float(v) for v in c.get("rpy_deg", [0, 0, 0])]
+            if len(xyz) != 3 or len(rpy) != 3 or not all(math.isfinite(v) for v in xyz + rpy):
+                raise ValueError(f"{name}: xyz and rpy_deg are 3 finite numbers each")
+            if max(abs(v) for v in xyz) > CORR_MAX_M or max(abs(v) for v in rpy) > CORR_MAX_DEG:
+                raise ValueError(f"{name}: corrections are limited to {CORR_MAX_M} m and {CORR_MAX_DEG}° per axis "
+                                 "(a larger error is a calibration for the operator)")
+            new[name] = {"xyz": xyz, "rpy_deg": rpy}
+        with self.lock:
+            self.geom_corr = new
+            for s in self.snapshots.values():          # held snapshots: re-derive their points with the correction
+                s.T_bc = self.corrected("camera", s.T_bc_desc)
+                s._cloud = None
+            d = self._session_dir()
+            if d:
+                with open(os.path.join(d, "geometry.json"), "w") as f:
+                    json.dump({"t": time.time(), "corrections": new}, f)
+        out = self.session_geometry(actor)
+        self.turn(actor, "geometry_set", {"camera": camera, "arm": arm}, out, comment, level="warn")
+        return out
+
+    def _arm_geometry(self, arm: Optional[dict]) -> dict:
+        """The arm node's geometry: now (arm None) or at a TCP pose / joint angles (arm dict)."""
+        if arm is None:
+            return self._call("arm", "GET", "/geometry", timeout=5)
+        body = {k: arm[k] for k in ("pose", "q", "gap_mm", "max_rot_deg") if arm.get(k) is not None}
+        body["seed"] = "measured"
+        return self._call("arm", "POST", "/geometry", body, timeout=8)
+
+    def _robot_view(self, s: Optional[Snapshot], resolved: dict, arm: Optional[dict], tag: str) -> tuple[dict, Optional[str]]:
+        """The whole robot (base + arm) at the goal pose, drawn into the snapshot, with the fingertips
+        and the depth points inside the arm's boxes. Imagination only: nothing moves."""
+        out: dict = {"warnings": []}
+        W = out["warnings"]
+        if s is None or s.T_bc is None or s.pose is None:
+            W.append("no calibrated snapshot with a pose: the robot is not drawn (POST /look)")
+            return out, None
+        px, py, pth = s.pose
+        gx, gy, gth = resolved["world"]
+        c, sn = math.cos(pth), math.sin(pth)
+        gb = (c * (gx - px) + sn * (gy - py), -sn * (gx - px) + c * (gy - py), wrap(gth - pth))
+        Rg = np.array([[math.cos(gb[2]), -math.sin(gb[2]), 0], [math.sin(gb[2]), math.cos(gb[2]), 0], [0, 0, 1.0]])
+        tg = np.array([gb[0], gb[1], 0.0])
+        out["goal_in_snapshot_base"] = [round(v, 4) for v in gb]
+        boxes = [(G.place(b, Rg, tg), G.BODY_COLOR) for b in G.body_boxes()]
+        pts = []
+        try:
+            geo = self._arm_geometry(arm)
+        except RequestError as e:
+            if e.status < 500:
+                raise                                   # a bad arm request: the agent's to fix
+            geo = None
+            W.append(f"arm node unavailable ({e}): base only")
+        if geo is not None:
+            T_desc_ab = np.asarray(geo["frames"]["arm_in_base"]["matrix"], float)  # arm frame -> base (description)
+            R_desc = T_desc_ab[:3, :3]
+            T_ab = self.corrected("arm", T_desc_ab)                                # with the session's correction
+            to_snap = lambda p_arm: Rg @ (T_ab[:3, :3] @ np.asarray(p_arm) + T_ab[:3, 3]) + tg
+            arm_boxes = []
+            for b in geo["boxes"]:
+                axes_arm = R_desc.T @ np.array(b["axes_base"]).T                     # columns = box axes, arm frame
+                bb = {"name": b["name"], "center": to_snap(b["center"]["arm"]), "axes": Rg @ T_ab[:3, :3] @ axes_arm,
+                      "size": np.array(b["size_m"])}
+                arm_boxes.append(bb)
+                boxes.append((bb, G.ARM_COLOR))
+            ft = geo["fingertips"]
+            tips = {"left": ft["left"]["arm"], "right": ft["right"]["arm"], "center": ft["center"]["arm"]["pos"]}
+            P_tips = {k: to_snap(v) for k, v in tips.items()}
+            pts += [(P_tips["left"], "L", G.TIP_COLOR), (P_tips["right"], "R", G.TIP_COLOR)]
+            wx = lambda p: list(s.cloud.base_to_world_xy(p[0], p[1])) + [p[2]]
+            back = lambda p: Rg.T @ (np.asarray(p) - tg)                               # snapshot base -> goal base
+            out["arm"] = {"which": geo["which"], "q": geo["q"], "gap_mm": geo["gap_mm"], "ik": geo.get("ik"),
+                          "arm_in_base": {**geo["frames"]["arm_in_base"], "effective": [[round(float(v), 6) for v in row] for row in T_ab],
+                                          "session_correction": self.geom_corr["arm"] if self._corr_active("arm") else None}}
+            if self._corr_active("arm"):
+                W.append("session arm-mount correction active (GET /session/geometry): the arm is drawn with it; the arm "
+                         "node's own replies (and every motion command) use the description")
+            out["fingertips"] = {k: {"base": [round(float(v), 4) for v in back(p)],
+                                     "snapshot_base": [round(float(v), 4) for v in p],
+                                     "world": [round(float(v), 4) for v in wx(p)]} for k, p in P_tips.items()}
+            out["past_footprint_m"] = geo["extent_base"]["past_footprint_m"]
+            ik = geo.get("ik")
+            if ik is not None and not ik.get("exact", ik.get("ok")):
+                W.append("the arm pose is not exactly reachable: drawn at the nearest reachable configuration (`arm.ik`)")
+            P = s.cloud.p_b
+            if P is not None:
+                P = P.reshape(-1, 3)
+                P = P[np.isfinite(P).all(1)]
+                hits = [{"box": b["name"], "points": n} for b in arm_boxes if (n := G.points_in_box(P, b)) > 0]
+                out["depth_points_in_arm"] = hits
+                if hits:
+                    W.append("depth points inside the arm's boxes at this pose: an object would be in the way, or it is "
+                             "the arm itself where it is now (" + ", ".join(f"{h['box']}: {h['points']}" for h in hits) + ")")
+        jpg, info = G.robot_view_image(s.jpeg, s.cam, s.T_bc, boxes, pts,
+                                       label=f"{tag}: the robot at the goal, drawn into {s.sid} (cyan base, orange arm)")
+        out.update(info)
+        if info["boxes_partly_out_of_view"]:
+            W.append(f"{info['boxes_partly_out_of_view']} of {len(boxes)} parts are partly outside {s.sid}'s view")
+        img = self.store_image(jpg, tag + "_robot", "jpg")
+        out["view"] = f"images/{img}"
+        return out, img
 
     def plan_approach(self, actor: str, query: Optional[str], standoff: float, face: bool = True,
                       comment: str = "") -> dict:
@@ -1015,6 +1223,26 @@ class AgentNav:
         self.turn("human", "profile", {"profile": name}, {"profile": name, "caps": PROFILES[name],
                   "note": "applies at the next enable"})
         return {"profile": name, "caps": PROFILES[name]}
+
+
+CORR_MAX_M = 0.05          # m per axis: session placement corrections
+CORR_MAX_DEG = 3.0         # degrees per axis
+
+
+def _zero_corr() -> dict:
+    return {"camera": {"xyz": [0.0, 0.0, 0.0], "rpy_deg": [0.0, 0.0, 0.0]},
+            "arm": {"xyz": [0.0, 0.0, 0.0], "rpy_deg": [0.0, 0.0, 0.0]}}
+
+
+def _rpy(r: float, p: float, y: float) -> np.ndarray:
+    """R = Rz(y) Ry(p) Rx(r) (fixed axes X, Y, Z, as URDF)."""
+    from ..description.frames import rpy_to_matrix
+    return rpy_to_matrix(r, p, y)
+
+
+def _matrix_rpy(R: np.ndarray):
+    from ..description.frames import matrix_to_rpy
+    return matrix_to_rpy(R)
 
 
 def _public(d: dict) -> dict:

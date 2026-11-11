@@ -145,6 +145,13 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     call("POST", "/enable", json={"caps": {"max_speed": 0.12}})
     look = call("POST", "/look", json={"grid": True})
     sid = look["snapshot"]
+    call("POST", "/look", json={"grid": {"step": 100, "values": "z"}})
+    call("POST", "/zoom", json={"snapshot": sid, "box": BOARD, "values": "xyz"})
+    call("POST", "/zoom", json={"snapshot": sid})
+    call("GET", "/session/geometry")
+    call("POST", "/session/geometry", json={"camera": {"xyz": [0.01, 0, 0]}})
+    call("POST", "/plan/check", json={"frame": "local", "x": 0.3})
+    call("POST", "/session/geometry", json={"camera": {}})
     call("POST", "/query/region", json={"select": {"box": [400, 20, 700, 160]}, "exclude": [{"disk": [520, 60, 25]}]})
     call("POST", "/query/region", json={"select": {"box": [0, 0, 4, 4]}})        # (almost) no depth: few keys
     plane = call("POST", "/query/plane", json={"select": {"box": BOARD}})     # the board, 3 m ahead

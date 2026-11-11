@@ -178,6 +178,26 @@ Shapes are `point u v`, `disk u v r`, `box u0 v0 u1 v1` or `poly u,v u,v u,v…`
 radians, or degrees as `90d`. Commands run exactly like the agent's calls and appear in the
 dialogue as the human's turns.
 
+## Zoom, grid values, the robot drawn, session geometry (2026-11-11)
+
+- **Zoom** (`POST /zoom`) enlarges a held snapshot (no capture) with grid labels in the full image's
+  pixels, so a point read off a zoom is a query coordinate as is. `look` and `zoom` take a grid `step`
+  and `values` (x | y | z | range | xyz): the base-frame depth value at each grid intersection, drawn on
+  the image and returned as `samples`. It replaces the agents' local depth-grid scripts with the numbers
+  drawn where they were measured.
+- **`/plan/check` draws the whole robot** (base boxes from swerve.constants, the arm's boxes from the arm
+  node's `POST /geometry`, the L/R fingertips) at the goal into the snapshot. The arm as it is now, or at a
+  TCP pose (IK) or joint angles. It also returns the fingertips (goal base, snapshot base, world) and the
+  depth points inside the arm's boxes. Planning only: nothing moves. Without an arm node it draws the base
+  and says so.
+- **Session geometry** (`GET`/`POST /session/geometry`): placements only (the colour camera in base, the
+  arm frame in base), as described (via 3d_perception and the arm node), the session's corrections
+  (≤ 5 cm, ≤ 3° per axis, reset per session, logged, saved as `geometry.json` with the session) and the
+  effective result. The corrections apply to look, zoom values, queries (held snapshots are
+  re-derived) and the robot drawn by check. The stop reflex reads the calibration fresh and never uses
+  them; motion nodes never see them. Shapes (footprint, arm boxes) stay code constants. Making a correction
+  permanent is the operator's change on the description node.
+
 ## Endpoints
 
 See `guide.md` (Reference) and `/docs`. In addition:
@@ -187,7 +207,8 @@ See `guide.md` (Reference) and `/docs`. In addition:
 
 ## Options
 
-`--pose-servo`, `--perception`, `--estimator` (instance names or URLs), `--profile cautious|normal`,
+`--pose-servo`, `--perception`, `--estimator`, `--description`, `--arm` (instance names or URLs; `none` to
+skip the last two), `--profile cautious|normal`,
 `--data-dir`, `--no-require-imu` (simulation only: lets goals proceed without an IMU-fused heading).
 
 ## Simulation

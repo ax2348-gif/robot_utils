@@ -575,6 +575,104 @@ def draw_grid(img: Image.Image, step: int = 100) -> None:
         dr.text((2, v + 2), str(v), fill=(255, 255, 0, 255), font=f, stroke_width=2, stroke_fill=(0, 0, 0, 255))
 
 
+GRID_STEPS = (5, 10, 20, 25, 50, 100, 200)
+GRID_VALUES = ("x", "y", "z", "range", "xyz")
+MAX_SAMPLES = 400
+
+
+def nice_step(span: float, lines: int = 8) -> int:
+    """A grid step (colour px) giving about ``lines`` lines over ``span`` px."""
+    return min(GRID_STEPS, key=lambda s: abs(span / s - lines))
+
+
+@_quiet
+def sample_grid(cloud: "Cloud", box: tuple, step: int) -> list:
+    """Base-frame points at the grid intersections inside ``box`` (colour px): the median of the depth
+    grid's 3x3 neighbourhood at each, or None where it has no depth. [(u, v, [x, y, z] | None), ...]"""
+    cam, P = cloud.cam, cloud.p_b
+    u0, v0, u1, v1 = box
+    out = []
+    for v in range((v0 + step - 1) // step * step, v1 + 1, step):
+        for u in range((u0 + step - 1) // step * step, u1 + 1, step):
+            gi, gj = int(round(v * cam.scale)), int(round(u * cam.scale))
+            win = P[max(gi - 1, 0): gi + 2, max(gj - 1, 0): gj + 2].reshape(-1, 3)
+            win = win[np.isfinite(win).all(1)]
+            out.append((u, v, np.median(win, 0).tolist() if len(win) else None))
+    return out
+
+
+def _fmt_value(p: list, values: str) -> list[str]:
+    x, y, z = p
+    if values == "xyz":
+        return [f"x{x:.3f}", f"y{y:.3f}", f"z{z:.3f}"]
+    return [f"{ {'x': x, 'y': y, 'z': z, 'range': math.hypot(x, y)}[values]:.3f}"]
+
+
+@_quiet
+def view_image(jpeg: bytes, *, box: Optional[tuple] = None, step: Optional[int] = None, values: Optional[str] = None,
+               cloud: Optional["Cloud"] = None, label: str = "", max_w: int = 1280, max_h: int = 960) -> tuple[bytes, dict]:
+    """The colour image, or the crop ``box`` [u0, v0, u1, v1] of it enlarged, with a pixel grid labelled in
+    the FULL image's pixel coordinates (so a point read off a zoom is a query coordinate as is). With
+    ``values`` (x | y | z | range | xyz), each grid intersection also shows the base-frame value of the depth
+    there (a dot; nothing where there is no depth). Returns (jpeg, info) with info["samples"] the numbers."""
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    W, H = img.size
+    if box is None:
+        u0, v0, u1, v1 = 0, 0, W - 1, H - 1
+        k = 1.0
+    else:
+        u0, v0, u1, v1 = (int(round(b)) for b in box)
+        u0, u1 = sorted((max(0, min(W - 1, u0)), max(0, min(W - 1, u1))))
+        v0, v1 = sorted((max(0, min(H - 1, v0)), max(0, min(H - 1, v1))))
+        if u1 - u0 < 8 or v1 - v0 < 8:
+            raise ValueError(f"zoom box must be at least 8 px each way inside the {W}x{H} image")
+        k = min(max_w / (u1 - u0 + 1), max_h / (v1 - v0 + 1), 8.0)
+        img = img.crop((u0, v0, u1 + 1, v1 + 1)).resize((int(round((u1 - u0 + 1) * k)), int(round((v1 - v0 + 1) * k))),
+                                                        Image.LANCZOS)
+    step = int(step) if step else nice_step(u1 - u0 + 1)
+    if step < 2:
+        raise ValueError("grid step must be >= 2 px")
+    X = lambda u: (u - u0 + 0.5) * k        # pixel centres
+    Y = lambda v: (v - v0 + 0.5) * k
+    dr = ImageDraw.Draw(img, "RGBA")
+    f = _font(13)
+    for u in range((u0 + step - 1) // step * step, u1 + 1, step):
+        dr.line([X(u), 0, X(u), img.size[1]], fill=(255, 255, 0, 110), width=1)
+        dr.text((X(u) + 2, 2), str(u), fill=(255, 255, 0, 255), font=f, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+    for v in range((v0 + step - 1) // step * step, v1 + 1, step):
+        dr.line([0, Y(v), img.size[0], Y(v)], fill=(255, 255, 0, 110), width=1)
+        dr.text((2, Y(v) + 2), str(v), fill=(255, 255, 0, 255), font=f, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+    info = {"box": [u0, v0, u1, v1], "magnification": round(k, 3), "step": step, "values": values}
+    if values:
+        if values not in GRID_VALUES:
+            raise ValueError(f"grid values: one of {', '.join(GRID_VALUES)}")
+        if cloud is None or cloud.p_b is None:
+            raise ValueError("grid values need the camera pose in base (not calibrated)")
+        n = ((u1 // step) - ((u0 + step - 1) // step) + 1) * ((v1 // step) - ((v0 + step - 1) // step) + 1)
+        if n > MAX_SAMPLES:
+            raise ValueError(f"{n} grid values is too many (max {MAX_SAMPLES}): use a larger step or a zoom box")
+        S = sample_grid(cloud, (u0, v0, u1, v1), step)
+        fv = _font(11 if values == "xyz" else 12)
+        for u, v, p in S:
+            x, y = X(u), Y(v)
+            if x < 34 or y < 18:            # under the axis labels: in `samples` only
+                continue
+            if p is None:
+                dr.line([x - 2, y, x + 2, y], fill=(255, 255, 255, 160), width=1)
+                continue
+            dr.ellipse([x - 2.5, y - 2.5, x + 2.5, y + 2.5], fill=(0, 255, 255, 255), outline=(0, 0, 0, 255))
+            for i, t in enumerate(_fmt_value(p, values)):
+                dr.text((x + 4, y + 2 + 11 * i), t, fill=(0, 255, 255, 255), font=fv, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        info["samples"] = [{"u": u, "v": v, "base": None if p is None else [round(c, 4) for c in p]} for u, v, p in S]
+        info["unit"] = {"range": "m, horizontal distance from the base origin"}.get(values, "m, base frame")
+    if label:
+        dr.text((10, img.size[1] - 26), label, fill=(255, 255, 255, 255), font=_font(16), stroke_width=3,
+                stroke_fill=(0, 0, 0, 255))
+    b = io.BytesIO()
+    img.save(b, "JPEG", quality=90)
+    return b.getvalue(), info
+
+
 @_quiet
 def overlay_image(jpeg: bytes, *, grid: bool = False, shapes=(), plane: Optional[dict] = None,
                   cam: Optional[Camera] = None, T_bc: Optional[np.ndarray] = None, label: str = "",
@@ -909,3 +1007,80 @@ def robot_diagram(cam: Camera, T_bc: np.ndarray, wheels: Sequence[dict], facts: 
     b = io.BytesIO()
     img.save(b, "PNG")
     return b.getvalue()
+
+
+# ----------------------------------------------------------------------------------------------
+# The robot drawn into a snapshot (planning: where a base pose + arm configuration would put it)
+
+BODY_COLOR = (0, 220, 255)          # cyan: the base
+ARM_COLOR = (255, 150, 0)           # orange: the arm
+TIP_COLOR = (255, 40, 200)          # magenta: the fingertips
+_EDGES = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
+
+
+def body_boxes() -> list[dict]:
+    """The base's frame (2x1 tubes) and top rails (1x1 tubes) as boxes in the base frame (swerve.constants)."""
+    from ..swerve.constants import FRAME_BOTTOM_Z, FRAME_TOP_Z, TOP_RAIL_BOTTOM_Z, TOP_Z
+    I = np.eye(3)
+    return [{"name": "frame", "center": np.array([0, 0, (FRAME_BOTTOM_Z + FRAME_TOP_Z) / 2]), "axes": I,
+             "size": np.array([FRAME, FRAME, FRAME_TOP_Z - FRAME_BOTTOM_Z])},
+            {"name": "top rails", "center": np.array([0, 0, (TOP_RAIL_BOTTOM_Z + TOP_Z) / 2]), "axes": I,
+             "size": np.array([FRAME, FRAME, TOP_Z - TOP_RAIL_BOTTOM_Z])}]
+
+
+def box_corners(b: dict) -> np.ndarray:
+    """8x3 corners of an oriented box {center, axes (3x3, columns = box axes), size}."""
+    s = np.asarray(b["size"]) / 2
+    L = np.array([[i * s[0], j * s[1], k * s[2]] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
+    return L @ np.asarray(b["axes"]).T + np.asarray(b["center"])
+
+
+def place(b: dict, R: np.ndarray, t: np.ndarray) -> dict:
+    """A box moved by the rigid transform (R, t)."""
+    return {**b, "center": R @ np.asarray(b["center"]) + t, "axes": R @ np.asarray(b["axes"])}
+
+
+@_quiet
+def points_in_box(P: np.ndarray, b: dict, shrink: float = 0.005) -> int:
+    """How many of the (N, 3) points lie inside the box (shrunk by ``shrink`` on every side)."""
+    L = (P - np.asarray(b["center"])) @ np.asarray(b["axes"])
+    h = np.asarray(b["size"]) / 2 - shrink
+    return int((np.abs(L) <= h).all(1).sum())
+
+
+@_quiet
+def robot_view_image(jpeg: bytes, cam: Camera, T_bc: np.ndarray, boxes: list[tuple[dict, tuple]],
+                     points: list[tuple[np.ndarray, str, tuple]], label: str = "") -> tuple[bytes, dict]:
+    """The snapshot with boxes (snapshot base frame) drawn as wireframes and labelled points, projected
+    through the camera. Edges behind the camera are left out. Returns (jpeg, {in_view, partly_out})."""
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    W, H = img.size
+    dr = ImageDraw.Draw(img, "RGBA")
+    Rc, tc = T_bc[:3, :3], T_bc[:3, 3]
+    seen = out = 0
+    for b, col in boxes:
+        C = box_corners(b)
+        pc = (C - tc) @ Rc
+        uv = project(cam, pc)
+        for a, c in _EDGES:
+            if pc[a, 2] < 0.05 or pc[c, 2] < 0.05 or not (np.isfinite(uv[a]).all() and np.isfinite(uv[c]).all()):
+                continue
+            dr.line([tuple(uv[a]), tuple(uv[c])], fill=col + (235,), width=2)
+        inside = [(0 <= p[0] < W and 0 <= p[1] < H and z > 0.05) for p, z in zip(uv, pc[:, 2])]
+        seen += any(inside)
+        out += not all(inside)
+    f = _font(13)
+    for p, text, col in points:
+        pc = (np.asarray(p) - tc) @ Rc
+        if pc[2] < 0.05:
+            continue
+        u, v = project(cam, pc[None])[0]
+        if not (np.isfinite(u) and 0 <= u < W and 0 <= v < H):
+            continue
+        dr.ellipse([u - 5, v - 5, u + 5, v + 5], outline=col + (255,), width=3)
+        dr.text((u + 7, v - 7), text, fill=col + (255,), font=f, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+    if label:
+        dr.text((10, H - 26), label, fill=(255, 255, 255, 255), font=_font(16), stroke_width=3, stroke_fill=(0, 0, 0, 255))
+    bb = io.BytesIO()
+    img.save(bb, "JPEG", quality=88)
+    return bb.getvalue(), {"boxes_in_view": seen, "boxes_partly_out_of_view": out}

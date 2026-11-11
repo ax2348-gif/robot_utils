@@ -191,6 +191,37 @@ class LookOut(BaseModel):
     moving: bool = Field(description="pose_servo was moving or braking at capture.")
     warnings: list[str]
     grid_image: str = Field(description="Relative URL of the snapshot with a labelled pixel grid.")
+    grid: Optional["GridInfo"] = Field(None, description="With grid values: the grid and the sampled values.")
+
+
+class GridSample(BaseModel):
+    u: int
+    v: int
+    base: Optional[list[float]] = Field(description="[x, y, z] m in the base frame at this grid intersection (median of "
+                                                    "the depth around it); null where there is no depth.")
+
+
+class GridInfo(BaseModel):
+    box: list[int] = Field(description="[u0, v0, u1, v1]: the part of the image shown (colour pixels).")
+    magnification: float = Field(description="Magnification of the shown part (1 = actual size).")
+    step: int = Field(description="Grid spacing, colour pixels.")
+    values: Optional[str] = Field(description="Which value is written at each grid intersection (x | y | z | range | "
+                                              "xyz), or null for lines only.")
+    samples: Optional[list[GridSample]] = Field(None, description="Every grid intersection's point (with values).")
+    unit: Optional[str] = None
+
+
+class ZoomOut(BaseModel):
+    zoom: str = Field(description="Zoom id (z1, z2, ...).")
+    snapshot: str = Field(description="The snapshot shown (no new capture).")
+    image: str = Field(description="Relative URL of the JPEG.")
+    box: list[int] = Field(description="[u0, v0, u1, v1]: the part of the image shown (colour pixels).")
+    magnification: float = Field(description="Magnification of the shown part (1 = actual size).")
+    step: int = Field(description="Grid spacing, colour pixels; the labels are full-image pixel coordinates.")
+    values: Optional[str] = Field(description="The value written at each grid intersection, or null for lines only.")
+    samples: Optional[list[GridSample]] = Field(None, description="Every grid intersection's point (with values).")
+    unit: Optional[str] = None
+    note: str
 
 
 class RegionBase(BaseModel):
@@ -320,11 +351,67 @@ class PathCheck(BaseModel):
     moved_since_snapshot: Optional[Moved] = Field(None, description="Motion since that snapshot (with poses).")
 
 
+class Placement(BaseModel):
+    xyz: list[float] = Field(description="m: the frame's origin in base (for a correction: the shift, base axes).")
+    rpy_deg: list[float] = Field(description="degrees, fixed axes X, Y, Z (for a correction: the turn about the "
+                                             "frame's origin, base axes).")
+
+
+class PlacementPair(BaseModel):
+    camera: Optional[Placement] = None
+    arm: Optional[Placement] = None
+
+
+class SessionGeometryOut(BaseModel):
+    """Where the camera and the arm mount are on the robot: as described, the session's corrections, and the
+    result this session uses for display and perception. Motion never uses the corrections."""
+    frames: dict[str, str]
+    described: PlacementPair = Field(description="From the description node (via 3d_perception and the arm node).")
+    corrections: PlacementPair = Field(description="This session's corrections (zero: none).")
+    effective: PlacementPair = Field(description="Described + corrections.")
+    limits: dict[str, float]
+    applies_to: str
+    never_applies_to: str
+    warnings: Optional[list[str]] = None
+
+
+class TipPoint(BaseModel):
+    base: list[float] = Field(description="[x, y, z] m in the base frame at the goal pose.")
+    snapshot_base: list[float] = Field(description="[x, y, z] m in the base frame of the snapshot (where the robot was).")
+    world: list[float] = Field(description="[x, y, z] m in the world frame.")
+
+
+class BoxHits(BaseModel):
+    box: str
+    points: int
+
+
+class RobotView(BaseModel):
+    """The whole robot at the goal, imagined: the base, and the arm (as it is now, or at `arm`), drawn into the
+    snapshot. Nothing moves."""
+    warnings: list[str]
+    goal_in_snapshot_base: Optional[list[float]] = Field(None, description="[x, y, theta] of the goal in the snapshot's "
+                                                                          "base frame.")
+    arm: Optional[dict[str, Any]] = Field(None, description="The arm configuration drawn: which (measured | q | ik), q, "
+                                                            "gap_mm, ik (the IK check, with a pose), arm_in_base.")
+    fingertips: Optional[dict[str, TipPoint]] = Field(None, description="left, right, center.")
+    past_footprint_m: Optional[dict[str, float]] = Field(None, description="How far the arm reaches past each side of "
+                                                                           "the frame (negative: inside).")
+    depth_points_in_arm: Optional[list[BoxHits]] = Field(None, description="Depth points of the snapshot inside each "
+                                                         "arm part at the goal: an obstacle in the way, or the arm itself "
+                                                         "where it is now.")
+    boxes_in_view: Optional[int] = None
+    boxes_partly_out_of_view: Optional[int] = None
+    view: Optional[str] = Field(None, description="Relative URL of the snapshot with the robot drawn in (cyan base, "
+                                                  "orange arm, magenta L/R fingertips).")
+
+
 class PlanCheckOut(BaseModel):
     goal: Resolved
     check: PathCheck
     bev: Optional[str] = Field(description="Relative URL of a bird's-eye PNG of the check (green clear, red blocked, "
                                            "grey unseen); null if unchecked.")
+    robot: Optional[RobotView] = Field(None, description="With `view` (default): the robot drawn at the goal.")
 
 
 class Proposal(BaseModel):

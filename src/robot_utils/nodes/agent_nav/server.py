@@ -51,11 +51,48 @@ class EnableIn(Commented):
                        "max_accel, max_alpha, max_jerk, max_ang_jerk, max_distance, max_rotation).")
 
 
+class GridIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    step: Optional[int] = Field(None, ge=2, le=400, description="Grid spacing in colour pixels (look: 100; zoom: chosen "
+                                                                "to fit the box).")
+    values: Optional[Literal["x", "y", "z", "range", "xyz"]] = Field(
+        None, description="Write the base-frame value of the depth at each grid intersection (z = height, x = ahead, "
+                          "y = left, range = horizontal distance; m). Also returned as numbers (`grid.samples`).")
+
+
 class LookIn(Commented):
-    scale: Optional[float] = Field(None, description="Depth grid = colour (1280x720) x scale; default the node's "
-                                   "(0.5 = 640x360); 1.0 = full resolution (slower, briefly applies to every viewer).")
-    grid: bool = Field(False, description="Draw a labelled pixel grid on the returned image.")
+    scale: Optional[float] = Field(None, description="Depth grid = colour x scale; default the node's (0.5); 1.0 = full "
+                                   "resolution (slower, briefly applies to every viewer).")
+    grid: bool | GridIn = Field(False, description="Draw a labelled pixel grid on the returned image: true (100 px) or "
+                                                   "{step, values}.")
     settle: bool = Field(False, description="Wait (<= 8 s) until the base is not moving before capturing.")
+
+
+class PlacementIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    xyz: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3,
+                             description="m: move the frame's origin by this, in base axes (|each| <= 0.05).")
+    rpy_deg: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3,
+                                 description="degrees: turn the frame about its origin, fixed base axes X, Y, Z (|each| <= 3).")
+
+
+class SessionGeometryIn(Commented):
+    camera: Optional[PlacementIn] = Field(None, description="Correction of the colour camera's pose (omitted: unchanged; "
+                                                            "{}: none).")
+    arm: Optional[PlacementIn] = Field(None, description="Correction of the arm mount (the arm frame) (omitted: unchanged).")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"camera": {"xyz": [0.01, 0.0, 0.0]}, "comment": "the drawn fingertips sit 1 cm behind the real ones"},
+        {"camera": {}, "arm": {}, "comment": "back to the description"}]})
+
+
+class ZoomIn(Commented):
+    snapshot: Optional[str] = Field(None, description="Snapshot id (default: the latest). Nothing is captured.")
+    box: Optional[list[float]] = Field(None, min_length=4, max_length=4,
+                                       description="[u0, v0, u1, v1] colour pixels to enlarge (default: the whole image).")
+    step: Optional[int] = Field(None, ge=2, le=400, description="Grid spacing, colour pixels (default: about 8 lines).")
+    values: Optional[Literal["x", "y", "z", "range", "xyz"]] = Field(None, description="As for look's grid.values.")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"box": [380, 260, 500, 350], "values": "z"}, {"snapshot": "s4", "box": [300, 200, 460, 320], "step": 10}]})
 
 
 class QueryIn(Commented):
@@ -76,8 +113,25 @@ class PoseIn(Commented):
     theta: float = Field(0.0, description="rad, CCW +")
 
 
+class ArmAt(BaseModel):
+    """An arm configuration to imagine (nothing moves): a TCP pose in the arm frame (IK, as the arm node's POST
+    /ik), or joint angles; and the gripper gap."""
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"pose": {"pos": [0.3, 0.0, 0.45], "rpy": [0, 0, 0]}, "gap_mm": 40}]})
+    pose: Optional[dict] = Field(None, description="TCP pose {pos, rpy | quat} in the arm frame (see the arm node's "
+                                                   "GET /geometry for where its TCP and fingertips are).")
+    q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles, rad.")
+    gap_mm: Optional[float] = Field(None, ge=0, le=60, description="Gripper gap (default: as measured).")
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, description="As for the arm node's POST /ik.")
+
+
 class CheckIn(PoseIn):
     snapshot: Optional[str] = Field(None, description="Check against this snapshot (default: the latest).")
+
+
+class PlanCheckIn(CheckIn):
+    arm: Optional[ArmAt] = Field(None, description="Imagine the arm at this configuration (default: as it is now).")
+    view: bool = Field(True, description="Draw the whole robot (base and arm) at the goal into the snapshot (`robot`).")
 
 
 class GoalIn(CheckIn):
@@ -318,9 +372,34 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     # -- perception -------------------------------------------------------------------------------------
 
-    @app.post("/look", response_model=M.LookOut, tags=["perception"], summary="Capture a snapshot (colour + registered depth + pose)")
+    @app.post("/look", response_model=M.LookOut, response_model_exclude_unset=True, tags=["perception"], summary="Capture a snapshot (colour + registered depth + pose)")
     async def look(body: LookIn = LookIn(), x_operator: Optional[str] = Operator):
-        return await run(node.look, actor(x_operator), body.scale, body.grid, body.settle, body.comment)
+        grid = body.grid.model_dump() if isinstance(body.grid, GridIn) else body.grid
+        return await run(node.look, actor(x_operator), body.scale, grid, body.settle, body.comment)
+
+    GEO_DOC = ("Placements of the camera and the arm mount on the robot, as described and as this session corrects them. "
+               "Corrections are for display and perception only (look, zoom values, queries, the robot drawn by "
+               "plan/check), last for the session, and are logged; the stop reflex, goals and arm commands never use "
+               "them. Use them when what you see disagrees with where the robot is drawn (e.g. plan/check with no "
+               "move draws the arm where it is now: its drawn fingertips should sit on the real ones).")
+
+    @app.get("/session/geometry", response_model=M.SessionGeometryOut, response_model_exclude_unset=True,
+             tags=["perception"], summary="Camera and arm-mount placements: described, corrected, effective", description=GEO_DOC)
+    async def session_geometry():
+        return await run(node.session_geometry)
+
+    @app.post("/session/geometry", response_model=M.SessionGeometryOut, response_model_exclude_unset=True,
+              tags=["perception"], summary="Correct the camera or arm-mount placement for this session (display and "
+                                           "perception only)", description=GEO_DOC)
+    async def set_session_geometry(body: SessionGeometryIn, x_operator: Optional[str] = Operator):
+        return await run(node.set_session_geometry, actor(x_operator),
+                         None if body.camera is None else body.camera.model_dump(),
+                         None if body.arm is None else body.arm.model_dump(), body.comment)
+
+    @app.post("/zoom", response_model=M.ZoomOut, response_model_exclude_unset=True, tags=["perception"],
+              summary="Enlarge part of a snapshot, with a grid in full-image pixels and optional depth values (no capture)")
+    async def zoom(body: ZoomIn, x_operator: Optional[str] = Operator):
+        return await run(node.zoom, actor(x_operator), body.snapshot, body.box, body.step, body.values, body.comment)
 
     @app.post("/query/region", response_model=M.RegionOut, response_model_exclude_unset=True, tags=["perception"], summary="3D extent of a selection (base / world frames)")
     async def q_region(body: QueryIn, x_operator: Optional[str] = Operator):
@@ -339,8 +418,9 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     # -- planning -----------------------------------------------------------------------------------------
 
     @app.post("/plan/check", response_model=M.PlanCheckOut, response_model_exclude_unset=True, tags=["planning"], summary="Check a straight move against a snapshot (loud, advisory)")
-    async def plan_check(body: CheckIn, x_operator: Optional[str] = Operator):
-        return await run(node.plan_check, actor(x_operator), body.frame, body.x, body.y, body.theta, body.snapshot, body.comment)
+    async def plan_check(body: PlanCheckIn, x_operator: Optional[str] = Operator):
+        return await run(node.plan_check, actor(x_operator), body.frame, body.x, body.y, body.theta, body.snapshot, body.comment,
+                         None if body.arm is None else body.arm.model_dump(exclude_none=True), body.view)
 
     @app.post("/plan/approach", response_model=M.ApproachOut, response_model_exclude_unset=True, tags=["planning"], summary="Propose a goal in front of a queried surface (moves nothing)")
     async def plan_approach(body: ApproachIn, x_operator: Optional[str] = Operator):

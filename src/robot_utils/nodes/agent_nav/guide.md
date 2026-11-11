@@ -58,11 +58,28 @@ curl -s -X POST $N/look -H 'content-type: application/json' -d '{"grid": true}'
 curl -s -o s1.jpg $N/images/s1.jpg                                      # then view the file
 ```
 
-The image is 1280x720 colour. `grid: true` draws labelled pixel lines every 100 px, so you can
-name coordinates. The depth grid is 640x360 by default; `{"scale": 1.0}` gives full-resolution
-depth for fine work. The BEV is top-down in the robot's frame at capture: the robot at the bottom,
+The colour image's size is `image_size` (e.g. 640x480); selections are in its pixels. `grid: true`
+draws labelled pixel lines every 100 px, so you can name coordinates; `{"grid": {"step": 50,
+"values": "z"}}` sets the spacing and also writes the depth's base-frame value at each grid
+intersection (`x` ahead, `y` left, `z` height, `range`, or `xyz`), returned as numbers too
+(`grid.samples`). The depth grid is half the colour size by default; `{"scale": 1.0}` gives
+full-resolution depth for fine work. The BEV is top-down in the robot's frame at capture: the robot at the bottom,
 x forward (up), y left, 0.5 m grid. Floor points are grey, obstacles orange/yellow by height, the
 blue line is the nearest visible floor.
+
+**Zoom** to read pixels precisely. It enlarges part of a snapshot you already have (nothing is
+captured), with grid labels in the **full image's** pixel coordinates: a point you read off a zoom
+is a query coordinate as it is, on the same snapshot.
+
+```bash
+curl -s -X POST $N/zoom -H 'content-type: application/json' \
+     -d '{"snapshot": "s1", "box": [380, 260, 500, 350], "step": 10, "values": "z", "comment": "the block top"}'
+# -> {"zoom": "z1", "image": "images/z1.jpg", "magnification": 8, "samples": [{u, v, base: [x, y, z]}, ...]}
+```
+
+Zoom enlarges the pixels the camera captured; it adds no detail, but it lets you place selections
+on the right pixels. With `values`, every number is drawn on the surface it belongs to; read them
+there, not just from `samples`, so you know which surface each one is.
 
 **2. Query what you see.** Select pixels with a point, disk, box or polygon, and optionally exclude shapes.
 
@@ -129,6 +146,23 @@ curl -s -X POST $N/plan/check -H 'content-type: application/json' -d '{"frame": 
 
 In the check BEV: green footprint = clear, red = obstacle points inside (red dots), grey = never
 seen. Proposals are suggestions. Verify them and adjust them yourself.
+
+**Imagine the whole robot.** `/plan/check` also draws the robot at the goal into the snapshot
+(`robot.view`: the base in cyan, the arm in orange, the fingertips L/R in magenta), with the arm as
+it is now, or at `"arm": {"pose": {pos, rpy}, "gap_mm": 40}` (a TCP pose in the arm frame, solved as
+the arm node's `POST /ik`) or `{"q": [...]}`. It returns the fingertips in the goal's base frame,
+the snapshot's and the world, how far the arm reaches past the frame, and the depth points that
+would be inside the arm (`depth_points_in_arm`: something in the way, or the arm itself where it
+is now). One call checks a base move, an arm pose, or both; nothing moves. Only what lies in the
+snapshot's view is drawn.
+
+**When the drawing and the image disagree.** With no move (`{"frame": "local"}`) the arm is drawn
+where it is now, so its drawn fingertips should sit on the real ones. If they are consistently
+off, the camera or arm-mount placement is slightly off: correct it for this session with `POST
+/session/geometry {"camera": {"xyz": [dx, dy, dz], "rpy_deg": [...]}, "comment": why}` (≤ 5 cm,
+≤ 3°; `{}` removes it), and check again. It changes the base and world coordinates of your
+looks, zoom values, queries (held snapshots included) and drawings, for this session only. The
+stop reflex, goals and arm commands never use it.
 
 **Reading the warnings.** They are meant to be rare, so act on them:
 - `OBSTACLE`: points above the floor inside the swept footprint.
@@ -219,10 +253,12 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `POST /session {agent, avatar, comment}` / `DELETE /session` | open / close (closing disables) |
 | `GET /robot` | body, wheels, frames, limits, camera pose / field of view / blind zone, diagram |
 | `POST /enable {caps?, comment}` / `POST /disable` | motion on (pose_servo + swerve lease) / off at once |
-| `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture |
+| `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture (`grid`: true or {step, values}) |
+| `POST /zoom {snapshot?, box?, step?, values?}` | enlarge part of a snapshot, grid in full-image pixels, depth values |
 | `POST /query/region`, `POST /query/plane` `{snapshot?, select, exclude?}` | read-only geometry with overlays |
 | `POST /query/line {snapshot?, points \| select, exclude?}` | 3D line: direction, heading, length (edges, alignment) |
-| `POST /plan/check {frame, x, y, theta, snapshot?}` | path check (loud, advisory) |
+| `POST /plan/check {frame, x, y, theta, snapshot?, arm?, view?}` | path check (loud, advisory) + the robot drawn at the goal |
+| `GET`/`POST /session/geometry` | camera / arm-mount placement: described, session correction, effective |
 | `POST /plan/approach {query, standoff, face}` | proposed goal in front of a surface |
 | `POST /goal {frame, x, y, theta, options…, comment}` | **move**; returns at once |
 | `GET /goals/{id}`, `GET /goals/{id}/wait?timeout=` | goal state / long-poll until done |
@@ -232,4 +268,4 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `GET /state`, `GET /log?since=`, `GET /sessions` | status, live transcript, stored transcripts |
 
 Selections: `{"point": [u, v]}`, `{"disk": [u, v, r]}`, `{"box": [u0, v0, u1, v1]}` or
-`{"polygon": [[u, v], …]}`, in colour-image pixels (1280x720, origin top left).
+`{"polygon": [[u, v], …]}`, in colour-image pixels (`image_size`, origin top left).

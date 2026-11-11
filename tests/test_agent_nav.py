@@ -433,3 +433,95 @@ def test_stale_means_moved_and_enable_adopts_the_pages_hold(stack):
     assert ln.status_code == 200 and "heading" in ln.json()["base"]
     assert post(st, "/query/line", {"points": [[400, 120]]}).status_code == 422
     assert post(st, "/chat", {"text": "line 400,120 500,125 600,130"}).json()["kind"] == "line"
+
+
+def test_look_grid_values_and_zoom(stack):
+    """look grid {step, values}; zoom crops a held snapshot with full-image grid labels and depth values."""
+    st = stack
+    post(st, "/session", {"agent": "Tester"})
+    look = post(st, "/look", {"grid": {"step": 50, "values": "x"}}).json()
+    assert "snapshot" in look, look
+    g = look["grid"]
+    assert g["step"] == 50 and g["values"] == "x" and g["magnification"] == 1
+    hit = [s for s in g["samples"] if s["base"] is not None]
+    assert hit and all(len(s["base"]) == 3 for s in hit)
+    u, v = board_px(demo_scene().rects[0])
+    # zoom on the board: labels in full-image pixels, values = the board's distance (3.0 m)
+    b = [u - 40, v - 20, u + 40, v + 20]
+    z = post(st, "/zoom", {"snapshot": look["snapshot"], "box": b, "step": 10, "values": "x", "comment": "board"}).json()
+    assert z["zoom"] == "z1" and z["snapshot"] == "s1" and z["magnification"] > 4
+    assert z["box"] == [int(round(c)) for c in b]
+    xs = [s["base"][0] for s in z["samples"] if s["base"] is not None]
+    assert xs and all(abs(x - 3.0) < 0.05 for x in xs), xs
+    assert all(s["u"] % 10 == 0 and b[0] <= s["u"] <= b[2] for s in z["samples"])
+    img = get(st, "/" + z["image"])
+    assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
+    # whole-image zoom with the default step; bad requests
+    assert post(st, "/zoom", {}).json()["box"][0] == 0
+    assert post(st, "/zoom", {"box": [10, 10, 12, 12]}).status_code == 422
+    assert post(st, "/zoom", {"step": 2, "values": "z"}).status_code == 422          # too many samples
+    assert post(st, "/zoom", {"snapshot": "s99"}).status_code == 404
+
+
+def test_plan_check_draws_the_robot_and_counts_depth_in_the_arm(stack):
+    """plan/check draws the base (and the arm, from the arm node's geometry) at the goal into the snapshot."""
+    st = stack
+    nav = st["nav"]
+    post(st, "/session", {"agent": "Tester"})
+    post(st, "/look")
+    # no arm node in the sim: the base alone, said loudly
+    r = post(st, "/plan/check", {"frame": "local", "x": 0.5, "y": 0.0, "theta": 0.0}).json()
+    rv = r["robot"]
+    assert rv["view"].startswith("images/") and rv["goal_in_snapshot_base"][:2] == pytest.approx([0.5, 0.0], abs=0.02)
+    assert any("arm node unavailable" in w for w in rv["warnings"])
+    assert get(st, "/" + rv["view"]).headers["content-type"] == "image/jpeg"
+    # a stand-in arm: one box (the "jaw") reaching 2.5 m ahead of the arm frame, i.e. into the board 3 m ahead
+    T = np.eye(4); T[:3, 3] = [0.1159, -0.1459, 0.22225]
+    seen = {}
+
+    def fake_geometry(arm):
+        seen["arm"] = arm
+        return {"which": "ik" if arm else "measured", "q": [0.0] * 6, "gap_mm": 40.0, "ik": {"ok": True, "exact": True} if arm else None,
+                "frames": {"arm_in_base": {"matrix": T.tolist(), "xyz": [0.1159, -0.1459, 0.22225], "source": "test"}},
+                "boxes": [{"name": "jaw", "link": "finger", "center": {"arm": [2.8, 0.3, 0.6], "base": [0, 0, 0]},
+                           "size_m": [0.3, 0.3, 0.3], "axes_base": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}],
+                "fingertips": {"left": {"arm": [0.4, 0.02, 0.3]}, "right": {"arm": [0.4, -0.02, 0.3]},
+                               "center": {"arm": {"pos": [0.4, 0.0, 0.3]}}},
+                "extent_base": {"past_footprint_m": {"front": 0.1, "rear": -0.1, "left": -0.2, "right": 0.0}}}
+
+    nav._arm_geometry = fake_geometry
+    r = post(st, "/plan/check", {"frame": "local", "x": 0.0, "y": 0.0, "theta": 0.0,
+                                 "arm": {"pose": {"pos": [0.3, 0, 0.4], "rpy": [0, 0, 0]}, "gap_mm": 40}}).json()
+    rv = r["robot"]
+    assert seen["arm"]["gap_mm"] == 40 and rv["arm"]["which"] == "ik"
+    assert rv["fingertips"]["left"]["base"] == pytest.approx([0.5159, -0.1259, 0.52225], abs=1e-3)
+    assert rv["depth_points_in_arm"] and rv["depth_points_in_arm"][0]["box"] == "jaw"
+    assert any("depth points inside the arm" in w for w in rv["warnings"])
+    # a bad arm request is the agent's to fix (422), not a warning
+    assert post(st, "/plan/check", {"frame": "local", "arm": {"q": [0, 0, 0]}}).status_code == 422
+
+
+def test_session_geometry_corrects_perception_not_motion(stack):
+    """Session placement corrections move base/world coordinates of held snapshots; they reset per session."""
+    st = stack
+    post(st, "/session", {"agent": "Tester"})
+    g0 = get(st, "/session/geometry").json()
+    assert g0["corrections"]["camera"]["xyz"] == [0, 0, 0] and g0["described"]["camera"] == g0["effective"]["camera"]
+    assert "reflex" in g0["never_applies_to"]
+    look = post(st, "/look").json()
+    u, v = board_px(demo_scene().rects[0])
+    x0 = post(st, "/query/region", {"select": {"disk": [u, v, 10]}}).json()["base"]["centroid"]
+    g = post(st, "/session/geometry", {"camera": {"xyz": [0.02, -0.01, 0.0]}, "comment": "drawn tips 2 cm short"}).json()
+    assert g["corrections"]["camera"]["xyz"] == [0.02, -0.01, 0.0]
+    assert g["effective"]["camera"]["xyz"][0] == pytest.approx(g["described"]["camera"]["xyz"][0] + 0.02, abs=1e-5)
+    x1 = post(st, "/query/region", {"snapshot": look["snapshot"], "select": {"disk": [u, v, 10]}}).json()["base"]["centroid"]
+    assert x1[0] - x0[0] == pytest.approx(0.02, abs=2e-3) and x1[1] - x0[1] == pytest.approx(-0.01, abs=2e-3)
+    assert any("session camera correction" in w for w in post(st, "/look").json()["warnings"])
+    assert post(st, "/session/geometry", {"camera": {"xyz": [0.2, 0, 0]}}).status_code == 422       # beyond the limit
+    assert post(st, "/session/geometry", {"arm": {"rpy_deg": [0, 5, 0]}}).status_code == 422
+    post(st, "/session/geometry", {"camera": {}})                                                    # back to none
+    x2 = post(st, "/query/region", {"snapshot": look["snapshot"], "select": {"disk": [u, v, 10]}}).json()["base"]["centroid"]
+    assert x2 == pytest.approx(x0, abs=1e-6)
+    post(st, "/session/geometry", {"camera": {"xyz": [0.01, 0, 0]}})
+    post(st, "/session", {"agent": "Next"})                                                          # a new session starts clean
+    assert get(st, "/session/geometry").json()["corrections"]["camera"]["xyz"] == [0, 0, 0]
