@@ -242,6 +242,7 @@ def test_servo_refuses_unreachable_and_too_short(rig):
 
 def test_servo_aborts_on_obstruction(rig):
     n = ready(rig).node
+    n.settings.abort_pos = 0.03                        # the mechanism, at a threshold this obstruction exceeds
     T = rig.tcp()
     T.translation = T.translation + np.array([0.0, 0.0, 0.08])
     n.servo_cmd(rig.tok, T, lin_vel=0.1)
