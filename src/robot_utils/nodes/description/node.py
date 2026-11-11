@@ -214,8 +214,10 @@ class DescriptionNode:
                 in_base[f] = np.round(tree.T("base", f), 9).tolist()
             except (KeyError, ValueError):        # a frame not under base (bad override): skip
                 pass
-        from ..swerve.constants import FRAME, MODULES
-        robot = {"frame_size": FRAME, "modules": [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES]}
+        from ..swerve.constants import FRAME, FRAME_BOTTOM_Z, FRAME_TOP_Z, MODULES, TOP_RAIL_BOTTOM_Z, TOP_Z
+        robot = {"frame_size": FRAME, "frame_z": [FRAME_BOTTOM_Z, FRAME_TOP_Z], "top_rail_z": [TOP_RAIL_BOTTOM_Z, TOP_Z],
+                 "top_z": TOP_Z,
+                 "modules": [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES]}
         return {"frames": frames, "frames_in_base": in_base, "robot": robot, "cameras": cams,
                 "conventions": {"base": "floor level, centre of the wheels; x forward, y left, z up",
                                 "optical": "x right, y down, z out of the lens",

@@ -83,6 +83,23 @@ def test_meta_page_description_transform(nodes):
     assert httpx.get(u + "/cameras/camera/depth.jpg").headers["content-type"] == "image/jpeg"
 
 
+def test_arm_frame_and_chassis_heights(nodes):
+    """The arm's base_link sits on the 8.75 in top surface, its 200 x 140 mm plate flush in the front-right corner."""
+    IN = 0.0254
+    d = httpx.get(nodes["url"] + "/description").json()
+    T = d["frames_in_base"]["arm"]
+    assert [T[0][3], T[1][3], T[2][3]] == pytest.approx([8.5 * IN - 0.100, -(8.5 * IN - 0.070), 8.75 * IN], abs=1e-4)
+    assert [v for row in T[:3] for v in row[:3]] == pytest.approx([1, 0, 0, 0, 1, 0, 0, 0, 1])
+    assert d["robot"]["frame_z"] == pytest.approx([2.75 * IN, 4.75 * IN])
+    assert d["robot"]["top_z"] == pytest.approx(8.75 * IN)
+    assert d["robot"]["top_rail_z"] == pytest.approx([7.75 * IN, 8.75 * IN])
+    # the plate's outer faces are flush with the frame's front and right faces
+    assert T[0][3] + 0.100 == pytest.approx(d["robot"]["frame_size"] / 2, abs=1e-4)
+    assert T[1][3] - 0.070 == pytest.approx(-d["robot"]["frame_size"] / 2, abs=1e-4)
+    t = httpx.get(nodes["url"] + "/transform", params={"from": "base", "to": "arm"}).json()
+    assert t["xyz"] == pytest.approx([0.1159, -0.1459, 0.22225], abs=1e-4)
+
+
 def test_yaw_refused_without_confirm_then_runs_on_the_sim(nodes):
     u = nodes["url"]
     r = httpx.post(u + "/calibrate/yaw", json={"amplitude": 0.05})

@@ -65,11 +65,12 @@ table.ru-table td,table.ru-table th{font-size:12px}
 <div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
+<script src="common/viz.js"></script>
 <script>
 const $ = s => document.querySelector(s), D = 180 / Math.PI;
 const err = m => $("#err").textContent = m || "";
 const estop = RU.estopButton($("#estop"));
-let DESC = null, ST = null, polys = [], cur = [];
+let DESC = null, ST = null, polys = [], cur = [], ARM = null;   // ARM: the arm's live links (below)
 const cam = () => $("#cam").value || "camera";
 async function call(path, body, method){ try { err(""); return await RU.api(path, {method: method || "POST", body}); } catch(e){ err(e.message); throw e; } }
 
@@ -158,6 +159,11 @@ RU.sse("events", st => { ST = st; estop.update(st);
   $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level !== "info" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 loadDesc().then(refreshImg); loadCals(); setInterval(loadDesc, 5000);
+// the arm, live: its link frames from the arm node (../arm/, the robot's proxy) at 5 Hz and the gripper gap;
+// read only. Without it the 3D view shows the mount alone.
+(async () => { for (;;){ try { const [l, gr] = await Promise.all([RU.api("../arm/links"), RU.api("../arm/gripper")]);
+    ARM = {frames: l.frames, gap: (gr.gap_mm ?? NaN) / 1000, at: performance.now()}; drawViews(); } catch (_) {}
+  await new Promise(r => setTimeout(r, 200)); } })();
 </script></body></html>
 """
 PAGE = PAGE.replace("/*VIZ_CSS*/", VIZ_CSS).replace("/*VIZ_HTML*/", VIZ_HTML).replace("/*VIZ_JS*/", VIZ_JS)

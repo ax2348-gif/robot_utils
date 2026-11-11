@@ -78,11 +78,20 @@ function buildScene(){
       P.push(tf(T, [c[0] + i * s[0] / 2, c[1] + j * s[1] / 2, c[2] + k * s[2] / 2]));
     [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]].forEach(([a, b]) => L(P[a], P[b], col, w, dash));
     return P; };
-  // robot: frame square, a nominal body height, wheels (3 in MAXSwerve), base axes
+  // robot: the 2x1 frame tubes (2.75-4.75 in) and the 1x1 top rails (7.75-8.75 in) solid, the interior
+  // volume between them as dotted corner posts, wheels (3 in MAXSwerve), base axes, and the arm at the
+  // arm frame (live links, else its mount)
   const rb = DESC.robot || {frame_size: 0.43, modules: []}, h = rb.frame_size / 2, I4 = rpyT([0, 0, 0], [0, 0, 0]);
-  fitR(...box(I4, [0, 0, 0.07], [rb.frame_size, rb.frame_size, 0.1], muted, 1.5));
+  const [fz0, fz1] = rb.frame_z || [0.02, 0.12], tr = rb.top_rail_z;
+  fitR(...box(I4, [0, 0, (fz0 + fz1) / 2], [rb.frame_size, rb.frame_size, fz1 - fz0], muted, 1.5));
+  if (tr){ fitR(...box(I4, [0, 0, (tr[0] + tr[1]) / 2], [rb.frame_size, rb.frame_size, tr[1] - tr[0]], muted, 1.5));
+    for (const i of [-1, 1]) for (const j of [-1, 1]) L([i * h, j * h, fz1], [i * h, j * h, tr[0]], muted, 1, [2, 3]); }
+  const Tarm = (DESC.frames_in_base || {}).arm;
+  if (Tarm){ const live = ARM && performance.now() - ARM.at < 1500;
+    for (const [a, b] of RU.viz.armSegments(Tarm, live ? ARM.frames : null, live ? ARM.gap : 0)) L(a, b, live ? fg : muted, 1.25);
+    fitR(tf(Tarm, [0, 0, 0])); axes(Tarm, 0.08, 2, null); lab(tf(Tarm, [0.12, 0, 0.02]), "arm", fg); }
   for (const m of rb.modules){ box(rpyT([m.x, m.y, 0.0381], [0, 0, 0]), [0, 0, 0], [0.0762, 0.03, 0.0762], fg, 1); lab([m.x, m.y, 0.09], m.name); }
-  L([h, 0, 0.12], [h + 0.06, 0, 0.12], AX[0], 2);           // front marker
+  L([h, 0, fz1], [h + 0.06, 0, fz1], AX[0], 2);             // front marker
   axes(I4, 0.2, 2.5, ["x", "y", "z"]); lab([0, 0, -0.03], "base");
   // floor grid: 0.1 m inside ±1 m, 0.5 m beyond; grows with the camera view
   const cams = Object.entries(DESC.cameras || {}), FB = DESC.frames_in_base || {};

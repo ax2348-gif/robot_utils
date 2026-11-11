@@ -8,6 +8,16 @@ frames:
   base:
     parent: null
     doc: floor level, centre of the wheels; x forward, y left, z up
+  arm:
+    parent: base
+    # The ReBot arm's base_link (rebot_ctl/urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf): the underside of its
+    # 200 x 140 mm mount plate (200 along x), at the plate centre on joint 1's axis; axes = base axes (the
+    # URDF turns the mount, not the frame). The plate sits on the robot's top surface (8.75 in) in the
+    # front-right corner, flush with the front and right outer faces of the 17 in frame:
+    #   x = 8.5 in - 0.100, y = -(8.5 in - 0.070), z = 8.75 in.
+    xyz: [0.1159, -0.1459, 0.22225]
+    rpy: [0.0, 0.0, 0.0]
+    doc: arm base (ReBot base_link), mount plate underside on joint 1's axis; axes as base
 
 # Cameras: one entry per camera node instance (`node`: its instance name on this machine, reached
 # through its unix socket; or `url` for a remote / debug one). Its frames (depth_optical, color_optical, imu)

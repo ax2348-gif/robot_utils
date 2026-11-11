@@ -741,6 +741,23 @@ start();
       if (p){ scene.update({velocity: [p.vx_world, p.vy_world]});
         $("rv-pose").textContent = `${f(p.x, 2)}, ${f(p.y, 2)} m · ${f(p.theta * D, 0)}°`; }
     }, {signal: ctl.signal});
+    // the arm, from live readings: its link frames (GET links, 10 Hz) and the gripper gap and enabled
+    // flag from its telemetry stream; read only (no lease)
+    const arm = byKind("arm");
+    if (arm){
+      const A = {};
+      RU.rows(base(arm) + "stream?max_hz=10", d => { A.gap = d.last("g_gap"); A.enabled = d.last("enabled") > 0.5; }, {signal: ctl.signal});
+      const sig = ctl.signal;
+      (async () => {
+        while (!sig.aborted){
+          const t0 = performance.now();
+          try { const r = await RU.api(base(arm) + "links");
+            if (!sig.aborted) scene.update({arm: Object.assign({}, A, {frames: r.frames, at: performance.now()})}); }
+          catch (_) { /* grey after 1 s */ }
+          await new Promise(res => setTimeout(res, Math.max(20, 100 - (performance.now() - t0))));
+        }
+      })();
+    }
     const frame = () => { for (const k in plots) plots[k].draw(); raf = requestAnimationFrame(frame); };
     raf = requestAnimationFrame(frame);
     cloudSync();

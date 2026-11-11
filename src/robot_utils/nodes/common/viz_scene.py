@@ -17,12 +17,22 @@ redraw, colours from theme tokens), kept in its own module so it composes with t
   ``push(pose)``: an estimator row ({t, x, y, theta, x_odom, y_odom}); kept in the trail when the
   robot moved 5 mm / 0.01 rad or 0.25 s passed; a jump > 0.5 m or a gap > 1 s breaks it.
   ``update({desc, modules: {FL: {angle, speed}, ...}, velocity: [vx, vy] (world m/s), driving,
-  cloud})``; ``cloud`` from ``cloudFromFrame`` (null to hide).
+  cloud, arm})``; ``cloud`` from ``cloudFromFrame`` (null to hide); ``arm``: ``{frames, gap, enabled, at}``
+  (the arm node's ``GET links`` frames, gripper gap m, enabled, ``performance.now()`` of the reading),
+  drawn on the description's ``arm`` frame (the mount alone without readings; grey after 1 s).
+
+``RU.viz.armSegments(T, frames, gap)``: the arm as wireframe edges ``[[a, b], ...]`` in base, from
+  ``RU.viz.ARM_BOXES`` (arm/geometry.py): T = the arm frame in base (4x4), frames = ``GET links``
+  frames (null: the mount plate and column only).
 
 ``RU.viz.cloudFromFrame(header, payload, calib, {maxPoints})`` (async): a 3d_perception fused frame
   record (``GET frame``) and its ``GET calibration`` -> coloured points in the base frame
   ``{xyz, rgb, n, t}`` (about ``maxPoints``, 8000), or null without ``base_to_color``.
 """
+
+import json as _json
+
+from ..arm.geometry import ARM_BOXES as _ARM_BOXES
 
 SCENE_JS = r"""
 (function(){
@@ -63,6 +73,34 @@ class Surface {
 
 // -- geometry ------------------------------------------------------------------------------------
 const tf = (T, p) => [0, 1, 2].map(i => T[i][0] * p[0] + T[i][1] * p[1] + T[i][2] * p[2] + T[i][3]);
+
+// -- the arm: ARM_BOXES (arm/geometry.py: [frame, centre xyz, size xyz] mm, axis-aligned in that frame) ------
+viz.ARM_BOXES = __ARM_BOXES__;
+const qToR = ([x, y, z, w]) => [[1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)], [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+                                [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]];
+// The arm as wireframe edges [[a, b], ...] in base. T: the arm frame in base (4x4, the description's
+// frames_in_base.arm); frames: the arm node's GET links frames ({pos, quat} in the arm frame: joint1-6,
+// end_link, tcp), or null for the mount alone; gap: the gripper gap (m).
+function armSegments(T, frames, gap){
+  const out = [];
+  const box = (F, b, sy) => { const Q = [];
+    for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]){
+      const v = [(b[1] + i * b[4] / 2) / 1000, sy * (b[2] + j * b[5] / 2) / 1000, (b[3] + k * b[6] / 2) / 1000];
+      Q.push(tf(T, [0, 1, 2].map(r => F.p[r] + F.R[r][0] * v[0] + F.R[r][1] * v[1] + F.R[r][2] * v[2]))); }
+    for (const [a, c] of [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]]) out.push([Q[a], Q[c]]); };
+  const I = {p: [0, 0, 0], R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]};
+  for (const b of viz.ARM_BOXES) if (b[0] === "base") box(I, b, 1);
+  if (!frames || frames.length < 7) return out;
+  const L = frames.map(f => ({p: f.pos, R: qToR(f.quat)})), E = L[6];
+  const FR = {link1: L[0], link2: L[1], link3: L[2], link4: L[3], link5: L[4], link6: L[5], end: E};
+  for (const b of viz.ARM_BOXES) if (FR[b[0]]) box(FR[b[0]], b, 1);
+  const g = fin(gap) ? Math.max(0, Math.min(gap, 0.057)) : 0;     // each jaw moves gap/2 along end_link y
+  for (const sgn of [1, -1]){ const d = [0, sgn * g / 2, 0];
+    const F = {p: [0, 1, 2].map(r => E.p[r] + E.R[r][1] * d[1]), R: E.R};
+    for (const b of viz.ARM_BOXES) if (b[0] === "finger") box(F, b, sgn); }
+  return out;
+}
+viz.armSegments = armSegments;
 const rot = (T, d) => [0, 1, 2].map(i => T[i][0] * d[0] + T[i][1] * d[1] + T[i][2] * d[2]);
 function cameraFloor(desc, opts){
   const R = (opts && opts.range) || 3, out = [];
@@ -200,13 +238,23 @@ class Scene extends Surface {
           const a = P(Bw([cl.xyz[3 * i], cl.xyz[3 * i + 1], cl.xyz[3 * i + 2]])); g.fillRect(a[0] - sz / 2, a[1] - sz / 2, sz, sz); }
       }
     }
-    // the robot: frame box 0.02-0.12 m, front marker, wheels at their steering angles
+    // the robot: the 2x1 frame tubes and the 1x1 top rails solid, the interior volume between them as
+    // dotted corner posts, front marker, wheels at their steering angles, and the arm on its mount (live
+    // from the arm node's links; grey when they stop)
     const rb = (desc && desc.robot) || {frame_size: 0.4318, modules: [{name: "FL", x: 0.1656, y: 0.1656}, {name: "FR", x: 0.1656, y: -0.1656}, {name: "RR", x: -0.1656, y: -0.1656}, {name: "RL", x: -0.1656, y: 0.1656}]};
     const h = rb.frame_size / 2, ink = live || !p ? C.ink : C.muted;
-    const box = (c, sz, col, w) => { const Q = []; for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) Q.push(Bw([c[0] + i * sz[0] / 2, c[1] + j * sz[1] / 2, c[2] + k * sz[2] / 2]));
-      [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]].forEach(([a, b]) => line(Q[a], Q[b], col, w)); };
-    box([0, 0, 0.07], [rb.frame_size, rb.frame_size, 0.1], ink, 1.5);
-    line(Bw([h, 0, 0.12]), Bw([h + 0.07, 0, 0.12]), ink, 2.5);
+    const box = (c, sz, col, w, dash) => { const Q = []; for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) Q.push(Bw([c[0] + i * sz[0] / 2, c[1] + j * sz[1] / 2, c[2] + k * sz[2] / 2]));
+      [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]].forEach(([a, b]) => line(Q[a], Q[b], col, w, dash)); };
+    const [fz0, fz1] = rb.frame_z || [0.02, 0.12];
+    box([0, 0, (fz0 + fz1) / 2], [rb.frame_size, rb.frame_size, fz1 - fz0], ink, 1.5);
+    const tr = rb.top_rail_z;
+    if (tr){ box([0, 0, (tr[0] + tr[1]) / 2], [rb.frame_size, rb.frame_size, tr[1] - tr[0]], ink, 1.5);
+      for (const i of [-1, 1]) for (const j of [-1, 1]) line(Bw([i * h, j * h, fz1]), Bw([i * h, j * h, tr[0]]), ink, 1, [2, 3]); }
+    line(Bw([h, 0, fz1]), Bw([h + 0.07, 0, fz1]), ink, 2.5);
+    const Ta = (desc && desc.frames_in_base || {}).arm;
+    if (Ta){ const A = D.arm || {}, armLive = A.frames && performance.now() - (A.at || 0) < 1000;
+      const col = armLive ? (A.enabled ? C.live : ink) : C.muted;
+      g.lineJoin = "round"; for (const [a, b] of armSegments(Ta, A.frames, A.gap)) line(Bw(a), Bw(b), col, 1.25); }
     for (const m of rb.modules || []){
       const sm = (D.modules || {})[m.name] || {}, a = fin(sm.angle) ? sm.angle : 0, Rw = 0.0381, ca = Math.cos(a), sa = Math.sin(a);
       const col = fin(sm.angle) && live ? (D.driving ? C.live : ink) : C.muted, ring = [];
@@ -245,4 +293,4 @@ class Scene extends Surface {
 }
 viz.Scene = Scene;
 })();
-"""
+""".replace("__ARM_BOXES__", _json.dumps(_ARM_BOXES))

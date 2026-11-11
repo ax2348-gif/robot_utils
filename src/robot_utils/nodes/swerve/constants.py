@@ -18,6 +18,13 @@ FRAME = 17.0 * INCH
 WHEEL_INSET = 3.96 / 2 * INCH
 HALF_WHEELBASE = FRAME / 2 - WHEEL_INSET   # x, centre to wheel (0.1656 m)
 HALF_TRACK = FRAME / 2 - WHEEL_INSET       # y, centre to wheel
+# Heights above the floor (REV drawings): the 2x1 frame tubes stand 2 in tall with their bottom face
+# 2.75 in up; the top rails (1x1 tube, same 17 in square), on which the arm's mount plate sits, have
+# their top face 6 in above that bottom face. Between the two frames is the robot's interior volume.
+FRAME_BOTTOM_Z = 2.75 * INCH                # 0.0699 m
+FRAME_TOP_Z = FRAME_BOTTOM_Z + 2.0 * INCH   # 0.1207 m
+TOP_Z = FRAME_BOTTOM_Z + 6.0 * INCH         # 0.2223 m: the robot's top surface
+TOP_RAIL_BOTTOM_Z = TOP_Z - 1.0 * INCH      # 0.1969 m
 
 
 @dataclass(frozen=True)

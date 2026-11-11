@@ -128,6 +128,11 @@ class SwerveModule(BaseModel):
 class RobotGeometry(BaseModel):
     """The swerve base's geometry (swerve.constants), for drawing the robot."""
     frame_size: float = Field(description="m, side of the square chassis frame (17 in).")
+    frame_z: list[float] = Field(description="m, bottom and top faces of the 2x1 frame tubes above the floor "
+                                             "(2.75 in, 4.75 in).")
+    top_rail_z: list[float] = Field(description="m, bottom and top faces of the 1x1 top rails (7.75 in, 8.75 in).")
+    top_z: float = Field(description="m, the robot's top surface (top rails, 8.75 in), on which the arm's mount "
+                                     "plate sits.")
     modules: list[SwerveModule]
 
 
