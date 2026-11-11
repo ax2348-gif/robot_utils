@@ -380,7 +380,7 @@ setInterval(async () => {
     const next = {p: jp.p.map((x, i) => x + v[i] * dt), R: mm(jp.R, expR(wt.map(x => x * dt)))};
     if (!held()) return;
     const seq = ++jSeq;
-    const r = await RU.api("track", {body: {pose: {pos: next.p, quat: rToQ(next.R)}, twist: v.concat(mv(next.R, wt)), twist_frame: "base", seq}, headers: lease.headers()});
+    const r = await RU.api("track", {body: {pose: {pos: next.p, quat: rToQ(next.R)}, twist: v.concat(mv(next.R, wt)), twist_frame: "arm", seq}, headers: lease.headers()});
     if (r.ok){ jp = next;
       jogNote(r.limited ? "the step limit is clipping: the arm lags the jog" : r.twist_scaled ? "jog speed capped at the soft limit" : "moving"); }
     else { jp = null;                          // refused: restart from the measured pose, never from a stale target

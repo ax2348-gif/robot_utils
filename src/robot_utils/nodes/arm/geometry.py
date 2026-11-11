@@ -34,3 +34,8 @@ ARM_BOXES = [
     ["finger", -70.8, 17.1, 0.0, 23.7, 34.3, 39.2],     # jaw root (carriage)
     ["finger", -29.4, 6.8, 0.0, 58.9, 13.6, 32.9],      # jaw (prong; inner face at y = 0)
 ]
+
+# One short name per ARM_BOXES entry (same order), for the text geometry (body.py, GET/POST /geometry).
+ARM_BOX_NAMES = ["mount plate", "column", "shoulder", "upper arm", "elbow hub", "forearm", "wrist hub", "wrist beam",
+                 "joint 6 housing", "gripper motor block", "gripper rail", "jaw root", "jaw"]
+assert len(ARM_BOX_NAMES) == len(ARM_BOXES)

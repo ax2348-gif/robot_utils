@@ -2,8 +2,9 @@
 
 Controlling requests carry the lease token (``X-Lease-Token``). Handlers only touch the node's
 locked state; the bus belongs to the control thread. Blocking work (enable's gripper check,
-planning) runs in a worker thread. Poses are in the arm base frame (URDF ``base_link``): a
-position [x, y, z] m plus either ``quat`` [x, y, z, w] or ``rpy`` [roll, pitch, yaw] rad.
+planning) runs in a worker thread. Poses are in the arm frame (the arm's URDF ``base_link``; ``GET
+/geometry`` gives its pose in the robot base frame): a position [x, y, z] m plus either ``quat``
+[x, y, z, w] or ``rpy`` [roll, pitch, yaw] rad.
 """
 from __future__ import annotations
 
@@ -37,7 +38,8 @@ TAGS = [
 
 class Pose(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False, json_schema_extra={"examples": [{"pos": [0.25, 0.0, 0.2], "rpy": [0.0, 1.57, 0.0]}]})
-    pos: list[float] = Field(min_length=3, max_length=3, description="m, arm base frame.")
+    pos: list[float] = Field(min_length=3, max_length=3, description="m, arm frame (the arm's URDF base_link; its pose in the "
+                                                                  "robot base frame: GET /geometry `frames.arm_in_base`).")
     quat: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, z, w].")
     rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[roll, pitch, yaw] rad, fixed X-Y-Z.")
 
@@ -64,7 +66,8 @@ class TrackIn(BaseModel):
     twist: Optional[list[float]] = Field(None, min_length=6, max_length=6,
                                          description=f"TCP velocity [vx, vy, vz, wx, wy, wz] (m/s, rad/s): joint velocity "
                                                      f"feedforward for {TWIST_TIMEOUT} s.")
-    twist_frame: Literal["base", "tcp"] = Field("base", description="Axes of the twist: arm base frame or the TCP's own.")
+    twist_frame: Literal["arm", "tcp", "base"] = Field("arm", description="Axes of the twist: the arm frame's or the TCP's own "
+                                                                       "(`base` is the old name of `arm`, still accepted).")
     gripper: Optional[GripperIn] = None
     seq: int = Field(0, description="Echoed in the stream (`seq`); debugging only.")
 
@@ -131,7 +134,25 @@ class KinIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     q: list[list[float]] = Field(min_length=1, max_length=200,
                                  description="Joint configurations (6 rad each). Inputs to a computation only.")
-    frame: Literal["base", "tcp"] = "base"
+    frame: Literal["arm", "tcp", "base"] = Field("arm", description="Jacobian axes: the arm frame's (`arm`; `base` is its old "
+                                                                    "name) or the TCP's own (`tcp`).")
+
+
+class GeometryIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles (rad): the geometry there.")
+    pose: Optional[Pose] = Field(None, description="A TCP pose (arm frame): the geometry at its IK solution (or the nearest "
+                                                   "reachable configuration; `ik` says which). Nothing moves.")
+    seed: Literal["command", "measured"] = "measured"
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, description="As for POST /ik.")
+    gap_mm: Optional[float] = Field(None, ge=0, le=round(C.GAP_MAX * 1000, 1), description="Gripper gap to place the jaws at "
+                                                                                          "(default: the measured gap).")
+
+    @model_validator(mode="after")
+    def _at_most_one(self):
+        if self.q is not None and self.pose is not None:
+            raise ValueError("give q or pose, not both")
+        return self
 
 
 class ProfileIn(BaseModel):
@@ -374,12 +395,32 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
             "X-IK-Pos-Err-Mm": f"{out['pos_err_mm']:.3f}", "X-IK-Rot-Err-Deg": f"{out['rot_err_deg']:.3f}"})
 
     @app.get("/kinematics", tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
-    async def kin_now(frame: Literal["base", "tcp"] = "base", which: Literal["measured", "command"] = "measured"):
+    async def kin_now(frame: Literal["arm", "tcp", "base"] = "arm", which: Literal["measured", "command"] = "measured"):
         return node.kinematics_now(frame, which)
 
     @app.post("/kinematics", tags=["kinematics"], summary="The same at given joint configurations (planning lookups)")
     async def kin_lookup(body: KinIn):
         return {"results": await asyncio.to_thread(node.kinematics_batch, body.q, body.frame)}
+
+    GEOM_DOC = ("Read only: nothing moves, no lease. Every point in both the arm frame and the robot base frame, with the "
+                "transform between them (`frames.arm_in_base`, from the description node). `fingertips`: each jaw's tip "
+                "(left, right) and the centre between them (end_link). `jaws`: per jaw its tip, inner (gripping) face "
+                "centre and root, and outer face; `jaw_shape_m.grasp_depth`: how far an object can sit between the jaws. "
+                "`tcp`: the point motion commands target, near the wrist, at `tcp.offset_in_end_link` from the fingertip "
+                "centre; to put the fingertips somewhere, command the TCP pose that places them there. `extent_base`: the "
+                "arm's bounds in the base frame and how far it reaches past the frame. `boxes`: every part as an oriented "
+                "box (approximate, from the meshes).")
+
+    @app.get("/geometry", tags=["kinematics"], summary="Fingertips, jaws and the arm's extent as numbers, now (both frames)",
+             description=GEOM_DOC)
+    async def geometry_now():
+        return await asyncio.to_thread(node.geometry)
+
+    @app.post("/geometry", tags=["kinematics"], summary="The same at given joint angles or at a TCP pose's IK solution",
+              description=GEOM_DOC)
+    async def geometry_at(body: GeometryIn):
+        return await asyncio.to_thread(node.geometry, body.q, None if body.pose is None else body.pose.se3(), body.seed,
+                                       body.max_rot_deg, body.gap_mm)
 
     @app.get("/links", tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
     async def links():

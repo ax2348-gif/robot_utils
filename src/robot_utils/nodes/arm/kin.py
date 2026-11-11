@@ -166,10 +166,10 @@ class ArmKinematics:
         out = [pin.SE3(d.oMi[j]) for j in range(1, N + 1)]
         return out + [pin.SE3(d.oMf[self._ee]), pin.SE3(d.oMf[self.tcp])]
 
-    def jacobian(self, q, frame: str = "base") -> np.ndarray:
-        """6×6 TCP Jacobian [v; ω]: ``base`` = LOCAL_WORLD_ALIGNED (TCP velocity in base axes),
-        ``tcp`` = LOCAL (in the TCP's own axes)."""
-        ref = {"base": pin.LOCAL_WORLD_ALIGNED, "tcp": pin.LOCAL}[frame]
+    def jacobian(self, q, frame: str = "arm") -> np.ndarray:
+        """6×6 TCP Jacobian [v; ω]: ``arm`` = LOCAL_WORLD_ALIGNED (TCP velocity in the arm frame's axes;
+        ``base`` is its old name), ``tcp`` = LOCAL (in the TCP's own axes)."""
+        ref = {"arm": pin.LOCAL_WORLD_ALIGNED, "base": pin.LOCAL_WORLD_ALIGNED, "tcp": pin.LOCAL}[frame]
         d = self._data()
         J = pin.computeFrameJacobian(self.model, d, self._full(q), self.tcp, ref)
         return np.array(J[:, :N])
@@ -187,7 +187,7 @@ class ArmKinematics:
     def gravity(self, q) -> np.ndarray:
         return np.array(compute_generalized_gravity(self.model, self._full(q), self._data())[:N])
 
-    def twist_to_qd(self, q, twist, frame: str = "base") -> np.ndarray:
+    def twist_to_qd(self, q, twist, frame: str = "arm") -> np.ndarray:
         """Joint velocities for a TCP twist [vx, vy, vz, wx, wy, wz] (damped pseudo-inverse)."""
         J = self.jacobian(q, frame)
         JJt = J @ J.T + (PINV_DAMPING ** 2) * np.eye(6)

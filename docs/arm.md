@@ -5,9 +5,12 @@ B601-DM (6 Damiao joints + gripper on the dm-serial bridge), in the shape of the
 one process owns the bus, requests never touch it, a lease gates motion, e-stop is for anyone.
 Teleop and any other "what should the arm do" logic stay in clients.
 
-**Frames:** every pose, twist and reading is in the arm's own base frame (its URDF `base_link`).
-The node knows nothing of the robot body or the world; whole-body coordination (base + arm) is
-out of scope here and belongs to clients.
+**Frames:** every pose, twist and reading is in the **arm frame** (`arm`: the arm's URDF `base_link`, the
+underside of its mount plate on joint 1's axis, axes parallel to the robot base). Its pose in the robot base frame
+comes from the description node's `arm` frame; `GET`/`POST /geometry` report it (`frames.arm_in_base`) and give
+their points in both frames. Commands stay in the arm frame; whole-body coordination (base + arm) belongs to
+clients. (`base` was the old name of the arm frame in `twist_frame` and the Jacobian `frame`; it is still
+accepted and means `arm`.)
 
 Built on `rebot_ctl` (submodule, pinned): `RebotArm` for the bus, pinocchio model, `solve_ik`,
 `compute_generalized_gravity`, the geodesic planner and CLIK tracker.
@@ -100,7 +103,7 @@ and a gripper command. There is no "done": clients close their own loop on the s
 - The pose is the goal, literally. A goal more than 20° (any joint) from where the arm is (measured) is
   refused (track is for small steps, servo for large moves); an older `seq` than one already
   applied is ignored.
-- The twist is the TCP's velocity, by default in the arm base frame's axes (`twist_frame: "base"`, the
+- The twist is the TCP's velocity, by default in the arm frame's axes (`twist_frame: "arm"`, the
   frame poses are given in), or in the TCP's own axes (`"tcp"`). It maps to
   `qd_ff = J⁺(q_goal)·twist` (damped pseudo-inverse), sent as the MIT velocity reference for
   0.25 s after the call, then zero, so a client that stops calling ends in a hold. The twist is
@@ -196,11 +199,31 @@ Available three ways:
   full 6×6 TCP Jacobian, the translational `w_lin` (from its top 3 rows), and the smallest
   singular value `σ_min` (distance to a singularity), as stream columns. The full Jacobian is
   36 numbers, so it streams on its own channel (`/stream?channel=jacobian`) for clients that want it.
-- **Current pose** (`GET /kinematics`): TCP pose, J (`frame: base | tcp`, as for the twist),
+- **Current pose** (`GET /kinematics`): TCP pose, J (`frame: arm | tcp`, as for the twist),
   w, w_lin, σ_min, the singular values and the principal axes (for the ellipsoid).
 - **Arbitrary lookups** (`POST /kinematics`): a batch of joint configurations in, the same
   quantities out for each (plus within-limits), for client-side planning. Joint positions here are
   inputs to a computation only: nothing moves, and no lease is needed. Capped batch size.
+
+## Geometry as numbers: fingertips, jaws, extent (`GET /geometry`, `POST /geometry`)
+
+Read only (nothing moves, no lease). At the measured configuration (`GET`), or (`POST`) at joint angles `q` or at
+the IK solution of a TCP `pose` (`ik` carries the IK result), with the jaws at the measured gap or `gap_mm`.
+Every point is given in both the arm frame and the robot base frame, with the transform (`frames.arm_in_base`,
+from the description node; the shipped default if it is unreachable, and `source` says which).
+
+- `fingertips`: `left` and `right` (each jaw's tip on its inner face, mid height) and `center` (end_link: midway
+  between them, with its orientation). end_link's x is the approach direction, y the jaw travel (left jaw at +y).
+- `jaws`: per jaw its tip, inner (gripping) face centre and root, outer face at the tip, and `inward`.
+  `jaw_shape_m`: `grasp_depth` (how far an object can sit between the jaws before the jaw carriage, ~59 mm),
+  length, thickness, height at root and tip. Approximate, from the meshes.
+- `tcp`: the point motion commands target, `offset_in_end_link` from the fingertip centre (default 0.15 m behind
+  it, near the wrist). The offset stays: a TCP near the wrist keeps orientation corrections from swinging the
+  TCP. To put the fingertips at a place, command the TCP pose that puts them there (`tcp` and `fingertips.center`
+  differ by the offset along the approach axis).
+- `axes` (approach, jaw travel, up), `extent_base` (bounds of the whole arm and of the gripper in the base frame,
+  and how far the arm reaches past each side of the frame), `boxes` (every part as an oriented box: centre, axes,
+  size).
 
 ## Other APIs
 

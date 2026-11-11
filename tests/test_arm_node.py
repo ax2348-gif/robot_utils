@@ -402,6 +402,53 @@ def test_kinematics_lookups(rig):
     ik = n.ik_check(n.kin.fk(np.array(Q0)), seed="measured")
     assert ik["ok"] and ik["pos_err_mm"] < 0.01
     assert len(n.links()) == 8
+    assert now["frame"] == "arm" and n.kinematics(Q0, frame="base")["frame"] == "arm"      # "base": the old name
+
+
+def test_geometry_fingertips_jaws_and_frames(rig):
+    """GET/POST /geometry: fingertips, jaws and extents as numbers in the arm and robot base frames."""
+    n = rig.node
+    n._aib = None
+    n.description_node = "/nonexistent/description.sock"          # unreachable: the shipped default arm frame
+    rig.step(2)
+    g = n.geometry(gap_mm=40.0)
+    Tb = np.array(g["frames"]["arm_in_base"]["matrix"])
+    assert "shipped default" in g["frames"]["arm_in_base"]["source"]
+    assert g["frames"]["arm_in_base"]["xyz"] == pytest.approx([0.1159, -0.1459, 0.22225], abs=1e-4)
+    assert g["which"] == "measured" and g["gap_mm"] == pytest.approx(40.0)
+    # every point is given in both frames, consistently
+    for key in ("left", "right"):
+        p = g["fingertips"][key]
+        assert p["base"] == pytest.approx(list(Tb[:3, :3] @ p["arm"] + Tb[:3, 3]), abs=1e-4)
+    # the two tips are the gap apart, along the jaw travel axis, centred on end_link
+    L, R = np.array(g["fingertips"]["left"]["arm"]), np.array(g["fingertips"]["right"]["arm"])
+    C0 = np.array(g["fingertips"]["center"]["arm"]["pos"])
+    assert np.linalg.norm(L - R) == pytest.approx(0.040, abs=1e-4)
+    assert (L + R) / 2 == pytest.approx(C0, abs=1e-4)
+    assert (L - R) / 0.040 == pytest.approx(g["axes"]["jaw_travel"]["arm"], abs=1e-3)
+    # the TCP is tcp_offset behind the fingertips along the approach axis
+    tcp = np.array(g["tcp"]["arm"]["pos"])
+    assert np.linalg.norm(C0 - tcp) == pytest.approx(abs(g["tcp"]["offset_in_end_link"][0]), abs=1e-4)
+    assert (C0 - tcp) / np.linalg.norm(C0 - tcp) == pytest.approx(g["axes"]["approach"]["arm"], abs=1e-3)
+    # jaw shape: the inner face runs grasp_depth back from the tip; jaws face each other
+    assert 0.05 < g["jaw_shape_m"]["grasp_depth"] < 0.07
+    jl = g["jaws"]["left"]
+    assert np.linalg.norm(np.array(jl["tip"]["arm"]) - jl["inner_face_root"]["arm"]) == pytest.approx(g["jaw_shape_m"]["length"], abs=1e-4)
+    assert np.dot(jl["inward"]["arm"], g["axes"]["jaw_travel"]["arm"]) == pytest.approx(-1, abs=1e-4)
+    # extents cover the fingertips; the boxes are all there
+    ext = g["extent_base"]["arm"]
+    for k in range(3):
+        assert ext["min"][k] - 1e-6 <= g["fingertips"]["left"]["base"][k] <= ext["max"][k] + 1e-6
+    assert len(g["boxes"]) == 15 and {"left jaw", "right jaw", "gripper rail"} <= {b["name"] for b in g["boxes"]}
+    # at given joint angles, and at a TCP pose (via IK: the same place)
+    q = [0.0, -0.6, -0.9, 0.0, 0.5, 0.0]
+    gq = n.geometry(q=q)
+    assert gq["which"] == "q" and gq["q"] == pytest.approx(q, abs=1e-5)
+    gp = n.geometry(pose=n.kin.fk(np.array(q)))
+    assert gp["which"] == "ik" and gp["ik"]["ok"]
+    assert gp["fingertips"]["center"]["base"]["pos"] == pytest.approx(gq["fingertips"]["center"]["base"]["pos"], abs=2e-3)
+    with pytest.raises(ValueError):
+        n.geometry(q=[0, 0, 0])
 
 
 def test_ik_render_for_agents(rig):
@@ -477,6 +524,13 @@ def test_http_api_end_to_end(tmp_path):
         k = c.post("/kinematics", json={"q": [list(Q0)], "frame": "tcp"}).json()["results"][0]
         assert k["within_limits"] and len(k["jacobian"]) == 6
         assert c.post("/kinematics", json={"q": [[0, 0, 0]]}).status_code == 422
+        assert c.post("/kinematics", json={"q": [list(Q0)], "frame": "base"}).json()["results"][0]["frame"] == "arm"
+        node.description_node = "/nonexistent/description.sock"; node._aib = None
+        g = c.get("/geometry").json()
+        assert {"fingertips", "jaws", "tcp", "frames", "extent_base", "boxes"} <= set(g) and set(g["fingertips"]["left"]) == {"arm", "base"}
+        g = c.post("/geometry", json={"pose": pose, "gap_mm": 30}).json()
+        assert g["which"] == "ik" and g["gap_mm"] == 30
+        assert c.post("/geometry", json={"q": list(Q0), "pose": pose}).status_code == 422
         assert c.post("/gripper", headers=h, json={"gap_mm": 20, "max_force_n": 30}).json()["max_force_n"] == 30
         assert c.post("/profile", headers=h, json={"name": "safe"}).status_code == 409   # enabled
         for path in ("/joints", "/tracking", "/gains", "/gripper", "/limits", "/tcp", "/links", "/fields",

@@ -58,7 +58,7 @@ def _job(kind: str, limits: dict, tcp: tuple, args: tuple, kwargs: dict):
                         (near.translation, near.rotation), out.public(), kin.joint_names, view)
         return out, png
     if kind == "kinematics":
-        frame = kwargs.get("frame", "base")
+        frame = kwargs.get("frame", "arm")
         out = []
         for q in args[0]:
             from .kin import pose_public

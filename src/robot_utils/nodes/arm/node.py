@@ -191,8 +191,10 @@ def finite(v):
 class ArmNode:
     def __init__(self, bus_factory: Callable[[], ArmBus], profile: str = C.DEFAULT_PROFILE,
                  settings: Optional[C.NodeSettings] = None, hub: Optional[RowHub] = None,
-                 locks: Optional[LockStore] = None, clock: Callable[[], float] = time.monotonic):
+                 locks: Optional[LockStore] = None, clock: Callable[[], float] = time.monotonic,
+                 description_node: str = "description"):
         self.bus_factory = bus_factory
+        self.description_node = description_node     # where the arm frame's pose in the robot base frame comes from
         self.clock = clock
         self.settings = settings or C.NodeSettings()
         self.profile = C.load_profile(profile)
@@ -704,7 +706,7 @@ class ArmNode:
             row[b:b + len(JOINT_COLS)] = [r.q[i], r.q_mot[i], r.qd[i], r.tau[i], qc, vc, tg, e, te, al,
                                           r.t_mos[i], r.status[i]]
         T = kin.fk(r.q)
-        J = kin.jacobian(r.q, "base")
+        J = kin.jacobian(r.q, "arm")
         mn = kin.manipulability(J)
         quat = pin.Quaternion(T.rotation)
         b = COL["x"]
@@ -902,15 +904,16 @@ class ArmNode:
             self.last_motion, self.motion = m, None
             self.events.add(f"{m.traj.kind} {m.traj.id}: preempted by {by}")
 
-    def track_cmd(self, token, pose: pin.SE3, twist=None, twist_frame: str = "base", seq: int = 0,
+    def track_cmd(self, token, pose: pin.SE3, twist=None, twist_frame: str = "arm", seq: int = 0,
                   gripper: Optional[dict] = None) -> dict:
         self._ready(token)
         if twist is not None:
             twist = np.asarray(twist, dtype=float)
             if twist.shape != (6,) or not np.all(np.isfinite(twist)):
                 raise ValueError("twist must be 6 finite numbers [vx, vy, vz, wx, wy, wz]")
-        if twist_frame not in ("base", "tcp"):
-            raise ValueError("twist_frame must be base or tcp")
+        twist_frame = "arm" if twist_frame == "base" else twist_frame      # "base": the old name of the arm frame
+        if twist_frame not in ("arm", "tcp"):
+            raise ValueError("twist_frame must be arm or tcp")
         scaled = False
         if twist is not None:          # bounded by the soft servo speeds
             lin, ang = float(np.linalg.norm(twist[:3])), float(np.linalg.norm(twist[3:]))
@@ -1210,7 +1213,8 @@ class ArmNode:
                                min(max(gap, 0.0), C.GAP_MAX), dict(view or {}), rot_tol=rot_tol)
         return out.public(), png
 
-    def kinematics(self, q, frame: str = "base") -> dict:
+    def kinematics(self, q, frame: str = "arm") -> dict:
+        frame = "arm" if frame == "base" else frame      # "base": the old name of the arm frame
         kin = self._need_kin()
         q = np.asarray(q, float)
         if q.shape != (N,) or not np.all(np.isfinite(q)):
@@ -1220,15 +1224,15 @@ class ArmNode:
         return {"q": q.tolist(), "within_limits": kin.within_limits(q), "tcp": pose_public(T),
                 "frame": frame, "jacobian": J.round(9).tolist(), **kin.manipulability(J)}
 
-    def kinematics_batch(self, qs: list, frame: str = "base") -> list:
+    def kinematics_batch(self, qs: list, frame: str = "arm") -> list:
         """Lookups at many configurations, in the planner process (no lease; nothing moves)."""
         kin = self._need_kin()
         arr = np.asarray(qs, float)
         if arr.ndim != 2 or arr.shape[1] != N or not np.all(np.isfinite(arr)):
             raise ValueError(f"each configuration is {N} finite joint angles (rad)")
-        return Planner.run("kinematics", kin, [list(map(float, q)) for q in arr], frame=frame)
+        return Planner.run("kinematics", kin, [list(map(float, q)) for q in arr], frame="arm" if frame == "base" else frame)
 
-    def kinematics_now(self, frame: str = "base", which: str = "measured") -> dict:
+    def kinematics_now(self, frame: str = "arm", which: str = "measured") -> dict:
         """which "command": the command, only while servoing (409 otherwise)."""
         r = self.reading
         if r is None:
@@ -1243,6 +1247,112 @@ class ArmNode:
         out = self.kinematics(q, frame)
         out["which"] = which
         return out
+
+    # -- geometry as numbers (read only) -------------------------------------------------------------
+
+    def arm_in_base(self) -> dict:
+        """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
+        ``arm`` frame (cached 10 s); its shipped default if that node is unreachable. Says which."""
+        now = time.monotonic()
+        c = getattr(self, "_aib", None)
+        if c and now - c["t"] < 10.0:
+            return c["v"]
+        try:
+            from ..common.client import NodeClient
+            with NodeClient(self.description_node, timeout=1.5) as cl:
+                d = cl.get("/transform", **{"from": "base", "to": "arm"})
+            T, src = np.asarray(d["matrix"], float), f"description node ({self.description_node!r}): frame 'arm'"
+        except Exception as e:
+            import yaml
+            from importlib import resources
+            from ..description.frames import frame_T
+            f = yaml.safe_load(resources.files("robot_utils.nodes.description").joinpath("default_description.yaml").read_text())
+            T = frame_T(f["frames"]["arm"])
+            src = f"shipped default (description node unreachable: {type(e).__name__})"
+        v = {"T": T, "source": src}
+        self._aib = {"t": now, "v": v}
+        return v
+
+    def geometry(self, q=None, pose: Optional[pin.SE3] = None, seed: str = "measured", max_rot_deg: Optional[float] = None,
+                 gap_mm: Optional[float] = None) -> dict:
+        """Gripper and finger geometry, and every box of the arm, as numbers in both the arm and the robot
+        base frame: at the measured configuration, at ``q``, or at the IK solution of a TCP ``pose``."""
+        from ..swerve.constants import FRAME
+        from .body import GRASP_DEPTH, JAW_HEIGHT_ROOT, JAW_HEIGHT_TIP, JAW_LENGTH, JAW_THICKNESS, body
+        kin = self._need_kin()
+        r = self.reading
+        ik = None
+        if pose is not None:
+            ik = self.ik_check(pose, seed, max_rot_deg)
+            qv, which = np.asarray(ik["q"], float), "ik"
+        elif q is not None:
+            qv, which = np.asarray(q, float), "q"
+            if qv.shape != (N,) or not np.all(np.isfinite(qv)):
+                raise ValueError(f"a configuration is {N} finite joint angles (rad)")
+        else:
+            if r is None:
+                raise RequestError(503, "no reading yet")
+            qv, which = np.asarray(r.q, float), "measured"
+        if gap_mm is not None:
+            gap, gap_src = float(gap_mm) / 1000, "given"
+        elif r is not None and math.isfinite(r.g_q):
+            gap, gap_src = C.rad_to_gap(r.g_q), "measured"
+        else:
+            gap, gap_src = 0.0, "unknown (no reading): 0"
+        F = [T.homogeneous for T in kin.frames(qv)]
+        B = body(F, gap)
+        aib = self.arm_in_base()
+        Tb = aib["T"]
+        rnd = lambda v: [round(float(x), 5) for x in v]
+        pt = lambda p: {"arm": rnd(p), "base": rnd(Tb[:3, :3] @ p + Tb[:3, 3])}
+        vec = lambda v: {"arm": rnd(v), "base": rnd(Tb[:3, :3] @ v)}
+        pose2 = lambda T: {"arm": pose_public(pin.SE3(T)), "base": pose_public(pin.SE3(Tb @ T))}
+        jaws = {k: {"tip": pt(j["tip"]), "inner_face_center": pt(j["inner_face_center"]),
+                    "inner_face_root": pt(j["inner_face_root"]), "outer_face_tip": pt(j["outer_face_tip"]),
+                    "inward": vec(j["inward"])} for k, j in B["jaws"].items()}
+        boxes, allc, grip = [], [], []
+        for name, link, corners, bp in B["boxes"]:
+            cb = corners @ Tb[:3, :3].T + Tb[:3, 3]
+            allc.append(cb)
+            if link in ("end", "finger"):
+                grip.append(cb)
+            boxes.append({"name": name, "link": link, "center": pt(bp["center"]), "size_m": rnd(bp["size"]),
+                          "axes_base": [rnd(Tb[:3, :3] @ bp["axes"][:, k]) for k in range(3)]})
+        allc, grip = np.vstack(allc), np.vstack(grip)
+        h = FRAME / 2
+        ext = lambda P: {"min": rnd(P.min(0)), "max": rnd(P.max(0))}
+        past = {"front": allc[:, 0].max() - h, "rear": -h - allc[:, 0].min(), "left": allc[:, 1].max() - h,
+                "right": -h - allc[:, 1].min()}
+        return {
+            "which": which, "q": rnd(qv), "within_limits": kin.within_limits(qv), "ik": ik,
+            "gap_mm": round(B["gap"] * 1000, 2), "gap_source": gap_src,
+            "frames": {
+                "arm_in_base": {"matrix": [rnd(row) for row in Tb], "xyz": rnd(Tb[:3, 3]), "source": aib["source"]},
+                "note": "Every point is given in both frames: p_base = R p_arm + t (arm_in_base). The arm frame is "
+                        "the arm's URDF base_link: the underside of its mount plate on joint 1's axis, axes parallel to "
+                        "the robot base. Motion commands (/servo, /track, /chunk, /ik) take TCP poses in the arm frame.",
+            },
+            "tcp": {**pose2(B["tcp"]), "offset_in_end_link": kin.tcp_offset,
+                    "note": "the point motion commands target, near the wrist (tcp_offset behind the fingertips)"},
+            "fingertips": {"left": pt(B["jaws"]["left"]["tip"]), "right": pt(B["jaws"]["right"]["tip"]),
+                           "center": pose2(B["end_link"]),
+                           "note": "left/right: each jaw's tip on its inner (gripping) face, mid height; center: end_link, "
+                                   "midway between them. end_link's x axis is the approach direction (out between the "
+                                   "jaws), y the jaw travel (left jaw at +y), z the jaws' height"},
+            "axes": {"approach": vec(B["approach"]), "jaw_travel": vec(B["jaw_axis"]), "up": vec(B["up"])},
+            "jaws": jaws,
+            "jaw_shape_m": {"grasp_depth": round(GRASP_DEPTH, 4), "length": round(JAW_LENGTH, 4),
+                            "thickness": round(JAW_THICKNESS, 4), "height_root": JAW_HEIGHT_ROOT, "height_tip": JAW_HEIGHT_TIP,
+                            "note": "approximate (from the meshes). Each jaw is a prong from its tip back along -approach "
+                                    "to inner_face_root, where the jaw carriage begins: grasp_depth is how far an object "
+                                    "can sit between the jaws, measured from the tips. The inner faces grip; each jaw is "
+                                    "`thickness` thick outward from its inner face and tapers in height from root to tip"},
+            "extent_base": {"arm": ext(allc), "gripper": ext(grip),
+                            "past_footprint_m": {k: round(float(v), 4) for k, v in past.items()},
+                            "note": f"axis-aligned bounds of every box in the robot base frame; past_footprint_m: how far "
+                                    f"the arm reaches beyond each side of the {FRAME:.4f} m square frame (negative: inside)"},
+            "boxes": boxes,
+        }
 
     def links(self, q=None) -> list:
         """The joint frames, end_link and tcp at ``q`` (default measured), for drawing."""
