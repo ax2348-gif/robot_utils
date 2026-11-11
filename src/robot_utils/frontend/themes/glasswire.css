@@ -163,7 +163,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background-color: var(--ground);
   background-image: var(--grid-tile);
   background-size: 120px 120px;
-  background-position: -1px -1px;
+  background-position: 50% -1px;   /* centred: the sheet is symmetric about the window midline */
   background-attachment: fixed;   /* the sheet stays put; content scrolls over it (nothing blurred on top, so cheap) */
 }
 /* main header of the landing page reads as a drawing's title block: a ruled line beneath */
@@ -297,7 +297,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     linear-gradient(var(--lens-veil), var(--lens-veil)),
     var(--lens-tile);
   background-size: 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
-  background-position: 50% 0, 0 0, -1px -1px;
+  background-position: 50% 0, 0 0, 50% -1px;
   background-repeat: no-repeat, no-repeat, repeat;
   background-attachment: scroll, scroll, fixed;
   border: 1px solid var(--lens-edge);
@@ -340,7 +340,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     linear-gradient(var(--lens-veil), var(--lens-veil)),
     var(--lens-tile);
   background-size: 135% 120%, 100% 100%, var(--lens-mag) var(--lens-mag);
-  background-position: 30% 0, 0 0, -6px -8px;  /* the lens "tilts": magnified dots shift */
+  background-position: 30% 0, 0 0, calc(50% - 5px) -8px;  /* the lens "tilts": magnified dots shift */
   border-color: var(--lens-edge-hi);
   box-shadow:
     inset 0 1px 0 var(--lens-rim-top), inset 1px 0 0 var(--lens-rim-top),
@@ -356,7 +356,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #theme-pick:active:not(:disabled),
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) #tools a:active:not(:disabled) {
   background-size: 100% 45%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
-  background-position: 50% 0, 0 0, -1px -1px;
+  background-position: 50% 0, 0 0, 50% -1px;
   box-shadow: var(--lens-press);
 }
 /* focus: a cyan rim and glow (the outline alone is >= 3:1 against the sheet) */
@@ -393,7 +393,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
     var(--lens-tile);
   background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
-  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-position: 50% 0, 0 0, 0 0, 50% -1px;
   background-repeat: no-repeat, no-repeat, no-repeat, repeat;
   background-attachment: scroll, scroll, scroll, fixed;
   border: 1.5px solid var(--signal); color: var(--signal); font-weight: 600;
@@ -405,12 +405,12 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
     linear-gradient(var(--lens-veil-strong), var(--lens-veil-strong)),
     var(--lens-tile);
   background-size: 135% 120%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
-  background-position: 30% 0, 0 0, 0 0, -6px -8px;
+  background-position: 30% 0, 0 0, 0 0, calc(50% - 5px) -8px;
   border-color: var(--signal);
 }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.primary:active:not(:disabled) {
   background-size: 100% 45%, 100% 100%, 100% 100%, var(--lens-mag-press) var(--lens-mag-press);
-  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-position: 50% 0, 0 0, 0 0, 50% -1px;
 }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.hazard { border-color: var(--stop); color: var(--stop); }
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) button.ru.live { border-color: var(--live); color: var(--live); }
@@ -457,7 +457,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
 :root[data-theme="glasswire"] :where(body:not(:has(#veil))) .ru-pill[data-k="who"].ru-warn {
   background-color: var(--ground);
   background-size: 100% 100%, 100% 100%, 100% 100%, var(--lens-mag) var(--lens-mag);
-  background-position: 50% 0, 0 0, 0 0, -1px -1px;
+  background-position: 50% 0, 0 0, 0 0, 50% -1px;
   background-repeat: no-repeat, no-repeat, no-repeat, repeat;
   background-attachment: scroll, scroll, scroll, fixed;
   border-width: 2px; font-weight: 600;
@@ -535,7 +535,7 @@ description: Wireframe line art on dot paper, with liquid-glass capsules for eve
   background-color: var(--ground);
   background-image: linear-gradient(var(--panel-veil), var(--panel-veil)), var(--panel-tile);
   background-size: 100% 100%, var(--panel-mag) var(--panel-mag);
-  background-position: 0 0, -1px -1px;
+  background-position: 0 0, 50% -1px;
   background-repeat: no-repeat, repeat;
   background-attachment: scroll, fixed;
   box-shadow: inset 0 1px 0 var(--panel-spec);

@@ -189,7 +189,7 @@ description: The robot as line art: charcoal outlines over faint graph paper by 
   background-color: var(--ground);
   background-image: var(--grid-tile);
   background-size: 120px 120px;
-  background-position: -1px -1px;
+  background-position: 50% -1px;   /* centred: the sheet is symmetric about the window midline */
   background-attachment: fixed;   /* the sheet stays put; content scrolls over it (nothing blurred on top, so cheap) */
 }
 /* main header of the landing page reads as a drawing's title block: a ruled line beneath */
