@@ -1016,6 +1016,7 @@ BODY_COLOR = (0, 220, 255)          # cyan: the base
 ARM_COLOR = (255, 150, 0)           # orange: the arm
 TIP_COLOR = (255, 40, 200)          # magenta: the fingertips
 _EDGES = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
+FOV_TAN = (1.0, 0.8)                # |x/z|, |y/z| drawn: just past the camera's view (about 0.88 x 0.66)
 
 
 def body_boxes() -> list[dict]:
@@ -1058,21 +1059,36 @@ def robot_view_image(jpeg: bytes, cam: Camera, T_bc: np.ndarray, boxes: list[tup
     dr = ImageDraw.Draw(img, "RGBA")
     Rc, tc = T_bc[:3, :3], T_bc[:3, 3]
     seen = out = 0
+    # the lens model only holds inside the field of view (it diverges far outside): edges are sampled and
+    # only their parts within the view (plus a small margin) are projected and drawn
+    t = np.linspace(0.0, 1.0, 24)[:, None]
+
+    def visible(P):                                  # (N, 3) colour optical -> bool: in front, within ~the view
+        z = P[:, 2]
+        with np.errstate(all="ignore"):
+            x, y = P[:, 0] / z, P[:, 1] / z
+        return (z > 0.05) & (np.abs(x) < FOV_TAN[0]) & (np.abs(y) < FOV_TAN[1])
+
     for b, col in boxes:
         C = box_corners(b)
         pc = (C - tc) @ Rc
-        uv = project(cam, pc)
         for a, c in _EDGES:
-            if pc[a, 2] < 0.05 or pc[c, 2] < 0.05 or not (np.isfinite(uv[a]).all() and np.isfinite(uv[c]).all()):
+            S = pc[a] + t * (pc[c] - pc[a])
+            ok = visible(S)
+            if not ok.any():
                 continue
-            dr.line([tuple(uv[a]), tuple(uv[c])], fill=col + (235,), width=2)
-        inside = [(0 <= p[0] < W and 0 <= p[1] < H and z > 0.05) for p, z in zip(uv, pc[:, 2])]
+            uv = project(cam, S)
+            for i in range(len(S) - 1):
+                if ok[i] and ok[i + 1] and np.isfinite(uv[i]).all() and np.isfinite(uv[i + 1]).all():
+                    dr.line([tuple(uv[i]), tuple(uv[i + 1])], fill=col + (235,), width=2)
+        uvc = project(cam, pc)
+        inside = [bool(visible(q[None])[0]) and 0 <= p[0] < W and 0 <= p[1] < H for q, p in zip(pc, uvc)]
         seen += any(inside)
         out += not all(inside)
     f = _font(13)
     for p, text, col in points:
         pc = (np.asarray(p) - tc) @ Rc
-        if pc[2] < 0.05:
+        if not visible(pc[None])[0]:
             continue
         u, v = project(cam, pc[None])[0]
         if not (np.isfinite(u) and 0 <= u < W and 0 <= v < H):
