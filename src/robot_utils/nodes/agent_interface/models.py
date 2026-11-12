@@ -753,8 +753,9 @@ class ArmBrief(BaseModel):
 
 class AnomalyBrief(BaseModel):
     checking: bool = Field(description="The base is idle and undriven: its pose is being watched.")
+    pushing: bool = Field(description="It has moved past the threshold and isn't at rest yet (reported, once, when it is).")
     count: int = Field(description="Anomalies reported so far.")
-    last: Optional[dict[str, Any]] = Field(description="The last: `t`, `moved_m`, `turned_deg`.")
+    last: Optional[dict[str, Any]] = Field(description="The last: `t`, `moved_m`, `turned_deg`, `duration_s`.")
 
 
 class NavState(BaseModel):

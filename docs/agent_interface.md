@@ -27,7 +27,10 @@ docs/plans/agent_node_v1.md. On top of agent_nav's design (below):
 - **Base anomalies:** the estimator pose departing > 1 cm or 1° from where an idle stretch began.
   Checked only with a session open, no goal running, pose_servo not moving / braking / holding,
   ≥ 1 s after that (or a stop), and the swerve lease pose_servo's or nobody's (`GET /lease` on the
-  swerve when pose_servo is disabled); each report starts a new reference.
+  swerve when pose_servo is disabled). One event per push: crossing the threshold starts a push, and it is
+  reported when the base has been still for 0.5 s (under 1 mm / 0.1° per 0.1 s) with the whole displacement and
+  duration (or at once, if the idle stretch ends first); the rest pose is the next reference. (The first
+  version reported every centimetre of a sustained push: 9 events in 3 s in the 2026-11-11 Codex MoMa run.)
 
 The fake arm node for tests and offline trials is `sim.fake_arm_app()`.
 

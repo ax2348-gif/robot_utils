@@ -58,6 +58,9 @@ ALIGN_WAIT_S = 1.0           # wait at most this for the wheels to align before 
 ANOMALY_M = 0.01             # base anomaly: moved this far ...
 ANOMALY_DEG = 1.0            # ... or turned this much from where an idle stretch began
 ANOMALY_QUIET_S = 1.0        # an idle stretch starts this long after the last goal / stop (braking settles)
+ANOMALY_SETTLE_S = 0.5       # a push ends (and is reported, once) when the base has been still this long
+ANOMALY_STILL_M = 0.001      # still: under this between two checks (0.1 s) ...
+ANOMALY_STILL_DEG = 0.1      # ... and under this
 ARM_POLL_S = 0.25            # lease renewal and jam polling
 
 
@@ -156,7 +159,7 @@ class AgentNav:
                           "last": None}
         self.arm = {"token": None, "lease_id": None, "heartbeat": 1.0, "enabled": False, "jams_seen": None,
                     "error": None}
-        self.anomaly = {"checking": False, "ref": None, "count": 0, "last": None}
+        self.anomaly = {"checking": False, "ref": None, "push": None, "count": 0, "last": None}
         self._base_busy_t = 0.0                 # monotonic s the base was last driven (goal, braking, holding, stop)
         self._swerve_lease = (0.0, None)        # (monotonic s read, holder or None)
         self._ev_seen = 0                       # the agent's events cursor (turn number at its last reply)
@@ -1440,7 +1443,10 @@ class AgentNav:
     def _anomaly_check(self, st: dict) -> None:
         """Watcher (10 Hz). Guarded so it can't fire while the base is driven: a session is open, no goal runs,
         pose_servo isn't moving / braking / holding, >= ANOMALY_QUIET_S since that, and the swerve lease is
-        pose_servo's or nobody's. Each idle stretch has its own reference pose."""
+        pose_servo's or nobody's. Each idle stretch has its own reference pose. A push is reported once: when the
+        pose leaves the reference by ANOMALY_M / ANOMALY_DEG it is a push; when the base has been still for
+        ANOMALY_SETTLE_S (or the stretch ends) one event gives the whole displacement, and where it came to rest is
+        the next reference."""
         a = self.anomaly
         now = time.monotonic()
         status = st.get("status")
@@ -1452,28 +1458,48 @@ class AgentNav:
             known, holder = self._swerve_holder()
             quiet = known and holder is None
         pose = self.pose_now() if quiet else None
+        push = a.get("push")
         if pose is None:
-            a["checking"], a["ref"] = False, None
+            if push is not None:                      # the stretch ended mid-push: report what was seen
+                self._report_push(push, push["last_pose"], st, "the base was driven again before it came to rest")
+            a["checking"], a["ref"], a["push"] = False, None, None
             return
         a["checking"] = True
         ref = a["ref"]
         if ref is None or ref[3] != pose[3]:          # a new idle stretch (or an estimator reset): a new reference
-            a["ref"] = pose
+            a["ref"], a["push"] = pose, None
+            return
+        if push is not None:
+            lp = push["last_pose"]
+            if (math.hypot(pose[0] - lp[0], pose[1] - lp[1]) > ANOMALY_STILL_M
+                    or abs(math.degrees(wrap(pose[2] - lp[2]))) > ANOMALY_STILL_DEG):
+                push["last_move"] = now
+            push["last_pose"] = pose
+            if now - push["last_move"] >= ANOMALY_SETTLE_S:
+                self._report_push(push, pose, st, None)
+                a["ref"], a["push"] = pose, None
             return
         d = math.hypot(pose[0] - ref[0], pose[1] - ref[1])
         dth = math.degrees(wrap(pose[2] - ref[2]))
-        if d < ANOMALY_M and abs(dth) < ANOMALY_DEG:
-            return
-        a["ref"] = pose
+        if d >= ANOMALY_M or abs(dth) >= ANOMALY_DEG:
+            a["push"] = {"t0": now, "wall0": time.time(), "from": ref, "last_pose": pose, "last_move": now,
+                         "aligned": bool((st.get("align") or {}).get("twist")), "status": status}
+
+    def _report_push(self, push: dict, pose: tuple, st: dict, cut: Optional[str]) -> None:
+        a, ref = self.anomaly, push["from"]
+        d = math.hypot(pose[0] - ref[0], pose[1] - ref[1])
+        dth = math.degrees(wrap(pose[2] - ref[2]))
+        dur = time.monotonic() - push["t0"]
         a["count"] += 1
-        a["last"] = {"t": time.time(), "moved_m": round(d, 4), "turned_deg": round(dth, 2)}
-        align = st.get("align") or {}
+        a["last"] = {"t": time.time(), "moved_m": round(d, 4), "turned_deg": round(dth, 2), "duration_s": round(dur, 1)}
         self._robot_turn(
-            f"base moved {d * 100:.1f} cm / {dth:+.1f}° while nothing drove it (pose_servo {status}"
-            + (", wheels aligned for the arm, drives coasting" if align.get("twist") else "")
-            + "): something pushed it (the arm against an obstacle?)", level="warn", source="base",
-            moved_m=round(d, 4), turned_deg=round(dth, 2), from_world=[round(v, 4) for v in ref[:3]],
-            to_world=[round(v, 4) for v in pose[:3]])
+            f"base moved {d * 100:.1f} cm / {dth:+.1f}° while nothing drove it (pose_servo {push['status']}"
+            + (", wheels aligned for the arm, drives coasting" if push["aligned"] else "")
+            + f", over {dur:.1f} s"
+            + (f"; {cut}" if cut else ", now at rest")
+            + "): something pushed it (the arm against an obstacle?). Earlier coordinates are off by that much.",
+            level="warn", source="base", moved_m=round(d, 4), turned_deg=round(dth, 2), duration_s=round(dur, 1),
+            settled=cut is None, from_world=[round(v, 4) for v in ref[:3]], to_world=[round(v, 4) for v in pose[:3]])
 
     # -- memory ---------------------------------------------------------------------------------
 
@@ -1588,8 +1614,8 @@ class AgentNav:
                 "alignment": dict(self.alignment),
                 "arm": {"held": self.arm["token"] is not None, "lease_id": self.arm["lease_id"],
                         "enabled": self.arm["enabled"], "jams_seen": self.arm["jams_seen"], "error": self.arm["error"]},
-                "anomaly": {"checking": self.anomaly["checking"], "count": self.anomaly["count"],
-                            "last": self.anomaly["last"]},
+                "anomaly": {"checking": self.anomaly["checking"], "pushing": self.anomaly["push"] is not None,
+                            "count": self.anomaly["count"], "last": self.anomaly["last"]},
                 "snapshots": list(self.snapshots.keys())[-10:],
                 "goals": {g.gid: {"done": g.done.is_set(), "result": g.result and g.result.get("result")}
                           for g in list(self.goals.values())[-10:]},

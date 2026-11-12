@@ -269,8 +269,9 @@ curl -s -X POST $N/arm/gripper -H 'content-type: application/json' -d '{"gap_mm"
   the jam arrives in `since_last_call` (`source: arm`, the joint and its torque). Back off along the
   opposite direction; don't retry into it. Don't grasp anything heavy: a heavy load reads as a jam.
 - **Base anomalies.** If the base moves (> 1 cm or 1°) while nothing drives it, for example the arm
-  pushing a coasting base, `since_last_call` says so (`source: base`). The base may have moved:
-  look again before relying on earlier coordinates.
+  pushing a coasting base, `since_last_call` says so (`source: base`), once per push, when the base is
+  at rest again, with the whole displacement (`moved_m`, `turned_deg`). Look again before relying on
+  earlier coordinates.
 
 **6. Remember.** `POST /memory/note {"text"}` and `POST /memory/place {"name", ...}` (default: here),
 then `GET /memory`. Places are lost when the estimator resets.

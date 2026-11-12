@@ -658,16 +658,18 @@ def test_since_last_call_carries_jams_anomalies_and_goal_ends(stack):
     ev = res["since_last_call"]
     assert [e["source"] for e in ev] == ["base"] and "reached" in ev[0]["message"], ev
     assert nav.anomaly["count"] == 0
-    # idle and undriven: a push of 2 cm is reported once
+    # idle and undriven: a push that goes on for 1.5 s (10 cm) is reported once, when the base is at rest again
     wait_for(lambda: nav.anomaly["checking"] and nav.anomaly["ref"] is not None, 5)
-    real = nav.pose_now
-    nav.pose_now = lambda: (lambda p: None if p is None else (p[0] + 0.02, p[1], p[2], p[3]))(real())
-    wait_for(lambda: nav.anomaly["count"] == 1, 5)
+    real, t_push = nav.pose_now, time.monotonic()
+    shift = lambda: 0.1 * min(max(time.monotonic() - t_push, 0.0), 1.5) / 1.5
+    nav.pose_now = lambda: (lambda p: None if p is None else (p[0] + shift(), p[1], p[2], p[3]))(real())
+    wait_for(lambda: nav.anomaly["count"] == 1, 6)
+    assert time.monotonic() - t_push >= 1.9                              # 1.5 s of pushing + 0.5 s at rest
     ev = post(st, "/memory/note", {"text": "w"}).json()["since_last_call"]
     assert [e["source"] for e in ev] == ["base"] and "while nothing drove it" in ev[0]["message"]
-    assert ev[0]["data"]["moved_m"] == pytest.approx(0.02, abs=0.003)
-    time.sleep(0.5)
-    assert nav.anomaly["count"] == 1                                     # a new reference: not again
+    assert ev[0]["data"]["moved_m"] == pytest.approx(0.1, abs=0.005) and ev[0]["data"]["settled"]
+    time.sleep(1.0)
+    assert nav.anomaly["count"] == 1 and not nav.anomaly["push"]          # at rest: a new reference, not again
     nav.pose_now = real
 
 
