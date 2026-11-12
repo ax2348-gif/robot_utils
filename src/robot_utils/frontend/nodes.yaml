@@ -31,4 +31,7 @@ nodes:
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d}}
+  # agent: Agent MoMa, the agent-facing node for mobile manipulation (docs/agent.md). agent_nav is its frozen
+  # predecessor (docs/agent_nav.md): kept for old briefs and episodes, not maintained; start it only for those.
+  - {name: agent, kind: agent, start: {module: robot_utils.nodes.agent}}
   - {name: agent_nav, kind: agent_nav, start: {module: robot_utils.nodes.agent_nav}}

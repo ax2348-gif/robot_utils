@@ -84,9 +84,14 @@ briefs, links and episode docs keep working) and is stopped by default.
 ### 2. arm node
 
 - **Jam detector** (v1: joint space, from the offline study):
+  - **only on a static arm** (it detects the aftermath, not the instant of contact; dynamic cases are out of
+    scope): no planned motion executing (a finished move counts, `not_reached` settles included), measured
+    joint speeds near zero, and a short settle time after the last motion. All four labelled jams (J1–J4)
+    were static holds after a move ended;
   - signal: residual τ − τ_g per joint, held ≥ `hold_s` (1 s), hysteresis (release at 0.7×);
   - bands per joint (study's draft: 1.0, 4.0, 4.0, 1.5, 0.8, 0.6 Nm), to be confirmed when the study is
-    finished; payload handled by re-baselining (decision below);
+    finished. Fixed bands, no payload re-baselining: agents aren't expected to grasp anything heavy enough
+    to read as a jam (said in the guide);
   - response, configurable: `hold` (default: setpoint pulled to the current reading during
     servo / chunk / home; the motion ends `jammed` with joint, residual and duration), `report`, `off`;
     report-only during `track`;
@@ -111,12 +116,8 @@ briefs, links and episode docs keep working) and is stopped by default.
 Settled: title "Agent MoMa"; one enable for base and arm (alignment always available while enabled);
 anomaly threshold 1 cm, guarded so it can't fire while the base is driven.
 
-1. **Jam payload handling in v1.** Re-baseline the residual after a grasp + lift (proposed), or bands
-   wide enough to cover the heaviest payload?
-2. **Order of work.**
-   - Land the reviewed agent_nav part of the API audit (typed models, chat options) first, so the copy
-     starts from it.
-   - The arm part of the audit (it touched `arm/node.py`) needs review before landing.
+None left: payload = fixed bands (no heavy grasps); jams only on a static arm; the API audit landed first
+(`5652f75`).
 
 ## Order of work (proposed)
 
