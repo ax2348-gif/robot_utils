@@ -16,7 +16,8 @@
 
   The "achieved" ring and numbers are computed here from the node's per-module measurements
   (wheel angle and speed), with the same least-squares fit as robot_twist() in
-  robot_utils/nodes/swerve/kinematics.py and the module positions from constants.py.
+  robot_utils/nodes/swerve/kinematics.py and the module positions from constants.py. The ring is drawn
+  back through the stick's dead zone, so it sits on the knob (concentric) when the command is achieved.
 -->
 <link rel="stylesheet" href="../common/ui.css">
 <style>
@@ -177,10 +178,21 @@ function achieved(t) {
   }
   return [sx / n, sy / n, num / den];
 }
+// The stick's dead zone, undone: the knob position whose command is (x, y). With it the ring sits on the knob
+// whenever the achieved twist equals the command (concentric = tracking). Achieved speeds below RING_NOISE of the
+// limit count as zero, so encoder noise at a standstill doesn't throw the ring out to the dead zone's edge.
+const RING_NOISE = 0.02;
+function deadzoneInverse(x, y) {
+  const m = Math.hypot(x, y);
+  if (m < RING_NOISE) return [0, 0];
+  const s = (DEADZONE + Math.min(m, 1) * (1 - DEADZONE)) / m;
+  return [x * s, y * s];
+}
 function placeRing(el, horizontal, x, y) {
   const ring = el.querySelector(".ring");
   ring.hidden = !Number.isFinite(x) || !Number.isFinite(y);
   if (ring.hidden) return;
+  [x, y] = deadzoneInverse(x, y);
   const r = el.getBoundingClientRect();
   const reach = (horizontal ? r.width : r.height) / 2 - ring.offsetWidth / 2;
   const m = Math.hypot(x, y);
