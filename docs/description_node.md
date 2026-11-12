@@ -21,6 +21,12 @@ Options: `--swerve NAME|URL` (default the instance `swerve`; `none` disables the
 ## Frames and conventions
 
 - `base`: on the floor at the centre of the wheels; x forward, y left, z up.
+- `arm`: the arm's URDF `base_link`, the underside of its 200 x 140 mm mount plate on joint 1's axis, axes as
+  `base`. The plate is clamped flush with the frame's front and right faces on the 8.75 in top surface:
+  (0.1159, −0.1459, 0.22225). The arm node reports its poses in this frame and reads this transform for
+  `GET /geometry`.
+- `robot` in `GET /description` (from swerve.constants): `frame_size` (17 in square), `frame_z` (the 2x1
+  frame tubes, 2.75–4.75 in), `top_rail_z` (the 1x1 top rails, 7.75–8.75 in), `top_z`, `modules` (wheels).
 - Camera frames come from the camera node's `GET /description`: `depth_optical` (the frame depth
   pixels unproject into), `color_optical`, `imu`; optical convention x right, y down, z out of the
   lens. Here they are named `<camera>/depth_optical` etc.
@@ -114,6 +120,21 @@ with the ground calibration's.
 actuated) aborts a running job and forwards an e-stop to the swerve node. It latches; new yaw runs
 are refused until `POST /estop/clear` (this node's; the swerve node's e-stop is cleared there).
 
+## API replies
+
+Every JSON reply has a typed, described schema in `/docs` (`/openapi.json`). The ones that are not obvious:
+
+- `GET /jobs`, `GET /jobs/{id}`, `POST /calibrate/*`, `/state` `job`: a `GroundJob` or `YawJob` by `kind`
+  (`state` running | done | failed | aborted; `result` set once done; `raw` the recording of an aborted run).
+  `POST /jobs/abort` returns the job, or `{"detail": "no job running"}`.
+- `GET /calibrations?type=&serial=`: summaries, newest first, with `active` and `has_raw`.
+- `GET /calibrations/{type}/{serial}/{id}`: the stored `meta.json` as is (a `GroundRecord` or `YawRecord` by
+  `type`), including `camera` (the camera node's `GET /description` at the time) and, for yaw, `limits`. Keys
+  an older record lacks are absent; unknown keys are passed through.
+- `POST /calibrations/{type}/activate` and `/state` `active`: camera serial -> {type -> calibration id}.
+- Yaw `checks`: `angle_<i>_<j>` -> {expected_deg, measured_deg, error_deg} per pair of vectors, and
+  `floor_normal_vs_ground_deg` (a number) when a ground calibration is active.
+
 ## Camera node addition
 
 `GET /description` on the camera node (`robot_utils.nodes.orbbec`): `root` `depth_optical`, the device
@@ -123,6 +144,3 @@ serial, conventions, `frames` (color_optical and imu with their factory pose in 
 ## Not done yet
 
 - The rotation-based calibration of the camera's x, y on the base (deferred: measure them).
-- Node instance names / Unix sockets (the routing work): the node will take `--name` / `--uds` from
-  the shared helper once it exists.
-- Not yet run on the robot: everything above is tested with a fake camera and simulated swerve only.

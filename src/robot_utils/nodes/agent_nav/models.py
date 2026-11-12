@@ -47,8 +47,8 @@ class StoredSession(BaseModel):
     directory), `turns` (int: dialogue turns in its log) and `live` (bool: it is the open session), after
     the keys below; any other key of the stored file is passed through."""
     id: str = Field(description="Session id (YYYYmmdd-HHMMSS, server local time).")
-    agent: str
-    avatar: str
+    agent: str = Field(description="The agent's name.")
+    avatar: str = Field(description="Its avatar (emoji, short text or data URI).")
     started: float = Field(description="Unix epoch s.")
     profile: Optional[str] = Field(None, description="Safety profile when it was opened.")
     ended: Optional[float] = Field(None, description="Unix epoch s; absent while live (or if the node stopped "
@@ -91,7 +91,7 @@ class Released(BaseModel):
 
 
 class ProfileOut(BaseModel):
-    profile: str
+    profile: str = Field(description="The profile now in force: cautious | normal.")
     caps: Caps = Field(description="The profile's caps (apply at the next enable).")
 
 
@@ -103,11 +103,11 @@ class ReflexOut(BaseModel):
 
 class Frames(BaseModel):
     """What each frame is (one sentence each)."""
-    base: str
-    world: str
-    image: str
-    color_optical: str
-    snapshot: str = Field(alias="snapshot:<id>")
+    base: str = Field(description="The robot's own frame (goals' `local`).")
+    world: str = Field(description="The estimator's frame (goals' `global`).")
+    image: str = Field(description="Colour-image pixels: where selections are given.")
+    color_optical: str = Field(description="The colour camera's frame.")
+    snapshot: str = Field(alias="snapshot:<id>", description="The base frame when a snapshot was taken.")
 
 
 class Wheel(BaseModel):
@@ -118,16 +118,24 @@ class Wheel(BaseModel):
 
 class Body(BaseModel):
     footprint_m: list[float] = Field(description="[length, width] of the square frame, m.")
-    shape: str
-    drive: str
+    shape: str = Field(description="The footprint's shape and where it is centred.")
+    drive: str = Field(description="How the base moves (swerve: any direction while turning).")
     wheels: list[Wheel] = Field(description="Wheel module positions (description node, else built-in constants).")
     turn_in_place_sweep_radius_m: float = Field(description="m: radius the corners sweep when turning in place.")
-    height_note: str
+    height_note: str = Field(description="Heights of the base, mast and arm, in words.")
+
+
+class CalibrationFrom(BaseModel):
+    """How the description node composed the camera pose (its GET /description `cameras.<name>.from`)."""
+    nominal: bool = Field(description="True: x and y (and anything not calibrated) come from the measured nominal pose.")
+    ground: Optional[str] = Field(None, description="Id of the ground calibration used (roll, pitch, height).")
+    yaw: Optional[str] = Field(None, description="Id of the yaw calibration used (heading).")
+    residual_deg: Optional[list[float]] = Field(None, description="deg: how far each calibration vector disagrees with "
+                                                                  "the fit (ground normal first, then each yaw vector).")
 
 
 class CameraCalibrationSource(BaseModel):
-    source: Optional[dict[str, Any]] = Field(description="The description node's `from` of the camera pose (nominal, "
-                                                         "ground / yaw calibration ids).")
+    source: Optional[CalibrationFrom] = Field(description="How the camera pose was composed; null if unknown.")
     serial: Optional[str] = Field(description="Camera serial number.")
 
 
@@ -169,7 +177,7 @@ class RobotOut(BaseModel):
     body: Body
     camera: CameraInfo
     limits: RobotLimits
-    sensing_notes: list[str]
+    sensing_notes: list[str] = Field(description="What the robot can't sense, in words.")
     diagram: Optional[str] = Field(description="Relative URL of a side + top view PNG (images/...); null without a "
                                                "calibrated camera.")
     warnings: Optional[list[str]] = Field(None, description="Present when the description node was unavailable.")
@@ -189,14 +197,15 @@ class LookOut(BaseModel):
                                    "| no_depth).")
     depth_fraction: float = Field(description="Fraction (0..1) of depth pixels with a depth.")
     moving: bool = Field(description="pose_servo was moving or braking at capture.")
-    warnings: list[str]
+    warnings: list[str] = Field(description="Read these: no camera calibration or pose at capture, the robot moving, "
+                                            "a session camera correction in use.")
     grid_image: str = Field(description="Relative URL of the snapshot with a labelled pixel grid.")
     grid: Optional["GridInfo"] = Field(None, description="With grid values: the grid and the sampled values.")
 
 
 class GridSample(BaseModel):
-    u: int
-    v: int
+    u: int = Field(description="Colour pixel column (full image).")
+    v: int = Field(description="Colour pixel row (full image).")
     base: Optional[list[float]] = Field(description="[x, y, z] m in the base frame at this grid intersection (median of "
                                                     "the depth around it); null where there is no depth.")
 
@@ -206,9 +215,9 @@ class GridInfo(BaseModel):
     magnification: float = Field(description="Magnification of the shown part (1 = actual size).")
     step: int = Field(description="Grid spacing, colour pixels.")
     values: Optional[str] = Field(description="Which value is written at each grid intersection (x | y | z | range | "
-                                              "xyz), or null for lines only.")
+                                              "xz | xyz), or null for lines only.")
     samples: Optional[list[GridSample]] = Field(None, description="Every grid intersection's point (with values).")
-    unit: Optional[str] = None
+    unit: Optional[str] = Field(None, description="Unit and frame of the drawn values (with values).")
 
 
 class ZoomOut(BaseModel):
@@ -220,8 +229,8 @@ class ZoomOut(BaseModel):
     step: int = Field(description="Grid spacing, colour pixels; the labels are full-image pixel coordinates.")
     values: Optional[str] = Field(description="The value written at each grid intersection, or null for lines only.")
     samples: Optional[list[GridSample]] = Field(None, description="Every grid intersection's point (with values).")
-    unit: Optional[str] = None
-    note: str
+    unit: Optional[str] = Field(None, description="Unit and frame of the drawn values (with values).")
+    note: str = Field(description="How to read the image.")
 
 
 class RegionBase(BaseModel):
@@ -236,7 +245,7 @@ class RegionBase(BaseModel):
 class RegionOut(BaseModel):
     """POST /query/region: 3D extent of the selected pixels with depth."""
     query: str = Field(description="Query id (q1, q2, ...), for POST /plan/approach.")
-    kind: Literal["region"]
+    kind: Literal["region"] = Field(description="The query kind.")
     snapshot: str = Field(description="Snapshot queried.")
     pixels: int = Field(description="Selected depth-grid pixels.")
     with_depth: int = Field(description="Of those, with a depth.")
@@ -264,11 +273,11 @@ class PlaneBase(BaseModel):
 class PlaneOut(BaseModel):
     """POST /query/plane: a robust plane through the selected points."""
     query: str = Field(description="Query id (q1, q2, ...), for POST /plan/approach.")
-    kind: Literal["plane"]
+    kind: Literal["plane"] = Field(description="The query kind.")
     snapshot: str = Field(description="Snapshot queried.")
     points: int = Field(description="Selected points with depth.")
     inliers: int = Field(description="Points within 2 cm of the plane.")
-    inlier_fraction: float
+    inlier_fraction: float = Field(description="inliers / points (low: the selection mixes surfaces).")
     rms_m: float = Field(description="m: RMS distance of the inliers from the plane.")
     orientation: str = Field(description="vertical | horizontal | inclined.")
     tilt_from_vertical_deg: float = Field(description="Degrees: 0 = a vertical surface, 90 = horizontal.")
@@ -294,11 +303,11 @@ class LineBase(BaseModel):
 class LineOut(BaseModel):
     """POST /query/line: a robust 3D line through points (or a thin selection)."""
     query: str = Field(description="Query id (q1, q2, ...).")
-    kind: Literal["line"]
+    kind: Literal["line"] = Field(description="The query kind.")
     snapshot: str = Field(description="Snapshot queried.")
     points: int = Field(description="Points used (pixel points with depth, or selected points).")
     inliers: int = Field(description="Points within 2 cm of the line.")
-    inlier_fraction: float
+    inlier_fraction: float = Field(description="inliers / points (low: a mixed or curved selection).")
     rms_m: float = Field(description="m: RMS distance of the inliers from the line.")
     length_m: float = Field(description="m: segment length.")
     tilt_from_horizontal_deg: float = Field(description="Degrees.")
@@ -364,21 +373,58 @@ class Placement(BaseModel):
 
 
 class PlacementPair(BaseModel):
-    camera: Optional[Placement] = None
-    arm: Optional[Placement] = None
+    camera: Optional[Placement] = Field(None, description="The colour camera's optical frame in base; null if unknown "
+                                                          "(see `warnings`).")
+    arm: Optional[Placement] = Field(None, description="The arm frame in base; null if the arm node is unreachable.")
+
+
+class GeometryFrames(BaseModel):
+    camera: str = Field(description="Which frame `camera` is.")
+    arm: str = Field(description="Which frame `arm` is.")
+
+
+class CorrectionLimits(BaseModel):
+    xyz_m: float = Field(description="m: the largest correction per axis.")
+    rpy_deg: float = Field(description="degrees: the largest turn per axis.")
 
 
 class SessionGeometryOut(BaseModel):
     """Where the camera and the arm mount are on the robot: as described, the session's corrections, and the
     result this session uses for display and perception. Motion never uses the corrections."""
-    frames: dict[str, str]
+    frames: GeometryFrames
     described: PlacementPair = Field(description="From the description node (via 3d_perception and the arm node).")
     corrections: PlacementPair = Field(description="This session's corrections (zero: none).")
     effective: PlacementPair = Field(description="Described + corrections.")
-    limits: dict[str, float]
-    applies_to: str
-    never_applies_to: str
-    warnings: Optional[list[str]] = None
+    limits: CorrectionLimits
+    applies_to: str = Field(description="What uses the corrections.")
+    never_applies_to: str = Field(description="What never does.")
+    warnings: Optional[list[str]] = Field(None, description="A placement that could not be read (camera or arm).")
+
+
+class ArmInBase(BaseModel):
+    matrix: list[list[float]] = Field(description="4x4: the arm frame in base, as described (p_base = T p_arm).")
+    xyz: list[float] = Field(description="m: its origin in base.")
+    source: str = Field(description="Where it came from (the description node, or the shipped default).")
+    effective: list[list[float]] = Field(description="4x4: what was drawn (with the session's arm correction).")
+    session_correction: Optional[Placement] = Field(description="The session's arm-mount correction; null if none.")
+
+
+class ArmDrawn(BaseModel):
+    which: Literal["measured", "q", "ik"] = Field(description="measured: the arm as it is now; q: the given joint "
+                                                              "angles; ik: the IK solution of the given pose.")
+    q: list[float] = Field(description="Joint angles drawn, rad.")
+    gap_mm: float = Field(description="Gripper gap drawn.")
+    ik: Optional[dict[str, Any]] = Field(description="With a pose: the arm node's IK result (ok, exact, q, pos_err_mm, "
+                                                     "rot_err_deg, nearest, reason; as its POST /ik). Null otherwise.")
+    arm_in_base: ArmInBase
+
+
+class PastFootprint(BaseModel):
+    """m beyond each side of the square frame (negative: inside by that much)."""
+    front: float = Field(description="m beyond the front face.")
+    rear: float = Field(description="m beyond the rear face.")
+    left: float = Field(description="m beyond the left face.")
+    right: float = Field(description="m beyond the right face.")
 
 
 class TipPoint(BaseModel):
@@ -387,27 +433,33 @@ class TipPoint(BaseModel):
     world: list[float] = Field(description="[x, y, z] m in the world frame.")
 
 
+class Fingertips(BaseModel):
+    left: TipPoint = Field(description="The left jaw's tip (on its gripping face, mid height).")
+    right: TipPoint = Field(description="The right jaw's tip.")
+    center: TipPoint = Field(description="Midway between them (the arm's end_link).")
+
+
 class BoxHits(BaseModel):
-    box: str
-    points: int
+    box: str = Field(description="The arm part (a box of the arm node's GET /geometry `boxes`).")
+    points: int = Field(description="Depth points of the snapshot inside it.")
 
 
 class RobotView(BaseModel):
     """The whole robot at the goal, imagined: the base, and the arm (as it is now, or at `arm`), drawn into the
     snapshot. Nothing moves."""
-    warnings: list[str]
+    warnings: list[str] = Field(description="Read these: no arm node, an unreachable arm pose (drawn at the nearest), "
+                                            "depth points inside the arm, parts out of view, session corrections.")
     goal_in_snapshot_base: Optional[list[float]] = Field(None, description="[x, y, theta] of the goal in the snapshot's "
                                                                           "base frame.")
-    arm: Optional[dict[str, Any]] = Field(None, description="The arm configuration drawn: which (measured | q | ik), q, "
-                                                            "gap_mm, ik (the IK check, with a pose), arm_in_base.")
-    fingertips: Optional[dict[str, TipPoint]] = Field(None, description="left, right, center.")
-    past_footprint_m: Optional[dict[str, float]] = Field(None, description="How far the arm reaches past each side of "
-                                                                           "the frame (negative: inside).")
+    arm: Optional[ArmDrawn] = Field(None, description="The arm configuration drawn (null without the arm node).")
+    fingertips: Optional[Fingertips] = Field(None, description="Where the fingertips would be.")
+    past_footprint_m: Optional[PastFootprint] = Field(None, description="How far the arm reaches past each side of the "
+                                                                        "frame at that configuration (negative: inside).")
     depth_points_in_arm: Optional[list[BoxHits]] = Field(None, description="Depth points of the snapshot inside each "
                                                          "arm part at the goal: an obstacle in the way, or the arm itself "
                                                          "where it is now.")
-    boxes_in_view: Optional[int] = None
-    boxes_partly_out_of_view: Optional[int] = None
+    boxes_in_view: Optional[int] = Field(None, description="Robot parts (boxes) with any corner in the image.")
+    boxes_partly_out_of_view: Optional[int] = Field(None, description="Parts with some corner outside the image.")
     view: Optional[str] = Field(None, description="Relative URL of the snapshot with the robot drawn in (cyan base, "
                                                   "orange arm, magenta L/R fingertips).")
 
@@ -469,8 +521,8 @@ class Progress(BaseModel):
 
 
 class GoalState(BaseModel):
-    goal_id: int
-    done: bool
+    goal_id: int = Field(description="pose_servo's goal id.")
+    done: bool = Field(description="The goal has ended (`result` says how).")
     result: Optional[GoalResult] = Field(description="Null until it ends.")
     goal: Resolved = Field(description="The goal as resolved when it was issued.")
     issued_by: str = Field(description="agent | human.")
@@ -496,7 +548,7 @@ class ServoEStop(BaseModel):
 class Note(BaseModel):
     t: float = Field(description="Unix epoch s.")
     by: str = Field(description="agent | human.")
-    text: str
+    text: str = Field(description="The note.")
 
 
 class Place(BaseModel):
@@ -509,7 +561,7 @@ class Place(BaseModel):
 
 class Memory(BaseModel):
     """This session's memory (cleared by a new session)."""
-    notes: list[Note]
+    notes: list[Note] = Field(description="Notes, oldest first.")
     places: dict[str, Place] = Field(description="Named world poses (goal frame `place:<name>`).")
 
 
@@ -550,7 +602,7 @@ class Turn(BaseModel):
 class LogOut(BaseModel):
     turns: list[Turn] = Field(description="Turns after `since` (up to `limit`, oldest first).")
     last: int = Field(description="Number of the latest turn (pass as `since`).")
-    session: Optional[Session]
+    session: Optional[Session] = Field(description="The open session; null if none.")
 
 
 class StoredSessionOut(BaseModel):
@@ -564,7 +616,7 @@ class Deleted(BaseModel):
 
 class NavEStop(BaseModel):
     """The swerve's e-stop, as pose_servo last saw it."""
-    latched: bool
+    latched: bool = Field(description="An e-stop is latched: nothing moves until a human clears it.")
     source: Optional[str] = Field(description="`swerve` if latched, else null.")
     reason: None = Field(description="Always null (see the swerve's /state).")
 
@@ -577,9 +629,9 @@ class Latch(BaseModel):
 class PoseServoBrief(BaseModel):
     """From pose_servo's /state."""
     status: Optional[str] = Field(description="idle | moving | braking | holding | disabled.")
-    enabled: Optional[bool]
+    enabled: Optional[bool] = Field(description="pose_servo holds the swerve lease and accepts goals.")
     holder: Optional[str] = Field(description="Who enabled it (`agent_nav: <name>` through this node).")
-    disabled_reason: Optional[str]
+    disabled_reason: Optional[str] = Field(description="Why it was last disabled (null while enabled).")
     goal: Optional[dict[str, Any]] = Field(description="pose_servo's last goal record (goal_id, resolved pose, motion, "
                                                        "result, reason, ...).")
 
@@ -606,15 +658,15 @@ class Reflex(BaseModel):
 
 
 class GoalBrief(BaseModel):
-    done: bool
+    done: bool = Field(description="The goal has ended.")
     result: Optional[str] = Field(description="reached | stopped | stalled | aborted; null until done.")
 
 
 class UpstreamStatus(BaseModel):
     """A pose stream input (estimator Upstream.status())."""
     url: str = Field(description="Stream URL.")
-    connected: bool
-    error: Optional[str]
+    connected: bool = Field(description="The stream is open.")
+    error: Optional[str] = Field(description="The last connection error; null if none.")
     rate_hz: Optional[float] = Field(description="Rows per s (null if stalled > 1 s or too few).")
     last_age: Optional[float] = Field(description="s since the last record.")
     samples: int = Field(description="Rows received.")
@@ -631,7 +683,7 @@ class NavState(BaseModel):
     covered: bool = Field(description="A cover lock covers the camera.")
     locks: list[LockOut] = Field(description="Those locks.")
     estop: NavEStop
-    session: Optional[Session]
+    session: Optional[Session] = Field(description="The open session; null if none.")
     profile: str = Field(description="Safety profile in force (for the next enable).")
     profiles: dict[str, Caps] = Field(description="All profiles (cautious, normal).")
     enabled_by: Optional[str] = Field(description="agent | human; null when disabled.")
@@ -654,8 +706,8 @@ class HelpOut(BaseModel):
 
 
 # POST /chat: the reply of the endpoint the command maps to, or the help.
-ChatOut = Union[LookOut, RegionOut, PlaneOut, LineOut, PlanCheckOut, ApproachOut, GoalOut, RobotOut, EnableOut,
-                DisableOut, Released, NoteOut, PlaceOut, ServoEStop, ServoStop, HelpOut]
+ChatOut = Union[LookOut, ZoomOut, RegionOut, PlaneOut, LineOut, PlanCheckOut, ApproachOut, GoalOut, RobotOut,
+                SessionGeometryOut, EnableOut, DisableOut, Released, NoteOut, PlaceOut, ServoEStop, ServoStop, HelpOut]
 
 
 EVENTS_DOC = (

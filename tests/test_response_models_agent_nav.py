@@ -147,6 +147,7 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     sid = look["snapshot"]
     call("POST", "/look", json={"grid": {"step": 100, "values": "z"}})
     call("POST", "/zoom", json={"snapshot": sid, "box": BOARD, "values": "xyz"})
+    call("POST", "/zoom", json={"snapshot": sid, "box": BOARD, "values": "xz"})
     call("POST", "/zoom", json={"snapshot": sid})
     call("GET", "/session/geometry")
     call("POST", "/session/geometry", json={"camera": {"xyz": [0.01, 0, 0]}})

@@ -1,9 +1,12 @@
 """Chat commands for humans on the page: the same calls an agent makes, typed as one line.
 
-    look [scale] [grid]            region <shape> [exclude <shape>...] [on <snapshot>]
-    plane <shape> [exclude ...]    approach <query> [standoff]
-    line u,v u,v [u,v ...] | line <shape>
-    check <x> <y> [theta] [frame]  goal <x> <y> [theta] [frame] [key=value ...]
+    look [scale] [grid] [step=N] [values=x|y|z|range|xz|xyz]
+    zoom [box u0 v0 u1 v1] [on <snapshot>] [step=N] [values=x|y|z|range|xz|xyz]
+    region <shape> [exclude <shape>...] [on <snapshot>]      plane <shape> [exclude ...] [on <snapshot>]
+    line u,v u,v [u,v ...] | line <shape>                    approach <query> [standoff]
+    check <x> <y> [theta] [frame] [arm x,y,z[,roll,pitch,yaw]] [gap=MM]
+    goal <x> <y> [theta] [frame] [key=value ...]
+    geometry | geometry camera|arm dx dy dz [roll pitch yaw (deg)] | geometry reset
     robot                          stop | enable | disable | release | estop [reason]
     note <text>                    place <name> [x y theta [frame]]
     help
@@ -17,6 +20,7 @@ from __future__ import annotations
 import math
 
 HELP = __doc__.split("\n\n", 1)[1].strip()
+VALUES = ("x", "y", "z", "range", "xz", "xyz")
 
 
 def _num(s: str) -> float:
@@ -43,6 +47,24 @@ def _shape(tok: list, i: int) -> tuple[dict, int]:
     raise ValueError(f"unknown shape {k!r} (point | disk | box | poly)")
 
 
+def _grid_opts(a: list) -> dict:
+    """The named grid options step=N and values=… of look / zoom (any other key=value is an error)."""
+    out = {}
+    for t in a:
+        if "=" not in t:
+            continue
+        k, v = t.split("=", 1)
+        if k == "step":
+            out["step"] = int(v)
+        elif k == "values":
+            if v not in VALUES:
+                raise ValueError(f"values= one of {', '.join(VALUES)}")
+            out["values"] = v
+        else:
+            raise ValueError(f"unknown option {k!r} (step=N, values=…)")
+    return out
+
+
 def parse(text: str) -> tuple[str, dict]:
     """One command line -> (node method, kwargs). Raises ValueError with a hint."""
     tok = text.strip().split()
@@ -54,11 +76,38 @@ def parse(text: str) -> tuple[str, dict]:
     if cmd == "robot":
         return "describe_robot", {}
     if cmd == "look":
-        kw = {"grid": "grid" in a, "scale": None}
+        kw, g = {"grid": False, "scale": None}, _grid_opts(a)
         for t in a:
-            if t not in ("grid",):
+            if t == "grid":
+                kw["grid"] = True
+            elif "=" not in t:
                 kw["scale"] = float(t)
+        if g:
+            kw["grid"] = g                # step= / values= imply the grid
         return "look", kw
+    if cmd == "zoom":
+        kw = {"snapshot": None, "box": None, "step": None, "values": None, **_grid_opts(a)}
+        i = 0
+        while i < len(a):
+            if a[i] == "box":
+                kw["box"], i = [float(x) for x in a[i + 1:i + 5]], i + 5
+            elif a[i] == "on":
+                kw["snapshot"], i = a[i + 1], i + 2
+            elif "=" in a[i]:
+                i += 1
+            else:
+                raise ValueError(f"unexpected {a[i]!r} (zoom [box u0 v0 u1 v1] [on sN] [step=N] [values=…])")
+        return "zoom", kw
+    if cmd == "geometry":
+        if not a:
+            return "session_geometry", {"log_turn": True}
+        if a[0] == "reset":
+            return "set_session_geometry", {"camera": {}, "arm": {}}
+        if a[0] not in ("camera", "arm") or len(a) not in (4, 7):
+            raise ValueError("geometry | geometry camera|arm dx dy dz [roll pitch yaw (deg)] | geometry reset")
+        v = [float(x) for x in a[1:]]
+        c = {"xyz": v[:3], "rpy_deg": v[3:6] if len(v) == 6 else [0.0, 0.0, 0.0]}
+        return "set_session_geometry", {"camera": c if a[0] == "camera" else None, "arm": c if a[0] == "arm" else None}
     if cmd in ("region", "plane"):
         sel, i = _shape(a, 0)
         exclude, snap = [], None
@@ -80,7 +129,14 @@ def parse(text: str) -> tuple[str, dict]:
     if cmd == "approach":
         return "plan_approach", {"query": a[0], "standoff": float(a[1]) if len(a) > 1 else 1.0, "face": True}
     if cmd in ("check", "goal"):
-        nums, frame, opts = [], "local", {}
+        nums, frame, opts, arm = [], "local", {}, None
+        if cmd == "check" and "arm" in a:
+            i = a.index("arm")
+            v = [float(x) for x in a[i + 1].split(",")]
+            if len(v) not in (3, 6):
+                raise ValueError("arm x,y,z[,roll,pitch,yaw]: a TCP pose in the arm frame (m, rad)")
+            arm = {"pose": {"pos": v[:3], "rpy": v[3:] if len(v) == 6 else [0.0, 0.0, 0.0]}}
+            a = a[:i] + a[i + 2:]
         for t in a:
             if "=" in t:
                 k, v = t.split("=", 1)
@@ -96,7 +152,11 @@ def parse(text: str) -> tuple[str, dict]:
             nums.append(0.0)
         x, y, th = nums[:3]
         if cmd == "check":
-            return "plan_check", {"frame": frame, "x": x, "y": y, "theta": th}
+            if "gap" in opts:
+                arm = {**(arm or {}), "gap_mm": float(opts.pop("gap"))}
+            if opts:
+                raise ValueError(f"check takes arm x,y,z[,r,p,y] and gap=MM, not {', '.join(opts)}")
+            return "plan_check", {"frame": frame, "x": x, "y": y, "theta": th, "arm": arm}
         return "goal", {"frame": frame, "x": x, "y": y, "theta": th, "options": opts}
     if cmd in ("stop", "enable", "disable", "release"):
         return cmd, {}

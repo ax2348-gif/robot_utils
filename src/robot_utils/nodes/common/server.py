@@ -49,7 +49,7 @@ class Event(BaseModel):
     """One ``EventLog`` entry."""
     t: float = Field(description="Server time.monotonic() (s) when it happened (the clock of /time `mono`).")
     wall: float = Field(description="Server time.time() (Unix epoch s) when it happened.")
-    msg: str
+    msg: str = Field(description="What happened, in words.")
     level: str = Field("info", description="info | warn | error (a few older entries say `warning`: treat it as warn).")
 
 
@@ -64,9 +64,9 @@ class Health(BaseModel):
 
 class MetaEndpoints(BaseModel):
     """Paths relative to the node root; null if the node lacks it."""
-    health: str
-    state: str
-    events: str
+    health: str = Field(description="Liveness (`health`).")
+    state: str = Field(description="Full status (`state`).")
+    events: str = Field(description="Server-Sent Events of the state (`events`).")
     estop: Optional[str] = Field(description="`estop` on actuated nodes, else null.")
 
 
@@ -75,7 +75,7 @@ class NodeMeta(BaseModel):
     the telemetry rate in Hz; `fake`, a simulated backend)."""
     name: str = Field(description="Instance name (the proxy path /nodes/<name>/); the kind unless renamed at startup.")
     title: str = Field(description="Human-readable title.")
-    version: str
+    version: str = Field(description="The node's software version.")
     kind: str = Field(description="Node type, e.g. `swerve`.")
     has_page: bool = Field(description="Serves a browser page at its root.")
     page: Optional[str] = Field(description="`./` if it has a page, else null.")
@@ -86,7 +86,7 @@ class NodeMeta(BaseModel):
 
 class EStopState(BaseModel):
     """The e-stop as reported in an actuated node's /state."""
-    latched: bool
+    latched: bool = Field(description="An e-stop is latched: the node refuses motion until it is cleared.")
     reason: Optional[str] = Field(description="Why it was pressed; null if not latched.")
     source: Optional[str] = Field(description="Who pressed it (free text, or the client IP); null if not latched.")
     t: Optional[float] = Field(description="Server time.monotonic() (s) when it latched; null if not latched.")
@@ -105,11 +105,11 @@ class EStopCleared(BaseModel):
 
 class LockOut(BaseModel):
     """A lock in force (common/locks.py ``Lock.public()``)."""
-    id: str
+    id: str = Field(description="Lock id (to remove it).")
     kind: str = Field(description="chock | cover.")
     target: str = Field(description="Node kind, instance name, or `all`.")
     by: str = Field(description="Who placed it.")
-    reason: str
+    reason: str = Field(description="Why, as given when placed.")
     placed: float = Field(description="Unix epoch s (wall clock) when placed.")
     source: str = Field(description="How it was placed: `ssh` or `web <client>`.")
     age_s: float = Field(description="Seconds since placed (wall clock, 0.1 s resolution).")

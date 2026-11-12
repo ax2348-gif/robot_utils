@@ -81,6 +81,20 @@ def test_path_check_is_loud_about_obstacles_and_the_blind_zone():
 
 def test_chat_parsing():
     assert chat.parse("look grid 1.0") == ("look", {"grid": True, "scale": 1.0})
+    assert chat.parse("look 0.5") == ("look", {"grid": False, "scale": 0.5})
+    assert chat.parse("look grid step=50 values=xz") == ("look", {"grid": {"step": 50, "values": "xz"}, "scale": None})
+    assert chat.parse("look values=z") == ("look", {"grid": {"values": "z"}, "scale": None})
+    with pytest.raises(ValueError):
+        chat.parse("look grid steps=50")
+    assert chat.parse("zoom box 10 20 110 90 on s3 step=5 values=xyz") == (
+        "zoom", {"snapshot": "s3", "box": [10, 20, 110, 90], "step": 5, "values": "xyz"})
+    m, kw = chat.parse("check 0.3 0 arm 0.3,0,0.5 gap=40")
+    assert m == "plan_check" and kw["arm"] == {"pose": {"pos": [0.3, 0, 0.5], "rpy": [0, 0, 0]}, "gap_mm": 40}
+    assert chat.parse("geometry") == ("session_geometry", {"log_turn": True})
+    assert chat.parse("geometry camera 0.01 0 0")[1]["camera"] == {"xyz": [0.01, 0, 0], "rpy_deg": [0, 0, 0]}
+    assert chat.parse("geometry reset") == ("set_session_geometry", {"camera": {}, "arm": {}})
+    with pytest.raises(ValueError):
+        chat.parse("check 0.3 0 speed=0.1")
     m, kw = chat.parse("plane poly 10,10 100,10 50,90 exclude disk 50 40 5 on s2")
     assert m == "query" and kw["select"]["polygon"][2] == [50.0, 90.0] and kw["exclude"] == [{"disk": [50.0, 40.0, 5.0]}]
     assert kw["snapshot"] == "s2" and kw["kind"] == "plane"
@@ -238,6 +252,12 @@ def test_human_hold_and_chat(stack):
     assert post(st, "/release", human=True).json()["released"]
     assert post(st, "/enable").status_code == 200
     assert post(st, "/chat", {"text": "look grid"}).json()["snapshot"]
+    assert post(st, "/chat", {"text": "look grid step=100 values=xz"}).json()["grid"]["values"] == "xz"
+    assert post(st, "/chat", {"text": "zoom box 400 20 700 160 values=x"}).json()["zoom"].startswith("z")
+    assert "robot" in post(st, "/chat", {"text": "check 0.2 0"}).json()
+    assert post(st, "/chat", {"text": "geometry camera 0.01 0 0"}).json()["corrections"]["camera"]["xyz"][0] == 0.01
+    assert post(st, "/chat", {"text": "geometry"}).json()["corrections"]["camera"]["xyz"][0] == 0.01
+    post(st, "/chat", {"text": "geometry reset"})
     r = post(st, "/chat", {"text": "region box 400 20 700 160"})
     assert r.status_code == 200 and r.json()["kind"] == "region"
     g = post(st, "/chat", {"text": "goal 0.2 0 10d"}).json()

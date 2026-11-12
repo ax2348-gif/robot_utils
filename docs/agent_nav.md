@@ -165,12 +165,15 @@ Every turn carries its `session` id, so a new session starts a fresh dialogue. T
 ## Chat commands (page, human)
 
 `help` lists them:
-- `look [scale] [grid]`
+- `look [scale] [grid] [step=N] [values=x|y|z|range|xz|xyz]` (e.g. `look grid step=50 values=xz`)
+- `zoom [box u0 v0 u1 v1] [on sN] [step=N] [values=…]`
 - `region <shape> [exclude <shape>…] [on sN]`
-- `plane …`
+- `plane …`, `line u,v u,v …`
 - `approach qN [standoff]`
-- `check x y [θ] [frame]`
+- `check x y [θ] [frame] [arm x,y,z[,roll,pitch,yaw]] [gap=MM]` (draws the robot, with the arm as now or at that
+  TCP pose)
 - `goal x y [θ] [frame] [key=value…]`
+- `geometry`, `geometry camera|arm dx dy dz [roll pitch yaw]` (degrees), `geometry reset`
 - `stop`, `enable`, `disable`, `release`, `estop [reason]`
 - `note …`
 - `place name [x y θ [frame]]`
@@ -183,7 +186,7 @@ dialogue as the human's turns.
 
 - **Zoom** (`POST /zoom`) enlarges a held snapshot (no capture) with grid labels in the full image's
   pixels, so a point read off a zoom is a query coordinate as is. `look` and `zoom` take a grid `step`
-  and `values` (x | y | z | range | xyz): the base-frame depth value at each grid intersection, drawn on
+  and `values` (x | y | z | range | xz | xyz): the base-frame depth value at each grid intersection, drawn on
   the image and returned as `samples`. It replaces the agents' local depth-grid scripts with the numbers
   drawn where they were measured.
 - **`/plan/check` draws the whole robot** (base boxes from swerve.constants, the arm's boxes from the arm

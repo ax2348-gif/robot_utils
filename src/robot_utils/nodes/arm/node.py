@@ -109,7 +109,7 @@ FIELD_DOC = {
     "j<i>_tau_est": "kp*e_mot + kd*(qd_ff - qd) + tau_g: torque the MIT law applies",
     "j<i>_tau_g": "gravity feedforward (whenever the motors are on)",
     "j<i>_status": "Damiao status code (1 enabled, 0 disabled, >= 8 fault)",
-    "x..qw": "TCP pose from the output encoders, arm base frame (quaternion x, y, z, w)",
+    "x..qw": "TCP pose from the output encoders, arm frame (quaternion x, y, z, w)",
     "cmd_x..z": "TCP position of q_cmd",
     "err_pos / err_rot": "measured TCP vs commanded TCP (output side)",
     "goal_err_pos / rot": "commanded TCP vs the goal of the source",
@@ -122,7 +122,7 @@ FIELD_DOC = {
     "g_force": "squeeze force applied, estimated: the gripper's MIT law plus the force-limit feedforward, over the pinion (N)",
     "g_force_demand": "squeeze force the MIT law alone asks for, before the force limit (N); above g_force_max while limiting",
     "g_tau_ff": "force-limit feedforward (opposes closing; |g_tau_ff| <= g_tau_est)",
-    "J<r><c>": "jacobian channel: TCP Jacobian at the measured pose, base-frame axes (LOCAL_WORLD_ALIGNED), row r of [vx vy vz wx wy wz], column = joint",
+    "J<r><c>": "jacobian channel: TCP Jacobian at the measured pose, arm-frame axes (LOCAL_WORLD_ALIGNED), row r of [vx vy vz wx wy wz], column = joint",
 }
 
 

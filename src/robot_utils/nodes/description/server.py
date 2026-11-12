@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, RootModel, WithJsonSchema
 
 from ..common.server import (EStopCleared, EStopState, EStopTriggered, Event, LockOut, add_base_routes,
                              add_page_routes, node_meta, setup_app, sse)
@@ -30,28 +30,31 @@ class NominalIn(BaseModel):
 
 
 class GroundIn(BaseModel):
-    camera: str = "camera"
+    camera: str = Field("camera", description="Camera name in the robot description (a key of GET /description "
+                                              "`cameras`).")
     polygons: Optional[list[list[list[float]]]] = Field(
         None, description="Floor regions on the depth image: polygons of [x, y] in normalised image coords "
                           "(0..1, origin top left). Omit for automatic (largest near-horizontal plane, using gravity).")
     frames: int = Field(10, ge=1, le=60, description="Depth frames to take the per-pixel median of.")
-    max_tilt_deg: float = Field(30.0, gt=0, le=60)
+    max_tilt_deg: float = Field(30.0, gt=0, le=60, description="deg; automatic mode only: the plane must be within "
+                                                                "this of horizontal (camera IMU gravity).")
     tol: float = Field(0.01, gt=0, le=0.1, description="m, inlier distance.")
-    activate: bool = True
+    activate: bool = Field(True, description="Activate the new record if it passes the quality gate.")
     model_config = ConfigDict(json_schema_extra={"examples": [
         {"polygons": [[[0.1, 0.7], [0.9, 0.7], [0.9, 0.98], [0.1, 0.98]]]}, {}]})
 
 
 class YawIn(BaseModel):
-    camera: str = "camera"
+    camera: str = Field("camera", description="Camera name in the robot description (a key of GET /description "
+                                              "`cameras`).")
     vectors: list[list[float]] = Field([[1.0, 0.0], [0.0, 1.0]], description="Base-frame directions [vx, vy] (normalised).")
     amplitude: float = Field(0.08, gt=0, le=LIMITS["amplitude_max"], description="m; the base swings 0..2A along each vector.")
     frequency: float = Field(1.0, ge=LIMITS["frequency_min"], le=LIMITS["frequency_max"], description="Hz")
-    cycles: int = Field(5, ge=LIMITS["cycles_min"], le=LIMITS["cycles_max"])
+    cycles: int = Field(5, ge=LIMITS["cycles_min"], le=LIMITS["cycles_max"], description="Sine periods per vector.")
     accel_lowpass_hz: Optional[float] = Field(None, gt=0, le=50, description="Accelerometer low-pass before the "
                                               "line fit (default 2 × frequency; removes the base's vibration).")
     confirm: bool = Field(False, description="Must be true: this drives the robot.")
-    activate: bool = True
+    activate: bool = Field(True, description="Activate the new record if it passes the quality gate.")
     model_config = ConfigDict(json_schema_extra={"examples": [{"confirm": True},
                                                               {"vectors": [[1, 0], [0, 1], [1, 1]], "amplitude": 0.06,
                                                                "frequency": 1.2, "cycles": 6, "confirm": True}]})
@@ -63,13 +66,13 @@ class ResolveIn(BaseModel):
 
 
 class ActivateIn(BaseModel):
-    serial: str
+    serial: str = Field(description="Camera serial the record is filed under.")
     id: Optional[str] = Field(None, description="Calibration id; null = none active.")
 
 
 class EStopIn(BaseModel):
-    reason: str = ""
-    source: str = ""
+    reason: str = Field("", description="Why (free text); `e-stop` if empty.")
+    source: str = Field("", description="Who (free text); the client IP if empty.")
 
 
 # -- responses ---------------------------------------------------------------------------------
@@ -133,13 +136,50 @@ class RobotGeometry(BaseModel):
     top_rail_z: list[float] = Field(description="m, bottom and top faces of the 1x1 top rails (7.75 in, 8.75 in).")
     top_z: float = Field(description="m, the robot's top surface (top rails, 8.75 in), on which the arm's mount "
                                      "plate sits.")
-    modules: list[SwerveModule]
+    modules: list[SwerveModule] = Field(description="The four swerve modules (wheels), FL, FR, RR, RL order "
+                                                    "as in swerve.constants.")
 
 
 class NominalPose(BaseModel):
     """A camera's measured/nominal pose of depth_optical in base (description file, or POST /cameras/{name}/nominal)."""
     xyz: list[Number] = Field(description="m.")
     rpy: list[Number] = Field(description="rad, fixed-axis X, Y, Z (URDF).")
+
+
+class Distortion(BaseModel):
+    """Lens distortion coefficients as the camera SDK reports them (unitless; OpenCV's rational model, as
+    agent_nav projects with it: radial factor (1 + k1 r² + k2 r⁴ + k3 r⁶) / (1 + k4 r² + k5 r⁴ + k6 r⁶) on the
+    normalised image point, plus the tangential p1, p2). Keys the SDK does not give are absent."""
+    k1: Optional[Number] = Field(None, description="Radial numerator, r² term (k1).")
+    k2: Optional[Number] = Field(None, description="Radial numerator, r⁴ term (k2).")
+    k3: Optional[Number] = Field(None, description="Radial numerator, r⁶ term (k3).")
+    k4: Optional[Number] = Field(None, description="Radial denominator, r² term (k4).")
+    k5: Optional[Number] = Field(None, description="Radial denominator, r⁴ term (k5).")
+    k6: Optional[Number] = Field(None, description="Radial denominator, r⁶ term (k6).")
+    p1: Optional[Number] = Field(None, description="Tangential coefficient p1.")
+    p2: Optional[Number] = Field(None, description="Tangential coefficient p2.")
+    model_config = ConfigDict(extra="allow")
+
+
+class Intrinsics(BaseModel):
+    """Pinhole intrinsics of one active profile, in pixels of that profile's width × height (factory values,
+    the camera node's GET /description)."""
+    fx: Number = Field(description="px, focal length along x.")
+    fy: Number = Field(description="px, focal length along y.")
+    cx: Number = Field(description="px, principal point x from the left edge.")
+    cy: Number = Field(description="px, principal point y from the top edge.")
+    width: int = Field(description="px, image width of the profile.")
+    height: int = Field(description="px, image height of the profile.")
+    distortion: Optional[Distortion] = Field(None, description="Lens distortion; absent when the SDK gives none.")
+    model_config = ConfigDict(extra="allow")
+
+
+class CameraIntrinsicsOut(BaseModel):
+    """Intrinsics of the camera's active profiles; a stream that is off is absent."""
+    depth: Optional[Intrinsics] = Field(None, description="The depth profile (unaligned depth pixels).")
+    color: Optional[Intrinsics] = Field(None, description="The color profile (also aligned depth pixels, when "
+                                                          "`aligned_depth`).")
+    model_config = ConfigDict(extra="allow")
 
 
 class CameraOut(BaseModel):
@@ -152,9 +192,8 @@ class CameraOut(BaseModel):
     from_: PoseSource = Field(alias="from", description="How pose_in_base was composed.")
     reachable: bool = Field(description="The last poll of the camera node (every 5 s) succeeded.")
     error: Optional[str] = Field(description="The last poll's error; null if fine.")
-    intrinsics: Optional[dict[str, dict[str, Any]]] = Field(
-        description="`depth` / `color` pinhole intrinsics of the active profiles, as in the camera node's GET "
-                    "/description ({fx, fy, cx, cy, width, height, distortion}, pixels of that profile); null "
+    intrinsics: Optional[CameraIntrinsicsOut] = Field(
+        description="Pinhole intrinsics of the active profiles, as in the camera node's GET /description; null "
                     "before the camera node was reached.")
 
 
@@ -176,7 +215,7 @@ class DescriptionOut(BaseModel):
 
 class Quality(BaseModel):
     """The quality gate (node.QUALITY). A run is always saved; activate=true makes it active only if ok."""
-    ok: bool
+    ok: bool = Field(description="Passed the gate (no problems).")
     problems: list[str] = Field(description="Why not ok (empty if ok).")
 
 
@@ -198,10 +237,15 @@ class AngleCheck(BaseModel):
     error_deg: float = Field(description="measured - expected, deg.")
 
 
-YawChecks = dict[str, Union[AngleCheck, float]]
-_CHECKS_DOC = ("`angle_<i>_<j>`: the angle between vectors i and j, expected vs measured; "
+_CHECKS_DOC = ("`angle_<i>_<j>` (i < j, vector indices): the angle between vectors i and j, expected vs measured; "
                "`floor_normal_vs_ground_deg` (deg, a number): the yaw run's floor normal vs the active ground "
                "calibration's, if both exist.")
+
+
+class YawChecks(RootModel[dict[str, Union[AngleCheck, float]]]):
+    """Consistency checks of a yaw run, by name: `angle_<i>_<j>` (i < j, vector indices) -> AngleCheck,
+    one per pair of vectors; `floor_normal_vs_ground_deg` -> deg (a number) between the run's floor
+    normal and the active ground calibration's, present only if both exist."""
 
 _V = {
     "vector": "Unit base-frame direction [vx, vy] the base translated along.",
@@ -271,7 +315,7 @@ class YawParamsOut(BaseModel):
     vectors: list[list[float]] = Field(description="Base-frame directions [vx, vy].")
     amplitude: float = Field(description="m; the base swings 0..2A along each vector.")
     frequency: float = Field(description="Hz.")
-    cycles: int
+    cycles: int = Field(description="Sine periods per vector.")
     align_speed: float = Field(description="m/s, the nudge along the vector that aligns the wheels first.")
     align_s: float = Field(description="s, duration of that nudge.")
     settle_s: float = Field(description="s stopped before and after each run.")
@@ -291,7 +335,7 @@ class _ResultCore(BaseModel):
 
 class GroundResult(_ResultCore):
     """A finished ground job's result."""
-    result: GroundFit
+    result: GroundFit = Field(description="The plane fit.")
     angle_to_yaw_floor_normal_deg: Optional[float] = Field(
         None, description="deg between this normal and the active yaw calibration's floor normal; absent if none.")
 
@@ -300,7 +344,7 @@ class YawResult(_ResultCore):
     """A finished yaw job's result (also POST .../resolve)."""
     checks: YawChecks = Field(description=_CHECKS_DOC)
     accel_lowpass_hz: Optional[float] = Field(description="Hz, the accelerometer low-pass used.")
-    vectors: list[YawVectorResult]
+    vectors: list[YawVectorResult] = Field(description="One fit per vector, in the order of `params.vectors`.")
 
 
 class _JobCore(BaseModel):
@@ -317,18 +361,22 @@ class _JobCore(BaseModel):
 
 
 class GroundJob(_JobCore):
-    kind: Literal["ground"]
+    kind: Literal["ground"] = Field(description="`ground`.")
     params: GroundParamsOut
     result: Optional[GroundResult] = Field(description="Set once done; null otherwise.")
 
 
 class YawJob(_JobCore):
-    kind: Literal["yaw"]
+    kind: Literal["yaw"] = Field(description="`yaw`.")
     params: YawParamsOut
     result: Optional[YawResult] = Field(description="Set once done; null otherwise.")
 
 
 JobInfo = Annotated[Union[GroundJob, YawJob], Field(discriminator="kind")]
+
+
+class Job(RootModel[JobInfo]):
+    """A calibration job: a GroundJob or a YawJob, by `kind`."""
 
 
 class NoJob(BaseModel):
@@ -340,73 +388,155 @@ class CalibrationSummary(BaseModel):
     type: str = Field(description="ground | yaw.")
     serial: str = Field(description="Camera serial.")
     active: bool = Field(description="The active one of its type for this camera.")
-    t_saved: Optional[float] = Field(description="Unix epoch s when saved.")
-    summary: Optional[str]
-    quality: Optional[Quality]
+    t_saved: Optional[float] = Field(description="Unix epoch s when saved; null if the record lacks it.")
+    summary: Optional[str] = Field(description="One line for people; null if the record lacks it.")
+    quality: Optional[Quality] = Field(description="The quality gate's verdict; null in records older than the "
+                                                   "gate.")
     has_raw: bool = Field(description="Raw data is stored (GET .../raw.npz).")
 
 
+class CameraDevice(BaseModel):
+    """The camera device (camera node)."""
+    name: Optional[str] = Field(None, description="Device name reported by the SDK.")
+    serial: Optional[str] = Field(None, description="Device serial.")
+    firmware: Optional[str] = Field(None, description="Firmware version.")
+    model_config = ConfigDict(extra="allow")
+
+
+class CameraConventions(BaseModel):
+    """The camera node's frame conventions."""
+    optical: Optional[str] = Field(None, description="Axes of every camera frame: `x right, y down, z out of the "
+                                                     "lens`.")
+    units: Optional[str] = Field(None, description="Length unit of the translations: `m`.")
+    transform: Optional[str] = Field(None, description="`p_parent = rotation @ p_child + translation`.")
+    model_config = ConfigDict(extra="allow")
+
+
+class CameraFrame(BaseModel):
+    """One frame of the camera's own tree. The root (`depth_optical`) has only `parent` (null)."""
+    parent: Optional[str] = Field(None, description="Parent frame name (camera-local, e.g. `depth_optical`); null "
+                                                    "for the root.")
+    rotation: Optional[list[list[Number]]] = Field(None, description="R of this frame in its parent, 3×3 row-major; "
+                                                                     "absent on the root.")
+    translation: Optional[list[Number]] = Field(None, description="m, t of this frame in its parent; absent on the "
+                                                                  "root.")
+    model_config = ConfigDict(extra="allow")
+
+
+class CameraFrames(RootModel[dict[str, CameraFrame]]):
+    """Camera-local frames by name: `depth_optical` (root), and `color_optical`, `imu` when the camera's
+    calibration has them."""
+
+
+class CameraSnapshot(BaseModel):
+    """The camera node's GET /description at the time of the run (keys as that node returned them)."""
+    kind: Optional[str] = Field(None, description="Camera node kind, `orbbec`.")
+    root: Optional[str] = Field(None, description="Root frame of the camera's tree, `depth_optical`.")
+    device: Optional[CameraDevice] = Field(None, description="The connected camera; null if none was open.")
+    conventions: Optional[CameraConventions] = Field(None, description="The camera node's frame conventions.")
+    frames: Optional[CameraFrames] = Field(None, description="Camera-local frames by name, each with its pose in "
+                                                             "its parent.")
+    intrinsics: Optional[CameraIntrinsicsOut] = Field(None, description="Pinhole intrinsics of the active "
+                                                                        "profiles.")
+    aligned_depth: Optional[bool] = Field(None, description="Depth was aligned to color (depth pixels use the "
+                                                            "color intrinsics).")
+    settings_version: Optional[int] = Field(None, description="The camera node's settings version the values "
+                                                              "belong to; null before its first pipeline start.")
+    model_config = ConfigDict(extra="allow")
+
+
+class YawLimits(BaseModel):
+    """The yaw routine's safety limits at the time of the run (routines.LIMITS). Keys added later are absent in
+    older records."""
+    amplitude_max: Optional[Number] = Field(None, description="m, largest amplitude A.")
+    frequency_min: Optional[Number] = Field(None, description="Hz, lowest frequency.")
+    frequency_max: Optional[Number] = Field(None, description="Hz, highest frequency.")
+    peak_speed_max: Optional[Number] = Field(None, description="m/s, largest peak speed A·2πf.")
+    cycles_min: Optional[Number] = Field(None, description="Fewest cycles per vector.")
+    cycles_max: Optional[Number] = Field(None, description="Most cycles per vector.")
+    vectors_max: Optional[Number] = Field(None, description="Most vectors per run.")
+    travel_max: Optional[Number] = Field(None, description="m, largest total travel of the run.")
+    yaw_rate_abort_dps: Optional[Number] = Field(None, description="deg/s; aborts when the yaw rate, averaged "
+                                                                   "over yaw_rate_window_s, exceeds this.")
+    yaw_rate_window_s: Optional[Number] = Field(None, description="s, averaging window of the yaw rate check.")
+    heading_abort_deg: Optional[Number] = Field(None, description="deg; aborts when the integrated heading drift "
+                                                                  "exceeds this.")
+    stream_stall_s: Optional[Number] = Field(None, description="s; aborts when the camera or swerve stream is "
+                                                               "silent this long.")
+    model_config = ConfigDict(extra="allow")
+
+
 _REC = {
-    "camera": "The camera node's GET /description at the time of the run (device, frames, intrinsics).",
+    "camera": "The camera node's GET /description at the time of the run.",
     "version": "Description node version that made it.",
     "summary": "One line for people.",
     "camera_name": "Camera name in the robot description.",
     "id": "Calibration id (`YYYYmmdd-HHMMSS`, `-n` if taken).",
     "serial": "Camera serial.",
     "t_saved": "Unix epoch s when saved.",
+    "quality": "The quality gate's verdict; absent in records older than the gate.",
 }
 
 
 class GroundRecord(BaseModel):
-    """A ground calibration record (meta.json; key order as stored)."""
-    params: Optional[GroundParamsOut] = None
-    result: Optional[GroundFit] = None
+    """A ground calibration record (meta.json; key order as stored). Keys a record lacks (older versions)
+    are absent; unknown keys are passed through after the known ones."""
+    params: Optional[GroundParamsOut] = Field(None, description="The run's parameters.")
+    result: Optional[GroundFit] = Field(None, description="The plane fit.")
     gravity_up_depth: Optional[list[float]] = Field(None, description="Mean accelerometer vector (m/s², points up "
                                                                       "when still) rotated into depth_optical; "
                                                                       "null without an IMU reading.")
-    camera: Optional[dict[str, Any]] = Field(None, description=_REC["camera"])
+    camera: Optional[CameraSnapshot] = Field(None, description=_REC["camera"])
     frame_seqs: Optional[list[int]] = Field(None, description="Sequence numbers of the depth frames used.")
     version: Optional[str] = Field(None, description=_REC["version"])
     summary: Optional[str] = Field(None, description=_REC["summary"])
-    quality: Optional[Quality] = None
+    quality: Optional[Quality] = Field(None, description=_REC["quality"])
     camera_name: Optional[str] = Field(None, description=_REC["camera_name"])
     id: str = Field(description=_REC["id"])
-    type: Literal["ground"]
+    type: Literal["ground"] = Field(description="`ground`.")
     serial: str = Field(description=_REC["serial"])
     t_saved: float = Field(description=_REC["t_saved"])
     model_config = ConfigDict(extra="allow")
 
 
 class YawRecord(BaseModel):
-    """A yaw calibration record (meta.json; key order as stored)."""
-    params: Optional[YawParamsOut] = None
-    vectors: Optional[list[YawVectorFit]] = None
+    """A yaw calibration record (meta.json; key order as stored). Keys a record lacks (older versions)
+    are absent; unknown keys are passed through after the known ones."""
+    params: Optional[YawParamsOut] = Field(None, description="The run's parameters (vectors normalised).")
+    vectors: Optional[list[YawVectorFit]] = Field(None, description="One fit per vector, in the order of "
+                                                                    "`params.vectors`.")
     checks: Optional[YawChecks] = Field(None, description=_CHECKS_DOC)
     floor_normal_depth: Optional[list[float]] = Field(None, description="Unit floor normal (pointing up) in "
                                                                         "depth_optical from the two most orthogonal "
                                                                         "motion lines; null with one vector.")
     gravity_up_imu: Optional[list[float]] = Field(None, description="Unit gravity reaction (up) in the IMU frame, "
                                                                     "from the still window before the run.")
-    camera: Optional[dict[str, Any]] = Field(None, description=_REC["camera"])
-    limits: Optional[dict[str, Number]] = Field(None, description="The routine's safety limits at the time "
-                                                                  "(routines.LIMITS).")
+    camera: Optional[CameraSnapshot] = Field(None, description=_REC["camera"])
+    limits: Optional[YawLimits] = Field(None, description="The routine's safety limits at the time "
+                                                          "(routines.LIMITS).")
     version: Optional[str] = Field(None, description=_REC["version"])
     accel_lowpass_hz: Optional[float] = Field(None, description="Hz, the accelerometer low-pass used.")
     summary: Optional[str] = Field(None, description=_REC["summary"])
     resolved_from: Optional[str] = Field(None, description="Id of the record this was re-solved from (POST .../resolve).")
-    quality: Optional[Quality] = None
+    quality: Optional[Quality] = Field(None, description=_REC["quality"])
     camera_name: Optional[str] = Field(None, description=_REC["camera_name"])
     id: str = Field(description=_REC["id"])
-    type: Literal["yaw"]
+    type: Literal["yaw"] = Field(description="`yaw`.")
     serial: str = Field(description=_REC["serial"])
     t_saved: float = Field(description=_REC["t_saved"])
     model_config = ConfigDict(extra="allow")
 
 
-CalibrationRecord = Annotated[Union[GroundRecord, YawRecord], Field(discriminator="type")]
+class CalibrationRecord(RootModel[Annotated[Union[GroundRecord, YawRecord], Field(discriminator="type")]]):
+    """One calibration record (meta.json): a GroundRecord or a YawRecord, by `type`."""
 
-ActiveMap = dict[str, dict[str, str]]
+
 _ACTIVE_DOC = "Active calibrations: camera serial -> {type -> calibration id}."
+
+
+class ActiveMap(RootModel[dict[str, dict[Literal["ground", "yaw"], str]]]):
+    """Active calibrations (active.json): camera serial -> {type (`ground` | `yaw`) -> calibration id}. A type
+    with no active record is absent; a camera with none may map to {}."""
 
 
 class CameraLink(BaseModel):
@@ -558,7 +688,7 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
     async def jobs():
         return [j.info() for j in node.jobs.values()]
 
-    @app.get("/jobs/{jid}", response_model=JobInfo, response_model_exclude_unset=True, tags=["calibration"],
+    @app.get("/jobs/{jid}", response_model=Job, response_model_exclude_unset=True, tags=["calibration"],
              summary="One job: state, progress, result")
     async def job(jid: int):
         j = node.jobs.get(jid)

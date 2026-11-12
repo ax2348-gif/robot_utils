@@ -4,6 +4,12 @@ You are about to drive a real robot: a swerve-drive base with an RGB-D camera, i
 people and things. This guide is all you need. Every call is plain HTTP + JSON. `N` below is
 this node's base URL, e.g. `http://botcore/nodes/agent_nav` (all paths in replies are relative to it).
 
+An arm stands on the base's front-right corner. You move it through the arm node
+(`http://botcore/nodes/arm`, its own `/docs`), not here; its `GET /geometry` says where its
+fingertips and every part are, in its own frame and in the base frame below. Here, `/plan/check`
+draws the arm with the base, and anything the robot holds or reaches past its front edge counts
+as an obstacle for the stop reflex (keep a carried object behind the bumper while driving).
+
 ## Principles (read these)
 
 1. **You decide; the tools don't.** Perception and planning calls are read-only. They return
@@ -60,9 +66,9 @@ curl -s -o s1.jpg $N/images/s1.jpg                                      # then v
 
 The colour image's size is `image_size` (e.g. 640x480); selections are in its pixels. `grid: true`
 draws labelled pixel lines every 100 px, so you can name coordinates; `{"grid": {"step": 50,
-"values": "z"}}` sets the spacing and also writes the depth's base-frame value at each grid
-intersection (`x` ahead, `y` left, `z` height, `range`, or `xyz`), returned as numbers too
-(`grid.samples`). The depth grid is half the colour size by default; `{"scale": 1.0}` gives
+"values": "xz"}}` sets the spacing and also writes the depth's base-frame values at each grid
+intersection: `xz` (distance ahead and height: with the pixel, a full 3D point), or `x`, `y`, `z`,
+`range`, `xyz`. They are returned as numbers too (`grid.samples`, always x, y, z). The depth grid is half the colour size by default; `{"scale": 1.0}` gives
 full-resolution depth for fine work. The BEV is top-down in the robot's frame at capture: the robot at the bottom,
 x forward (up), y left, 0.5 m grid. Floor points are grey, obstacles orange/yellow by height, the
 blue line is the nearest visible floor.
@@ -73,7 +79,7 @@ is a query coordinate as it is, on the same snapshot.
 
 ```bash
 curl -s -X POST $N/zoom -H 'content-type: application/json' \
-     -d '{"snapshot": "s1", "box": [380, 260, 500, 350], "step": 10, "values": "z", "comment": "the block top"}'
+     -d '{"snapshot": "s1", "box": [380, 260, 500, 350], "step": 10, "values": "xz", "comment": "the block"}'
 # -> {"zoom": "z1", "image": "images/z1.jpg", "magnification": 8, "samples": [{u, v, base: [x, y, z]}, ...]}
 ```
 
@@ -85,8 +91,8 @@ there, not just from `samples`, so you know which surface each one is.
 
 ```bash
 curl -s -X POST $N/query/plane -H 'content-type: application/json' -d '{
-  "snapshot": "s1", "select": {"polygon": [[380,10],[700,10],[690,150],[390,150]]},
-  "exclude": [{"box": [600,0,700,40]}], "comment": "the whiteboard, not the curtain"}'
+  "snapshot": "s1", "select": {"polygon": [[190,10],[350,10],[345,75],[195,75]]},
+  "exclude": [{"box": [300,0,350,20]}], "comment": "the whiteboard, not the curtain"}'
 # -> centre / normal / width / height in base and world frames, touches_image_edge, overlay, bev
 ```
 

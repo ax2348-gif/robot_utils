@@ -10,7 +10,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..common.hub import RowHub
 from ..common.lease import RequestError
@@ -32,7 +32,27 @@ TAGS = [
     {"name": "log", "description": "The dialogue transcript (API boundary), live and per session."},
 ]
 
-Shape = dict  # {"point":[u,v]} | {"disk":[u,v,r]} | {"box":[u0,v0,u1,v1]} | {"polygon":[[u,v],...]}
+class Shape(BaseModel):
+    """A selection of colour-image pixels (u right, v down, origin top left): exactly one of the four."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, json_schema_extra={"examples": [
+        {"point": [320, 240]}, {"disk": [320, 240, 8]}, {"box": [200, 10, 350, 80]},
+        {"polygon": [[190, 10], [350, 10], [345, 75], [195, 75]]}]})
+    point: Optional[list[float]] = Field(None, min_length=2, max_length=2, description="[u, v]: one pixel.")
+    disk: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[u, v, r]: pixels within r of (u, v).")
+    box: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[u0, v0, u1, v1]: a screen-aligned "
+                                                                                     "rectangle (corners).")
+    polygon: Optional[list[list[float]]] = Field(None, min_length=3, description="[[u, v], ...]: the pixels inside the "
+                                                                                 "outline (3 or more corners, in order).")
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if sum(v is not None for v in (self.point, self.disk, self.box, self.polygon)) != 1:
+            raise ValueError("a selection has exactly one of point, disk, box, polygon")
+        return self
+
+
+def shape_dict(s: Optional[Shape]) -> Optional[dict]:
+    return None if s is None else s.model_dump(exclude_none=True)
 
 
 class Commented(BaseModel):
@@ -46,25 +66,41 @@ class SessionIn(Commented):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"agent": "Claude", "avatar": "🦉"}]})
 
 
+class CapsIn(BaseModel):
+    """Caps below the profile's for this session (each <= the profile's value; `GET /state` shows the profile)."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    max_speed: Optional[float] = Field(None, gt=0, description="m/s.")
+    max_omega: Optional[float] = Field(None, gt=0, description="rad/s, turn rate.")
+    max_accel: Optional[float] = Field(None, gt=0, description="m/s².")
+    max_alpha: Optional[float] = Field(None, gt=0, description="rad/s², angular acceleration.")
+    max_jerk: Optional[float] = Field(None, gt=0, description="m/s³.")
+    max_ang_jerk: Optional[float] = Field(None, gt=0, description="rad/s³.")
+    max_distance: Optional[float] = Field(None, gt=0, description="m: the farthest a single goal may be.")
+    max_rotation: Optional[float] = Field(None, gt=0, description="rad: the largest turn a single goal may make.")
+
+
 class EnableIn(Commented):
-    caps: dict = Field(default_factory=dict, description="Lower any cap of the profile (max_speed, max_omega, "
-                       "max_accel, max_alpha, max_jerk, max_ang_jerk, max_distance, max_rotation).")
+    caps: Optional[CapsIn] = Field(None, description="Lower any cap of the profile for this session (never raise).")
 
 
 class GridIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     step: Optional[int] = Field(None, ge=2, le=400, description="Grid spacing in colour pixels (look: 100; zoom: chosen "
                                                                 "to fit the box).")
-    values: Optional[Literal["x", "y", "z", "range", "xyz"]] = Field(
-        None, description="Write the base-frame value of the depth at each grid intersection (z = height, x = ahead, "
-                          "y = left, range = horizontal distance; m). Also returned as numbers (`grid.samples`).")
+    values: Optional[Literal["x", "y", "z", "range", "xz", "xyz"]] = Field(
+        None, description="Write the base-frame value of the depth at each grid intersection (m): z = height, x = ahead, "
+                          "y = left, range = horizontal distance, xz = ahead and height (with the pixel, a full 3D point), "
+                          "xyz = all three. Also returned as numbers (`grid.samples`).")
 
 
 class LookIn(Commented):
     scale: Optional[float] = Field(None, description="Depth grid = colour x scale; default the node's (0.5); 1.0 = full "
                                    "resolution (slower, briefly applies to every viewer).")
-    grid: bool | GridIn = Field(False, description="Draw a labelled pixel grid on the returned image: true (100 px) or "
-                                                   "{step, values}.")
+    grid: bool | GridIn = Field(False, description="Draw a labelled pixel grid on the returned image: true (100 px), or "
+                                                   "{step, values} to set the spacing and write the depth's base-frame value "
+                                                   "(e.g. `z`: a height grid) at each intersection, also returned as `grid.samples`.")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"grid": True}, {"grid": {"step": 50, "values": "xz"}, "comment": "distance and height at each grid point"}, {"scale": 1.0, "settle": True}]})
     settle: bool = Field(False, description="Wait (<= 8 s) until the base is not moving before capturing.")
 
 
@@ -90,9 +126,9 @@ class ZoomIn(Commented):
     box: Optional[list[float]] = Field(None, min_length=4, max_length=4,
                                        description="[u0, v0, u1, v1] colour pixels to enlarge (default: the whole image).")
     step: Optional[int] = Field(None, ge=2, le=400, description="Grid spacing, colour pixels (default: about 8 lines).")
-    values: Optional[Literal["x", "y", "z", "range", "xyz"]] = Field(None, description="As for look's grid.values.")
+    values: Optional[Literal["x", "y", "z", "range", "xz", "xyz"]] = Field(None, description="As for look's grid.values.")
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
-        {"box": [380, 260, 500, 350], "values": "z"}, {"snapshot": "s4", "box": [300, 200, 460, 320], "step": 10}]})
+        {"box": [380, 260, 500, 350], "values": "xz"}, {"snapshot": "s4", "box": [300, 200, 460, 320], "step": 10}]})
 
 
 class QueryIn(Commented):
@@ -101,16 +137,24 @@ class QueryIn(Commented):
                           '{"polygon":[[u,v],...]} in colour-image pixels.')
     exclude: list[Shape] = Field(default_factory=list, description="Shapes removed from the selection.")
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
-        {"select": {"box": [400, 20, 700, 160]}},
-        {"select": {"polygon": [[380, 10], [700, 10], [690, 150], [390, 150]]}, "exclude": [{"disk": [520, 60, 25]}]}]})
+        {"select": {"box": [200, 10, 350, 80]}},
+        {"select": {"polygon": [[190, 10], [350, 10], [345, 75], [195, 75]]}, "exclude": [{"disk": [260, 30, 12]}]}]})
 
 
 class PoseIn(Commented):
     frame: str = Field("local", description="local (default: x forward, y left; theta literal) | global (theta: "
                        "shortest turn) | snapshot:<id> (the base at that capture) | place:<name>")
-    x: float = 0.0
-    y: float = 0.0
-    theta: float = Field(0.0, description="rad, CCW +")
+    x: float = Field(0.0, description="m, forward in `frame`.")
+    y: float = Field(0.0, description="m, left in `frame`.")
+    theta: float = Field(0.0, description="rad, heading in `frame`, counter-clockwise positive.")
+
+
+class ArmPose(BaseModel):
+    """A TCP pose in the arm frame, as the arm node's POST /ik takes it."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    pos: list[float] = Field(min_length=3, max_length=3, description="m, arm frame (the arm's base_link; axes as the base).")
+    rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[roll, pitch, yaw] rad, fixed X-Y-Z.")
+    quat: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, z, w] (instead of rpy).")
 
 
 class ArmAt(BaseModel):
@@ -118,8 +162,8 @@ class ArmAt(BaseModel):
     /ik), or joint angles; and the gripper gap."""
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
         {"pose": {"pos": [0.3, 0.0, 0.45], "rpy": [0, 0, 0]}, "gap_mm": 40}]})
-    pose: Optional[dict] = Field(None, description="TCP pose {pos, rpy | quat} in the arm frame (see the arm node's "
-                                                   "GET /geometry for where its TCP and fingertips are).")
+    pose: Optional[ArmPose] = Field(None, description="TCP pose in the arm frame (the arm node's GET /geometry says where "
+                                                      "its TCP and fingertips are).")
     q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles, rad.")
     gap_mm: Optional[float] = Field(None, ge=0, le=60, description="Gripper gap (default: as measured).")
     max_rot_deg: Optional[float] = Field(None, ge=0, le=30, description="As for the arm node's POST /ik.")
@@ -139,19 +183,27 @@ class PlanCheckIn(CheckIn):
 
 
 class GoalIn(CheckIn):
-    mode: Optional[Literal["synchronized", "independent"]] = None
-    pos_tol: Optional[float] = None
-    heading_tol: Optional[float] = None
-    on_reach: Optional[Literal["terminate", "hold"]] = None
-    hold_band: Optional[float] = None
-    speed: Optional[float] = None
-    omega: Optional[float] = None
-    accel: Optional[float] = None
-    alpha: Optional[float] = None
-    jerk: Optional[float] = None
-    ang_jerk: Optional[float] = None
-    min_wheel_speed: Optional[float] = None
-    stall_s: Optional[float] = None
+    mode: Optional[Literal["synchronized", "independent"]] = Field(
+        None, description="synchronized (default): translation and rotation start and finish together; independent: "
+                          "each runs at its own pace.")
+    pos_tol: Optional[float] = Field(None, gt=0, description="m: the goal is reached within this distance (default 0.02).")
+    heading_tol: Optional[float] = Field(None, gt=0, description="rad: and within this heading (default 0.035).")
+    on_reach: Optional[Literal["terminate", "hold"]] = Field(
+        None, description="terminate (default): the goal ends when reached; hold: it keeps correcting until replaced or "
+                          "stopped.")
+    hold_band: Optional[float] = Field(None, gt=0, description="While holding: an axis inside its tolerance moves again "
+                                                               "beyond hold_band x tolerance (default 2).")
+    speed: Optional[float] = Field(None, gt=0, description="m/s, at most this goal (<= the cap).")
+    omega: Optional[float] = Field(None, gt=0, description="rad/s, turn rate (<= the cap).")
+    accel: Optional[float] = Field(None, gt=0, description="m/s² (<= the cap).")
+    alpha: Optional[float] = Field(None, gt=0, description="rad/s², angular acceleration (<= the cap).")
+    jerk: Optional[float] = Field(None, gt=0, description="m/s³ (<= the cap).")
+    ang_jerk: Optional[float] = Field(None, gt=0, description="rad/s³ (<= the cap).")
+    min_wheel_speed: Optional[float] = Field(None, ge=0, description="m/s: while the base doesn't move, the command is "
+                                                                     "raised up to this wheel speed to overcome static "
+                                                                     "friction (default 0.08; 0 = off).")
+    stall_s: Optional[float] = Field(None, ge=0, description="s without progress before the goal ends as `stalled` "
+                                                             "(default 3; 0 = never).")
     reflex_margin_m: Optional[float] = Field(
         None, gt=0, le=1.0, allow_inf_nan=False,
         description="The gap (m) the stop reflex leaves in front of what it sees, for this goal (default 0.12). "
@@ -167,32 +219,32 @@ class LineIn(Commented):
     select: Optional[Shape] = Field(None, description="A selection along the line (a thin polygon on an edge), or ...")
     points: Optional[list[list[float]]] = Field(None, description="... >= 2 colour pixels [[u, v], ...] on the line "
                                                 "(each read as the median depth of a 4 px disk). Preferred for edges.")
-    exclude: list[Shape] = Field(default_factory=list)
+    exclude: list[Shape] = Field(default_factory=list, description="Shapes removed from the selection.")
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
-        {"points": [[850, 320], [950, 385], [1080, 465], [1200, 535]], "comment": "table edge beside the robot"}]})
+        {"points": [[425, 240], [475, 272], [540, 312], [600, 348]], "comment": "table edge beside the robot"}]})
 
 
 class ApproachIn(Commented):
     query: str = Field(..., description="A plane (or region) query id.")
     standoff: float = Field(1.0, gt=0, le=5, description="m from the surface (plane) / point (region).")
-    face: bool = True
+    face: bool = Field(True, description="Turn the proposed goal to face the surface (plane) / point (region).")
 
 
 class StopIn(Commented):
-    reason: str = ""
+    reason: str = Field("", description="Why (shown to the human with the latched e-stop).")
 
 
 class NoteIn(Commented):
-    text: str
+    text: str = Field(..., description="The note, kept with this session's memory (`GET /memory`).")
 
 
 class PlaceIn(PoseIn):
-    name: str
-    theta: Optional[float] = None
+    name: str = Field(..., description="The place's name (use it later as frame `place:<name>`).")
+    theta: Optional[float] = Field(None, description="rad, heading to remember (null: the place has no heading).")
 
 
 class ChatIn(BaseModel):
-    text: str
+    text: str = Field(..., description="One command line, as typed on the page (`help` lists them).")
 
 
 def create_app(node: AgentNav, start: bool = True) -> FastAPI:
@@ -341,7 +393,8 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     @app.post("/enable", response_model=M.EnableOut, response_model_exclude_unset=True, tags=["session"], summary="Enable motion (pose_servo + swerve lease) with the profile's caps")
     async def enable(body: EnableIn = EnableIn(), x_operator: Optional[str] = Operator):
         """423 while the human operator holds it (disabled or e-stopped on the page)."""
-        return await run(node.enable, actor(x_operator), body.caps, body.comment)
+        return await run(node.enable, actor(x_operator), None if body.caps is None else body.caps.model_dump(exclude_none=True),
+                         body.comment)
 
     @app.post("/disable", response_model=M.DisableOut, tags=["session"], summary="Disable at once (no braking); releases the swerve")
     async def disable(body: Commented = Commented(), x_operator: Optional[str] = Operator):
@@ -407,16 +460,16 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     @app.post("/query/region", response_model=M.RegionOut, response_model_exclude_unset=True, tags=["perception"], summary="3D extent of a selection (base / world frames)")
     async def q_region(body: QueryIn, x_operator: Optional[str] = Operator):
-        return await run(node.query, actor(x_operator), "region", body.snapshot, body.select, body.exclude, body.comment)
+        return await run(node.query, actor(x_operator), "region", body.snapshot, shape_dict(body.select), [shape_dict(e) for e in body.exclude], body.comment)
 
     @app.post("/query/plane", response_model=M.PlaneOut, response_model_exclude_unset=True, tags=["perception"], summary="Fit a plane to a selection (centre, extent, normal)")
     async def q_plane(body: QueryIn, x_operator: Optional[str] = Operator):
-        return await run(node.query, actor(x_operator), "plane", body.snapshot, body.select, body.exclude, body.comment)
+        return await run(node.query, actor(x_operator), "plane", body.snapshot, shape_dict(body.select), [shape_dict(e) for e in body.exclude], body.comment)
 
     @app.post("/query/line", response_model=M.LineOut, response_model_exclude_unset=True, tags=["perception"], summary="Fit a 3D line (edge, row of legs): direction, heading, length")
     async def q_line(body: LineIn, x_operator: Optional[str] = Operator):
         """Use `points` on the edge itself (preferred) or a thin `select`ion. Gives the heading to align with."""
-        return await run(node.query, actor(x_operator), "line", body.snapshot, body.select, body.exclude, body.comment,
+        return await run(node.query, actor(x_operator), "line", body.snapshot, shape_dict(body.select), [shape_dict(e) for e in body.exclude], body.comment,
                          points=body.points)
 
     # -- planning -----------------------------------------------------------------------------------------

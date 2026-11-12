@@ -587,7 +587,7 @@ def draw_grid(img: Image.Image, step: int = 100) -> None:
 
 
 GRID_STEPS = (5, 10, 20, 25, 50, 100, 200)
-GRID_VALUES = ("x", "y", "z", "range", "xyz")
+GRID_VALUES = ("x", "y", "z", "range", "xz", "xyz")
 MAX_SAMPLES = 400
 
 
@@ -616,6 +616,8 @@ def _fmt_value(p: list, values: str) -> list[str]:
     x, y, z = p
     if values == "xyz":
         return [f"x{x:.3f}", f"y{y:.3f}", f"z{z:.3f}"]
+    if values == "xz":
+        return [f"x{x:.3f}", f"z{z:.3f}"]
     return [f"{ {'x': x, 'y': y, 'z': z, 'range': math.hypot(x, y)}[values]:.3f}"]
 
 
@@ -663,7 +665,7 @@ def view_image(jpeg: bytes, *, box: Optional[tuple] = None, step: Optional[int] 
         if n > MAX_SAMPLES:
             raise ValueError(f"{n} grid values is too many (max {MAX_SAMPLES}): use a larger step or a zoom box")
         S = sample_grid(cloud, (u0, v0, u1, v1), step)
-        fv = _font(11 if values == "xyz" else 12)
+        fv = _font(11 if values in ("xyz", "xz") else 12)
         for u, v, p in S:
             x, y = X(u), Y(v)
             if x < 34 or y < 18:            # under the axis labels: in `samples` only

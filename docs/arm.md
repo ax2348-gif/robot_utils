@@ -97,7 +97,7 @@ one ends as `preempted`, logged in events). With none, the arm **holds** `q_cmd`
 The rapid, stateless primitive. Each call: a TCP pose (arm base frame) and optionally a TCP twist
 and a gripper command. There is no "done": clients close their own loop on the streamed errors.
 
-- IK is solved in the request, warm-started from the measured pose (≤ 50 iterations). On failure the call answers 200 with `ok: false` and the residuals and the previous goal stays in force: never a partial
+- IK is solved in the request, warm-started from the measured pose (≤ 30 iterations). On failure the call answers 200 with `ok: false` and the residuals and the previous goal stays in force: never a partial
   solution.
 - The pose never times out: the last accepted pose is held indefinitely.
 - The pose is the goal, literally. A goal more than 20° (any joint) from where the arm is (measured) is
@@ -108,8 +108,9 @@ and a gripper command. There is no "done": clients close their own loop on the s
   `qd_ff = J⁺(q_goal)·twist` (damped pseudo-inverse), sent as the MIT velocity reference for
   0.25 s after the call, then zero, so a client that stops calling ends in a hold. The twist is
   capped at the soft servo speeds and `qd_ff` at the joint speed limits.
-- Response: `{ok, seq, ik: {ok, pos_err_mm, rot_err_deg}, limited}`. `limited` means the step
-  limit is clipping this tick, so `q_cmd` lags `q_goal`.
+- Response (`TrackOut` in `/docs`): `{ok, seq, ik, limited, twist_scaled, reason}`: `ik` is the full IK
+  result (as `POST /ik`; null for a stale `seq`, which also omits `twist_scaled`), `reason` why not ok.
+  `limited` means the step limit is clipping this tick, so `q_cmd` lags `q_goal`.
 
 ### Servo — go to a pose (`POST /servo`)
 
@@ -137,8 +138,9 @@ on the arm. "Reached" only makes sense here.
    motion in force) is refused rather than started from a stale pose; a chunk's lead-in is
    re-anchored on the command when it is accepted and speed-checked.
 
-Observable: `servo {id, phase: planning|executing|settling|reached|not_reached|aborted|refused,
-progress, t, duration, reason}` in every state row.
+Observable: the reply and `/state` `motion` (`MotionOut` in `/docs`): `{id, kind, name, phase:
+executing|settling|reached|not_reached|done|aborted|preempted, reason, progress, duration, t_start,
+t_end_planned, goal, info}`; the stream carries `motion_id`, `phase` and `progress` every tick.
 
 ### Chunk — action chunks from a policy (`POST /chunk`)
 
@@ -152,7 +154,8 @@ Time-indexed TCP poses (+ gripper per step) at a fixed `dt`, the output of a chu
 - A new chunk replaces the one in force from its first future sample, blended over `blend_s`
   (default 0.1 s) to avoid a step.
 - After the last sample: hold (no extrapolation).
-- Observable: `chunk {id, index, n, lag_ms, phase, reason}`.
+- Observable: as servo (`motion`, kind `chunk`; it ends `done` after the last sample), with `info: {skipped,
+  n, t0, dt, blend_s}`.
 
 ### Home and named poses (`POST /home`, `POST /servo {pose_name}`)
 
@@ -227,8 +230,8 @@ from the description node; the shipped default if it is unreachable, and `source
 
 ## Other APIs
 
-- `POST /ik`: IK check only. Pose + seed (`command` | `measured`) → `{ok, q, pos_err_mm,
-  rot_err_deg, within_limits}`. Never moves anything.
+- `POST /ik`: IK check only. Pose + seed (`command` | `measured`) → `{ok, exact, q, pos_err_mm,
+  rot_err_deg, within_limits, joints_at_limit, iterations, reason, nearest}`. Never moves anything.
 - **Agent picture of an IK query**: `POST /ik` with `render` (an object; `{}` takes the defaults)
   also returns `image`, a PNG data URL, and `view`, the view used. `POST /ik/render` takes the same
   body and answers the PNG itself (`image/png`; the IK result in `X-IK-Ok`, `X-IK-Exact`,
@@ -252,7 +255,7 @@ from the description node; the shipped default if it is unreachable, and `source
     never delays the control loop. No lease; nothing moves. Needs a joint reading (503 before).
 - `GET/POST /tcp`: the TCP offset in `end_link` (default −0.15 m along x, as in teleop). Only
   while the arm is not servoing.
-- `GET/POST /profile`: gain profiles from yaml (`soft` production, `safe` debug). Switching only
+- `GET /gains`, `POST /profile`: gain profiles from yaml (`soft` production, `safe` debug). Switching only
   while nothing is servoing.
 - `GET/POST /limits`: joint speed caps (the step limit; defaults 2 / 6 rad/s, below the teleop's
   6 / 18), joint acceleration caps (increases only; 10 / 30 rad/s²), TCP speed and acceleration

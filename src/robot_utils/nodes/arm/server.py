@@ -17,9 +17,10 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..common.server import LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
+from ..common.server import EStopCleared, EStopTriggered, LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
 from . import config as C
 from .kin import se3
+from . import models as M
 from .render import VIEW_DEFAULTS, VIEW_DOC
 from .node import FIELD_DOC, FIELDS, JAC_FIELDS, JAC_UNITS, LEASE_HEARTBEAT, RATE_HZ, TWIST_TIMEOUT, UNITS, ArmNode
 
@@ -68,12 +69,12 @@ class TrackIn(BaseModel):
                                                      f"feedforward for {TWIST_TIMEOUT} s.")
     twist_frame: Literal["arm", "tcp", "base"] = Field("arm", description="Axes of the twist: the arm frame's or the TCP's own "
                                                                        "(`base` is the old name of `arm`, still accepted).")
-    gripper: Optional[GripperIn] = None
+    gripper: Optional[GripperIn] = Field(None, description="Also command the gripper (as POST /gripper).")
     seq: int = Field(0, description="Echoed in the stream (`seq`); debugging only.")
 
 
 class ServoIn(BaseModel):
-    pose: Optional[Pose] = None
+    pose: Optional[Pose] = Field(None, description="TCP goal pose, arm frame (a Cartesian move); or give `name`.")
     name: Optional[str] = Field(None, description="A named pose (joint-space move) instead of `pose`.")
     lin_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s (default: the soft limit).")
     lin_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s².")
@@ -95,7 +96,7 @@ class ServoIn(BaseModel):
 
 class ChunkIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
-    poses: list[Pose] = Field(min_length=1, max_length=1000)
+    poses: list[Pose] = Field(min_length=1, max_length=1000, description="TCP poses, arm frame, `dt` apart from `t0`.")
     dt: float = Field(gt=0, le=1.0, allow_inf_nan=False, description="s between poses.")
     t0: Optional[float] = Field(None, allow_inf_nan=False,
                                 description="Server monotonic s when poses[0] is due (GET /time); default now. "
@@ -106,7 +107,9 @@ class ChunkIn(BaseModel):
 
 class IKIn(BaseModel):
     pose: Pose
-    seed: Literal["command", "measured"] = "command"
+    seed: Literal["command", "measured"] = Field("command", description="Where IK starts: `command` = the joint "
+                                                       "command while servoing (else the measured angles); `measured` = the "
+                                                       "measured angles. Only a starting point: the answer is the solution.")
     max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False,
                                          description="Accept an IK solution whose orientation is within this many degrees of the "
                                                      "request (default 10; the position must be within 2 mm). 1 asks for an exact pose.")
@@ -143,7 +146,7 @@ class GeometryIn(BaseModel):
     q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles (rad): the geometry there.")
     pose: Optional[Pose] = Field(None, description="A TCP pose (arm frame): the geometry at its IK solution (or the nearest "
                                                    "reachable configuration; `ik` says which). Nothing moves.")
-    seed: Literal["command", "measured"] = "measured"
+    seed: Literal["command", "measured"] = Field("measured", description="IK start for `pose`, as for POST /ik.")
     max_rot_deg: Optional[float] = Field(None, ge=0, le=30, description="As for POST /ik.")
     gap_mm: Optional[float] = Field(None, ge=0, le=round(C.GAP_MAX * 1000, 1), description="Gripper gap to place the jaws at "
                                                                                           "(default: the measured gap).")
@@ -156,7 +159,7 @@ class GeometryIn(BaseModel):
 
 
 class ProfileIn(BaseModel):
-    name: Literal["soft", "safe"]
+    name: Literal["soft", "safe"] = Field(description="Gain profile: `soft` (production) or `safe` (debug).")
 
 
 class TcpIn(BaseModel):
@@ -168,20 +171,20 @@ class LimitsIn(BaseModel):
     joint_vel: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s per joint.")
     joint_acc: Optional[list[float]] = Field(None, min_length=6, max_length=6,
                                              description="rad/s² per joint: limits only increases of commanded speed.")
-    lin_vel: Optional[float] = None
-    lin_acc: Optional[float] = None
-    ang_vel: Optional[float] = None
-    ang_acc: Optional[float] = None
+    lin_vel: Optional[float] = Field(None, description="m/s, TCP speed of servo moves.")
+    lin_acc: Optional[float] = Field(None, description="m/s², TCP acceleration of servo moves.")
+    ang_vel: Optional[float] = Field(None, description="rad/s, TCP angular speed of servo moves.")
+    ang_acc: Optional[float] = Field(None, description="rad/s², TCP angular acceleration of servo moves.")
     home_vel: Optional[float] = Field(None, description="rad/s, joint-space moves.")
 
 
 class LeaseIn(BaseModel):
-    client: str = "anonymous"
+    client: str = Field("anonymous", description="Your name, shown to others as the holder.")
 
 
 class EStopIn(BaseModel):
-    reason: str = ""
-    source: str = ""
+    reason: str = Field("", description="Why (free text; `e-stop` if empty).")
+    source: str = Field("", description="Who pressed it (free text; default: the caller's IP).")
 
 
 STREAM_DOC = ("Binary records as every node's /stream (docs/nodes.md): a `schema` record then float64 `rows`. "
@@ -234,17 +237,19 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     # -- state ------------------------------------------------------------------------------------
 
-    @app.get("/state", tags=["state"], summary="Status, lease, motion, gripper, settings, latest telemetry")
+    @app.get("/state", response_model=M.ArmStateOut, response_model_exclude_unset=True, tags=["state"], summary="Status, lease, motion, gripper, settings, latest telemetry")
     async def get_state():
         return node.state_dict()
 
     @app.get("/events", tags=["state"], response_class=StreamingResponse,
-             summary="Server-Sent Events: /state on every change and every 1 s")
+             summary="Server-Sent Events: /state on every change and every 1 s",
+             responses={200: {"content": {"text/event-stream": {}},
+                              "description": "Unnamed events; each `data:` line is the GET /state JSON (ArmStateOut)."}})
     async def events():
         return StreamingResponse(sse(node.hub, node.state_dict), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})
 
-    @app.get("/fields", tags=["stream"], summary="Columns of the stream rows")
+    @app.get("/fields", response_model=M.FieldsOut, response_model_exclude_unset=True, tags=["stream"], summary="Columns of the stream rows")
     async def fields(channel: Literal["tick", "jacobian"] = "tick"):
         if channel == "jacobian":
             return {"fields": JAC_FIELDS, "units": JAC_UNITS, "doc": FIELD_DOC}
@@ -262,84 +267,84 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
                           schema_extra={"node": "arm", "rate_hz": RATE_HZ}, max_hz=max_hz)
         return StreamingResponse(gen, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
 
-    @app.get("/joints", tags=["state"], summary="Joint readings (output encoders, motor side, temperatures, limits)")
+    @app.get("/joints", response_model=M.JointsOut, response_model_exclude_unset=True, tags=["state"], summary="Joint readings (output encoders, motor side, temperatures, limits)")
     async def joints():
         return node.joints()
 
-    @app.get("/tracking", tags=["state"], summary="Tracking errors of the last tick")
+    @app.get("/tracking", response_model=M.TrackingOut, response_model_exclude_unset=True, tags=["state"], summary="Tracking errors of the last tick")
     async def tracking():
         return node.tracking()
 
-    @app.get("/gains", tags=["settings"], summary="The gain profile in force")
+    @app.get("/gains", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="The gain profile in force")
     async def gains():
         return node.profile.public()
 
-    @app.get("/gripper", tags=["motion"], summary="Gripper gap, force and limit")
+    @app.get("/gripper", response_model=M.GripperOut, response_model_exclude_unset=True, tags=["motion"], summary="Gripper gap, force and limit")
     async def get_gripper():
         return node.gripper_state()
 
     # -- lease and control ---------------------------------------------------------------------------
 
-    @app.get("/lease", tags=["lease"], summary="Who holds the lease (no token)")
+    @app.get("/lease", response_model=Optional[M.LeaseHolder], response_model_exclude_unset=True, tags=["lease"], summary="Who holds the lease (no token)")
     async def get_lease():
         info = node.lease.info
         return None if info is None else {"client": info.client, "lease_id": info.lease_id,
                                           "expires_in": info.expires - time.monotonic()}
 
-    @app.post("/lease", tags=["lease"], summary="Acquire the lease (409 if held)")
+    @app.post("/lease", response_model=M.LeaseAcquired, response_model_exclude_unset=True, tags=["lease"], summary="Acquire the lease (409 if held)")
     async def acquire(body: LeaseIn):
         token, info = node.acquire(body.client)
         return {"token": token, "client": info.client, "lease_id": info.lease_id, "heartbeat": node.lease.heartbeat}
 
-    @app.post("/lease/renew", tags=["lease"], summary="Keep the lease (any accepted command also renews it)")
+    @app.post("/lease/renew", response_model=M.LeaseRenewed, response_model_exclude_unset=True, tags=["lease"], summary="Keep the lease (any accepted command also renews it)")
     async def renew(token: LeaseToken = None):
         info = node.renew(token)
         return {"lease_id": info.lease_id, "expires_in": info.expires - time.monotonic()}
 
-    @app.delete("/lease", tags=["lease"], summary="Release the lease (disables)")
+    @app.delete("/lease", response_model=M.LeaseReleased, response_model_exclude_unset=True, tags=["lease"], summary="Release the lease (disables)")
     async def release(token: LeaseToken = None):
         node.release(token)
         return {"released": True}
 
-    @app.post("/enable", tags=["control"], summary="Enable: the arm floats until a command engages it (holder; first time: gripper check)")
+    @app.post("/enable", response_model=M.EnableOut, response_model_exclude_unset=True, tags=["control"], summary="Enable: the arm floats until a command engages it (holder; first time: gripper check)")
     async def enable(token: LeaseToken = None):
         """Motors on, gravity compensated. The arm floats (kp = kd = 0) until the first closed-loop arm
         command (track, servo, chunk, home, stow) engages servoing from the measured pose; the gripper
         is free until a gripper command makes it hold (disable puts it into damping; enable frees it again)."""
         return await asyncio.to_thread(node.enable, token)
 
-    @app.post("/disable", tags=["control"], summary="Disable: the arm floats, the gripper goes into damping, commands refused (holder)")
+    @app.post("/disable", response_model=M.DisableOut, response_model_exclude_unset=True, tags=["control"], summary="Disable: the arm floats, the gripper goes into damping, commands refused (holder)")
     async def disable(token: LeaseToken = None):
         return node.disable(token)
 
-    @app.post("/float", tags=["control"], summary="Float the arm: stays enabled, servoing off, gravity on (holder); the gripper is untouched")
+    @app.post("/float", response_model=M.StateWord, response_model_exclude_unset=True, tags=["control"], summary="Float the arm: stays enabled, servoing off, gravity on (holder); the gripper is untouched")
     async def float_arm(token: LeaseToken = None):
         return node.float_arm(token)
 
-    @app.post("/stow", tags=["control"], summary="Safe homing, then motors off (damping) at home; at once if already within 3° of home (holder)")
+    @app.post("/stow", response_model=M.StowOut, response_model_exclude_unset=True, tags=["control"], summary="Safe homing, then motors off (damping) at home; at once if already within 3° of home (holder)")
     async def stow(token: LeaseToken = None):
         return await asyncio.to_thread(node.stow, token)
 
-    @app.post("/estop", tags=["control"], summary="E-stop: anyone; all motors off (damping); latches until the holder clears it")
+    @app.post("/estop", response_model=EStopTriggered, response_model_exclude_unset=True, tags=["control"], summary="E-stop: anyone; all motors off (damping); latches until the holder clears it")
     async def estop(request: Request, body: Optional[EStopIn] = None):
         body = body or EStopIn()
         src = body.source or (request.client.host if request.client else "")
         info = node.trigger_estop(body.reason, src)
         return {"latched": True, "reason": info.reason, "source": info.source}
 
-    @app.post("/estop/clear", tags=["control"], summary="Clear the e-stop (holder; stays disabled)")
+    @app.post("/estop/clear", response_model=EStopCleared, response_model_exclude_unset=True, tags=["control"], summary="Clear the e-stop (holder; stays disabled)")
     async def clear_estop(token: LeaseToken = None):
         node.clear_estop(token)
         return {"latched": False}
 
-    @app.post("/reset", tags=["control"], summary="Reconnect after a fault (holder; ends uninitialized)")
+    @app.post("/reset", response_model=M.ResetOut, response_model_exclude_unset=True, tags=["control"], summary="Reconnect after a fault (holder; ends uninitialized)")
     async def reset(token: LeaseToken = None):
         node.reset(token)
         return {"state": node.state}
 
     # -- motion -----------------------------------------------------------------------------------------
 
-    @app.post("/track", tags=["motion"], summary="Stream a TCP pose (+ twist feedforward, gripper); 200 with ok=false if IK fails")
+    @app.post("/track", response_model=M.TrackOut, response_model_exclude_unset=True, tags=["motion"], summary="Stream a TCP pose (+ twist feedforward, gripper); 200 with ok=false if IK fails")
     async def track(body: TrackIn, token: LeaseToken = None):
         """Low level and rapid: IK from the previous goal; on failure the previous goal stays and
         `ok` is false (with the residuals). The pose holds until replaced; the twist feeds forward
@@ -348,32 +353,32 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
         return await asyncio.to_thread(node.track_cmd, token, body.pose.se3(), body.twist, body.twist_frame,
                                        body.seq, g)
 
-    @app.post("/servo", tags=["motion"], summary="Planned move to a pose or a named pose (422 if it can't be planned: nothing moves; `code`, `retry`, `nearest` say how to adjust)")
+    @app.post("/servo", response_model=M.MotionOut, response_model_exclude_unset=True, tags=["motion"], summary="Planned move to a pose or a named pose (422 if it can't be planned: nothing moves; `code`, `retry`, `nearest` say how to adjust)")
     async def servo(body: ServoIn, token: LeaseToken = None):
         return await asyncio.to_thread(node.servo_cmd, token, body.pose.se3() if body.pose else None, body.name,
                                        body.lin_vel, body.lin_acc, body.ang_vel, body.ang_acc, body.duration,
                                        body.max_rot_deg)
 
-    @app.post("/home", tags=["motion"], summary="Slow joint-space move to the home pose (through home_via)")
+    @app.post("/home", response_model=M.MotionOut, response_model_exclude_unset=True, tags=["motion"], summary="Slow joint-space move to the home pose (through home_via)")
     async def home(token: LeaseToken = None):
         return await asyncio.to_thread(node.home, token)
 
-    @app.post("/chunk", tags=["motion"], summary="Time-indexed TCP poses (an action chunk); 422 if it can't be planned (nothing moves; `code`, `retry` say why)")
+    @app.post("/chunk", response_model=M.MotionOut, response_model_exclude_unset=True, tags=["motion"], summary="Time-indexed TCP poses (an action chunk); 422 if it can't be planned (nothing moves; `code`, `retry` say why)")
     async def chunk(body: ChunkIn, token: LeaseToken = None):
         return await asyncio.to_thread(node.chunk, token, [p.se3() for p in body.poses], body.dt, body.t0,
                                        body.gaps_mm, body.blend_s)
 
-    @app.post("/cancel", tags=["motion"], summary="End the planned motion or track: hold the current command")
+    @app.post("/cancel", response_model=M.CancelOut, response_model_exclude_unset=True, tags=["motion"], summary="End the planned motion or track: hold the current command")
     async def cancel(token: LeaseToken = None):
         return node.cancel(token)
 
-    @app.post("/gripper", tags=["motion"], summary="Gripper gap (mm) with a force limit: makes it hold")
+    @app.post("/gripper", response_model=M.GripperOut, response_model_exclude_unset=True, tags=["motion"], summary="Gripper gap (mm) with a force limit: makes it hold")
     async def gripper(body: GripperIn, token: LeaseToken = None):
         return node.gripper_cmd(token, body.gap_mm, body.max_force_n)
 
     # -- kinematics ---------------------------------------------------------------------------------
 
-    @app.post("/ik", tags=["kinematics"], summary="IK check only (nothing moves, no lease): always returns `nearest`, the closest reachable pose",
+    @app.post("/ik", response_model=M.IKOut, response_model_exclude_unset=True, tags=["kinematics"], summary="IK check only (nothing moves, no lease): always returns `nearest`, the closest reachable pose",
               description="Answers `{ok, exact, q, pos_err_mm, rot_err_deg, within_limits, joints_at_limit, iterations, reason, "
                           "nearest}`. With `render` (an object, `{}` for the defaults) it also returns `image`, a PNG data URL "
                           "showing the query, and `view`, the view used: for agents (vision models) choosing how to move. "
@@ -394,11 +399,11 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
             "X-IK-Ok": str(out["ok"]).lower(), "X-IK-Exact": str(out["exact"]).lower(),
             "X-IK-Pos-Err-Mm": f"{out['pos_err_mm']:.3f}", "X-IK-Rot-Err-Deg": f"{out['rot_err_deg']:.3f}"})
 
-    @app.get("/kinematics", tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
+    @app.get("/kinematics", response_model=M.KinematicsNow, response_model_exclude_unset=True, tags=["kinematics"], summary="TCP pose, Jacobian and manipulability now")
     async def kin_now(frame: Literal["arm", "tcp", "base"] = "arm", which: Literal["measured", "command"] = "measured"):
         return node.kinematics_now(frame, which)
 
-    @app.post("/kinematics", tags=["kinematics"], summary="The same at given joint configurations (planning lookups)")
+    @app.post("/kinematics", response_model=M.KinematicsBatch, response_model_exclude_unset=True, tags=["kinematics"], summary="The same at given joint configurations (planning lookups)")
     async def kin_lookup(body: KinIn):
         return {"results": await asyncio.to_thread(node.kinematics_batch, body.q, body.frame)}
 
@@ -411,40 +416,40 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
                 "arm's bounds in the base frame and how far it reaches past the frame. `boxes`: every part as an oriented "
                 "box (approximate, from the meshes).")
 
-    @app.get("/geometry", tags=["kinematics"], summary="Fingertips, jaws and the arm's extent as numbers, now (both frames)",
+    @app.get("/geometry", response_model=M.GeometryOut, response_model_exclude_unset=True, tags=["kinematics"], summary="Fingertips, jaws and the arm's extent as numbers, now (both frames)",
              description=GEOM_DOC)
     async def geometry_now():
         return await asyncio.to_thread(node.geometry)
 
-    @app.post("/geometry", tags=["kinematics"], summary="The same at given joint angles or at a TCP pose's IK solution",
+    @app.post("/geometry", response_model=M.GeometryOut, response_model_exclude_unset=True, tags=["kinematics"], summary="The same at given joint angles or at a TCP pose's IK solution",
               description=GEOM_DOC)
     async def geometry_at(body: GeometryIn):
         return await asyncio.to_thread(node.geometry, body.q, None if body.pose is None else body.pose.se3(), body.seed,
                                        body.max_rot_deg, body.gap_mm)
 
-    @app.get("/links", tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
+    @app.get("/links", response_model=M.LinksOut, response_model_exclude_unset=True, tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
     async def links():
         return {"frames": node.links(), "names": [f"joint{i}" for i in range(1, 7)] + ["end_link", "tcp"]}
 
     # -- settings ---------------------------------------------------------------------------------------
 
-    @app.post("/profile", tags=["settings"], summary="Switch the gain profile (holder; only while disabled)")
+    @app.post("/profile", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="Switch the gain profile (holder; only while disabled)")
     async def profile(body: ProfileIn, token: LeaseToken = None):
         return node.set_profile(token, body.name)
 
-    @app.get("/tcp", tags=["settings"], summary="TCP offset in end_link (m)")
+    @app.get("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="TCP offset in end_link (m)")
     async def get_tcp():
         return {"offset": None if node.kin is None else node.kin.tcp_offset}
 
-    @app.post("/tcp", tags=["settings"], summary="Set the TCP offset (holder; only while disabled)")
+    @app.post("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="Set the TCP offset (holder; only while disabled)")
     async def set_tcp(body: TcpIn, token: LeaseToken = None):
         return node.set_tcp(token, body.offset)
 
-    @app.get("/limits", tags=["settings"], summary="Hard and soft speed limits")
+    @app.get("/limits", response_model=M.LimitsOut, response_model_exclude_unset=True, tags=["settings"], summary="Hard and soft speed limits")
     async def get_limits():
         return node.limits()
 
-    @app.post("/limits", tags=["settings"], summary="Soft limits within the hard ones (holder; reset when the lease ends)")
+    @app.post("/limits", response_model=M.LimitsOut, response_model_exclude_unset=True, tags=["settings"], summary="Soft limits within the hard ones (holder; reset when the lease ends)")
     async def set_limits(body: LimitsIn, token: LeaseToken = None):
         return node.set_limits(token, **body.model_dump())
 

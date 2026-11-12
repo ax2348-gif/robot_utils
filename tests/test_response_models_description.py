@@ -96,7 +96,10 @@ def api(monkeypatch, tmp_path):
     routes = {(m, r.path): r for r in app.routes if isinstance(r, APIRoute) for m in r.methods}
     fields.update(id(r.response_field) for r in routes.values() if r.response_field is not None)
 
+    called = set()
+
     def call(method, path, route=None, order=True, **kw):
+        called.add((method, route or path))
         raw.clear()
         r = client.request(method, path, **kw)
         assert r.status_code == 200, (path, r.text)
@@ -112,11 +115,42 @@ def api(monkeypatch, tmp_path):
 
     with TestClient(app) as client:
         wait_for(lambda: client.get("/description").json()["cameras"]["camera"]["reachable"], 15)
-        yield call, node, routes, client
+        yield call, node, routes, client, called
     for s, th in ((cam_srv, cam_t), (sw_srv, sw_t)):
         s.should_exit = True
         th.join(10)
     stop_sim(sims, iface)
+
+
+# A ground record as stored on the robot (meta.json of 2026-11-11, trimmed): the camera node's description
+# with real intrinsics and distortion, ints and floats as written.
+_K = {"k1": 0.0, "k2": 0.0, "k3": 0.0, "k4": 0.0, "k5": 0.0, "k6": 0.0, "p1": 0.0, "p2": 0.0}
+ROBOT_GROUND = {
+    "params": {"polygons": [[[0.1, 0.7], [0.9, 0.7], [0.9, 0.98], [0.1, 0.98]]], "frames": 10, "max_tilt_deg": 30.0,
+               "tol": 0.01},
+    "result": {"normal": [0.0173, -0.9239, -0.3822], "height": 1.128, "rms": 0.0038, "inliers": 86231,
+               "n_points": 120000, "angle_to_gravity_deg": 1.25},
+    "gravity_up_depth": [0.17, -9.06, -3.75],
+    "camera": {"kind": "orbbec", "root": "depth_optical",
+               "device": {"name": "Orbbec Gemini 336L", "serial": "FAKE0001", "firmware": "1.4.60"},
+               "conventions": {"optical": "x right, y down, z out of the lens", "units": "m",
+                               "transform": "p_parent = rotation @ p_child + translation"},
+               "frames": {"depth_optical": {"parent": None},
+                          "color_optical": {"parent": "depth_optical",
+                                            "rotation": [[0.999992, -0.003328, 0.002076], [0.003328, 0.999994, -0.000156],
+                                                         [-0.002076, 0.000163, 0.999998]],
+                                            "translation": [0.023692, 9.1e-05, -0.000437]},
+                          "imu": {"parent": "depth_optical", "rotation": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                                  "translation": [0.007886, 0.001086, -0.014248]}},
+               "intrinsics": {"depth": {"fx": 415.50421142578125, "fy": 415.50421142578125, "cx": 423.3375244140625,
+                                        "cy": 238.67501831054688, "width": 848, "height": 480, "distortion": _K},
+                              "color": {"fx": 365.7105712890625, "fy": 365.7886047363281, "cx": 320.1219177246094,
+                                        "cy": 236.58285522460938, "width": 640, "height": 480,
+                                        "distortion": {**_K, "k1": -0.03221883252263069, "k2": 0.03856267035007477,
+                                                       "k3": -0.013476075604557991, "p1": -0.000343605614034459,
+                                                       "p2": -0.00011862569954246283}}},
+               "aligned_depth": False, "settings_version": 3},
+    "frame_seqs": [101, 102], "version": "0.3.0", "summary": "as on the robot", "quality": {"ok": True, "problems": []}, "camera_name": "camera"}
 
 
 def job_done(client, jid, timeout=40):
@@ -124,7 +158,7 @@ def job_done(client, jid, timeout=40):
 
 
 def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
-    call, node, routes, client = api
+    call, node, routes, client, called = api
     untyped = {f"{m} {p}" for (m, p), r in routes.items()
                if r.include_in_schema and p not in NON_JSON and r.response_model is None}
     assert not untyped
@@ -168,6 +202,9 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     rec = call("GET", f"/calibrations/ground/FAKE0001/{new}", route="/calibrations/{kind}/{serial}/{cid}",
                order=False)                                             # unknown keys kept (after the known ones)
     assert rec["future_key"] == {"a": 1}
+    real = node.store.save("ground", "FAKE0001", ROBOT_GROUND, {}, activate=False)
+    rec = call("GET", f"/calibrations/ground/FAKE0001/{real}", route="/calibrations/{kind}/{serial}/{cid}")
+    assert rec["camera"]["intrinsics"]["color"]["distortion"]["p2"] == -0.00011862569954246283
 
     # yaw: a full run on the simulated base (refused by the quality gate: the fake IMU feels nothing)
     j = call("POST", "/calibrate/yaw", json={"amplitude": 0.04, "frequency": 2.0, "cycles": 2, "confirm": True})
@@ -193,6 +230,11 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     act = call("POST", "/calibrations/yaw/activate", route="/calibrations/{kind}/activate",
                json={"serial": c["serial"], "id": c["id"]})
     assert act["FAKE0001"] == {"ground": gid, "yaw": c["id"]}
+    act = call("POST", "/calibrations/ground/activate", route="/calibrations/{kind}/activate",
+               json={"serial": c["serial"], "id": None})           # none active
+    assert act["FAKE0001"] == {"yaw": c["id"]}
+    call("POST", "/calibrations/ground/activate", route="/calibrations/{kind}/activate",
+         json={"serial": c["serial"], "id": gid})
     d = call("GET", "/description")                                     # composed from ground + yaw
     assert set(d["cameras"]["camera"]["from"]) == {"nominal", "ground", "yaw", "residual_deg"}
     assert d["frames"]["camera/depth_optical"]["source"]["yaw"] == c["id"]
@@ -217,6 +259,9 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     st = wait_for(lambda: (s := call("GET", "/state"))["chocked"] and s["covered"] and s)
     assert len(st["locks"]) == 2
 
+    json_routes = {(m, p) for (m, p), r in routes.items() if r.include_in_schema and p not in NON_JSON}
+    assert json_routes <= called, f"not exercised: {json_routes - called}"
+
     transform = node.transform                                          # the check catches a dropped key
     node.transform = lambda a, b: {**transform(a, b), "undeclared": 1}
     with pytest.raises(AssertionError, match="differs"):
@@ -239,3 +284,17 @@ def test_openapi_documents_shapes_and_media_types(tmp_path):
     assert "frames_in_base" in schemas["DescriptionOut"]["properties"]
     assert "from" in schemas["CameraOut"]["properties"]
     assert schemas["YawRecord"]["additionalProperties"] is True
+    # this node's own models: every field described, nothing free-form (the shared models are common's)
+    shared = {"EStopState", "EStopTriggered", "EStopCleared", "Event", "LockOut", "MetaEndpoints", "NodeMeta",
+              "Health", "TimeResponse", "HTTPValidationError", "ValidationError"}
+    for name, sch in schemas.items():
+        if name in shared:
+            continue
+        for f, p in (sch.get("properties") or {}).items():
+            assert p.get("description") or "$ref" in p, f"{name}.{f} has no description"
+            for alt in [p] + p.get("anyOf", []):
+                assert not (alt.get("type") == "object" and not alt.get("properties")
+                            and alt.get("additionalProperties") in (None, True, {})), f"{name}.{f} is free-form"
+    for p in ("/jobs/{jid}", "/calibrations/{kind}/{serial}/{cid}", "/calibrations/{kind}/activate"):
+        method = "post" if p.endswith("activate") else "get"
+        assert "$ref" in spec["paths"][p][method]["responses"]["200"]["content"]["application/json"]["schema"], p

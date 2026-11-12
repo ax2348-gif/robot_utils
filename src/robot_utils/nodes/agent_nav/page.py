@@ -55,7 +55,7 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
     <div id="sessions" class="ru-card"></div>
     <div class="banner" id="banner"></div>
     <div id="dialogue"></div>
-    <div class="ctl"><input id="cmd" placeholder="command as a human, e.g. look grid · region box 400 20 700 160 · goal 0.5 0 90d · help">
+    <div class="ctl"><input id="cmd" placeholder="command as a human, e.g. look grid · zoom box 200 120 360 240 values=xz · region box 200 10 350 80 · goal 0.5 0 90d · help">
       <button class="ru" id="send">Send</button></div>
   </div>
   <div class="ru-side">
