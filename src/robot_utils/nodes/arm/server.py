@@ -13,10 +13,11 @@ import time
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..common.lease import RequestError
 from ..common.server import EStopCleared, EStopTriggered, LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
 from . import config as C
 from .kin import se3
@@ -192,6 +193,18 @@ STREAM_DOC = ("Binary records as every node's /stream (docs/nodes.md): a `schema
               "t_tick and the 36 entries of the TCP Jacobian (row-major, base-frame axes) at the measured pose.")
 
 
+class JamIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, json_schema_extra={"examples": [
+        {"response": "report"}, {"bands": [1.0, 4.0, 4.0, 1.5, 0.8, 0.6], "hold_s": 1.0}, {"response": "off"}]})
+    bands: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Nm per joint (all > 0).")
+    hold_s: Optional[float] = Field(None, gt=0, description="s over its band before it fires.")
+    release: Optional[float] = Field(None, gt=0, lt=1, description="Clears below release x band.")
+    static_qd: Optional[float] = Field(None, gt=0, description="rad/s: every joint slower than this = static.")
+    settle_s: Optional[float] = Field(None, ge=0, description="s static before judging.")
+    response: Optional[Literal["hold", "report", "off"]] = Field(None, description="hold | report | off.")
+    refire: Optional[bool] = Field(None, description="Fire again after clearing (false = once per command).")
+
+
 def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
@@ -274,6 +287,26 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     @app.get("/tracking", response_model=M.TrackingOut, response_model_exclude_unset=True, tags=["state"], summary="Tracking errors of the last tick")
     async def tracking():
         return node.tracking()
+
+    JAM_DOC = ("Jam detection: an arm that is static (no motion executing, every joint slow, after a short settle) but "
+               "still pushing: a joint's residual |measured torque - gravity model| above its band for `hold_s`. It "
+               "detects the aftermath of a contact (pressed against something, or pushed by the base), not the instant "
+               "of it. Response `hold` pulls the command to where the arm is (a planned move ends `jammed`); while "
+               "tracking it only reports. Fires again after clearing unless `refire` is false.")
+
+    @app.get("/jam", response_model=M.JamState, tags=["settings"], summary="Jam detection: settings, the jam in force, "
+             "recent jams", description=JAM_DOC)
+    async def get_jam():
+        return node.jam_state()
+
+    @app.post("/jam", response_model=M.JamState, tags=["settings"],
+              summary="(human) Change jam detection: bands, timing, response (hold | report | off)",
+              description=JAM_DOC + " Changes need the header `X-Operator: human`: the person in charge decides, "
+                                    "not the lease holder or an agent.")
+    async def set_jam(body: JamIn, x_operator: Optional[str] = Header(None)):
+        if (x_operator or "").lower() != "human":
+            raise RequestError(403, "jam detection is the human operator's to change (X-Operator: human)")
+        return node.set_jam(body.model_dump(exclude_none=True))
 
     @app.get("/gains", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="The gain profile in force")
     async def gains():

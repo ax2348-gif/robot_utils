@@ -74,7 +74,7 @@ ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
 CONNECT_RETRY_S = 2.0
 STATES = ["connecting", "uninitialized", "initializing", "off", "disabled", "floating", "servoing", "fault"]
 SOURCES = ["none", "hold", "track", "servo", "pose", "home", "stow", "chunk"]
-PHASES = ["none", "executing", "settling", "reached", "not_reached", "done", "aborted", "preempted"]
+PHASES = ["none", "executing", "settling", "reached", "not_reached", "done", "aborted", "preempted", "jammed"]
 JOINT_COLS = [("q", "rad"), ("q_mot", "rad"), ("qd", "rad/s"), ("tau", "Nm"), ("q_cmd", "rad"),
               ("qd_ff", "rad/s"), ("tau_g", "Nm"), ("e_mot", "rad"), ("tau_est", "Nm"), ("acc_lim", "bool"),
               ("t_mos", "C"), ("status", "enum")]
@@ -90,7 +90,8 @@ _GRIP = [("g_gap", "m"), ("g_gap_cmd", "m"), ("g_gap_goal", "m"), ("g_qd", "rad/
          ("g_tau_est", "Nm"), ("g_force", "N"), ("g_force_demand", "N"), ("g_tau_ff", "Nm"), ("g_force_max", "N"), ("g_limiting", "bool"),
          ("g_status", "enum")]
 _MOTION = [("motion_id", "id"), ("phase", "enum"), ("progress", "")]
-_ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION)
+_JAM = [("jam", "bool")]   # appended last: existing columns keep their positions
+_ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION + _JAM)
 FIELDS = [n for n, _ in _ALL]
 UNITS = [u for _, u in _ALL]
 COL = {n: i for i, n in enumerate(FIELDS)}
@@ -101,6 +102,7 @@ FIELD_DOC = {
     "servo / g_servo": "arm / gripper closed loop engaged",
     "source": "arm motion source in force: index into " + ", ".join(SOURCES) + " (none = not servoing)",
     "phase": "of the planned motion (servo / pose / home / stow / chunk): index into " + ", ".join(PHASES),
+    "jam": "1 while a jam is in force: the arm static but still pushing (residual over its band; GET /jam)",
     "j<i>_q": "output encoder (xout): the arm's measured pose",
     "j<i>_q_mot / qd / tau": "motor-side feedback frame",
     "j<i>_q_cmd / qd_ff": "position command and the MIT velocity reference (track: the twist's joint velocity while fresh; planned motions: the trajectory's) (NaN when not servoing)",
@@ -153,6 +155,28 @@ class Motion:
                 "progress": round(prog, 4), "duration": round(tr.duration, 3),
                 "t_start": tr.t[0], "t_end_planned": tr.t[-1],
                 "goal": None if tr.goal is None else pose_public(tr.goal), "info": tr.info}
+
+
+@dataclass
+class JamConfig:
+    """Jam detection: a STATIC arm still pushing (the aftermath of a contact, not the instant of it). Judged only
+    while servoing with no motion executing (a finished move counts; a move still settling too), every joint
+    slower than ``static_qd`` for ``settle_s``. A joint's residual |tau - tau_g| above its band for ``hold_s``
+    fires; it clears below ``release`` x band."""
+    bands: list = field(default_factory=lambda: [1.0, 4.0, 4.0, 1.5, 0.8, 0.6])   # Nm per joint (draft, offline study)
+    hold_s: float = 1.0
+    release: float = 0.7
+    static_qd: float = 0.05          # rad/s: every joint slower than this counts as static
+    settle_s: float = 0.5            # s static before judging
+    response: str = "hold"           # hold: command pulled to the reading (a move ends `jammed`) | report | off
+    refire: bool = True              # fire again after clearing (e.g. the base keeps pushing the arm in)
+
+    def public(self) -> dict:
+        return {"bands": list(self.bands), "hold_s": self.hold_s, "release": self.release, "static_qd": self.static_qd,
+                "settle_s": self.settle_s, "response": self.response, "refire": self.refire}
+
+
+JAM_RESPONSES = ("hold", "report", "off")
 
 
 @dataclass
@@ -248,6 +272,14 @@ class ArmNode:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connect_at = 0.0
+        self.jam = JamConfig()
+        self.jam_active: Optional[dict] = None    # the jam in force: joint, residual, since, response
+        self.jams: list[dict] = []                # recent jams (last 20), newest last
+        self.jam_count = 0
+        self._static_since: Optional[float] = None
+        self._over_since = np.full(N, np.nan)     # per joint: when its residual went over its band (NaN = under)
+        self._jam_fired_cmd: Optional[int] = None # with refire off: the command it fired for (fires once per command)
+        self._cmd_count = 0                       # every new command / motion (refire off: one jam per command)
 
     # -- state ---------------------------------------------------------------------------------------
 
@@ -585,6 +617,9 @@ class ArmNode:
         self._last_send = now
         if self.servo:
             self._supervise(now, r, src)
+            self._jam_check(now, r, src, tau_g)
+        else:
+            self._jam_reset()
 
     def _has_source(self) -> bool:
         m = self.motion
@@ -645,6 +680,83 @@ class ArmNode:
                 if now - m.t_end > s.settle_timeout_s:
                     self._end_motion("not_reached", f"{ep * 1e3:.1f} mm / {math.degrees(er):.2f}° from the goal "
                                                     f"{s.settle_timeout_s:g} s after the planned end: holding")
+
+    # -- jam detection: a static arm still pushing ----------------------------------------------------
+
+    def _jam_reset(self) -> None:
+        self._static_since = None
+        self._over_since[:] = np.nan
+        self.jam_active = None
+
+    def _jam_check(self, now: float, r, src, tau_g) -> None:
+        """Control thread, while servoing. See JamConfig. Planned motions and holds get the response; track (a
+        teleop stream overwrites the command every tick) is report-only."""
+        cfg = self.jam
+        if cfg.response == "off" or tau_g is None:
+            self._jam_reset()
+            return
+        m = self.motion
+        moving = (m is not None and m.phase == "executing") or bool(np.any(np.abs(r.qd) > cfg.static_qd))
+        if moving:
+            self._static_since = None
+            self._over_since[:] = np.nan
+            return
+        self._static_since = self._static_since or now
+        if now - self._static_since < cfg.settle_s:
+            return
+        res = np.asarray(r.tau, float) - np.asarray(tau_g, float)
+        bands = np.asarray(cfg.bands, float)
+        if self.jam_active is not None:                       # hysteresis: clear only well under every band
+            if np.all(np.abs(res) < cfg.release * bands):
+                self.events.add(f"jam cleared (joint{self.jam_active['joint']})")
+                self.jam_active = None
+                self._over_since[:] = np.nan
+            return
+        over = np.abs(res) > bands
+        self._over_since = np.where(over, np.where(np.isnan(self._over_since), now, self._over_since), np.nan)
+        held = np.where(over, now - self._over_since, 0.0)
+        if not np.any(held >= cfg.hold_s):
+            return
+        if not cfg.refire and self._jam_fired_cmd == self._cmd_count:
+            return
+        i = int(np.argmax(np.where(held >= cfg.hold_s, np.abs(res) / bands, 0.0)))
+        track = src == "track"
+        act = "report" if (cfg.response == "report" or track) else "hold"
+        jam = {"t": now, "wall": time.time(), "joint": i + 1, "residual_nm": round(float(res[i]), 3),
+               "band_nm": float(bands[i]), "held_s": round(float(held[i]), 2), "response": act, "source": src,
+               "residuals_nm": [round(float(v), 3) for v in res]}
+        self.jam_count += 1
+        jam["count"] = self.jam_count
+        self.jam_active, self._jam_fired_cmd = jam, self._cmd_count
+        self.jams = (self.jams + [jam])[-20:]
+        what = (f"jam: joint{i + 1} residual {res[i]:+.1f} Nm (band {bands[i]:g}) for {held[i]:.1f} s while static")
+        if act == "hold":
+            with self._lock:     # stop pushing: hold where the arm is, not where it was told to be
+                self._command_from_reading(r, np.zeros(N))
+            if self.motion is not None:
+                self._end_motion("jammed", what + ": holding where it is")
+            else:
+                self.events.add(what + ": holding where it is", "warn")
+        else:
+            self.events.add(what + (" (track: report only)" if track else " (report only)"), "warn")
+
+    def jam_state(self) -> dict:
+        return finite({"config": self.jam.public(), "active": self.jam_active, "count": self.jam_count,
+                       "recent": list(self.jams)})
+
+    def set_jam(self, changes: dict) -> dict:
+        """Change the jam detector (the server allows it for a human only)."""
+        cfg = self.jam
+        new = JamConfig(**{**cfg.public(), **{k: v for k, v in changes.items() if v is not None}})
+        if len(new.bands) != N or not all(math.isfinite(b) and b > 0 for b in new.bands):
+            raise ValueError(f"bands: {N} positive numbers (Nm, one per joint)")
+        if new.response not in JAM_RESPONSES:
+            raise ValueError(f"response: one of {', '.join(JAM_RESPONSES)}")
+        if not (0 < new.release < 1) or new.hold_s <= 0 or new.settle_s < 0 or new.static_qd <= 0:
+            raise ValueError("release in (0, 1); hold_s > 0; settle_s >= 0; static_qd > 0")
+        self.jam = new
+        self.events.add("jam detection: " + ", ".join(f"{k}={v}" for k, v in changes.items() if v is not None))
+        return self.jam_state()
 
     def _end_motion(self, phase: str, reason: Optional[str] = None) -> None:
         with self._lock:
@@ -731,6 +843,7 @@ class ArmNode:
             row[COL["motion_id"]], row[COL["phase"]], row[COL["progress"]] = m.traj.id, PHASES.index(m.phase), mp["progress"]
         else:
             row[COL["phase"]] = 0
+        row[COL["jam"]] = float(self.jam_active is not None)
         self.hub.publish_rows(row[None], "tick")
         self.hub.publish_rows(np.concatenate([[now], J.reshape(-1)])[None], "jacobian")
 
@@ -907,6 +1020,7 @@ class ArmNode:
     def track_cmd(self, token, pose: pin.SE3, twist=None, twist_frame: str = "arm", seq: int = 0,
                   gripper: Optional[dict] = None) -> dict:
         self._ready(token)
+        self._cmd_count += 1
         if twist is not None:
             twist = np.asarray(twist, dtype=float)
             if twist.shape != (6,) or not np.all(np.isfinite(twist)):
@@ -986,6 +1100,7 @@ class ArmNode:
         more than PLAN_DRIFT since (latest reading), a servo / pose / home / stow is not started rather
         than started from a stale pose (409, retryable); a chunk's lead-in is re-anchored on where the arm is now
         (latest reading) and its speed checked."""
+        self._cmd_count += 1
         with self._lock:
             if not self.enabled:
                 raise RequestError(409, "disabled while planning")
@@ -1432,6 +1547,7 @@ class ArmNode:
                                               "twist": None if tr.twist is None else tr.twist.tolist(),
                                               "twist_frame": tr.twist_frame},
             "motion": motion,
+            "jam": self.jam_state(),
             "gripper": self.gripper_state(),
             "profile": self.profile.name, "profiles": list(C.PROFILES),
             "tcp_offset": None if self.kin is None else self.kin.tcp_offset,

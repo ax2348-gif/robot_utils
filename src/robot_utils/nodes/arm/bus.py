@@ -290,6 +290,7 @@ class SimBus(ArmBus):
         self.q = np.array(q0, dtype=float)
         self.qd = np.zeros(N)
         self.tau = np.zeros(N)
+        self.stuck: Optional[np.ndarray] = None   # tests: an obstruction holds the arm at this pose
         self.g_q, self.g_qd, self.g_tau = -0.5, 0.0, 0.0
         self.enabled = False
         self.g_enabled = False
@@ -363,6 +364,8 @@ class SimBus(ArmBus):
             self.qd += (self.tau - g - 0.1 * self.qd) / self.INERTIA * dt     # + a little joint friction
         self.q += self.qd * dt
         self._stops()
+        if self.stuck is not None:     # an obstruction holds the arm here (it pushes, it doesn't move)
+            self.q, self.qd = np.array(self.stuck, float), np.zeros(N)
         gc = self.gcmd if (self.enabled and self.g_enabled) else None
         if gc is None:                 # damping: comes to rest
             self.g_tau = 0.0

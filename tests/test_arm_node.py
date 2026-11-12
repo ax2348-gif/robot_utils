@@ -258,6 +258,61 @@ def test_servo_aborts_on_obstruction(rig):
     assert n.last_motion.phase == "aborted" and "tracking error" in n.last_motion.reason
 
 
+def _hold_stuck(rig, stuck, seconds):
+    """Something holds the arm still at ``stuck`` (the command elsewhere): the arm pushes against it."""
+    rig.sim.stuck = stuck
+    rig.keep(seconds)
+    rig.sim.stuck = None
+
+
+def test_jam_fires_only_on_a_static_arm_and_holds_where_it_is(rig):
+    """A static arm still pushing (after the move): the jam fires after hold_s, the command is pulled to the reading
+    (it stops pushing), the move ends `jammed`; while a move is executing nothing is judged."""
+    n = ready(rig).node
+    n.settings.abort_pos, n.settings.settle_timeout_s = 10.0, 5.0   # the abort and not_reached out of the way
+    n.set_jam({"bands": [0.2] * 6})                    # the sim's soft push is small: the mechanism, not the bands
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.0, 0.04])
+    n.servo_cmd(rig.tok, T, lin_vel=0.02, duration=4.0)
+    rig.keep(0.3)
+    stuck = rig.sim.q.copy()
+    _hold_stuck(rig, stuck, 2.0)                       # executing: pushing but moving, not judged
+    assert n.motion is not None and n.motion.phase == "executing" and n.jam_count == 0
+    _hold_stuck(rig, stuck, 4.0)                       # the planned end passes: static and pushing
+    assert n.jam_count == 1, [e["msg"] for e in n.events.list()][-5:]
+    j = n.jams[-1]
+    assert j["response"] == "hold" and abs(j["residual_nm"]) > n.jam.bands[j["joint"] - 1]
+    assert n.last_motion.phase == "jammed" and "static" in n.last_motion.reason
+    assert np.allclose(n.q_cmd, rig.sim.q_mot if hasattr(rig.sim, "q_mot") else rig.sim.q, atol=0.02)
+    assert rig.row()["jam"] in (0.0, 1.0)
+    st = n.state_dict()["jam"]
+    assert st["count"] == 1 and st["config"]["response"] == "hold"
+
+
+def test_jam_report_off_and_config(rig):
+    n = ready(rig).node
+    n.settings.abort_pos = 10.0
+    n.set_jam({"bands": [0.2] * 6})
+    with pytest.raises(ValueError):
+        n.set_jam({"bands": [1, 2, 3]})
+    with pytest.raises(ValueError):
+        n.set_jam({"response": "explode"})
+    n.set_jam({"response": "off"})
+    assert rig.node.track_cmd(rig.tok, rig.tcp())["ok"]       # engaged, holding its own pose
+    rig.keep(0.3)
+    q0 = rig.sim.q.copy()
+    stuck = q0.copy()
+    stuck[1] -= 0.05                                    # pushed off its command on joint 2
+    n.track = None                                      # a hold (no track), so `report` isn't forced by tracking
+    _hold_stuck(rig, stuck, 3.0)
+    assert n.jam_count == 0                             # off: not checked
+    n.set_jam({"response": "report"})
+    q_cmd_before = n.q_cmd.copy()
+    _hold_stuck(rig, stuck, 3.0)
+    assert n.jam_count >= 1 and n.jams[-1]["response"] == "report"
+    assert np.allclose(n.q_cmd, q_cmd_before)           # report only: the command is left alone
+
+
 def test_home_and_named_pose(rig):
     n = ready(rig).node
     m = n.home(rig.tok)
@@ -521,6 +576,11 @@ def test_http_api_end_to_end(tmp_path):
         r = c.post("/ik/render", json={"pose": pose, "render": {"azimuth_deg": 90}})
         assert r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG" and r.headers["x-ik-ok"] == "true"
         assert c.post("/ik", json={"pose": pose, "render": {"width": 5000}}).status_code == 422
+        jam = c.get("/jam").json()
+        assert jam["config"]["response"] == "hold" and jam["active"] is None
+        assert c.post("/jam", json={"response": "report"}).status_code == 403             # not the human
+        assert c.post("/jam", json={"response": "report"}, headers={"X-Operator": "human"}).json()["config"]["response"] == "report"
+        assert c.post("/jam", json={"response": "nope"}, headers={"X-Operator": "human"}).status_code == 422
         k = c.post("/kinematics", json={"q": [list(Q0)], "frame": "tcp"}).json()["results"][0]
         assert k["within_limits"] and len(k["jacobian"]) == 6
         assert c.post("/kinematics", json={"q": [[0, 0, 0]]}).status_code == 422
