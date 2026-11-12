@@ -6,7 +6,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from importlib import resources
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -28,6 +28,8 @@ TAGS = [
     {"name": "perception", "description": "READ-ONLY: snapshots, selections, region / plane queries, overlays, BEV."},
     {"name": "planning", "description": "READ-ONLY: path checks and proposals. Nothing moves."},
     {"name": "motion", "description": "The only calls that move the base: explicit goals, plus stop / e-stop."},
+    {"name": "arm", "description": "The arm, through this node (it holds the arm lease for the session): planned moves, "
+                                   "gripper, IK and geometry checks. Replies are the arm node's, unchanged."},
     {"name": "memory", "description": "Per-session notes and named places."},
     {"name": "log", "description": "The dialogue transcript (API boundary), live and per session."},
 ]
@@ -81,6 +83,10 @@ class CapsIn(BaseModel):
 
 class EnableIn(Commented):
     caps: Optional[CapsIn] = Field(None, description="Lower any cap of the profile for this session (never raise).")
+    base: bool = Field(True, description="Enable the base (pose_servo + the swerve lease). false: leave it as it is.")
+    arm: bool = Field(True, description="Enable the arm (this node takes its lease; the arm floats until a move engages "
+                                        "it; its first enable after power-up closes the gripper once to check it). "
+                                        "false: leave it as it is.")
 
 
 class GridIn(BaseModel):
@@ -204,6 +210,9 @@ class GoalIn(CheckIn):
                                                                      "friction (default 0.08; 0 = off).")
     stall_s: Optional[float] = Field(None, ge=0, description="s without progress before the goal ends as `stalled` "
                                                              "(default 3; 0 = never).")
+    reflex: Optional[bool] = Field(
+        None, description="true: the stop reflex watches this goal. The operator usually forces it on for every goal "
+                          "(`GET /state` reflex.force); then false is overridden and the reply says so.")
     reflex_margin_m: Optional[float] = Field(
         None, gt=0, le=1.0, allow_inf_nan=False,
         description="The gap (m) the stop reflex leaves in front of what it sees, for this goal (default 0.12). "
@@ -241,6 +250,62 @@ class NoteIn(Commented):
 class PlaceIn(PoseIn):
     name: str = Field(..., description="The place's name (use it later as frame `place:<name>`).")
     theta: Optional[float] = Field(None, description="rad, heading to remember (null: the place has no heading).")
+
+
+# -- the arm (forwarded; the arm node validates fully and answers 422 with `code`, `retry`, `nearest`) ----------
+
+class ArmPose(BaseModel):
+    """A TCP pose in the arm frame (axes parallel to the robot base; `GET /arm/geometry` frames.arm_in_base)."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False,
+                              json_schema_extra={"examples": [{"pos": [0.25, 0.0, 0.2], "rpy": [0.0, 1.57, 0.0]}]})
+    pos: list[float] = Field(min_length=3, max_length=3, description="m, arm frame.")
+    quat: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, z, w] (or `rpy`).")
+    rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="[roll, pitch, yaw] rad, fixed X-Y-Z "
+                                                                                  "(or `quat`).")
+
+
+class ArmServoIn(Commented):
+    pose: Optional[ArmPose] = Field(None, description="TCP goal pose (a Cartesian move); or give `name`.")
+    name: Optional[str] = Field(None, description="A named pose (joint-space move) instead of `pose`.")
+    lin_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s (default: the soft limit).")
+    lin_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="m/s².")
+    ang_vel: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s.")
+    ang_acc: Optional[float] = Field(None, gt=0, allow_inf_nan=False, description="rad/s².")
+    duration: Optional[float] = Field(None, gt=0, le=60, allow_inf_nan=False, description="Exact duration (s).")
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False,
+                                         description="Accept an IK orientation within this many degrees (default 10).")
+    align_wheels: bool = Field(True, description="Defensive wheel alignment first: the wheels are set along the move's "
+                                                 "horizontal direction with the drives coasting, so a push rolls the base "
+                                                 "instead of dragging the tyres (the operator may force it on). Skipped for "
+                                                 "mostly vertical moves and named poses; the reply's `align` says what was done.")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"pose": {"pos": [0.3, 0.0, 0.15], "rpy": [0, 1.57, 0]}, "lin_vel": 0.05, "comment": "above the cup"},
+        {"name": "home"}]})
+
+
+class ArmGripperIn(Commented):
+    gap_mm: Optional[float] = Field(None, ge=0, allow_inf_nan=False, description="Jaw gap goal (0 = closed).")
+    max_force_n: Optional[float] = Field(None, ge=0, allow_inf_nan=False, description="Squeeze force limit (N).")
+
+
+class ArmIKIn(Commented):
+    pose: ArmPose
+    seed: Literal["command", "measured"] = Field("command", description="Where IK starts (only a starting point).")
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, allow_inf_nan=False, description="As for servo.")
+    render: Optional[dict[str, Any]] = Field(None, description="Also return a PNG of the query: {azimuth_deg, "
+                                                               "elevation_deg, zoom, width, height} (`{}`: defaults).")
+
+
+class ArmGeometryIn(Commented):
+    q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles (rad): the geometry there.")
+    pose: Optional[ArmPose] = Field(None, description="A TCP pose: the geometry at its IK solution. Nothing moves.")
+    seed: Literal["command", "measured"] = Field("measured", description="IK start for `pose`.")
+    max_rot_deg: Optional[float] = Field(None, ge=0, le=30, description="As for servo.")
+    gap_mm: Optional[float] = Field(None, ge=0, description="Gripper gap to place the jaws at (default: the measured gap).")
+
+
+def arm_body(m: BaseModel, drop=("comment",)) -> dict:
+    return m.model_dump(exclude_none=True, exclude=set(drop))
 
 
 class ChatIn(BaseModel):
@@ -281,11 +346,21 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     def actor(op: Optional[str]) -> str:
         return "human" if (op or "").lower() == "human" else "agent"
 
+    def for_agent(who: str, out):
+        """An agent's reply starts with the robot's events since its previous reply (`since_last_call`)."""
+        if who == "agent" and isinstance(out, dict):
+            return {"since_last_call": node.since_last_call(), **out}
+        return out
+
     async def run(fn, *a, **k):
-        """Run a node call in a worker thread; a refused call is logged as a dialogue turn too."""
+        """Run a node call in a worker thread; a refused call is logged as a dialogue turn too. Calls made as an
+        actor (`agent` / `human` first) answer an agent with `since_last_call` first."""
         try:
-            return await asyncio.to_thread(fn, *a, **k)
+            out = await asyncio.to_thread(fn, *a, **k)
+            return for_agent(a[0], out) if a and a[0] in ("agent", "human") else out
         except (RequestError, ValueError) as e:
+            if getattr(e, "logged", False):          # the node logged it already, with more detail
+                raise
             who = a[0] if a and a[0] in ("agent", "human") else "agent"
             req = {"args": [x for x in a[1:] if isinstance(x, (str, int, float, bool, dict, list, type(None)))]}
             node.turn(who, fn.__name__, req, {"error": str(e), "status": getattr(e, "status", 422)},
@@ -384,19 +459,19 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
 
     @app.post("/session", response_model=M.OpenSessionOut, response_model_exclude_unset=True, tags=["session"], summary="Open a session: your name and avatar")
     async def open_session(body: SessionIn, x_operator: Optional[str] = Operator):
-        return await run(node.open_session, body.agent, body.avatar, body.comment, actor(x_operator))
+        return for_agent(actor(x_operator), await run(node.open_session, body.agent, body.avatar, body.comment, actor(x_operator)))
 
-    @app.delete("/session", response_model=M.Closed, tags=["session"], summary="Close the session (disables)")
+    @app.delete("/session", response_model=M.Closed, response_model_exclude_unset=True, tags=["session"], summary="Close the session (disables)")
     async def close_session(x_operator: Optional[str] = Operator):
-        return await run(node.close_session, "closed", actor(x_operator))
+        return for_agent(actor(x_operator), await run(node.close_session, "closed", actor(x_operator)))
 
-    @app.post("/enable", response_model=M.EnableOut, response_model_exclude_unset=True, tags=["session"], summary="Enable motion (pose_servo + swerve lease) with the profile's caps")
+    @app.post("/enable", response_model=M.EnableOut, response_model_exclude_unset=True, tags=["session"], summary="Enable the base (pose_servo + swerve lease, the profile's caps) and the arm")
     async def enable(body: EnableIn = EnableIn(), x_operator: Optional[str] = Operator):
         """423 while the human operator holds it (disabled or e-stopped on the page)."""
         return await run(node.enable, actor(x_operator), None if body.caps is None else body.caps.model_dump(exclude_none=True),
-                         body.comment)
+                         body.comment, body.base, body.arm)
 
-    @app.post("/disable", response_model=M.DisableOut, tags=["session"], summary="Disable at once (no braking); releases the swerve")
+    @app.post("/disable", response_model=M.DisableOut, response_model_exclude_unset=True, tags=["session"], summary="Disable at once (no braking): the base (releases the swerve) and the arm (releases its lease)")
     async def disable(body: Commented = Commented(), x_operator: Optional[str] = Operator):
         return await run(node.disable, actor(x_operator), body.comment)
 
@@ -412,13 +487,22 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
             raise RequestError(403, "only the human operator chooses the profile")
         return await run(node.set_profile, name)
 
-    @app.post("/reflex", response_model=M.ReflexOut, tags=["session"], summary="(human) Turn the stop reflex on / off")
-    async def reflex(enabled: bool, x_operator: Optional[str] = Operator):
+    @app.post("/reflex", response_model=M.ReflexOut, tags=["session"], summary="(human) Force the stop reflex on for every goal, or let goals choose")
+    async def reflex(force: bool, x_operator: Optional[str] = Operator):
+        """force=false: a goal has the reflex only with `reflex: true` (a utility for the agent)."""
         if actor(x_operator) != "human":
             raise RequestError(403, "only the human operator changes the reflex")
-        node.reflex["enabled"] = enabled
-        node.turn("human", "reflex", {"enabled": enabled}, {"reflex": enabled})
-        return {"reflex": enabled}
+        node.reflex["force"] = force
+        node.turn("human", "reflex", {"force": force}, {"force": force})
+        return {"force": force}
+
+    @app.post("/alignment", response_model=M.AlignmentOut, tags=["session"], summary="(human) Force defensive wheel alignment on every arm servo, or let the call choose")
+    async def alignment(force: bool, x_operator: Optional[str] = Operator):
+        if actor(x_operator) != "human":
+            raise RequestError(403, "only the human operator changes defensive alignment")
+        node.alignment["force"] = force
+        node.turn("human", "alignment", {"force": force}, {"force": force})
+        return {"force": force}
 
     # -- robot ------------------------------------------------------------------------------------------
 
@@ -494,19 +578,19 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
                          body.also_use)
 
     @app.get("/goals/{gid}", response_model=M.GoalState, response_model_exclude_unset=True, tags=["motion"], summary="A goal's state")
-    async def goal_state(gid: int):
-        return node.goal_state(gid)
+    async def goal_state(gid: int, x_operator: Optional[str] = Operator):
+        return for_agent(actor(x_operator), node.goal_state(gid))
 
     @app.get("/goals/{gid}/wait", response_model=M.GoalState, response_model_exclude_unset=True, tags=["motion"], summary="Long-poll until the goal ends (or timeout)")
-    async def goal_wait(gid: int, timeout: float = Query(60.0, gt=0, le=600)):
+    async def goal_wait(gid: int, timeout: float = Query(60.0, gt=0, le=600), x_operator: Optional[str] = Operator):
         node.goal_state(gid)
         rec = node.goals[gid]
         end = time.monotonic() + timeout
         while not rec.done.is_set() and time.monotonic() < end:
             await asyncio.sleep(0.1)
-        return node.goal_state(gid)
+        return for_agent(actor(x_operator), node.goal_state(gid))
 
-    @app.post("/stop", response_model=M.ServoStop, tags=["motion"], summary="Brake to a stop (stays enabled)")
+    @app.post("/stop", response_model=M.ServoStop, response_model_exclude_unset=True, tags=["motion"], summary="Brake to a stop (stays enabled)")
     async def stop(body: Commented = Commented(), x_operator: Optional[str] = Operator):
         return await run(node.stop, actor(x_operator), body.comment)
 
@@ -514,17 +598,85 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     async def estop(body: StopIn = StopIn(), x_operator: Optional[str] = Operator):
         return await run(node.estop, actor(x_operator), body.reason, body.comment)
 
+    # -- arm (forwarded to the arm node) ------------------------------------------------------------------
+
+    ARM_DOC = (" Forwarded to the arm node (this node holds the arm lease for the session and keeps it); the reply is "
+               "the arm node's, unchanged, after `since_last_call`. Its refusals keep their status and fields "
+               "(e.g. 422 with `code`, `retry`, `nearest` for a move that can't be planned: nothing moved).")
+
+    @app.post("/arm/enable", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Enable the arm only (POST /enable does the base and the arm)", description="The arm floats "
+              "(gravity compensated) until a move engages it; its first enable after power-up closes the gripper once to "
+              "check it." + ARM_DOC)
+    async def arm_enable(body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_enable, actor(x_operator), body.comment)
+
+    @app.post("/arm/disable", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Disable the arm and release its lease (the base stays as it is)")
+    async def arm_disable(body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_disable, actor(x_operator), body.comment)
+
+    @app.post("/arm/servo", response_model=M.ArmServoOut, response_model_exclude_unset=True, tags=["arm"],
+              summary="Planned move to a TCP pose or a named pose (defensive wheel alignment first)",
+              description="Returns at once with the motion (`id`, `duration`); watch `GET /arm/state` motion.phase "
+                          "(executing, settling, reached, not_reached, aborted, jammed). A jam (the arm static but still "
+                          "pushing) ends the move `jammed` and holds where the arm is; it also arrives in "
+                          "`since_last_call`." + ARM_DOC)
+    async def arm_servo(body: ArmServoIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_servo, actor(x_operator), arm_body(body, ("comment", "align_wheels")),
+                         body.align_wheels, body.comment)
+
+    @app.post("/arm/home", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Slow joint-space move to the home pose", description=ARM_DOC)
+    async def arm_home(body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_home", "POST", "/home", None, body.comment)
+
+    @app.post("/arm/gripper", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Gripper gap (mm) with a force limit: makes it hold", description=ARM_DOC)
+    async def arm_gripper(body: ArmGripperIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_gripper", "POST", "/gripper", arm_body(body),
+                         body.comment)
+
+    @app.post("/arm/cancel", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="End the arm's planned move: hold the current command", description=ARM_DOC)
+    async def arm_cancel(body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_cancel", "POST", "/cancel", None, body.comment)
+
+    @app.post("/arm/ik", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="IK check only (nothing moves): ok, q, errors, `nearest` reachable pose; `render` adds a PNG",
+              description=ARM_DOC)
+    async def arm_ik(body: ArmIKIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_ik", "POST", "/ik", arm_body(body), body.comment,
+                         lease=False)
+
+    @app.get("/arm/geometry", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+             summary="Fingertips, jaws and the arm's extent now (arm and base frames)", description=ARM_DOC)
+    async def arm_geometry_now(comment: str = "", x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_geometry", "GET", "/geometry", None, comment,
+                         lease=False)
+
+    @app.post("/arm/geometry", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="The same at joint angles or at a TCP pose's IK solution (nothing moves)", description=ARM_DOC)
+    async def arm_geometry(body: ArmGeometryIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_geometry", "POST", "/geometry", arm_body(body),
+                         body.comment, lease=False)
+
+    @app.get("/arm/state", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+             summary="The arm node's state: status, motion (phase), gripper, jam, latest telemetry", description=ARM_DOC)
+    async def arm_state(comment: str = "", x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_state", "GET", "/state", None, comment, lease=False)
+
     # -- memory -----------------------------------------------------------------------------------------------
 
     @app.get("/memory", response_model=M.Memory, tags=["memory"], summary="This session's notes and places")
     async def memory():
         return node.memory
 
-    @app.post("/memory/note", response_model=M.NoteOut, tags=["memory"], summary="Add a note")
+    @app.post("/memory/note", response_model=M.NoteOut, response_model_exclude_unset=True, tags=["memory"], summary="Add a note")
     async def note(body: NoteIn, x_operator: Optional[str] = Operator):
         return await run(node.note, actor(x_operator), body.text, body.comment)
 
-    @app.post("/memory/place", response_model=M.PlaceOut, tags=["memory"], summary="Name a pose (default: here)")
+    @app.post("/memory/place", response_model=M.PlaceOut, response_model_exclude_unset=True, tags=["memory"], summary="Name a pose (default: here)")
     async def place(body: PlaceIn, x_operator: Optional[str] = Operator):
         return await run(node.place, actor(x_operator), body.name, body.frame, body.x, body.y, body.theta, body.comment)
 

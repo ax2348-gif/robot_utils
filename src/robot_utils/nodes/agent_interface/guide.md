@@ -1,20 +1,20 @@
-# agent: driving the robot as an agent
+# Agent MoMa: driving the robot and its arm as an agent
 
-You are about to drive a real robot: a swerve-drive base with an RGB-D camera, in a room with
-people and things. This guide is all you need. Every call is plain HTTP + JSON. `N` below is
+You are about to drive a real robot: a swerve-drive base with an RGB-D camera and an arm, in a room
+with people and things. This guide is all you need. Every call is plain HTTP + JSON. `N` below is
 this node's base URL, e.g. `http://botcore/nodes/agent_interface` (all paths in replies are relative to it).
 
-An arm stands on the base's front-right corner. You move it through the arm node
-(`http://botcore/nodes/arm`, its own `/docs`), not here; its `GET /geometry` says where its
-fingertips and every part are, in its own frame and in the base frame below. Here, `/plan/check`
-draws the arm with the base, and anything the robot holds or reaches past its front edge counts
-as an obstacle for the stop reflex (keep a carried object behind the bumper while driving).
+An arm stands on the base's front-right corner. You move it through this node (`/arm/...`, step 5):
+it holds the arm's lease for your session, so you never keep a lease alive yourself. `GET
+/arm/geometry` says where its fingertips and every part are, in its own frame and in the base frame.
+`/plan/check` draws the arm with the base, and anything the robot holds or reaches past its front
+edge counts as an obstacle for the stop reflex (keep a carried object behind the bumper while driving).
 
 ## Principles (read these)
 
 1. **You decide; the tools don't.** Perception and planning calls are read-only. They return
-   numbers, proposals and images. Nothing moves unless you call `POST /goal`. No call turns
-   perception into motion by itself.
+   numbers, proposals and images. Nothing moves unless you call `POST /goal` (the base) or an arm
+   move (`/arm/servo`, `/arm/home`, `/arm/gripper`). No call turns perception into motion by itself.
 2. **Stopping is the only automatic action.** The stop reflex brakes if depth shows an
    obstacle within the braking distance ahead of the motion. It only sees what the camera sees
    (forward, beyond the blind zone: `GET /robot`, about 0.8 m from the base centre). It is a guardrail, not your obstacle avoidance: **you** avoid
@@ -37,6 +37,10 @@ as an obstacle for the stop reflex (keep a carried object behind the bumper whil
 8. **The human is in charge.** If they disable or e-stop on the page, you get `423` until they
    release it. Ask, don't work around. Never send the `X-Operator: human` header: it is for the
    page / a person.
+9. **Read `since_last_call` first.** Every reply starts with `since_last_call`: what the robot
+   reported since your previous call, oldest first (`source`, `level`, `message`, `data`): goal
+   ends, reflex stops, arm jams, and the base moving while nothing drove it. A `warn` event changes
+   the situation: read it before deciding the next step.
 
 ## Workflow
 
@@ -46,6 +50,10 @@ curl -s $N/guide.md                                                    # this fi
 curl -s -X POST $N/session -H 'content-type: application/json' -d '{"agent": "Claude", "avatar": "🦉"}'
 curl -s -X POST $N/enable  -H 'content-type: application/json' -d '{"comment": "starting the task"}'
 ```
+
+`POST /enable` enables the base and the arm (`{"arm": false}` or `{"base": false}` for one only).
+The arm then floats (gravity compensated) until a move engages it; its first enable after power-up
+closes the gripper once to check it, so keep the jaws clear. `POST /disable` disables both.
 
 **0. Know your body.** `GET $N/robot` returns the footprint, the wheels, the frames, the limits
 and the camera: where it is (about 1.13 m up), where it points (pitch and yaw), its field of view,
@@ -211,6 +219,9 @@ Goal options (each within the caps):
 - `pos_tol` (0.02 m), `heading_tol` (0.035 rad);
 - `mode`: `synchronized` (default) or `independent`;
 - `on_reach`: `terminate` or `hold`;
+- `reflex`: the operator usually forces the stop reflex on for every goal (`GET /state`
+  `reflex.force`); when they don't, `"reflex": true` turns it on for this goal. The reply's
+  `reflex` says whether it watches the goal, and why;
 - `reflex_margin_m` (default 0.12 m, any value > 0): the gap the stop reflex leaves in front of
   what it sees, for this goal. Braking and latency are added as always, so a small margin (e.g.
   0.02) lets the robot end close to a surface, even flush against a wall, and still stop before
@@ -232,10 +243,39 @@ Goal options (each within the caps):
 - **Find a thin thing on the floor (a cable):** depth doesn't see it, but a point or small disk on
   its pixels returns the floor under it, which is its position. Trace it with a sequence of disks.
 
-**5. Remember.** `POST /memory/note {"text"}` and `POST /memory/place {"name", ...}` (default: here),
+**5. The arm.** Poses are TCP poses in the arm frame (axes parallel to the base; `GET
+/arm/geometry` `frames.arm_in_base` places it): `{"pos": [x, y, z], "rpy": [r, p, y]}` (or `quat`).
+
+```bash
+curl -s -X POST $N/arm/ik -H 'content-type: application/json' \
+     -d '{"pose": {"pos": [0.3, 0.0, 0.15], "rpy": [0, 1.57, 0]}, "render": {}}'      # check first: nothing moves
+curl -s -X POST $N/arm/servo -H 'content-type: application/json' \
+     -d '{"pose": {"pos": [0.3, 0.0, 0.15], "rpy": [0, 1.57, 0]}, "lin_vel": 0.05, "comment": "above the cup"}'
+# -> {"since_last_call": [...], "align": {...}, "id": 3, "kind": "servo", "duration": 2.1, ...}
+curl -s $N/arm/state                          # motion.phase: executing, settling, reached, not_reached, jammed, ...
+curl -s -X POST $N/arm/gripper -H 'content-type: application/json' -d '{"gap_mm": 0, "max_force_n": 20}'
+```
+
+- **Replies are the arm node's**, unchanged, after `since_last_call`; so are its refusals (a move
+  that can't be planned is `422` with `code`, `retry` and `nearest`: nothing moved).
+- **Defensive wheel alignment.** Before an arm servo, the wheels are turned along the move's
+  horizontal direction with the drive motors coasting, so if the arm pushes against something the
+  base rolls back instead of dragging its tyres. It is on by default (`"align_wheels": false` turns it
+  off; the operator may force it). Mostly vertical moves (under 2 cm sideways) and named poses
+  change nothing, nor do directions within 15° of the current alignment (the axis has no sign). The
+  reply's `align` says what was done. Your next base goal ends the alignment.
+- **Jams.** If the arm stops moving but keeps pushing (a static arm whose joint torque stays over a
+  band for a second), it stops pushing and holds where it is; a move in progress ends `jammed`, and
+  the jam arrives in `since_last_call` (`source: arm`, the joint and its torque). Back off along the
+  opposite direction; don't retry into it. Don't grasp anything heavy: a heavy load reads as a jam.
+- **Base anomalies.** If the base moves (> 1 cm or 1°) while nothing drives it, for example the arm
+  pushing a coasting base, `since_last_call` says so (`source: base`). The base may have moved:
+  look again before relying on earlier coordinates.
+
+**6. Remember.** `POST /memory/note {"text"}` and `POST /memory/place {"name", ...}` (default: here),
 then `GET /memory`. Places are lost when the estimator resets.
 
-**6. Finish.** `POST /disable`, then `DELETE /session`.
+**7. Finish.** `POST /disable`, then `DELETE /session`.
 
 ## Limits and caps
 
@@ -259,7 +299,7 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `GET /guide.md` | this guide |
 | `POST /session {agent, avatar, comment}` / `DELETE /session` | open / close (closing disables) |
 | `GET /robot` | body, wheels, frames, limits, camera pose / field of view / blind zone, diagram |
-| `POST /enable {caps?, comment}` / `POST /disable` | motion on (pose_servo + swerve lease) / off at once |
+| `POST /enable {caps?, base?, arm?, comment}` / `POST /disable` | base (pose_servo + swerve lease) and arm on / both off at once |
 | `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture (`grid`: true or {step, values}) |
 | `POST /zoom {snapshot?, box?, step?, values?}` | enlarge part of a snapshot, grid in full-image pixels, depth values |
 | `POST /query/region`, `POST /query/plane` `{snapshot?, select, exclude?}` | read-only geometry with overlays |
@@ -270,6 +310,10 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `POST /goal {frame, x, y, theta, options…, comment}` | **move**; returns at once |
 | `GET /goals/{id}`, `GET /goals/{id}/wait?timeout=` | goal state / long-poll until done |
 | `POST /stop`, `POST /estop {reason}` | brake / e-stop (latches for the human) |
+| `POST /arm/servo {pose \| name, lin_vel?, …, align_wheels?}` | **arm move** (planned; defensive alignment first) |
+| `POST /arm/home`, `POST /arm/gripper {gap_mm, max_force_n?}`, `POST /arm/cancel` | arm home / gripper / end the move |
+| `POST /arm/enable`, `POST /arm/disable` | the arm alone on / off (lease released) |
+| `POST /arm/ik {pose, render?}`, `GET`/`POST /arm/geometry`, `GET /arm/state` | read-only: IK check, geometry, state |
 | `GET /images/{name}`, `GET /images/{snapshot}/grid.jpg` | rendered images |
 | `GET /memory`, `POST /memory/note`, `POST /memory/place` | per-session memory |
 | `GET /state`, `GET /log?since=`, `GET /sessions` | status, live transcript, stored transcripts |

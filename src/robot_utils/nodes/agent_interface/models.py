@@ -18,6 +18,26 @@ XYTheta = list[float]   # [x m, y m, theta rad]
 Pct = list[float]       # [5th, 50th, 95th] percentile
 
 
+class SinceEvent(BaseModel):
+    """Something the robot reported (a robot turn of the transcript)."""
+    n: int = Field(description="Turn number in the transcript.")
+    wall: float = Field(description="Unix epoch s.")
+    age_s: float = Field(description="s ago, at this reply.")
+    source: str = Field(description="base (goal ends, movement anomalies, pose_servo) | reflex | arm (jams, lease) | "
+                                    "estimator | agent_interface.")
+    level: Literal["info", "warn"] = Field(description="warn: read it before deciding the next step.")
+    message: str = Field(description="What happened, in words.")
+    data: dict[str, Any] = Field(description="The same as numbers (e.g. a jam's joint and residual, a reflex stop's "
+                                             "points and mask, a goal's result, an anomaly's from / to pose).")
+
+
+class Reply(BaseModel):
+    """Every agent-facing reply starts with the robot's events since the agent's previous reply."""
+    since_last_call: Optional[list[SinceEvent]] = Field(
+        None, description="Robot events since your previous call, oldest first: goal ends, reflex stops, arm jams, base "
+                          "movement anomalies. Read them before deciding the next step. Absent for the human operator.")
+
+
 # -- session / profile ---------------------------------------------------------------------------
 
 class Caps(BaseModel):
@@ -56,7 +76,7 @@ class StoredSession(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class OpenSessionOut(BaseModel):
+class OpenSessionOut(Reply):
     session: Session
     profile: str = Field(description="Safety profile in force (the human chooses it).")
     caps: Caps = Field(description="The profile's caps (an agent may lower them at POST /enable).")
@@ -66,24 +86,35 @@ class OpenSessionOut(BaseModel):
                                                             "visible floor. Absent if the robot could not be described.")
 
 
-class Closed(BaseModel):
+class Closed(Reply):
     closed: Union[str, bool] = Field(description="Id of the session closed, or false if none was open.")
 
 
-class EnableOut(BaseModel):
+class ArmEnabled(BaseModel):
+    enabled: bool = Field(description="The arm is enabled through this node (it floats until a move engages it).")
+    state: Optional[str] = Field(None, description="The arm node's state after enabling (floating, servoing, ...).")
+    lease_id: Optional[int] = Field(None, description="The arm lease this node holds for the session.")
+    error: Optional[str] = Field(None, description="Why the arm could not be enabled (the base part still applies).")
+
+
+class EnableOut(Reply):
     enabled: bool = Field(description="Always true.")
-    profile: str = Field(description="Safety profile in force.")
-    caps: Caps = Field(description="Caps in force: the profile's, lowered by the request.")
+    base: Optional[bool] = Field(None, description="The base was enabled (absent with `base: false`).")
+    profile: Optional[str] = Field(None, description="Safety profile in force (with the base).")
+    caps: Optional[Caps] = Field(None, description="Caps in force: the profile's, lowered by the request (with the base).")
     adopted: Optional[str] = Field(None, description="Present when pose_servo was already enabled (idle) by someone "
-                                                     "else through agent and was re-enabled with these caps.")
-    pose_servo: Optional[dict[str, Any]] = Field(description="pose_servo's config in force (its POST /enable reply's "
-                                                             "`config`).")
+                                                     "else through agent_interface and was re-enabled with these caps.")
+    pose_servo: Optional[dict[str, Any]] = Field(None, description="pose_servo's config in force (its POST /enable "
+                                                                   "reply's `config`; with the base).")
+    arm: Optional[ArmEnabled] = Field(None, description="The arm part (absent with `arm: false`).")
 
 
-class DisableOut(BaseModel):
+class DisableOut(Reply):
     enabled: bool = Field(description="Always false.")
     latched: bool = Field(description="The human operator holds it (disabled or e-stopped on the page): the agent "
                                       "cannot enable until they release it.")
+    arm_error: Optional[str] = Field(None, description="Disabling the arm or releasing its lease failed (it is forgotten "
+                                                       "here either way).")
 
 
 class Released(BaseModel):
@@ -96,7 +127,13 @@ class ProfileOut(BaseModel):
 
 
 class ReflexOut(BaseModel):
-    reflex: bool = Field(description="The stop reflex is on.")
+    force: bool = Field(description="The operator forces the stop reflex on for every goal (off: a goal's `reflex: true` "
+                                    "turns it on).")
+
+
+class AlignmentOut(BaseModel):
+    force: bool = Field(description="The operator forces defensive wheel alignment on every arm servo (off: the call's "
+                                    "`align_wheels` decides).")
 
 
 # -- robot ----------------------------------------------------------------------------------------
@@ -172,7 +209,7 @@ class RobotLimits(BaseModel):
     steer_rate_max_rad_s: float = Field(description="rad/s, each wheel's steering (pose_servo planner).")
 
 
-class RobotOut(BaseModel):
+class RobotOut(Reply):
     frames: Frames
     body: Body
     camera: CameraInfo
@@ -185,7 +222,7 @@ class RobotOut(BaseModel):
 
 # -- perception ------------------------------------------------------------------------------------
 
-class LookOut(BaseModel):
+class LookOut(Reply):
     snapshot: str = Field(description="Snapshot id (s1, s2, ...; the last 30 are kept).")
     image: str = Field(description="Relative URL of the colour JPEG (with a pixel grid if `grid`).")
     bev: str = Field(description="Relative URL of a bird's-eye PNG of the depth (base frame, 0.5 m grid).")
@@ -220,7 +257,7 @@ class GridInfo(BaseModel):
     unit: Optional[str] = Field(None, description="Unit and frame of the drawn values (with values).")
 
 
-class ZoomOut(BaseModel):
+class ZoomOut(Reply):
     zoom: str = Field(description="Zoom id (z1, z2, ...).")
     snapshot: str = Field(description="The snapshot shown (no new capture).")
     image: str = Field(description="Relative URL of the JPEG.")
@@ -242,7 +279,7 @@ class RegionBase(BaseModel):
                                                                 "(horizontally). Base frame only.")
 
 
-class RegionOut(BaseModel):
+class RegionOut(Reply):
     """POST /query/region: 3D extent of the selected pixels with depth."""
     query: str = Field(description="Query id (q1, q2, ...), for POST /plan/approach.")
     kind: Literal["region"] = Field(description="The query kind.")
@@ -270,7 +307,7 @@ class PlaneBase(BaseModel):
     facing_heading: float = Field(description="rad: heading of the normal's horizontal part (where the surface faces).")
 
 
-class PlaneOut(BaseModel):
+class PlaneOut(Reply):
     """POST /query/plane: a robust plane through the selected points."""
     query: str = Field(description="Query id (q1, q2, ...), for POST /plan/approach.")
     kind: Literal["plane"] = Field(description="The query kind.")
@@ -300,7 +337,7 @@ class LineBase(BaseModel):
     ends: list[list[float]] = Field(description="The segment's ends [[x, y, z], [x, y, z]] m (1-99 % extent).")
 
 
-class LineOut(BaseModel):
+class LineOut(Reply):
     """POST /query/line: a robust 3D line through points (or a thin selection)."""
     query: str = Field(description="Query id (q1, q2, ...).")
     kind: Literal["line"] = Field(description="The query kind.")
@@ -388,7 +425,7 @@ class CorrectionLimits(BaseModel):
     rpy_deg: float = Field(description="degrees: the largest turn per axis.")
 
 
-class SessionGeometryOut(BaseModel):
+class SessionGeometryOut(Reply):
     """Where the camera and the arm mount are on the robot: as described, the session's corrections, and the
     result this session uses for display and perception. Motion never uses the corrections."""
     frames: GeometryFrames
@@ -464,7 +501,7 @@ class RobotView(BaseModel):
                                                   "orange arm, magenta L/R fingertips).")
 
 
-class PlanCheckOut(BaseModel):
+class PlanCheckOut(Reply):
     goal: Resolved
     check: PathCheck
     bev: Optional[str] = Field(description="Relative URL of a bird's-eye PNG of the check (green clear, red blocked, "
@@ -480,7 +517,7 @@ class Proposal(BaseModel):
     theta: float = Field(description="rad.")
 
 
-class ApproachOut(BaseModel):
+class ApproachOut(Reply):
     proposal: Proposal
     goal: Resolved
     check: PathCheck
@@ -489,7 +526,12 @@ class ApproachOut(BaseModel):
     note: str = Field(description="A proposal only: nothing moves until POST /goal.")
 
 
-class GoalOut(BaseModel):
+class GoalReflex(BaseModel):
+    on: bool = Field(description="The reflex watches this goal.")
+    why: str = Field(description="Forced on by the operator | on: requested | off: not requested.")
+
+
+class GoalOut(Reply):
     goal_id: int = Field(description="pose_servo's goal id.")
     status: str = Field(description="Always `moving`.")
     goal: Resolved
@@ -498,6 +540,7 @@ class GoalOut(BaseModel):
     bev: Optional[str] = Field(description="Relative URL of a bird's-eye PNG of the check; null if unchecked.")
     wait: str = Field(description="Relative URL to long-poll for the result.")
     reflex_margin_m: Optional[float] = Field(None, description="The stop reflex's margin for this goal (m).")
+    reflex: Optional[GoalReflex] = Field(None, description="Whether the stop reflex watches this goal, and why.")
 
 
 class GoalResult(BaseModel):
@@ -520,7 +563,7 @@ class Progress(BaseModel):
     omega: Optional[float] = Field(description="rad/s.")
 
 
-class GoalState(BaseModel):
+class GoalState(Reply):
     goal_id: int = Field(description="pose_servo's goal id.")
     done: bool = Field(description="The goal has ended (`result` says how).")
     result: Optional[GoalResult] = Field(description="Null until it ends.")
@@ -530,13 +573,13 @@ class GoalState(BaseModel):
     progress: Optional[Progress] = Field(None, description="While not done.")
 
 
-class ServoStop(BaseModel):
+class ServoStop(Reply):
     """pose_servo's POST /stop reply, passed through."""
     status: str = Field(description="pose_servo status after the request (braking | idle | ...).")
     model_config = ConfigDict(extra="allow")
 
 
-class ServoEStop(BaseModel):
+class ServoEStop(Reply):
     """pose_servo's POST /estop reply, passed through (pose_servo disables itself either way)."""
     forwarded: bool = Field(description="The e-stop reached the swerve (it latches there).")
     error: Optional[str] = Field(None, description="Why forwarding failed.")
@@ -565,11 +608,11 @@ class Memory(BaseModel):
     places: dict[str, Place] = Field(description="Named world poses (goal frame `place:<name>`).")
 
 
-class NoteOut(BaseModel):
+class NoteOut(Reply):
     notes: int = Field(description="Notes now stored.")
 
 
-class PlaceOut(BaseModel):
+class PlaceOut(Reply):
     """The place stored (its name, then the same fields as in /memory)."""
     place: str = Field(description="The name.")
     x: float = Field(description="m, world.")
@@ -648,8 +691,8 @@ class ReflexTick(BaseModel):
 
 class Reflex(BaseModel):
     """The stop reflex (it can only stop)."""
-    enabled: bool = Field(description="Turned on (human).")
-    armed: bool = Field(description="Armed by a goal; disarmed after it stopped one.")
+    force: bool = Field(description="The operator forces it on for every goal (off: a goal's `reflex: true` turns it on).")
+    armed: bool = Field(description="Armed by a goal that has it; disarmed after it stopped one.")
     last: Union[ReflexTick, str, None] = Field(description="The last check, or `error: ...`; null before the first.")
     blind: Optional[str] = Field(description="Set while moving outside the camera's view.")
     stops: int = Field(description="Stops so far.")
@@ -678,6 +721,42 @@ class Inputs(BaseModel):
     estimator: Optional[UpstreamStatus] = Field(description="Null if no estimator is configured.")
 
 
+class AlignResult(BaseModel):
+    """What defensive wheel alignment did before an arm servo."""
+    requested: bool = Field(description="The call's `align_wheels`.")
+    forced: bool = Field(description="The operator forced it although the call asked for none.")
+    done: bool = Field(description="The wheels are set for this move (now or kept from before).")
+    why: Optional[str] = Field(None, description="Why it was skipped, kept, or not aligned in time.")
+    travel_m: Optional[float] = Field(None, description="m: the move's horizontal travel (TCP now to the target).")
+    axis_deg: Optional[float] = Field(None, description="Degrees, base frame, [0, 180): the wheels' axis (no sign).")
+    kept: Optional[bool] = Field(None, description="Within the hysteresis of the alignment already in force.")
+    aligned: Optional[bool] = Field(None, description="Every wheel within 3 degrees of its setting.")
+    wait_s: Optional[float] = Field(None, description="s waited for the wheels (at most 1).")
+    steer_err_deg: Optional[float] = Field(None, description="Worst wheel's steering error when the wait ended.")
+
+
+class Alignment(BaseModel):
+    """Defensive wheel alignment for arm servos."""
+    force: bool = Field(description="The operator forces it on every arm servo.")
+    deadzone_m: float = Field(description="m: arm moves with less horizontal travel change nothing (mostly vertical).")
+    hysteresis_deg: float = Field(description="Degrees: a direction this close to the current alignment keeps it.")
+    last: Optional[dict[str, Any]] = Field(description="The last decision (as `align` in the arm servo reply, with `t`).")
+
+
+class ArmBrief(BaseModel):
+    held: bool = Field(description="This node holds the arm lease.")
+    lease_id: Optional[int] = Field(description="That lease's id.")
+    enabled: bool = Field(description="Enabled through this node.")
+    jams_seen: Optional[int] = Field(description="The arm's jam count at the last poll (null before).")
+    error: Optional[str] = Field(description="Why the lease was lost, if it was.")
+
+
+class AnomalyBrief(BaseModel):
+    checking: bool = Field(description="The base is idle and undriven: its pose is being watched.")
+    count: int = Field(description="Anomalies reported so far.")
+    last: Optional[dict[str, Any]] = Field(description="The last: `t`, `moved_m`, `turned_deg`.")
+
+
 class NavState(BaseModel):
     chocked: bool = Field(description="A chock lock covers swerve / pose_servo / agent.")
     covered: bool = Field(description="A cover lock covers the camera.")
@@ -693,6 +772,9 @@ class NavState(BaseModel):
     reset_id: Optional[float] = Field(description="The estimator's reset id (its world frame).")
     pose_servo: Optional[PoseServoBrief] = Field(description="Null while pose_servo is unreachable.")
     reflex: Reflex
+    alignment: Alignment
+    arm: ArmBrief
+    anomaly: AnomalyBrief
     snapshots: list[str] = Field(description="Latest snapshot ids (up to 10), oldest first.")
     goals: dict[int, GoalBrief] = Field(description="Latest goals of the session (up to 10), by goal id.")
     memory: Memory
@@ -703,6 +785,17 @@ class NavState(BaseModel):
 
 class HelpOut(BaseModel):
     help: str = Field(description="The chat commands.")
+
+
+class ArmReply(Reply):
+    """The arm node's reply, unchanged (its schema: the arm node's /docs, same path without `/arm`), after
+    `since_last_call`."""
+    model_config = ConfigDict(extra="allow")
+
+
+class ArmServoOut(ArmReply):
+    """The arm node's POST /servo reply (MotionOut), after `since_last_call` and `align`."""
+    align: Optional[AlignResult] = Field(None, description="What defensive wheel alignment did first.")
 
 
 # POST /chat: the reply of the endpoint the command maps to, or the help.

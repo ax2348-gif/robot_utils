@@ -15,7 +15,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
-from robot_utils.nodes.agent_interface.sim import demo_scene, fake_perception_app
+from robot_utils.nodes.agent_interface.sim import demo_scene, fake_arm_app, fake_perception_app
 
 NON_JSON = {"/guide.md", "/events", "/sessions/{sid}/export.zip", "/sessions/{sid}/log.jsonl",
             "/sessions/{sid}/thumbs/{fn}", "/images/{name}", "/images/{sid}/grid.jpg"}
@@ -42,6 +42,11 @@ def serve(app):
     t.start()
     wait_for(lambda: srv.started)
     return f"http://127.0.0.1:{port}", (srv, t)
+
+
+def bare(d):
+    """A reply without the agent's `since_last_call`."""
+    return {k: v for k, v in d.items() if k != "since_last_call"}
 
 
 def settle(nav):
@@ -101,7 +106,9 @@ def api(monkeypatch, tmp_path):
 
     per_url, s = serve(fake_perception_app(demo_scene(), pose)); servers.append(s)
     ps_url, s = serve(ps_app(PoseServoNode(sw_url, est_url))); servers.append(s)
-    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False, description=None)
+    arm_url, s = serve(fake_arm_app()); servers.append(s)
+    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False, description=None,
+                   arm=arm_url, swerve=sw_url)
     app = create_app(nav)
     routes = {(m, r.path): r for r in app.routes if isinstance(r, APIRoute) for m in r.methods}
 
@@ -109,6 +116,8 @@ def api(monkeypatch, tmp_path):
         raw.clear()
         r = client.request(method, path, **kw)
         assert r.status_code == status, (path, r.text)
+        if status != 200:
+            return r.json()
         rt = routes[(method, route or path)]
         assert rt.response_model is not None, f"{method} {path} has no response model"
         TypeAdapter(rt.response_model).validate_python(r.json())
@@ -136,13 +145,14 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     assert call("GET", "/meta")["guide"] == "guide.md"
     st = call("GET", "/state")                                            # no session, nothing enabled
     assert st["session"] is None and st["caps"] is None and st["latch"] is None
-    assert call("DELETE", "/session") == {"closed": False}
+    assert call("DELETE", "/session") == {"since_last_call": [], "closed": False}
     assert call("GET", "/sessions") == []
 
     out = call("POST", "/session", json={"agent": "Typed", "avatar": "🦉"})
     assert "camera_summary" in out
     call("GET", "/robot", params={"comment": "describe"})
-    call("POST", "/enable", json={"caps": {"max_speed": 0.12}})
+    out = call("POST", "/enable", json={"caps": {"max_speed": 0.12}})
+    assert out["base"] and out["arm"]["enabled"] and out["since_last_call"] == []
     look = call("POST", "/look", json={"grid": True})
     sid = look["snapshot"]
     call("POST", "/look", json={"grid": {"step": 100, "values": "z"}})
@@ -177,7 +187,7 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     res = call("GET", f"/goals/{gid}/wait", route="/goals/{gid}/wait", params={"timeout": 40})
     assert res["done"] and res["result"]["result"], res                  # reached (or aborted by a race)
 
-    assert call("POST", "/memory/note", json={"text": "board ahead"}) == {"notes": 2}
+    assert bare(call("POST", "/memory/note", json={"text": "board ahead"})) == {"notes": 2}
     call("POST", "/memory/place", json={"name": "here"})
     call("POST", "/memory/place", json={"name": "facing", "theta": 0.3})
     mem = call("GET", "/memory")
@@ -187,9 +197,29 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     wait_for(lambda: nav.goals[g2["goal_id"]].done.is_set(), 20)
     call("GET", f"/goals/{g2['goal_id']}", route="/goals/{gid}")
 
-    assert call("POST", "/reflex", params={"enabled": True}, headers=HUMAN) == {"reflex": True}
+    assert call("POST", "/reflex", params={"force": True}, headers=HUMAN) == {"force": True}
+    assert call("POST", "/alignment", params={"force": False}, headers=HUMAN) == {"force": False}
+
+    # the arm, through this node
+    call("POST", "/enable", json={"base": False})                         # the arm alone (already held: re-enable)
+    settle(nav)                                                           # the base idle again after the stop
+    sv = call("POST", "/arm/servo", json={"pose": {"pos": [0.35, 0.1, 0.2], "rpy": [0, 1.57, 0]}, "comment": "reach"})
+    assert sv["align"]["done"] and sv["align"]["axis_deg"] == 45.0 and sv["id"] == 1, sv["align"]
+    sv = call("POST", "/arm/servo", json={"name": "home", "align_wheels": False})
+    assert sv["align"]["done"] is False
+    call("POST", "/arm/servo", status=422, json={"pose": {"pos": [3, 0, 0], "rpy": [0, 0, 0]}})
+    call("POST", "/arm/home")
+    call("POST", "/arm/gripper", json={"gap_mm": 30})
+    call("POST", "/arm/cancel")
+    call("POST", "/arm/ik", json={"pose": {"pos": [0.3, 0, 0.2], "rpy": [0, 0, 0]}})
+    call("GET", "/arm/geometry")
+    call("POST", "/arm/geometry", json={"q": [0.0] * 6})
+    call("GET", "/arm/state")
+    call("POST", "/arm/disable")
+    call("POST", "/arm/enable")
     call("POST", "/profile/normal", route="/profile/{name}", headers=HUMAN)
     assert call("POST", "/disable", json={}, headers=HUMAN) == {"enabled": False, "latched": True}
+    assert nav.arm["token"] is None                                       # the arm released too
     st = call("GET", "/state")                                            # held, goals, memory, reflex
     assert st["latch"] and st["goals"] and st["memory"]["notes"]
     assert call("POST", "/release", json={}, headers=HUMAN) == {"released": True}
@@ -210,7 +240,7 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     rows = call("GET", "/sessions")                                       # live: no `ended`
     assert rows[0]["live"] and "ended" not in rows[0]
     closed = call("DELETE", "/session")
-    assert closed == {"closed": live}
+    assert bare(closed) == {"closed": live}
     rows = call("GET", "/sessions")                                       # ended: `ended`, `turns`
     assert rows[0]["ended"] and rows[0]["turns"] > 10 and not rows[0]["live"]
     stored = call("GET", f"/sessions/{live}", route="/sessions/{sid}")

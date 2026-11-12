@@ -1,9 +1,35 @@
 # Agent MoMa node (`agent_interface`)
 
-Started on 2026-11-11 as a copy of agent_nav (docs/agent_nav.md, now frozen). Everything below
-was agent_nav's design and applies here; the MoMa additions (arm through this node, defensive wheel
-alignment, reflex force / opt-in, `since_last_call` events) are planned in docs/plans/agent_node_v1.md and
-will be documented here as they land.
+Started on 2026-11-11 as a copy of agent_nav (docs/agent_nav.md, now frozen). The plan is
+docs/plans/agent_node_v1.md. On top of agent_nav's design (below):
+
+- **One enable for the robot.** `POST /enable {base?, arm?}`: the base (pose_servo + the swerve
+  lease) and the arm (this node takes the arm lease, renews it itself and enables the arm).
+  `/disable`, the human's hold and the e-stop cover both.
+- **The arm, forwarded** (`/arm/enable`, `/arm/disable`, `/arm/servo`, `/arm/home`, `/arm/gripper`,
+  `/arm/cancel`; read-only `/arm/ik`, `/arm/geometry`, `/arm/state`). Each call is a transcript turn;
+  the reply is the arm node's, unchanged (`ArmReply` passes its keys through; their schema is the arm
+  node's), and refusals keep their status and fields. Not forwarded: track, chunk, profiles, TCP
+  offset, limits.
+- **Defensive wheel alignment** on `/arm/servo` (`align_wheels`, default true; the human's
+  `POST /alignment?force=` overrides): from the measured TCP to the target, the horizontal direction
+  in base axes (the arm frame's axes are the base's); under 0.02 m of travel or within 15° of the
+  alignment in force (axis, no sign) nothing changes; otherwise pose_servo `/align` with that unit
+  translation twist (drives coasting), waiting ≤ 1 s for `aligned`. Only an idle base, enabled here.
+- **Stop reflex: force / opt-in.** The human's `POST /reflex?force=` (default on) arms it for every
+  goal; with it off, a goal's `reflex: true` arms it.
+- **`since_last_call`** first in every agent reply (not the human's): the robot turns of the
+  session since the agent's previous reply (a cursor over the transcript). Robot turns now carry a
+  `source`: base (goal ends, anomalies, outside disables), reflex, arm (jams, a lost lease),
+  estimator.
+- **Arm jams** are polled from the arm node's `GET /jam` (4 Hz, while the lease is held here);
+  the first read is the baseline.
+- **Base anomalies:** the estimator pose departing > 1 cm or 1° from where an idle stretch began.
+  Checked only with a session open, no goal running, pose_servo not moving / braking / holding,
+  ≥ 1 s after that (or a stop), and the swerve lease pose_servo's or nobody's (`GET /lease` on the
+  swerve when pose_servo is disabled); each report starts a new reference.
+
+The fake arm node for tests and offline trials is `sim.fake_arm_app()`.
 
 
 `python -m robot_utils.nodes.agent_interface` is the boundary between an AI agent and the robot. The agent

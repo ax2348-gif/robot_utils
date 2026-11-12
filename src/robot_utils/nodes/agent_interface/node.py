@@ -9,7 +9,11 @@ Principles (docs/agent_interface.md):
 - Every call is logged as a dialogue turn (caller -> robot reply), with an optional comment.
 
 Peers (instance names or URLs): pose_servo (motion), 3d_perception (registered colour + depth),
-estimator (pose stream, for the pose at each snapshot's capture time).
+estimator (pose stream, for the pose at each snapshot's capture time), arm (forwarded; this node holds
+its lease for the session), swerve (read only: who holds its lease, for the base anomaly guard).
+
+Events for the agent (`since_last_call` on its replies) are the robot turns of the transcript: goal
+ends, reflex stops, arm jams, base movement anomalies.
 """
 from __future__ import annotations
 
@@ -48,6 +52,13 @@ REFLEX_POINTS = 25           # obstacle points ahead needed to trigger the refle
 REFLEX_LATENCY = 0.35        # s: depth age + reaction, added to the braking distance
 REFLEX_MARGIN = 0.12         # m: default gap left in front of what stops the reflex (beyond braking + latency)
 REFLEX_MARGIN_MAX = 1.0      # m: a goal may set its margin anywhere in (0, this]
+ALIGN_DEADZONE_M = 0.02      # defensive alignment: horizontal arm travel under this changes nothing
+ALIGN_HYSTERESIS_DEG = 15.0  # nor a direction within this of the current alignment (an axis: no sign)
+ALIGN_WAIT_S = 1.0           # wait at most this for the wheels to align before the arm moves
+ANOMALY_M = 0.01             # base anomaly: moved this far ...
+ANOMALY_DEG = 1.0            # ... or turned this much from where an idle stretch began
+ANOMALY_QUIET_S = 1.0        # an idle stretch starts this long after the last goal / stop (braking settles)
+ARM_POLL_S = 0.25            # lease renewal and jam polling
 
 
 def stopping_distance(v: float, accel: float, jerk: float, tick_s: float = 1.0 / REFLEX_HZ) -> float:
@@ -113,9 +124,10 @@ class GoalRec:
 class AgentNav:
     def __init__(self, pose_servo: str = "pose_servo", perception: str = "3d_perception",
                  estimator: str = "estimator", data_dir: str = DATA_DIR, profile: str = "cautious",
-                 require_imu: bool = True, description: Optional[str] = "description", arm: Optional[str] = "arm"):
+                 require_imu: bool = True, description: Optional[str] = "description", arm: Optional[str] = "arm",
+                 swerve: Optional[str] = "swerve"):
         self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator,
-                        "description": description, "arm": arm}
+                        "description": description, "arm": arm, "swerve": swerve}
         self.data_dir = data_dir
         self.events = EventLog()
         self.lock = threading.RLock()
@@ -138,15 +150,24 @@ class AgentNav:
         self.enabled_by: Optional[str] = None
         self.enabled_at = 0.0                   # monotonic s when our last /enable returned (watcher ignores older polls)
         self.caps: Optional[dict] = None
-        self.reflex = {"enabled": True, "armed": False, "last": None, "blind": None, "stops": 0,
+        self.reflex = {"force": True, "armed": False, "last": None, "blind": None, "stops": 0,
                        "margin": REFLEX_MARGIN, "tick_errors": 0}
+        self.alignment = {"force": False, "deadzone_m": ALIGN_DEADZONE_M, "hysteresis_deg": ALIGN_HYSTERESIS_DEG,
+                          "last": None}
+        self.arm = {"token": None, "lease_id": None, "heartbeat": 1.0, "enabled": False, "jams_seen": None,
+                    "error": None}
+        self.anomaly = {"checking": False, "ref": None, "count": 0, "last": None}
+        self._base_busy_t = 0.0                 # monotonic s the base was last driven (goal, braking, holding, stop)
+        self._swerve_lease = (0.0, None)        # (monotonic s read, holder or None)
+        self._ev_seen = 0                       # the agent's events cursor (turn number at its last reply)
         self._reflex_tick_s = 1.0 / REFLEX_HZ      # measured interval between reflex checks (EMA)
         self.geom_corr = _zero_corr()           # session placement corrections (display / perception only)
         self._n_snap = self._n_img = self._n_q = 0
         self._ps_status = None
         self._threads = [threading.Thread(target=self._read_poses, name="poses", daemon=True),
                          threading.Thread(target=self._watch, name="watch", daemon=True),
-                         threading.Thread(target=self._reflex_loop, name="reflex", daemon=True)]
+                         threading.Thread(target=self._reflex_loop, name="reflex", daemon=True),
+                         threading.Thread(target=self._arm_loop, name="arm", daemon=True)]
 
     # -- clients ------------------------------------------------------------------------------
 
@@ -196,7 +217,8 @@ class AgentNav:
                     if self.poses and self.poses[-1][4] != rid:
                         self.poses.clear()
                         self._robot_turn("estimator reset: the world frame moved; snapshot-relative goals and "
-                                         "places from before are no longer valid", level="warn")
+                                         "places from before are no longer valid", level="warn",
+                                         source="estimator")
                     self.poses.append((float(r["t"]) - offset, float(r["x"]), float(r["y"]), float(r["theta"]), rid))
                 while self.poses and self.poses[-1][0] - self.poses[0][0] > POSE_HISTORY_S:
                     self.poses.popleft()
@@ -263,8 +285,24 @@ class AgentNav:
             self.on_change()
         return t
 
-    def _robot_turn(self, msg: str, level: str = "info", **data):
-        self.turn("robot", "event", {}, {"message": msg, **data}, level=level)
+    def _robot_turn(self, msg: str, level: str = "info", source: str = "agent_interface", **data):
+        self.turn("robot", "event", {}, {"message": msg, "source": source, **data}, level=level)
+
+    def since_last_call(self) -> list:
+        """The robot's events (robot turns of this session) since the agent's previous reply, oldest first; moves the
+        agent's cursor. Only agents' replies carry them (the page reads the transcript)."""
+        with self.lock:
+            sid = (self.session or {}).get("id")
+            new = [t for t in self.turns if t["n"] > self._ev_seen and t["actor"] == "robot" and t.get("session") == sid]
+            self._ev_seen = self.n_turn
+        now = time.monotonic()
+        out = []
+        for t in new:
+            r = dict(t["reply"])
+            msg, src = r.pop("message", ""), r.pop("source", "agent_interface")
+            out.append({"n": t["n"], "wall": round(t["wall"], 3), "age_s": round(now - t["t"], 2), "source": src,
+                        "level": t["level"], "message": msg, "data": r})
+        return out
 
     def store_image(self, data: bytes, kind: str, ext: str) -> str:
         with self.lock:
@@ -332,10 +370,33 @@ class AgentNav:
         if actor == "agent" and self.session is None:
             raise RequestError(409, "open a session first: POST /session {agent, avatar}")
 
-    def enable(self, actor: str, caps: Optional[dict] = None, comment: str = "") -> dict:
+    def enable(self, actor: str, caps: Optional[dict] = None, comment: str = "", base: bool = True,
+               arm: bool = True) -> dict:
+        """Enable the base (pose_servo + the swerve lease, with the caps) and the arm (this node takes its lease and
+        enables it: it floats until a move engages it). `base` / `arm` false: leave that part as it is."""
         self._need_session(actor)
         if self.latch is not None and actor != "human":
             raise RequestError(423, f"held by the human operator ({self.latch['why']}); ask them to release it")
+        if not (base or arm):
+            raise ValueError("nothing to enable: base and arm both false")
+        name = (self.session or {}).get("agent", "human") if actor == "agent" else "human"
+        reply = {"enabled": True}
+        if base:
+            reply.update(self._enable_base(actor, caps, name))
+        if arm:
+            try:
+                out = self._arm_enable(name)
+                reply["arm"] = {"enabled": True, "state": out.get("state"), "lease_id": self.arm["lease_id"]}
+            except RequestError as e:
+                reply["arm"] = {"enabled": False, "error": str(e)}
+        if actor == "human":
+            with self.lock:
+                self.latch = None
+        level = "warn" if arm and not reply["arm"]["enabled"] else "info"
+        self.turn(actor, "enable", {"caps": caps or {}, "base": base, "arm": arm}, reply, comment, level=level)
+        return reply
+
+    def _enable_base(self, actor: str, caps: Optional[dict], name: str) -> dict:
         base = PROFILES[self.profile]
         cfg = dict(base)
         for k, v in (caps or {}).items():
@@ -346,7 +407,6 @@ class AgentNav:
             if not (0 < float(v) <= base[k]):
                 raise ValueError(f"{k} must be within (0, {base[k]}] (profile {self.profile!r}; only the human can raise it)")
             cfg[k] = float(v)
-        name = (self.session or {}).get("agent", "human") if actor == "agent" else "human"
         ps = self._call("pose_servo", "GET", "/state")
         adopted = None
         if ps.get("enabled"):
@@ -362,15 +422,15 @@ class AgentNav:
         with self.lock:
             self.enabled_by, self.caps = actor, cfg
             self.enabled_at = time.monotonic()
-            if actor == "human":
-                self.latch = None
-        reply = {"enabled": True, "profile": self.profile, "caps": cfg}
+        reply = {"base": True, "profile": self.profile, "caps": cfg}
         if adopted:
             reply["adopted"] = f"pose_servo was already enabled by {adopted!r} (idle): re-enabled with these caps"
-        self.turn(actor, "enable", {"caps": caps or {}}, reply, comment)
-        return {**reply, "pose_servo": out.get("config")}
+        reply["pose_servo"] = out.get("config")
+        return reply
 
     def disable(self, actor: str, comment: str = "") -> dict:
+        """Disable the base (pose_servo, no braking) and the arm (disabled, lease released)."""
+        arm_err = None
         try:
             self._call("pose_servo", "POST", "/disable", {})
         finally:
@@ -378,8 +438,12 @@ class AgentNav:
                 self.enabled_by = None
                 if actor == "human":
                     self.latch = {"why": "disabled on the page", "t": time.time()}
-        self.turn(actor, "disable", {}, {"enabled": False, "latched": self.latch is not None}, comment)
-        return {"enabled": False, "latched": self.latch is not None}
+            arm_err = self._arm_release()
+        reply = {"enabled": False, "latched": self.latch is not None}
+        if arm_err:
+            reply["arm_error"] = arm_err
+        self.turn(actor, "disable", {}, reply, comment, level="warn" if arm_err else "info")
+        return reply
 
     def release(self, comment: str = "") -> dict:
         with self.lock:
@@ -388,6 +452,7 @@ class AgentNav:
         return {"released": was is not None}
 
     def stop(self, actor: str, comment: str = "") -> dict:
+        self._base_busy_t = time.monotonic()
         out = self._call("pose_servo", "POST", "/stop", {})
         self.turn(actor, "stop", {}, out, comment)
         return out
@@ -398,6 +463,14 @@ class AgentNav:
             self.enabled_by = None
             if actor == "human":
                 self.latch = {"why": "e-stop from the page", "t": time.time()}
+        if self.targets.get("arm"):            # the arm too (anyone may; it latches there until its holder clears it)
+            try:
+                a = self._arm_call("POST", "/estop", {"reason": f"agent_interface ({actor}): {reason}", "source": actor},
+                                   timeout=2)
+                out = {**out, "arm": {"latched": bool(a.get("latched"))}}
+            except RequestError as e:
+                out = {**out, "arm": {"latched": False, "error": str(e)}}
+            self._arm_forget()
         self.turn(actor, "estop", {"reason": reason}, out, comment, level="warn")
         return out
 
@@ -967,6 +1040,10 @@ class AgentNav:
         if margin is not None and not (0 < float(margin) <= REFLEX_MARGIN_MAX):
             raise ValueError(f"reflex_margin_m must be > 0 and <= {REFLEX_MARGIN_MAX:g} m")
         margin = REFLEX_MARGIN if margin is None else float(margin)
+        want = options.pop("reflex", None)                     # the agent's opt-in (the operator may force it on)
+        reflex_on = bool(self.reflex["force"] or want)
+        reflex_why = ("forced on by the operator" + (" (your reflex: false is overridden)" if want is False else "")
+                      if self.reflex["force"] else "on: requested" if want else "off: not requested (reflex: true turns it on)")
         bad = set(options) - set(GOAL_OPTIONS)
         if bad:
             raise ValueError(f"unknown goal options {sorted(bad)}")
@@ -974,17 +1051,19 @@ class AgentNav:
         chk, s = self._check(r, snapshot, also_use)
         lx, ly, lth = r["local"]
         body = {"frame": "local", "x": lx, "y": ly, "theta": lth, **{k: v for k, v in options.items() if v is not None}}
+        self._base_busy_t = time.monotonic()
         ps = self._call("pose_servo", "POST", "/goal", body)
         rec = GoalRec(ps["goal_id"], {"frame": frame, "x": x, "y": y, "theta": theta, **options,
-                                      "reflex_margin_m": margin}, r, chk, actor, time.monotonic())
+                                      "reflex": want, "reflex_margin_m": margin}, r, chk, actor, time.monotonic())
         with self.lock:
             self.goals[rec.gid] = rec
-            self.reflex["armed"] = True
+            self.reflex["armed"] = reflex_on
             self.reflex["margin"] = margin                     # for this goal (and until the next one)
         imgs = self._check_images(chk, s, r, f"goal{rec.gid}")
         out = {"goal_id": rec.gid, "status": "moving", "goal": r, "check": _public(chk),
                "warnings": chk.get("warnings", []), "bev": f"images/{imgs[0]}" if imgs else None,
-               "wait": f"goals/{rec.gid}/wait", "reflex_margin_m": margin}
+               "wait": f"goals/{rec.gid}/wait", "reflex_margin_m": margin,
+               "reflex": {"on": reflex_on, "why": reflex_why}}
         self.turn(actor, "goal", rec.request, out, comment, imgs, level="warn" if chk.get("warnings") else "info")
         return out
 
@@ -1029,19 +1108,25 @@ class AgentNav:
                               "duration_s": round(time.monotonic() - rec.t, 2)}
                 rec.done.set()
                 self._robot_turn(f"goal {rec.gid} {g['result']}" + (f": {g.get('reason')}" if g.get("reason") else ""),
-                                 level="info" if g["result"] == "reached" else "warn", goal_id=rec.gid, **rec.result)
+                                 level="info" if g["result"] == "reached" else "warn", source="base", goal_id=rec.gid,
+                                 **rec.result)
             # a poll that started before our latest enable returned may still say "disabled": not an outside disable
             if (self.enabled_by is not None and st.get("status") == "disabled" and last_status not in (None, "disabled")
                     and t_poll > self.enabled_at):
                 why = st.get("disabled_reason")
                 with self.lock:
                     self.enabled_by = None
-                self._robot_turn(f"pose_servo disabled outside agent: {why}", level="warn")
+                self._robot_turn(f"pose_servo disabled outside agent_interface: {why}", level="warn", source="base")
                 for rec in self.goals.values():
                     if not rec.done.is_set():
                         rec.result = {"result": "aborted", "reason": f"pose_servo disabled: {why}"}
                         rec.done.set()
             last_status = st.get("status")
+            try:
+                self._anomaly_check(st)
+            except Exception as e:          # the watcher must keep running
+                self.anomaly["checking"] = False
+                log.warning("anomaly check: %s", e)
 
     # -- the stop reflex (the only automatic action: it can only stop) ------------------------------------
 
@@ -1049,7 +1134,7 @@ class AgentNav:
         prev = None
         while not self.stop_ev.is_set():
             time.sleep(1 / REFLEX_HZ)
-            if not (self.reflex["enabled"] and self._servo_moving() and self.reflex["armed"]):
+            if not (self._servo_moving() and self.reflex["armed"]):
                 prev = None
                 continue
             now = time.monotonic()
@@ -1110,7 +1195,7 @@ class AgentNav:
         """Log a reflex stop (after the stop was sent): what the reflex counted, and its mask."""
         H = P[hit]
         pct = lambda k: [round(float(q), 3) for q in np.percentile(H[:, k], [5, 50, 95])]
-        reply = {"message": f"Reflex stop: {n} depth points in the stopping zone ({dist:.2f} m ahead at {v:.2f} m/s, "
+        reply = {"source": "reflex", "message": f"Reflex stop: {n} depth points in the stopping zone ({dist:.2f} m ahead at {v:.2f} m/s, "
                             f"margin {margin:.2f} m), nearest {near:.2f} m ahead of the base. They may include false "
                             "positives; see the mask. The goal has ended; a new goal continues.",
                  "points": n, "distance_m": round(near, 3), "lookahead_m": round(dist, 3), "margin_m": round(margin, 3),
@@ -1128,6 +1213,267 @@ class AgentNav:
         except Exception as e:      # the stop is already sent; a missing image must not hide the event
             reply["mask_error"] = f"{type(e).__name__}: {e}"
         self.turn("robot", "event", {}, reply, images=imgs, level="warn")
+
+    # -- the arm (forwarded to the arm node; this node holds its lease for the session) -------------------
+
+    def _arm_call(self, method: str, path: str, body=None, timeout: float = 5.0, lease: bool = False):
+        """One arm node request. A refusal keeps the arm's status and its machine-readable fields (`code`, `retry`,
+        `nearest`, ...); `lease`: with this node's arm lease token (409 if the arm isn't enabled through here)."""
+        headers = {}
+        if lease:
+            tok = self.arm["token"]
+            if tok is None:
+                raise RequestError(409, "the arm is not enabled through agent_interface: POST /enable (or /arm/enable)")
+            headers["X-Lease-Token"] = tok
+        try:
+            with self._client("arm", timeout) as c:
+                r = c.http.request(method, path, json=body if method == "POST" else None, headers=headers)
+        except RequestError:
+            raise
+        except Exception as e:
+            raise RequestError(503, f"arm unreachable: {type(e).__name__}: {e}")
+        try:
+            data = r.json() if r.content else None
+        except ValueError:
+            data = r.text
+        if r.status_code >= 400:
+            d = data if isinstance(data, dict) else {"detail": data}
+            detail = d.get("detail", "")
+            extra = {k: v for k, v in d.items() if k != "detail"}
+            if not isinstance(detail, str):          # FastAPI validation errors: a list
+                extra["errors"], detail = detail, "invalid request"
+            raise RequestError(r.status_code if r.status_code < 500 else 502, f"arm: {detail}", extra)
+        return data
+
+    def _arm_enable(self, name: str) -> dict:
+        if self.arm["token"] is None:
+            got = self._arm_call("POST", "/lease", {"client": f"agent_interface: {name}"})
+            with self.lock:
+                self.arm.update(token=got["token"], lease_id=got["lease_id"], heartbeat=float(got.get("heartbeat") or 1.0),
+                                error=None, jams_seen=None)
+        out = self._arm_call("POST", "/enable", lease=True, timeout=40)      # the first: the gripper check (seconds)
+        with self.lock:
+            self.arm["enabled"] = True
+        return out
+
+    def _arm_forget(self) -> None:
+        with self.lock:
+            self.arm.update(token=None, lease_id=None, enabled=False, jams_seen=None)
+
+    def _arm_release(self) -> Optional[str]:
+        """Disable the arm and release its lease (None, or why it failed; the lease is forgotten either way)."""
+        if self.arm["token"] is None:
+            return None
+        err = None
+        for path, method in (("/disable", "POST"), ("/lease", "DELETE")):
+            try:
+                self._arm_call(method, path, lease=True)
+            except RequestError as e:
+                err = err or str(e)
+        self._arm_forget()
+        return err
+
+    def _arm_loop(self):
+        """Keep the arm lease while it is held here; report new arm jams as robot turns (`since_last_call`)."""
+        last_renew = 0.0
+        while not self.stop_ev.is_set():
+            time.sleep(ARM_POLL_S)
+            if not self.targets.get("arm") or self.arm["token"] is None:
+                continue
+            now = time.monotonic()
+            if now - last_renew >= self.arm["heartbeat"] / 3:
+                try:
+                    self._arm_call("POST", "/lease/renew", lease=True, timeout=2)
+                    last_renew = now
+                except RequestError as e:
+                    if e.status in (401, 403, 409):
+                        self._arm_forget()
+                        self.arm["error"] = str(e)
+                        self._robot_turn(f"arm lease lost ({e}): the arm is no longer enabled through agent_interface; "
+                                         "POST /arm/enable to take it again", level="warn", source="arm")
+                        continue
+            try:
+                self._jam_events(self._arm_call("GET", "/jam", timeout=2))
+            except RequestError:
+                pass
+
+    def _jam_events(self, j: dict) -> None:
+        count = int(j.get("count") or 0)
+        seen = self.arm["jams_seen"]
+        self.arm["jams_seen"] = count
+        if seen is None or count <= seen:
+            return                                   # the first read is the baseline: jams from before aren't ours
+        for jam in (j.get("recent") or []):
+            if jam.get("count", 0) <= seen:
+                continue
+            what = (f"arm jam: joint{jam['joint']} residual {jam['residual_nm']:+.1f} Nm (band {jam['band_nm']:g}) "
+                    f"for {jam['held_s']:.1f} s while static")
+            if jam.get("response") == "hold":
+                what += (": the arm stopped pushing and holds where it is (its move ended `jammed`). Back off along "
+                         "the opposite direction; don't retry into it.")
+            else:
+                what += " (reported only: the arm keeps its command)."
+            self._robot_turn(what, level="warn", source="arm", jam=jam)
+
+    def _need_arm_motion(self, actor: str) -> None:
+        self._need_session(actor)
+        if self.latch is not None and actor != "human":
+            raise RequestError(423, f"held by the human operator ({self.latch['why']})")
+
+    def arm_enable(self, actor: str, comment: str = "") -> dict:
+        self._need_arm_motion(actor)
+        name = (self.session or {}).get("agent", "human") if actor == "agent" else "human"
+        out = self._arm_enable(name)
+        self.turn(actor, "arm_enable", {}, out, comment)
+        return out
+
+    def arm_disable(self, actor: str, comment: str = "") -> dict:
+        err = self._arm_release()
+        reply = {"enabled": False}
+        if err:
+            reply["error"] = err
+        self.turn(actor, "arm_disable", {}, reply, comment, level="warn" if err else "info")
+        return reply
+
+    def arm_forward(self, actor: str, kind: str, method: str, path: str, body: Optional[dict] = None,
+                    comment: str = "", lease: bool = True, timeout: float = 15.0) -> dict:
+        """A forwarded arm call as a transcript turn; the reply is the arm node's, unchanged."""
+        if lease:
+            self._need_arm_motion(actor)
+        try:
+            out = self._arm_call(method, path, body, lease=lease, timeout=timeout)
+        except RequestError as e:
+            self.turn(actor, kind, body or {}, {"error": str(e), "status": e.status, **e.extra}, comment, level="warn")
+            e.logged = True
+            raise
+        self.turn(actor, kind, body or {}, out if isinstance(out, dict) else {"reply": out}, comment)
+        return out
+
+    def arm_servo(self, actor: str, body: dict, align_wheels: bool = True, comment: str = "") -> dict:
+        """POST /arm/servo: defensive wheel alignment first (unless off and not forced), then the arm's planned move."""
+        self._need_arm_motion(actor)
+        if self.arm["token"] is None:
+            raise RequestError(409, "the arm is not enabled through agent_interface: POST /enable (or /arm/enable)")
+        align = self._defend(body.get("pose"), align_wheels)
+        req = {**body, "align_wheels": align_wheels}
+        try:
+            out = self._arm_call("POST", "/servo", body, lease=True, timeout=15)
+        except RequestError as e:
+            self.turn(actor, "arm_servo", req, {"error": str(e), "status": e.status, **e.extra, "align": align},
+                      comment, level="warn")
+            e.logged = True
+            raise
+        reply = {"align": align, **out}
+        self.turn(actor, "arm_servo", req, reply, comment)
+        return reply
+
+    # -- defensive wheel alignment ------------------------------------------------------------------------
+
+    def _defend(self, pose: Optional[dict], requested: bool) -> dict:
+        """Set the wheels (drives coasting) along the arm move's horizontal direction, so a push from the arm rolls
+        the base instead of dragging the tyres sideways. Skipped (and said) when it can't or needn't."""
+        a = self.alignment
+        res = {"requested": requested, "forced": bool(a["force"] and not requested), "done": False}
+
+        def skip(why):
+            res["why"] = why
+            a["last"] = {"t": time.time(), **res}
+            return res
+        if not (requested or a["force"]):
+            return skip("off: align_wheels false (the operator doesn't force it)")
+        if pose is None:
+            return skip("a named pose: no target position to align for")
+        if self.enabled_by is None:
+            return skip("the base is not enabled through agent_interface (POST /enable with base)")
+        ps = self._call("pose_servo", "GET", "/state", timeout=2)
+        if ps.get("status") != "idle":
+            return skip(f"the base is {ps.get('status')}: only an idle base is aligned")
+        tcp = self._arm_call("GET", "/kinematics", timeout=3)["tcp"]["pos"]     # arm frame: axes parallel to the base's
+        dx, dy = pose["pos"][0] - tcp[0], pose["pos"][1] - tcp[1]
+        d = math.hypot(dx, dy)
+        res["travel_m"] = round(d, 3)
+        if d < a["deadzone_m"]:
+            return skip(f"horizontal travel {d:.3f} m < the deadzone {a['deadzone_m']:g} m (mostly vertical)")
+        axis = math.degrees(math.atan2(dy, dx)) % 180.0
+        res["axis_deg"] = round(axis, 1)
+        cur = (ps.get("align") or {}).get("twist")
+        if cur is not None and abs(cur[2]) < 1e-6:
+            cur_axis = math.degrees(math.atan2(cur[1], cur[0])) % 180.0
+            diff = abs(axis - cur_axis) % 180.0
+            diff = min(diff, 180.0 - diff)
+            if diff < a["hysteresis_deg"]:
+                res.update(done=True, kept=True, axis_deg=round(cur_axis, 1), aligned=bool(ps["align"].get("aligned")),
+                           why=f"within {a['hysteresis_deg']:g}° of the current alignment: kept")
+                a["last"] = {"t": time.time(), **res}
+                return res
+        th = math.radians(axis)
+        self._call("pose_servo", "POST", "/align", {"twist": [math.cos(th), math.sin(th), 0.0]}, timeout=2)
+        t0 = time.monotonic()
+        st = {}
+        while time.monotonic() - t0 < ALIGN_WAIT_S:
+            st = self._call("pose_servo", "GET", "/state", timeout=2).get("align") or {}
+            if st.get("aligned"):
+                break
+            time.sleep(0.05)
+        res.update(done=True, aligned=bool(st.get("aligned")), wait_s=round(time.monotonic() - t0, 2),
+                   steer_err_deg=st.get("steer_err_deg"))
+        if not res["aligned"]:
+            res["why"] = f"not aligned within {ALIGN_WAIT_S:g} s: the arm moves anyway"
+        a["last"] = {"t": time.time(), **res}
+        return res
+
+    # -- base movement anomalies (something moved the base while nothing drove it) ----------------------
+
+    def _swerve_holder(self) -> tuple[bool, Optional[str]]:
+        """(known, holder) of the swerve lease; read at most once a second."""
+        t, h = self._swerve_lease
+        if time.monotonic() - t < 1.0:
+            return h
+        try:
+            info = self._call("swerve", "GET", "/lease", timeout=1)
+            h = (True, None if info is None else info.get("client"))
+        except RequestError:
+            h = (False, None)
+        self._swerve_lease = (time.monotonic(), h)
+        return h
+
+    def _anomaly_check(self, st: dict) -> None:
+        """Watcher (10 Hz). Guarded so it can't fire while the base is driven: a session is open, no goal runs,
+        pose_servo isn't moving / braking / holding, >= ANOMALY_QUIET_S since that, and the swerve lease is
+        pose_servo's or nobody's. Each idle stretch has its own reference pose."""
+        a = self.anomaly
+        now = time.monotonic()
+        status = st.get("status")
+        running = any(not g.done.is_set() for g in self.goals.values())
+        if running or status in ("moving", "braking", "holding"):
+            self._base_busy_t = now
+        quiet = self.session is not None and not running and now - self._base_busy_t >= ANOMALY_QUIET_S
+        if quiet and not st.get("enabled"):          # pose_servo off: someone else may drive (teleop)
+            known, holder = self._swerve_holder()
+            quiet = known and holder is None
+        pose = self.pose_now() if quiet else None
+        if pose is None:
+            a["checking"], a["ref"] = False, None
+            return
+        a["checking"] = True
+        ref = a["ref"]
+        if ref is None or ref[3] != pose[3]:          # a new idle stretch (or an estimator reset): a new reference
+            a["ref"] = pose
+            return
+        d = math.hypot(pose[0] - ref[0], pose[1] - ref[1])
+        dth = math.degrees(wrap(pose[2] - ref[2]))
+        if d < ANOMALY_M and abs(dth) < ANOMALY_DEG:
+            return
+        a["ref"] = pose
+        a["count"] += 1
+        a["last"] = {"t": time.time(), "moved_m": round(d, 4), "turned_deg": round(dth, 2)}
+        align = st.get("align") or {}
+        self._robot_turn(
+            f"base moved {d * 100:.1f} cm / {dth:+.1f}° while nothing drove it (pose_servo {status}"
+            + (", wheels aligned for the arm, drives coasting" if align.get("twist") else "")
+            + "): something pushed it (the arm against an obstacle?)", level="warn", source="base",
+            moved_m=round(d, 4), turned_deg=round(dth, 2), from_world=[round(v, 4) for v in ref[:3]],
+            to_world=[round(v, 4) for v in pose[:3]])
 
     # -- memory ---------------------------------------------------------------------------------
 
@@ -1239,6 +1585,11 @@ class AgentNav:
                 "reset_id": None if now is None else now[3],
                 "pose_servo": {k: st.get(k) for k in ("status", "enabled", "holder", "disabled_reason", "goal")} if st else None,
                 "reflex": dict(self.reflex),
+                "alignment": dict(self.alignment),
+                "arm": {"held": self.arm["token"] is not None, "lease_id": self.arm["lease_id"],
+                        "enabled": self.arm["enabled"], "jams_seen": self.arm["jams_seen"], "error": self.arm["error"]},
+                "anomaly": {"checking": self.anomaly["checking"], "count": self.anomaly["count"],
+                            "last": self.anomaly["last"]},
                 "snapshots": list(self.snapshots.keys())[-10:],
                 "goals": {g.gid: {"done": g.done.is_set(), "result": g.result and g.result.get("result")}
                           for g in list(self.goals.values())[-10:]},

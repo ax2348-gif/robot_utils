@@ -159,3 +159,130 @@ def fake_perception_app(scene: Scene, pose_fn: Callable[[], tuple]):
         return Response(pack_record(hdr, payload), media_type="application/octet-stream")
 
     return app
+
+
+def fake_arm_app(tcp=(0.25, 0.0, 0.2)):
+    """FastAPI app standing in for the arm node (no pinocchio): the lease, enable / disable, servo / home / gripper /
+    cancel (recorded, nothing moves), /kinematics (a fixed TCP), /ik, /geometry, /state and /jam. ``app.state.arm``
+    holds what it saw (``calls``) and lets a test add jams (``add_jam``)."""
+    import secrets
+
+    from fastapi import FastAPI, Header, HTTPException
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI(title="fake arm")
+    st = {"token": None, "lease_id": 0, "enabled": False, "calls": [], "jams": [], "tcp": list(tcp), "motion": 0}
+    app.state.arm = st
+
+    def holder(tok):
+        if st["token"] is None or tok != st["token"]:
+            raise HTTPException(403, "not the lease holder")
+
+    def add_jam(joint=2, residual=5.1, band=4.0, response="hold"):
+        st["jams"].append({"t": time.monotonic(), "wall": time.time(), "joint": joint, "residual_nm": residual,
+                           "band_nm": band, "held_s": 1.0, "response": response, "source": "hold",
+                           "residuals_nm": [0.0] * 6, "count": len(st["jams"]) + 1})
+    st["add_jam"] = add_jam
+
+    @app.post("/lease")
+    async def lease(body: dict):
+        if st["token"] is not None:
+            raise HTTPException(409, "lease held")
+        st["token"], st["lease_id"] = secrets.token_hex(8), st["lease_id"] + 1
+        return {"token": st["token"], "client": body.get("client"), "lease_id": st["lease_id"], "heartbeat": 1.0}
+
+    @app.post("/lease/renew")
+    async def renew(x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        return {"lease_id": st["lease_id"], "expires_in": 1.0}
+
+    @app.delete("/lease")
+    async def release(x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        st["token"], st["enabled"] = None, False
+        return {"released": True}
+
+    @app.post("/enable")
+    async def enable(x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        st["enabled"] = True
+        return {"enabled": True, "state": "floating"}
+
+    @app.post("/disable")
+    async def disable(x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        st["enabled"] = False
+        return {"enabled": False, "state": "disabled"}
+
+    @app.post("/estop")
+    async def estop(body: dict = None):
+        st["token"], st["enabled"] = None, False
+        return {"latched": True, "reason": (body or {}).get("reason", ""), "source": (body or {}).get("source", "")}
+
+    def motion(kind, body, tok):
+        holder(tok)
+        st["calls"].append((kind, body))
+        st["motion"] += 1
+        return {"id": st["motion"], "kind": kind, "duration": 1.0, "info": {}}
+
+    @app.post("/servo")
+    async def servo(body: dict, x_lease_token: str = Header(None)):
+        if body.get("pose") and body["pose"]["pos"][0] > 1.0:
+            return JSONResponse(status_code=422, content={"detail": "unreachable", "code": "ik_failed", "retry": None})
+        return motion("servo", body, x_lease_token)
+
+    @app.post("/home")
+    async def home(x_lease_token: str = Header(None)):
+        return motion("home", {}, x_lease_token)
+
+    @app.post("/gripper")
+    async def gripper(body: dict, x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        st["calls"].append(("gripper", body))
+        return {"goal_mm": body.get("gap_mm"), "max_force_n": body.get("max_force_n") or 20.0}
+
+    @app.post("/cancel")
+    async def cancel(x_lease_token: str = Header(None)):
+        holder(x_lease_token)
+        return {"cancelled": True}
+
+    @app.get("/kinematics")
+    async def kinematics():
+        return {"tcp": {"pos": st["tcp"], "quat": [0.0, 0.0, 0.0, 1.0]}}
+
+    @app.post("/ik")
+    async def ik(body: dict):
+        return {"ok": True, "exact": True, "q": [0.0] * 6, "nearest": body["pose"]}
+
+    def geo(which, q, gap_mm=40.0):
+        """The shape of the arm node's geometry: the arm frame on the front-right mount, one jaw box, fingertips."""
+        xyz = [0.1159, -0.1459, 0.22225]
+        T = [[1.0, 0.0, 0.0, xyz[0]], [0.0, 1.0, 0.0, xyz[1]], [0.0, 0.0, 1.0, xyz[2]], [0.0, 0.0, 0.0, 1.0]]
+        p = st["tcp"]
+        return {"which": which, "q": q, "gap_mm": gap_mm, "ik": {"ok": True, "exact": True} if which == "ik" else None,
+                "frames": {"arm_in_base": {"matrix": T, "xyz": xyz, "source": "fake"}},
+                "boxes": [{"name": "jaw", "link": "finger", "center": {"arm": p, "base": [0, 0, 0]},
+                           "size_m": [0.03, 0.03, 0.03], "axes_base": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}],
+                "fingertips": {"left": {"arm": [p[0], p[1] + 0.02, p[2]]}, "right": {"arm": [p[0], p[1] - 0.02, p[2]]},
+                               "center": {"arm": {"pos": p}}},
+                "extent_base": {"past_footprint_m": {"front": -0.1, "rear": -0.3, "left": -0.3, "right": -0.05}}}
+
+    @app.get("/geometry")
+    async def geometry():
+        return geo("measured", [0.0] * 6)
+
+    @app.post("/geometry")
+    async def geometry_at(body: dict):
+        return geo("ik" if body.get("pose") else "q", body.get("q") or [0.0] * 6, body.get("gap_mm") or 40.0)
+
+    @app.get("/state")
+    async def state():
+        return {"state": "floating" if st["enabled"] else "disabled", "motion": None,
+                "jam": {"count": len(st["jams"]), "active": None}}
+
+    @app.get("/jam")
+    async def jam():
+        return {"config": {}, "active": st["jams"][-1] if st["jams"] else None, "count": len(st["jams"]),
+                "recent": st["jams"][-20:]}
+
+    return app

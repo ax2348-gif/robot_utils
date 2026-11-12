@@ -1,6 +1,6 @@
 # Agent MoMa node, v1: plan
 
-Status: draft for review (2026-11-11). Nothing built yet.
+Status (2026-11-11): steps 1–5 built on `claude/agent-node` (tests green in simulation, with a fake arm node for agent_interface); step 6, the supervised robot test, is next.
 
 ## Goal
 

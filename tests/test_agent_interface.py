@@ -15,7 +15,7 @@ import uvicorn
 
 from robot_utils.nodes.agent_interface import chat
 from robot_utils.nodes.agent_interface import geometry as G
-from robot_utils.nodes.agent_interface.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_perception_app
+from robot_utils.nodes.agent_interface.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_arm_app, fake_perception_app
 
 CAM = G.Camera.from_calibration(CALIBRATION)
 T_BC = np.array(CALIBRATION["base_to_color"])
@@ -156,10 +156,14 @@ def stack(tmp_path, request):
     per_url, *s = serve(fake_perception_app(scene, pose)); servers.append(s)
     ps = PoseServoNode(sw_url, est_url)
     ps_url, *s = serve(ps_app(ps)); servers.append(s)
-    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False, description=None)
+    arm = fake_arm_app()
+    arm_url, *s = serve(arm); servers.append(s)
+    nav = AgentNav(ps_url, per_url, est_url, str(tmp_path / "nav"), "cautious", require_imu=False, description=None,
+                   arm=arm_url, swerve=sw_url)
     url, *s = serve(nav_app(nav)); servers.append(s)
     wait_for(lambda: nav.pose_now() is not None, 15)
-    yield {"url": url, "nav": nav, "swerve": sw_url, "est": est_url, "data": str(tmp_path / "nav")}
+    yield {"url": url, "nav": nav, "swerve": sw_url, "est": est_url, "ps": ps_url, "arm": arm.state.arm,
+           "data": str(tmp_path / "nav")}
     for srv, t in reversed(servers):
         srv.should_exit = True
         t.join(10)
@@ -487,9 +491,9 @@ def test_plan_check_draws_the_robot_and_counts_depth_in_the_arm(stack):
     """plan/check draws the base (and the arm, from the arm node's geometry) at the goal into the snapshot."""
     st = stack
     nav = st["nav"]
+    nav.targets["arm"] = None                     # no arm node: the base alone, said loudly
     post(st, "/session", {"agent": "Tester"})
     post(st, "/look")
-    # no arm node in the sim: the base alone, said loudly
     r = post(st, "/plan/check", {"frame": "local", "x": 0.5, "y": 0.0, "theta": 0.0}).json()
     rv = r["robot"]
     assert rv["view"].startswith("images/") and rv["goal_in_snapshot_base"][:2] == pytest.approx([0.5, 0.0], abs=0.02)
@@ -574,3 +578,112 @@ def test_snapshots_and_queries_belong_to_one_session(stack):
     assert chk["obstacle_points_in_path"] > 0 and set(chk["obstacles_by_snapshot"]) == {s3}
     assert sum(chk["obstacles_by_snapshot"].values()) == chk["obstacle_points_in_path"]
     assert get(st, "/" + chk["obstacle_masks"][s3]).headers["content-type"] == "image/jpeg"
+
+
+# -- MoMa: the arm through this node, defensive alignment, events, reflex force / opt-in --------------------
+
+def _ps(st):
+    return httpx.get(st["ps"] + "/state", timeout=5).json()
+
+
+def test_arm_through_the_node_with_defensive_alignment(stack):
+    """One enable takes the arm lease and keeps it; arm servos align the wheels along their horizontal direction
+    (deadzone, hysteresis, no sign), the call or the operator decides; disable releases the arm."""
+    st, nav, arm = stack, stack["nav"], stack["arm"]
+    post(st, "/session", {"agent": "Tester"})
+    assert post(st, "/arm/servo", {"name": "home"}).status_code == 409                    # not enabled here
+    out = post(st, "/enable").json()
+    assert out["base"] and out["arm"] == {"enabled": True, "state": "floating", "lease_id": 1}
+    assert arm["token"] == nav.arm["token"] and arm["enabled"]
+    time.sleep(1.5)                                                     # beyond the arm lease's heartbeat: kept
+    assert post(st, "/arm/state").status_code == 405 and get(st, "/arm/state").json()["state"] == "floating"
+    assert arm["token"] == nav.arm["token"]
+    wait_for(lambda: _ps(st)["status"] == "idle")
+
+    # sideways and forward: the wheels are set along 45 degrees, drives coasting
+    r = post(st, "/arm/servo", {"pose": {"pos": [0.35, 0.1, 0.2], "rpy": [0, 1.57, 0]}, "comment": "reach"}).json()
+    a = r["align"]
+    assert a["done"] and a["axis_deg"] == 45.0 and a["travel_m"] == pytest.approx(0.1414, abs=1e-3), a
+    tw = _ps(st)["align"]["twist"]
+    assert tw == pytest.approx([math.sqrt(0.5), math.sqrt(0.5), 0.0], abs=1e-6)
+    assert arm["calls"][-1] == ("servo", {"pose": {"pos": [0.35, 0.1, 0.2], "rpy": [0, 1.57, 0]}})   # forwarded as is
+    # the opposite direction, slightly off: the same axis (no sign), within the hysteresis: kept
+    arm["tcp"] = [0.35, 0.1, 0.2]
+    a = post(st, "/arm/servo", {"pose": {"pos": [0.26, 0.0, 0.2], "rpy": [0, 1.57, 0]}}).json()["align"]
+    assert a["kept"] and a["axis_deg"] == 45.0, a
+    # mostly vertical: the deadzone
+    a = post(st, "/arm/servo", {"pose": {"pos": [0.355, 0.1, 0.05], "rpy": [0, 1.57, 0]}}).json()["align"]
+    assert not a["done"] and "deadzone" in a["why"]
+    # straight ahead, but the agent opts out; then the operator forces it
+    a = post(st, "/arm/servo", {"pose": {"pos": [0.5, 0.1, 0.2], "rpy": [0, 1.57, 0]}, "align_wheels": False}).json()["align"]
+    assert not a["done"] and "off" in a["why"]
+    assert post(st, "/alignment?force=true").status_code == 403                          # human only
+    post(st, "/alignment?force=true", human=True)
+    a = post(st, "/arm/servo", {"pose": {"pos": [0.5, 0.1, 0.2], "rpy": [0, 1.57, 0]}, "align_wheels": False}).json()["align"]
+    assert a["done"] and a["forced"] and a["axis_deg"] == 0.0, a
+    # a move that can't be planned: the arm's refusal, with its fields
+    r = post(st, "/arm/servo", {"pose": {"pos": [3, 0, 0], "rpy": [0, 0, 0]}, "align_wheels": False})
+    assert r.status_code == 422 and r.json()["code"] == "ik_failed"
+    # a base goal ends the alignment
+    g = post(st, "/goal", {"frame": "local", "x": 0.05}).json()
+    assert _ps(st)["align"]["twist"] is None
+    get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
+    # the log has the arm turns with comments
+    kinds = [t["kind"] for t in get(st, "/log").json()["turns"]]
+    assert {"arm_servo", "enable"} <= set(kinds)
+    assert post(st, "/disable").json()["enabled"] is False
+    assert arm["token"] is None and nav.arm["token"] is None
+
+
+def test_since_last_call_carries_jams_anomalies_and_goal_ends(stack):
+    st, nav, arm = stack, stack["nav"], stack["arm"]
+    post(st, "/session", {"agent": "Tester"})
+    assert post(st, "/enable", {"caps": {"max_speed": 0.12}}).json()["arm"]["enabled"]
+    wait_for(lambda: nav.arm["jams_seen"] == 0)                         # the baseline is read
+    arm["add_jam"]()
+    wait_for(lambda: nav.arm["jams_seen"] == 1)
+    ev = post(st, "/memory/note", {"text": "x"}).json()["since_last_call"]
+    assert [e["source"] for e in ev] == ["arm"] and "joint2" in ev[0]["message"] and ev[0]["data"]["jam"]["joint"] == 2
+    assert ev[0]["level"] == "warn" and "Back off" in ev[0]["message"]
+    assert post(st, "/memory/note", {"text": "y"}).json()["since_last_call"] == []        # each event once
+    # the human's calls don't move the agent's cursor (and carry no events)
+    arm["add_jam"](joint=5, residual=-1.2, band=0.8, response="report")
+    wait_for(lambda: nav.arm["jams_seen"] == 2)
+    assert "since_last_call" not in post(st, "/memory/note", {"text": "z"}, human=True).json()
+
+    # a goal: no anomaly while driven; its end is an event
+    g = post(st, "/goal", {"frame": "local", "x": 0.3}).json()
+    assert [e["source"] for e in g["since_last_call"]] == ["arm"]      # the jam while the human was busy
+    res = httpx.get(st["url"] + f"/goals/{g['goal_id']}/wait", params={"timeout": 30}, timeout=40).json()
+    ev = res["since_last_call"]
+    assert [e["source"] for e in ev] == ["base"] and "reached" in ev[0]["message"], ev
+    assert nav.anomaly["count"] == 0
+    # idle and undriven: a push of 2 cm is reported once
+    wait_for(lambda: nav.anomaly["checking"] and nav.anomaly["ref"] is not None, 5)
+    real = nav.pose_now
+    nav.pose_now = lambda: (lambda p: None if p is None else (p[0] + 0.02, p[1], p[2], p[3]))(real())
+    wait_for(lambda: nav.anomaly["count"] == 1, 5)
+    ev = post(st, "/memory/note", {"text": "w"}).json()["since_last_call"]
+    assert [e["source"] for e in ev] == ["base"] and "while nothing drove it" in ev[0]["message"]
+    assert ev[0]["data"]["moved_m"] == pytest.approx(0.02, abs=0.003)
+    time.sleep(0.5)
+    assert nav.anomaly["count"] == 1                                     # a new reference: not again
+    nav.pose_now = real
+
+
+def test_reflex_force_and_opt_in(stack):
+    st, nav = stack, stack["nav"]
+    post(st, "/session", {"agent": "Tester"})
+    post(st, "/enable", {"arm": False})
+    g = post(st, "/goal", {"frame": "local", "x": 0.05, "reflex": False}).json()          # forced on (default)
+    assert g["reflex"]["on"] and "overridden" in g["reflex"]["why"] and nav.reflex["armed"]
+    get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
+    assert post(st, "/reflex?force=false").status_code == 403
+    post(st, "/reflex?force=false", human=True)
+    g = post(st, "/goal", {"frame": "local", "x": 0.05}).json()
+    assert not g["reflex"]["on"] and not nav.reflex["armed"]
+    get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
+    g = post(st, "/goal", {"frame": "local", "x": 0.05, "reflex": True}).json()
+    assert g["reflex"] == {"on": True, "why": "on: requested"} and nav.reflex["armed"]
+    get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
+    assert get(st, "/state").json()["reflex"]["force"] is False

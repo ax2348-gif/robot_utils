@@ -64,7 +64,8 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
         <button class="ru" id="enable">Enable</button><button class="ru" id="disable">Disable</button>
         <button class="ru" id="stop">Stop</button><button class="ru" id="release">Release hold</button>
         <label>profile <select id="profile"></select></label>
-        <label><input type="checkbox" id="reflex" checked> stop reflex</label>
+        <label title="every goal has the stop reflex (off: goals choose)"><input type="checkbox" id="reflex" checked> force stop reflex</label>
+        <label title="every arm servo aligns the wheels first (off: the call chooses)"><input type="checkbox" id="align"> force wheel alignment</label>
       </div>
       <div class="kv" id="state"></div>
     </div>
@@ -88,7 +89,8 @@ $("#release").onclick = () => human("release");
 // the shared e-stop, sent as the human operator (agent latches its hold too)
 const estop = RU.estopButton($("#estop"), {headers: H, body: {reason: "page button"}});
 const band = RU.stateBand($("#band"));
-$("#reflex").onchange = e => human("reflex?enabled=" + e.target.checked);
+$("#reflex").onchange = e => human("reflex?force=" + e.target.checked);
+$("#align").onchange = e => human("alignment?force=" + e.target.checked);
 $("#profile").onchange = e => human("profile/" + e.target.value);
 async function sendCmd(){ const t = $("#cmd").value.trim(); if (!t) return;
   try { err(""); await RU.api("chat", {method: "POST", headers: H, body: {text: t}}); $("#cmd").value = ""; } catch(e){ err(e.message); } }
@@ -208,7 +210,7 @@ async function pull(){
 }
 RU.api("state").then(s => { const p = $("#profile");
   for (const n of Object.keys(s.profiles)){ const o = el("option", "", n); o.value = n; p.appendChild(o); } p.value = s.profile;
-  $("#reflex").checked = s.reflex.enabled; });
+  $("#reflex").checked = s.reflex.force; $("#align").checked = s.alignment.force; });
 RU.sse("events", s => {
   estop.update(s);
   band.update(s, {live: ["moving", "holding", "braking"].includes(s.servo), liveText: "servo " + s.servo});
