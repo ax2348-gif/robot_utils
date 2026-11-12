@@ -152,6 +152,31 @@ def test_enable_goal_reached_and_constraints_hold(stack):
     assert st["loop_hz"] > 40
 
 
+def test_align_holds_wheels_for_a_unit_twist_with_drives_coasting(stack):
+    """POST /align while idle: the swerve gets steer-only commands for that unit twist (drive motors off), the state
+    reports when aligned; a goal ends it; it refuses while a goal runs and when disabled."""
+    import math as _m
+    url = stack["url"]
+    assert post(url, "/align", {"twist": [1, 0, 0]}).status_code == 409                    # not enabled
+    assert post(url, "/enable", {"client": "test", "config": NO_IMU}).status_code == 200
+    a = post(url, "/align", {"twist": [0.0, 0.0, 3.0]})                                    # a turn in place
+    assert a.status_code == 200 and a.json()["twist"] == [0.0, 0.0, 1.0]
+    st = wait_for(lambda: (s := state(stack))["align"]["aligned"] and s, 5)
+    sw = httpx.get(stack["swerve"] + "/state").json()["latest"]
+    assert sw["steer_omega"] == 1.0 and sw["motors_enabled"] == 1
+    for name in ("FL", "FR", "RR", "RL"):
+        assert _m.isnan(sw[f"{name}_drive_sp"]) if sw[f"{name}_drive_sp"] is not None else True
+    assert post(url, "/align", {"twist": [0, 0, 0]}).status_code == 422                    # no direction
+    g = post(url, "/goal", {"x": 0.1})
+    assert g.status_code == 200 and state(stack)["align"]["twist"] is None                # a goal ends it
+    assert post(url, "/align", {"twist": [1, 0, 0]}).status_code == 409                    # not while moving
+    wait_result(stack)
+    wait_for(lambda: state(stack)["status"] == "idle", 5)
+    assert post(url, "/align", {"twist": [0.6, -0.8, 0.0]}).json()["twist"] == [0.6, -0.8, 0.0]
+    assert httpx.delete(url + "/align").json()["twist"] is None
+    post(url, "/disable")
+
+
 def test_requires_imu_by_default_and_rejects_bad_goals(stack):
     url = stack["url"]
     assert post(url, "/goal", {"x": 0.1}).status_code == 409                   # not enabled

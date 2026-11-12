@@ -133,6 +133,24 @@ class StopOut(BaseModel):
     status: str = Field(description="Servo status after the stop: braking (still moving) | idle.")
 
 
+class AlignIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, json_schema_extra={"examples": [
+        {"twist": [1.0, 0.0, 0.0]}, {"twist": [0.6, -0.8, 0.0]}]})
+    twist: list[float] = Field(min_length=3, max_length=3,
+                               description="Unit twist [vx, vy, omega] (only its direction matters): every wheel is set the "
+                                           "way it would roll for it, the drive motors are off (coasting), so the base "
+                                           "rolls freely along that twist if pushed (e.g. by the arm meeting something).")
+
+
+class AlignState(BaseModel):
+    """Defensive alignment: wheels set for a unit twist with the drives coasting, held while idle."""
+    twist: Optional[list[float]] = Field(description="The unit twist in force, normalised; null when off.")
+    aligned: bool = Field(description="Every wheel is within 3 degrees of its setting.")
+    steer_err_deg: Optional[float] = Field(description="The worst wheel's steering error, degrees; null when off or "
+                                                       "not yet read.")
+    since_s: Optional[float] = Field(description="s since this alignment was set; null when off.")
+
+
 class EStopOut(BaseModel):
     """The node disables itself whether or not the forward worked."""
     forwarded: bool = Field(description="The swerve node accepted the e-stop (it latches there).")
@@ -197,6 +215,8 @@ class SwerveView(BaseModel):
     enabled: float = Field(description="1 if the swerve is enabled.")
     estop: float = Field(description="1 if its e-stop is latched.")
     lease_id: float = Field(description="Its lease in force (0 = none).")
+    steer_err: Optional[float] = Field(None, description="rad: the worst wheel's steering error while a steer-only "
+                                                         "(alignment) command is in force; null otherwise.")
 
 
 _TICK_DOC = {
@@ -253,6 +273,7 @@ class ServoState(BaseModel):
     status: str = Field(description="disabled | idle | moving | holding | braking.")
     enabled: bool = Field(description="The servo holds the swerve lease and drives (POST /enable).")
     holder: Optional[str] = Field(description="`client` of POST /enable (`anonymous` if empty); null if disabled.")
+    align: AlignState = Field(description="Defensive alignment (POST /align): ended by a goal, stop or disable.")
     disabled_reason: Optional[str] = Field(description="Why it was last disabled; null if never or enabled since.")
     swerve_lease_id: Optional[int] = Field(description="The swerve lease it holds; null if disabled.")
     goal: Optional[GoalOut] = Field(description="The last goal (kept after it ends, with its result); null if none yet.")
@@ -372,6 +393,17 @@ def create_app(node: PoseServoNode, start: bool = True) -> FastAPI:
         world frame. Its progress and result (reached / stopped / aborted + reason) are in `/state.goal`."""
         opts = body.model_dump(exclude={"frame", "x", "y", "theta"})
         return node.set_goal(body.frame, body.x, body.y, body.theta, opts)
+
+    @app.post("/align", response_model=AlignState, tags=["control"],
+              summary="While idle: hold the wheels set for a unit twist with the drives coasting (defensive alignment)",
+              description="409 if not enabled or a goal is running. Holds until the next goal, POST /stop, "
+                          "DELETE /align or disable. `aligned` turns true once every wheel is within 3 degrees.")
+    async def align(body: AlignIn):
+        return node.set_align(body.twist)
+
+    @app.delete("/align", response_model=AlignState, tags=["control"], summary="End the defensive alignment")
+    async def align_off():
+        return node.clear_align("DELETE /align")
 
     @app.post("/stop", response_model=StopOut, tags=["control"], summary="Brake to a stop within the caps; stay enabled")
     async def stop():

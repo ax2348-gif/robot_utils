@@ -31,6 +31,7 @@ from ..common.lease import RequestError
 from ..common.server import EventLog
 from ..estimator.node import Upstream
 from ..swerve.client import SwerveClient
+from ..swerve.constants import MODULES
 from ..swerve.node import HARD_MAX_OMEGA, HARD_MAX_SPEED
 from .planner import (STATUS, STEER_MIN_SPEED, STEER_RATE_MAX, WHEEL_R, WHEEL_SPEED_MAX, Caps, Cmd, Goal, Motion,
                       Servo, check_step)
@@ -45,6 +46,7 @@ JUMP_THETA = 0.30        # rad
 MAX_PREDICT_S = 0.10     # pose extrapolation (estimator latency) is capped at this
 CMD_FAIL_S = 0.20        # swerve commands failing for this long -> disabled
 RENEW_S = 0.30           # lease renew interval while idle
+ALIGN_TOL = math.radians(3)   # every wheel within this of its steer-only setpoint = aligned
 SWERVE_GRACE_S = 0.25    # after enable, swerve telemetry this old may still show the old state
 
 FIELDS = ["t", "status", "goal_id", "x", "y", "theta", "goal_x", "goal_y", "goal_theta",
@@ -178,7 +180,9 @@ class PoseServoNode:
         self.io = threading.Lock()          # swerve HTTP calls
         self.stop_ev = threading.Event()
         self.est = EstimatorView()
-        self.sw: Optional[dict] = None      # latest swerve telemetry (enabled, estop, lease_id, t)
+        self.sw: Optional[dict] = None      # latest swerve telemetry (enabled, estop, lease_id, t, steer_err)
+        self.align: Optional[tuple] = None  # steer-only unit twist held while idle (POST /align); None = off
+        self.align_t: Optional[float] = None
         self.config = Config()
         self.servo = Servo(self.config.caps)
         self.enabled = False
@@ -229,9 +233,15 @@ class PoseServoNode:
                     self._est_row({n: float(r[n]) for n in names}, offset, now)
             elif key == "swerve" and len(rows):
                 r = rows[-1]
+                steer_err = None
+                if "steer_vx" in names and math.isfinite(float(r["steer_vx"])):   # steer-only in force: how far off
+                    errs = [abs(math.remainder(float(r[f"{m.name}_steer_angle"]) - float(r[f"{m.name}_steer_sp"]), 2 * math.pi))
+                            for m in MODULES if f"{m.name}_steer_sp" in names]
+                    steer_err = max(errs) if errs and all(math.isfinite(e) for e in errs) else None
                 with self.lock:
                     self.sw = {"t": float(r["t_tick"]) - offset, "enabled": float(r["enabled"]),
-                               "estop": float(r["estop"]), "lease_id": float(r["lease_id"]), "rx": now}
+                               "estop": float(r["estop"]), "lease_id": float(r["lease_id"]), "rx": now,
+                               "steer_err": steer_err}
 
     def _est_row(self, row: dict, offset: float, now: float):
         row["t"] -= offset
@@ -335,10 +345,13 @@ class PoseServoNode:
             prev = servo.cmd
             cmd, diag = servo.update(pose if servo.goal is not None else None, PERIOD)
             goal = servo.goal
+            align = self.align if (cmd is None and goal is None) else None
             self._sync_result()
         sent = 0.0
         if cmd is not None:
             sent = 1.0 if self._send(cmd) else 0.0
+        elif align is not None:
+            sent = 1.0 if self._send_steer(align) else 0.0
         else:
             self._renew_if_due(now)
         with self.lock:
@@ -362,6 +375,63 @@ class PoseServoNode:
             if now - self._cmd_fail_since > CMD_FAIL_S:
                 self.disable(f"swerve commands failing for {CMD_FAIL_S} s ({e})")
             return False
+
+    def _send_steer(self, twist: tuple) -> bool:
+        """Steer-only for the alignment (renews the lease like a twist)."""
+        try:
+            with self.io:
+                if self.client is None:
+                    return False
+                self.client.steer(*twist)
+            self._cmd_fail_since = None
+            self._last_renew = time.monotonic()
+            return True
+        except Exception as e:
+            now = time.monotonic()
+            if self._cmd_fail_since is None:
+                self._cmd_fail_since = now
+                self.events.add(f"swerve steer command failed: {e}", "warn")
+            if now - self._cmd_fail_since > CMD_FAIL_S:
+                self.disable(f"swerve commands failing for {CMD_FAIL_S} s ({e})")
+            return False
+
+    # -- defensive alignment: wheels set for a unit twist, drives coasting, while idle ---------------
+
+    def set_align(self, twist) -> dict:
+        """Hold every wheel set for the unit twist ``twist`` [vx, vy, omega] (direction only) with the drive motors
+        coasting, while no goal runs; until the next goal, stop, clear_align or disable."""
+        with self.lock:
+            if not self.enabled:
+                raise RequestError(409, "not enabled (POST /enable)")
+            if self.servo.goal is not None or self.servo.active:
+                raise RequestError(409, f"the base is {self.servo.status}: align only when idle")
+            t = [float(v) for v in twist]
+            norm = math.hypot(*t) if len(t) == 3 and all(math.isfinite(v) for v in t) else 0.0
+            if norm < 1e-9:
+                raise ValueError("twist must be a direction: three finite numbers [vx, vy, omega], not all zero")
+            new = tuple(v / norm for v in t)
+            if new != self.align:
+                self.align, self.align_t = new, time.monotonic()
+                self.events.add("align: wheels set for twist (%.2f, %.2f, %.2f), drives coasting" % new)
+            return self.align_state_locked()
+
+    def clear_align(self, reason: str = "cleared") -> dict:
+        with self.lock:
+            self._clear_align_locked(reason)
+            return self.align_state_locked()
+
+    def _clear_align_locked(self, reason: str) -> None:
+        if self.align is not None:
+            self.events.add(f"align ended: {reason}")
+        self.align, self.align_t = None, None
+
+    def align_state_locked(self) -> dict:
+        sw = self.sw or {}
+        err = sw.get("steer_err") if self.align is not None else None
+        return {"twist": list(self.align) if self.align is not None else None,
+                "aligned": bool(self.align is not None and err is not None and err < ALIGN_TOL),
+                "steer_err_deg": None if err is None else round(math.degrees(err), 2),
+                "since_s": None if self.align_t is None else round(time.monotonic() - self.align_t, 2)}
 
     def _renew_if_due(self, now: float):
         if now - self._last_renew < RENEW_S:
@@ -461,6 +531,7 @@ class PoseServoNode:
             self.events.add(f"goal {self.servo.goal.goal_id} aborted: disabled ({reason})", "warn")
         self.servo.reset()
         self._sync_result(reason=f"disabled: {reason}")
+        self._clear_align_locked(f"disabled ({reason})")
         self.enabled = False
         self.disabled_reason = reason
         c, self.client = self.client, None
@@ -549,6 +620,7 @@ class PoseServoNode:
             self.goal_count += 1
             g = Goal(gx, gy, gth, motion, self.goal_count)
             moving = self.servo.active
+            self._clear_align_locked(f"goal {g.goal_id}")
             self.servo.set_goal(g)
             self.goal_reset_id, self._goal_jumps = self.est.reset_id, self.est.jumps
             self.last_goal = {"goal_id": g.goal_id, "frame": frame, "request": {"x": x, "y": y, "theta": theta},
@@ -564,6 +636,7 @@ class PoseServoNode:
             if not self.enabled:
                 raise RequestError(409, "not enabled")
             self._end_goal("stop requested", "stopped")
+            self._clear_align_locked("stop")
             self._sync_result()
             return {"status": self.servo.status}
 
@@ -600,6 +673,7 @@ class PoseServoNode:
                 "status": "disabled" if not self.enabled else self.servo.status,
                 "enabled": self.enabled,
                 "holder": self.holder if self.enabled else None,
+                "align": self.align_state_locked(),
                 "disabled_reason": self.disabled_reason,
                 "swerve_lease_id": self.lease_id if self.enabled else None,
                 "goal": self.last_goal,
