@@ -32,6 +32,7 @@ nodes:
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d}}
   # agent_interface: Agent MoMa, the node agents use for mobile manipulation (docs/agent_interface.md). agent_nav is its frozen
-  # predecessor (docs/agent_nav.md): kept for old briefs and episodes, not maintained; start it only for those.
+  # predecessor (docs/agent_nav.md): kept for old briefs and episodes, not maintained; disabled (2026-11-12):
+  # set enabled: true (or remove it) to start it again for those.
   - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface}}
-  - {name: agent_nav, kind: agent_nav, start: {module: robot_utils.nodes.agent_nav}}
+  - {name: agent_nav, kind: agent_nav, enabled: false, start: {module: robot_utils.nodes.agent_nav}}
