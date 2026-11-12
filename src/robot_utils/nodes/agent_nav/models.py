@@ -327,7 +327,8 @@ class Moved(BaseModel):
 
 
 class PathCheck(BaseModel):
-    """Loud, advisory check of the straight move against recent snapshots. Never refuses anything."""
+    """Loud, advisory check of the straight move against the snapshot (plus any named in `also_use`). Never refuses
+    anything."""
     checked: bool = Field(description="False: no snapshot or no calibrated camera / pose (see `warnings`).")
     length_m: Optional[float] = Field(None, description="m: straight-line length.")
     turn_rad: Optional[float] = Field(None, description="rad: goal heading minus current heading.")
@@ -346,9 +347,14 @@ class PathCheck(BaseModel):
                                                                                  "(world) in the path, nearest first.")
     note: Optional[str] = Field(None, description="For a turn in place: what the check cannot see.")
     against_snapshot: Optional[str] = Field(None, description="The snapshot checked against.")
-    also_used: Optional[list[str]] = Field(None, description="Recent snapshots also used (same world frame).")
+    also_used: Optional[list[str]] = Field(None, description="The other snapshots combined (those named in `also_use`).")
+    obstacles_by_snapshot: Optional[dict[str, int]] = Field(
+        None, description="With obstacle points: how many each snapshot contributed (by snapshot id).")
     snapshot_age_s: Optional[float] = Field(None, description="s since that snapshot's capture.")
     moved_since_snapshot: Optional[Moved] = Field(None, description="Motion since that snapshot (with poses).")
+    obstacle_masks: Optional[dict[str, str]] = Field(
+        None, description="With obstacle points: per snapshot, a relative URL of its image with the counted pixels "
+                          "tinted red. Look at it: they may be the robot itself or something no longer there.")
 
 
 class Placement(BaseModel):

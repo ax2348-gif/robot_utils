@@ -127,6 +127,10 @@ class ArmAt(BaseModel):
 
 class CheckIn(PoseIn):
     snapshot: Optional[str] = Field(None, description="Check against this snapshot (default: the latest).")
+    also_use: Optional[list[str]] = Field(
+        None, description="Other snapshots of this session to combine with `snapshot` (coverage and obstacles), in the "
+                          "same world frame, e.g. to cover the blind zone from an earlier position. Default: none, only "
+                          "`snapshot`. An older view may show the arm or things where they no longer are.")
 
 
 class PlanCheckIn(CheckIn):
@@ -420,7 +424,7 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     @app.post("/plan/check", response_model=M.PlanCheckOut, response_model_exclude_unset=True, tags=["planning"], summary="Check a straight move against a snapshot (loud, advisory)")
     async def plan_check(body: PlanCheckIn, x_operator: Optional[str] = Operator):
         return await run(node.plan_check, actor(x_operator), body.frame, body.x, body.y, body.theta, body.snapshot, body.comment,
-                         None if body.arm is None else body.arm.model_dump(exclude_none=True), body.view)
+                         None if body.arm is None else body.arm.model_dump(exclude_none=True), body.view, body.also_use)
 
     @app.post("/plan/approach", response_model=M.ApproachOut, response_model_exclude_unset=True, tags=["planning"], summary="Propose a goal in front of a queried surface (moves nothing)")
     async def plan_approach(body: ApproachIn, x_operator: Optional[str] = Operator):
@@ -432,8 +436,9 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     async def goal(body: GoalIn, x_operator: Optional[str] = Operator):
         """The path is checked against the latest (or given) snapshot and the result reported loudly in
         `warnings`; the goal is executed as issued. Wait with `GET /goals/{id}/wait` in the background."""
-        opts = body.model_dump(exclude={"frame", "x", "y", "theta", "snapshot", "comment"})
-        return await run(node.goal, actor(x_operator), body.frame, body.x, body.y, body.theta, opts, body.snapshot, body.comment)
+        opts = body.model_dump(exclude={"frame", "x", "y", "theta", "snapshot", "comment", "also_use"})
+        return await run(node.goal, actor(x_operator), body.frame, body.x, body.y, body.theta, opts, body.snapshot, body.comment,
+                         body.also_use)
 
     @app.get("/goals/{gid}", response_model=M.GoalState, response_model_exclude_unset=True, tags=["motion"], summary="A goal's state")
     async def goal_state(gid: int):

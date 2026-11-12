@@ -167,8 +167,9 @@ stop reflex, goals and arm commands never use it.
 **Reading the warnings.** They are meant to be rare, so act on them:
 - `OBSTACLE`: points above the floor inside the swept footprint.
 - `tight`: under 15 cm of clearance.
-- `UNVERIFIED`: part of the swept area was not seen in any of the recent snapshots. Look from a
-  position that sees it, or move in a shorter leg.
+- `UNVERIFIED`: part of the swept area was not seen in the snapshot checked. Look from a position
+  that sees it, move in a shorter leg, or name an earlier snapshot of this session that saw it in
+  `also_use` (only views that are still true: the arm and people may have moved since).
 - `STALE`: the robot moved since that snapshot, or it is minutes old. Look again.
 - A turn in place carries a `note` instead: its corners sweep a 0.31 m radius around the base
   that the camera can't see. Make sure nothing low stands beside the robot.
@@ -242,7 +243,7 @@ then `GET /memory`. Places are lost when the estimator resets.
   The reflex and the path checks see nothing beside or behind the robot, so turn and look.
 - **Depth:** unreliable on glass, mirrors, black or shiny surfaces and thin legs or cables.
   Treat thin things you see in the image as real even when depth misses them.
-- **Snapshot age:** snapshots are kept briefly (the last 30). A snapshot from an earlier position is
+- **Snapshot age:** snapshots belong to your session (a new session starts with none) and are kept briefly (the last 30). A snapshot from an earlier position is
   still valid in its own frame, but things may have moved since.
 
 ## Reference

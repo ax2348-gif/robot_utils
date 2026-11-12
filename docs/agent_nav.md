@@ -60,8 +60,9 @@ human can watch, and take part in, the exchange on the node's page.
   - **The first park was not parallel.** The guide now has an alignment pattern with a
     measure-move-verify loop.
   - **Warning fatigue.** `STALE` now means "moved since the snapshot" (more than 0.10 m or
-    0.35 rad) or older than 5 min, instead of older than 30 s. `UNVERIFIED` combines the last 6
-    snapshots in the same world frame, and a turn in place gets a plain `note` instead of a
+    0.35 rad) or older than 5 min, instead of older than 30 s. `UNVERIFIED` combined the last 6
+    snapshots in the same world frame (since 2026-11-11: only the checked snapshot, plus those the agent names in
+    `also_use`; an older view held the raised arm and blocked every path), and a turn in place gets a plain `note` instead of a
     percentage.
   - **Enable failed when the page held pose_servo.** Enable now adopts agent_nav's own idle hold,
     re-applying the caller's caps.

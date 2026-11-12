@@ -525,3 +525,32 @@ def test_session_geometry_corrects_perception_not_motion(stack):
     post(st, "/session/geometry", {"camera": {"xyz": [0.01, 0, 0]}})
     post(st, "/session", {"agent": "Next"})                                                          # a new session starts clean
     assert get(st, "/session/geometry").json()["corrections"]["camera"]["xyz"] == [0, 0, 0]
+
+
+def test_snapshots_and_queries_belong_to_one_session(stack):
+    """A new session starts with no snapshots: its checks never combine an earlier session's views."""
+    st = stack
+    post(st, "/session", {"agent": "First"})
+    s1 = post(st, "/look").json()["snapshot"]
+    q = post(st, "/query/region", {"select": {"box": [400, 20, 700, 160]}}).json()["query"]
+    post(st, "/session", {"agent": "Second"})
+    assert post(st, "/query/region", {"select": {"point": [500, 100]}}).status_code == 409          # no snapshot yet
+    assert post(st, "/query/region", {"snapshot": s1, "select": {"point": [500, 100]}}).status_code == 404
+    assert post(st, "/plan/approach", {"query": q, "standoff": 1.0}).status_code in (404, 409, 422)
+    s2 = post(st, "/look").json()["snapshot"]
+    assert s1 == s2 == "s1"                                                     # ids start again per session
+    chk = post(st, "/plan/check", {"frame": "local", "x": 0.3}).json()["check"]
+    assert chk["against_snapshot"] == s2 and chk["also_used"] == []
+    assert get(st, "/state").json()["snapshots"] == [s2]
+    # the agent chooses which snapshots are combined
+    s3 = post(st, "/look").json()["snapshot"]
+    assert post(st, "/plan/check", {"frame": "local", "x": 0.3}).json()["check"]["also_used"] == []     # default
+    assert post(st, "/plan/check", {"frame": "local", "x": 0.3, "also_use": []}).json()["check"]["also_used"] == []
+    chk = post(st, "/plan/check", {"frame": "local", "x": 0.3, "snapshot": s2, "also_use": [s3]}).json()["check"]
+    assert chk["against_snapshot"] == s2 and chk["also_used"] == [s3]
+    assert post(st, "/plan/check", {"frame": "local", "x": 0.3, "also_use": ["s999"]}).status_code == 404
+    # obstacles are attributed to the snapshot they came from, with a mask of the counted pixels
+    chk = post(st, "/plan/check", {"frame": "local", "x": 3.3, "y": 0.3}).json()["check"]
+    assert chk["obstacle_points_in_path"] > 0 and set(chk["obstacles_by_snapshot"]) == {s3}
+    assert sum(chk["obstacles_by_snapshot"].values()) == chk["obstacle_points_in_path"]
+    assert get(st, "/" + chk["obstacle_masks"][s3]).headers["content-type"] == "image/jpeg"

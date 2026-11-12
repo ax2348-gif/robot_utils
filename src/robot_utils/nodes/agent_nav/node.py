@@ -57,7 +57,6 @@ def stopping_distance(v: float, accel: float, jerk: float, tick_s: float = 1.0 /
     is added on top of this, so a small margin still stops before what it sees."""
     return v * (tick_s + REFLEX_LATENCY) + v * v / (2 * accel) + v * accel / (2 * jerk)
 MAX_AVATAR = 64 * 1024       # bytes (data URI)
-CHECK_SNAPSHOTS = 6          # path checks also use this many recent snapshots (coverage, obstacles)
 STALE_MOVE_M = 0.10          # a snapshot is stale once the robot moved this far / turned this much since
 STALE_TURN_RAD = 0.35
 STALE_AGE_S = 300.0
@@ -292,6 +291,9 @@ class AgentNav:
             self.memory = {"notes": [], "places": {}}
             self.geom_corr = _zero_corr()
             self.goals.clear()
+            self.snapshots.clear()          # snapshots and queries belong to one session: a new session's checks
+            self.queries.clear()            # never use an earlier session's views (the arm may have moved since)
+            self._n_snap = self._n_q = self._n_zoom = 0     # and its ids start again at s1, q1, z1
             d = self._session_dir()
             with open(os.path.join(d, "session.json"), "w") as f:
                 json.dump(self.session, f)
@@ -322,6 +324,8 @@ class AgentNav:
             except OSError as e:
                 log.warning("session.json: %s", e)
             self.session = None
+            self.snapshots.clear()
+            self.queries.clear()
         return {"closed": s["id"]}
 
     def _need_session(self, actor: str):
@@ -572,11 +576,11 @@ class AgentNav:
         with self.lock:
             if sid is None:
                 if not self.snapshots:
-                    raise RequestError(409, "no snapshot yet: POST /look")
+                    raise RequestError(409, "no snapshot in this session yet: POST /look")
                 return next(reversed(self.snapshots.values()))
             s = self.snapshots.get(sid)
         if s is None:
-            raise RequestError(404, f"snapshot {sid!r} unknown or expired (the last {KEEP_SNAPSHOTS} are kept)")
+            raise RequestError(404, f"snapshot {sid!r} unknown, expired (the last {KEEP_SNAPSHOTS} are kept) or from another session")
         return s
 
     def grid_image(self, sid: str) -> bytes:
@@ -662,21 +666,35 @@ class AgentNav:
         return {"world": [round(v, 4) for v in g], "local": [round(v, 4) for v in local],
                 "from_world": [round(v, 4) for v in (cx, cy, cth)], "distance": round(math.hypot(dx, dy), 4)}
 
-    def _check(self, resolved: dict, snapshot: Optional[str]) -> tuple[dict, Optional[Snapshot]]:
-        """Path check against the given (or latest) snapshot plus the recent ones in the same world
-        frame (coverage and obstacles from all of them). STALE only when the robot moved since that
-        snapshot, or it is minutes old: agents take their time between a look and a goal."""
+    def _check(self, resolved: dict, snapshot: Optional[str],
+                also_use: Optional[list] = None) -> tuple[dict, Optional[Snapshot]]:
+        """Path check against the given (or latest) snapshot alone, or combined with the snapshots
+        ``also_use`` names (same world frame; coverage and obstacles from all of them). Never others by
+        default: an older view may hold the arm, or the scene, where it no longer is. STALE only when the
+        robot moved since that snapshot, or it is minutes old: agents take their time between a look and a
+        goal."""
         try:
             s = self.snapshot(snapshot)
         except RequestError:
             return {"checked": False, "warnings": ["UNCHECKED: no snapshot to check the path against (POST /look)"]}, None
-        with self.lock:
-            recent = [o for o in list(self.snapshots.values())[-CHECK_SNAPSHOTS:]
-                      if o is not s and o.pose is not None and o.reset_id == s.reset_id]
+        recent = []
+        if also_use:
+            for sid in also_use:
+                o = self.snapshot(sid)
+                if o is s:
+                    continue
+                if o.pose is None or o.reset_id != s.reset_id:
+                    raise RequestError(409, f"{sid} is not in {s.sid}'s world frame (no pose, or the estimator was "
+                                            "reset since): it can't be combined")
+                recent.append(o)
         chk = G.path_check(s.cloud, tuple(resolved["from_world"]), tuple(resolved["world"]),
                            others=[o.cloud for o in recent])
         chk["against_snapshot"] = s.sid
         chk["also_used"] = [o.sid for o in recent]
+        by_cloud = {id(o.cloud): o for o in [s, *recent]}
+        chk["_masks"] = [(by_cloud[id(c)], m) for c, m in chk.get("_masks", []) if id(c) in by_cloud]
+        if chk.get("checked") and chk.get("obstacle_points_in_path"):
+            chk["obstacles_by_snapshot"] = {o.sid: int(m.sum()) for o, m in chk["_masks"] if m.any()}
         age = time.monotonic() - s.t
         chk["snapshot_age_s"] = round(age, 1)
         now = self.pose_now()
@@ -701,13 +719,26 @@ class AgentNav:
         bev = self.store_image(G.bev_image(s.cloud, path=chk, goal_base=gb,
                                            label=f"{tag}: path check on {s.sid} (green clear, red blocked, grey unseen)"),
                                tag + "_bev", "png")
-        return [bev]
+        out = [bev]
+        masks = {}
+        for o, m in chk.get("_masks", []):
+            if m.any():
+                img = self.store_image(G.mask_image(o.jpeg, m, label=f"{tag}: {int(m.sum())} points of {o.sid} counted as "
+                                                                       "obstacles in the path (red)"),
+                                       f"{tag}_mask_{o.sid}", "jpg")
+                masks[o.sid] = f"images/{img}"
+                out.append(img)
+        if masks:
+            chk["obstacle_masks"] = masks
+        chk.pop("_masks", None)                     # pixel masks: only for these images (they hold the snapshots)
+        return out
 
     def plan_check(self, actor: str, frame: str, x: float, y: float, theta: float, snapshot: Optional[str] = None,
-                   comment: str = "", arm: Optional[dict] = None, view: bool = True) -> dict:
+                   comment: str = "", arm: Optional[dict] = None, view: bool = True,
+                   also_use: Optional[list] = None) -> dict:
         self._need_session(actor)
         r = self.resolve(frame, x, y, theta)
-        chk, s = self._check(r, snapshot)
+        chk, s = self._check(r, snapshot, also_use)
         tag = f"check{self.n_turn + 1}"
         imgs = self._check_images(chk, s, r, tag)
         out = {"goal": r, "check": _public(chk), "bev": f"images/{imgs[0]}" if imgs else None}
@@ -716,7 +747,8 @@ class AgentNav:
             out["robot"] = robot
             if vimg:
                 imgs.append(vimg)
-        req = {"frame": frame, "x": x, "y": y, "theta": theta, **({"arm": arm} if arm is not None else {})}
+        req = {"frame": frame, "x": x, "y": y, "theta": theta, **({"arm": arm} if arm is not None else {}),
+               **({"also_use": also_use} if also_use is not None else {})}
         self.turn(actor, "plan_check", req, out, comment, imgs,
                   level="warn" if chk.get("warnings") or (out.get("robot") or {}).get("warnings") else "info")
         return out
@@ -926,7 +958,7 @@ class AgentNav:
     # -- motion (explicit only) ---------------------------------------------------------------------
 
     def goal(self, actor: str, frame: str, x: float, y: float, theta: float, options: dict,
-             snapshot: Optional[str] = None, comment: str = "") -> dict:
+             snapshot: Optional[str] = None, comment: str = "", also_use: Optional[list] = None) -> dict:
         self._need_session(actor)
         if self.latch is not None and actor != "human":
             raise RequestError(423, f"held by the human operator ({self.latch['why']})")
@@ -939,7 +971,7 @@ class AgentNav:
         if bad:
             raise ValueError(f"unknown goal options {sorted(bad)}")
         r = self.resolve(frame, x, y, theta)
-        chk, s = self._check(r, snapshot)
+        chk, s = self._check(r, snapshot, also_use)
         lx, ly, lth = r["local"]
         body = {"frame": "local", "x": lx, "y": ly, "theta": lth, **{k: v for k, v in options.items() if v is not None}}
         ps = self._call("pose_servo", "POST", "/goal", body)

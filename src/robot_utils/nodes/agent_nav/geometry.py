@@ -469,12 +469,13 @@ def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MAR
     clouds = [c for c in [cloud, *others] if c.p_b is not None and c.pose is not None]
     if not clouds:
         return {"checked": False, "warnings": ["cannot check the path: no calibrated camera pose or no pose"]}
-    Ws = []
+    Ws, pix = [], []                     # pix: per cloud, the (H, W) mask of its obstacle pixels (in W's order)
     for c in clouds:
-        B = c.p_b[np.isfinite(c.z)]
-        ob = B[(B[:, 2] > OBST_Z[0]) & (B[:, 2] < OBST_Z[1])]
-        if len(ob):
-            Ws.append(c.to_world(ob)[:, :2])
+        P = c.p_b
+        m = np.isfinite(c.z) & (P[..., 2] > OBST_Z[0]) & (P[..., 2] < OBST_Z[1])
+        pix.append(m)
+        if m.any():
+            Ws.append(c.to_world(P[m])[:, :2])
     W = np.concatenate(Ws) if Ws else np.zeros((0, 2))
     poses = _footprints(start, goal)
     h = HALF + margin
@@ -527,7 +528,17 @@ def path_check(cloud: Cloud, start: tuple, goal: tuple, margin: float = FOOT_MAR
         d = np.hypot(unseen[:, 0] - st[0], unseen[:, 1] - st[1]) if len(unseen) else np.zeros(0)
         where = (f"within {d.max():.2f} m of the start" if len(d) and d.max() < 1.0 else "along the path")
         out["warnings"].append(f"UNVERIFIED: {100 * (1 - cov):.0f}% of the swept area ({where}) was not seen in "
-                               f"the last {len(clouds)} snapshot(s): blind zone, outside the view, or occluded")
+                               f"the {len(clouds)} snapshot(s) checked: blind zone, outside the view, or occluded "
+                               f"(`also_use` can add an earlier view of it)")
+    # per cloud: which of its pixels were counted as obstacles in the path (for masks and attribution)
+    masks, k = [], 0
+    for c, m in zip(clouds, pix):
+        n = int(m.sum())
+        mm = np.zeros_like(m)
+        mm[m] = inside[k:k + n]
+        masks.append((c, mm))
+        k += n
+    out["_masks"] = masks
     out["_poses"], out["_inside_world"], out["_unseen_world"] = poses, W[inside], S[~seen & ~own]
     return out
 
