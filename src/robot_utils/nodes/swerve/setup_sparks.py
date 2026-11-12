@@ -58,8 +58,8 @@ def drive_config() -> SparkFlexConfig:
     config.encoder.velocity_conversion_factor(c.DRIVE_MPS_PER_RPM)        # m/s per motor RPM
     loop = config.closed_loop
     loop.set_feedback_sensor(FeedbackSensor.PRIMARY_ENCODER)
-    loop.p(c.DRIVE_P).i(0).d(0)
-    loop.feed_forward.v(c.DRIVE_KV)
+    loop.p(c.DRIVE_P).i(c.DRIVE_I).d(0).i_zone(c.DRIVE_I_ZONE).i_max_accum(c.DRIVE_I_MAX_ACCUM)
+    loop.feed_forward.v(c.DRIVE_KV).s(c.DRIVE_KS)
     loop.output_range(-c.DRIVE_MAX_OUTPUT, c.DRIVE_MAX_OUTPUT)
     return config
 
