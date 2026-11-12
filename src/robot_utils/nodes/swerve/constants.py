@@ -64,17 +64,17 @@ STEER_MAX_OUTPUT = 0.3       # duty cycle (about 1.2 wheel rotations/s at the NE
 # on every new setpoint, so with a goal that changes every loop the wheels barely moved).
 DRIVE_P = 0.02               # duty per m/s; REV's template uses 0.04
 DRIVE_KV = 12.0 / DRIVE_FREE_SPEED         # V per m/s (2.25): 12 V at free speed, as REV's template
-# Low-speed friction (hand-tuned on the floor; initial values, 2026-11-11). Without them the loop gave ~1 % duty at
+# Low-speed friction (hand-tuned on the floor by teleop, 2026-11-11). Without them the loop gave ~1 % duty at
 # 0.05 m/s and never more while a wheel stood still, so the base stalled below ~0.06 m/s (e.g. slow turns in place).
 # kS: volts added in the direction of any non-zero speed command: the KINETIC friction (rolling), below the
 #     breakaway voltage (~0.15-0.2 V seen: 0.06 m/s stalls, 0.08 moves), so the base doesn't creep or lurch.
 # I: covers the rest of the breakaway while a wheel is stuck, then stays small: duty per (m/s of error x ms), as the
 #    SPARK accumulates every 1 ms; reset outside DRIVE_I_ZONE (m/s of error) and capped at DRIVE_I_MAX_ACCUM.
-#    0.05 m/s stuck for 0.3 s adds ~0.09 V. The cap (I x cap = 0.01 duty = 0.12 V) stays BELOW the breakaway: at a
-#    zero speed command kS adds nothing but a leftover accumulator still pushes, and must not move a stopped wheel.
-#    Starting: kS + the full I = 0.22 V, above the breakaway.
+#    0.05 m/s stuck for 0.3 s adds ~0.036 V. The cap (I x cap = 0.004 duty = 0.048 V) stays well BELOW the
+#    breakaway: at a zero speed command kS adds nothing but a leftover accumulator still pushes, and must not move a
+#    stopped wheel. kS + the full I = 0.148 V. (Tuning started from I 0.0005; 0.0002 worked better.)
 DRIVE_KS = 0.10              # V
-DRIVE_I = 0.0005             # duty per (m/s x ms)
+DRIVE_I = 0.0002             # duty per (m/s x ms)
 DRIVE_I_ZONE = 0.10          # m/s of error
 DRIVE_I_MAX_ACCUM = 20.0     # m/s x ms
 DRIVE_MAX_OUTPUT = 0.35      # duty cycle (about 1.8 m/s)
