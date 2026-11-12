@@ -70,14 +70,19 @@ _MODULE_FIELDS = [
     ("steer_out", "duty"), ("steer_current", "A"), ("t_steer_s0", "s"),
     ("drive_out", "duty"), ("drive_current", "A"), ("t_drive_s0", "s"),
 ]
-FIELDS: list[str] = [n for n, _ in _BASE_FIELDS] + [f"{m.name}_{n}" for m in MODULES for n, _ in _MODULE_FIELDS]
-UNITS: list[str] = [u for _, u in _BASE_FIELDS] + [u for _ in MODULES for _, u in _MODULE_FIELDS]
+_TAIL_FIELDS = [("steer_vx", "unit"), ("steer_vy", "unit"), ("steer_omega", "unit")]   # appended after the modules:
+# existing columns keep their positions
+FIELDS: list[str] = ([n for n, _ in _BASE_FIELDS] + [f"{m.name}_{n}" for m in MODULES for n, _ in _MODULE_FIELDS]
+                     + [n for n, _ in _TAIL_FIELDS])
+UNITS: list[str] = ([u for _, u in _BASE_FIELDS] + [u for _ in MODULES for _, u in _MODULE_FIELDS]
+                    + [u for _, u in _TAIL_FIELDS])
 FIELD_DOC = {
     "t_tick": "server monotonic time at the start of the control tick",
     "motors_enabled": "1 if the tick sent setpoints and an enabling heartbeat",
     "enabled": "the node's enable flag (POST /enable)",
     "lease_id": "id of the lease in force (0 = none)",
     "cmd_source": "writer of the command in force: 0 none, 1 slow (POST /command), 2 fast",
+    "steer_vx..omega": "steer-only twist in force (direction only): wheels set for it, drives coasting; NaN otherwise",
     "cmd_age": "seconds since that command was written (NaN if none)",
     "req_*": "the command as requested; cmd_* = after the soft-limit clamp, as sent (NaN when stopped)",
     "<module>_steer_angle": "wheel angle from the absolute encoder (0 = forward, CCW +), STATUS_5",
@@ -108,6 +113,7 @@ class Command:
     seq: int
     source: str
     t: float
+    steer: Optional[tuple] = None    # steer-only unit twist (vx, vy, omega): wheels set for it, drives coasting
 
 
 class CommandSlot:
@@ -117,8 +123,9 @@ class CommandSlot:
         self._lock = threading.Lock()
         self._cmd: Optional[Command] = None
 
-    def write(self, twist, seq: int = 0, source: str = "slow") -> Command:
-        cmd = Command(tuple(float(v) for v in twist), int(seq), source, time.monotonic())
+    def write(self, twist, seq: int = 0, source: str = "slow", steer=None) -> Command:
+        cmd = Command(tuple(float(v) for v in twist), int(seq), source, time.monotonic(),
+                      None if steer is None else tuple(float(v) for v in steer))
         with self._lock:
             self._cmd = cmd
         return cmd
@@ -247,16 +254,24 @@ class SwerveNode:
         self.lease.renew(token)
         self._disable("disabled")
 
-    def command(self, token: Optional[str], twist, seq: int = 0, source: str = "slow") -> dict:
-        """Write the CommandSlot (both the slow and a future fast path come through here)."""
+    def command(self, token: Optional[str], twist=None, seq: int = 0, source: str = "slow", steer=None) -> dict:
+        """Write the CommandSlot (both the slow and a future fast path come through here): a twist, or
+        ``steer``, a unit twist [vx, vy, omega] (only its direction matters): every wheel set the way it would roll
+        for it, with the drive motors off so they coast (steer-only)."""
         self.lease.renew(token)   # checks the token; any accepted command renews the lease
         if self.estop.active:
             raise RequestError(409, "e-stop is latched")
         if not self.enabled:
             raise RequestError(409, "not enabled (POST /enable)")
+        if (twist is None) == (steer is None):
+            raise RequestError(422, "give exactly one of twist or steer")
+        if steer is not None:
+            if len(steer) != 3 or not all(math.isfinite(float(v)) for v in steer) or math.hypot(*map(float, steer)) < 1e-9:
+                raise RequestError(422, "steer must be a direction: three finite numbers [vx, vy, omega], not all zero")
+            twist = (0.0, 0.0, 0.0)
         if len(twist) != 3 or not all(math.isfinite(float(v)) for v in twist):
             raise ValueError("twist must be three finite numbers [vx, vy, omega]")
-        cmd = self.slot.write(twist, seq, source)
+        cmd = self.slot.write(twist, seq, source, steer)
         applied, clamped = clamp(cmd.twist, *self.soft)
         return {"seq": cmd.seq, "applied": list(applied), "clamped": clamped,
                 "soft_limits": {"max_speed": self.soft[0], "max_omega": self.soft[1]}}
@@ -333,6 +348,10 @@ class SwerveNode:
         cmd = self.slot.read()
         if cmd is None or time.monotonic() - cmd.t > COMMAND_TIMEOUT:
             drive.stop()
+            return
+        if cmd.steer is not None:                # steer-only: wheels along the axis, drives coasting
+            drive.steer_only(*cmd.steer)
+            self._applied = (cmd, (0.0, 0.0, 0.0))
             return
         applied, _ = clamp(cmd.twist, *self.soft)
         self._wants_motion = any(v != 0.0 for v in applied)
@@ -509,6 +528,7 @@ class SwerveNode:
                 s0d["CURRENT"] if s0d.timestamp else nan,
                 s0d.timestamp or nan,
             ]
+        row += list(cmd.steer) if (cmd is not None and cmd.steer is not None) else [nan] * 3
         self.hub.publish_rows(np.array([row]), "tick")
 
     # -- state for /state and /events -----------------------------------------------------------

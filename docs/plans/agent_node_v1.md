@@ -35,8 +35,9 @@ briefs, links and episode docs keep working) and is stopped by default.
 
 ### 1. agent node (copy of agent_nav)
 
-- **Copy and rename:** package `robot_utils.nodes.agent`, service unit `robot-node-agent`, proxy path
-  `/nodes/agent/`, data directory `~/.local/share/robot_utils/agent`, own tests, title **"Agent MoMa"**
+- **Copy and rename:** package `robot_utils.nodes.agent_interface` (it is the agents' interface, not an agent),
+  service unit `robot-node-agent_interface`, proxy path `/nodes/agent_interface/`, data directory
+  `~/.local/share/robot_utils/agent_interface`, own tests, title **"Agent MoMa"**
   (MoMa = mobile manipulation; fits a landing-page tile on one row). The guide becomes the MoMa guide.
 - **One enable for the whole robot.** `POST /enable` enables the base (pose_servo lease, caps) and the
   arm (the node takes the arm lease and enables it: the arm floats under gravity compensation until a
@@ -56,8 +57,9 @@ briefs, links and episode docs keep working) and is stopped by default.
   1. From the measured TCP and the target, the horizontal direction of travel in base axes.
   2. If the horizontal travel is under the deadzone (default 0.02 m) or within the hysteresis angle
      (default 15°) of the current alignment (axis, no sign): no change.
-  3. Otherwise ask pose_servo to align the wheels to that axis with the drives coasting, wait until
-     aligned (timeout ~1 s), then forward the servo.
+  3. Otherwise ask pose_servo to align the wheels for the unit twist of that horizontal direction (a
+     translation; the swerve takes any unit twist) with the drives coasting, wait until aligned (timeout ~1 s),
+     then forward the servo.
   4. If the base was left out of the enable (`"base": false`), alignment is skipped and the reply says so.
 
   The human toggle "force defensive alignment" (human-only, as `/reflex` today) makes it apply even when
@@ -104,11 +106,11 @@ briefs, links and episode docs keep working) and is stopped by default.
 
 ### 3. pose_servo and swerve
 
-- **swerve: steer-only mode.** A command that points each wheel at an angle with the drive motors
-  left out of the heartbeat (disabled, so they coast in coast idle mode). Same lease rules as other
-  commands.
-- **pose_servo: `POST /align {angle}`** (holder only, only when no goal is running): steer-only at that
-  axis until the next goal or `stop`; reports when aligned. A goal ends the alignment. Off when pose_servo
+- **swerve: steer-only mode.** `POST /command {"steer": [vx, vy, omega]}`: a unit twist (only its direction
+  matters); each wheel is set the way it would roll for it, with the drive motors left out of the heartbeat
+  (disabled, so they coast in coast idle mode). Same lease rules and 0.25 s hold as a twist.
+- **pose_servo: `POST /align {twist}`** (holder only, only when no goal is running): steer-only for that unit
+  twist until the next goal or `stop`; reports when aligned. A goal ends the alignment. Off when pose_servo
   isn't enabled.
 
 ## Open decisions

@@ -1,6 +1,6 @@
 """agent core: the agent <-> robot boundary (no web code).
 
-Principles (docs/agent.md):
+Principles (docs/agent_interface.md):
 - Perception and planning calls are READ-ONLY: they return data, proposals and overlay images.
 - Motion happens only when the agent (or a human on the page) explicitly issues a goal / stop.
   No call ingests perception and moves the base on its own.
@@ -36,9 +36,9 @@ from ..common.server import EventLog
 from ..estimator.node import Upstream
 from . import geometry as G
 
-log = logging.getLogger("agent")
+log = logging.getLogger("agent_interface")
 
-DATA_DIR = os.path.expanduser("~/.local/share/robot_utils/agent")
+DATA_DIR = os.path.expanduser("~/.local/share/robot_utils/agent_interface")
 KEEP_SNAPSHOTS = 30          # full-resolution snapshots kept in memory (thumbnails are stored)
 KEEP_IMAGES = 200            # rendered overlay images kept in memory
 KEEP_LOG = 1000              # dialogue turns kept in memory (all are in the session's log.jsonl)
@@ -174,7 +174,7 @@ class AgentNav:
             self.est.start()
         for t in self._threads:
             t.start()
-        self.events.add("agent started")
+        self.events.add("agent_interface started")
 
     def close(self):
         self.stop_ev.set()
@@ -351,13 +351,13 @@ class AgentNav:
         adopted = None
         if ps.get("enabled"):
             holder = ps.get("holder") or ""
-            if not holder.startswith("agent: "):
-                raise RequestError(409, f"pose_servo is enabled by {holder!r} (not agent): they must disable it first")
+            if not holder.startswith("agent_interface: "):
+                raise RequestError(409, f"pose_servo is enabled by {holder!r} (not agent_interface): they must disable it first")
             if ps.get("status") not in ("idle", "holding"):
                 raise RequestError(409, f"pose_servo is {ps.get('status')} under {holder!r}: stop it first")
             self._call("pose_servo", "POST", "/disable", {})     # idle: re-enable with this caller's caps
             adopted = holder
-        out = self._call("pose_servo", "POST", "/enable", {"client": f"agent: {name}",
+        out = self._call("pose_servo", "POST", "/enable", {"client": f"agent_interface: {name}",
                                                            "config": {**cfg, "require_imu": self.require_imu}}, timeout=8)
         with self.lock:
             self.enabled_by, self.caps = actor, cfg
@@ -1223,7 +1223,7 @@ class AgentNav:
         if not hasattr(self, "_locks"):
             self._locks = LockStore()
         sw = (self._ps_status or {}).get("swerve") or {}
-        return {**lock_state(self._locks, chock={"swerve", "pose_servo", "arm", "agent"}, cover={"camera"}),
+        return {**lock_state(self._locks, chock={"swerve", "pose_servo", "arm", "agent_interface"}, cover={"camera"}),
                 "estop": {"latched": bool(sw.get("estop")), "source": "swerve" if sw.get("estop") else None, "reason": None}}
 
     def state(self) -> dict:

@@ -84,6 +84,10 @@ class SwerveClient(NodeClient):
         """One twist (holds 0.25 s). ``seq`` is optional, for debugging (echoed as cmd_seq)."""
         return self.post("/command", {"twist": [vx, vy, omega], "seq": seq})
 
+    def steer(self, vx: float, vy: float, omega: float, seq: int = 0) -> dict:
+        """Steer-only (holds 0.25 s): wheels set for the unit twist (vx, vy, omega), drive motors off (coasting)."""
+        return self.post("/command", {"steer": [vx, vy, omega], "seq": seq})
+
     def drive_for(self, twist, seconds: float, rate: float = 20.0) -> None:
         """Hold a twist for ``seconds`` by resending it at ``rate`` Hz, then send zero."""
         end = time.monotonic() + seconds

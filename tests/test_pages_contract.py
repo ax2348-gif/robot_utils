@@ -29,7 +29,7 @@ PAGES = {
     "swerve": lambda: node_page("swerve"),
     "pose_servo": lambda: node_page("pose_servo"),
     "agent_nav": lambda: node_page("agent_nav"),
-    "agent": lambda: node_page("agent"),
+    "agent_interface": lambda: node_page("agent_interface"),
     "description": lambda: node_page("description"),
     "camera": lambda: node_page("orbbec"),
     "estimator": lambda: node_page("estimator"),

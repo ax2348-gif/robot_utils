@@ -1,7 +1,7 @@
 # agent_nav: driving the robot as an agent
 
 > **Frozen.** This node is kept as it is for older briefs and episodes and is no longer developed. New work
-> uses Agent MoMa at `/nodes/agent/` (its own `GET /guide.md`).
+> uses Agent MoMa at `/nodes/agent_interface/` (its own `GET /guide.md`).
 
 You are about to drive a real robot: a swerve-drive base with an RGB-D camera, in a room with
 people and things. This guide is all you need. Every call is plain HTTP + JSON. `N` below is

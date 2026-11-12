@@ -25,7 +25,7 @@ def page_html(f: str) -> str:
 
 
 LAYOUT_PAGES = {"nodes/swerve/page.py": "swerve", "nodes/pose_servo/page.py": "pose_servo",
-                "nodes/agent_nav/page.py": "agent_nav", "nodes/agent/page.py": "agent", "nodes/description/page.py": "description",
+                "nodes/agent_nav/page.py": "agent_nav", "nodes/agent_interface/page.py": "agent_interface", "nodes/description/page.py": "description",
                 "nodes/estimator/page.py": "estimator", "nodes/perception3d/page.py": "perception3d",
                 "nodes/orbbec/page.py": "camera", "nodes/power/page.py": "power", "nodes/arm/page.py": "arm",
                 "frontend/page.html": "landing"}
@@ -56,7 +56,7 @@ def test_tools_name_their_page(tool):
 
 def test_estop_lives_in_the_header():
     """Every node page with an e-stop puts it in the header row, so it is above the fold on a phone."""
-    for f in ["nodes/swerve/page.py", "nodes/pose_servo/page.py", "nodes/agent_nav/page.py", "nodes/agent/page.py", "nodes/description/page.py",
+    for f in ["nodes/swerve/page.py", "nodes/pose_servo/page.py", "nodes/agent_nav/page.py", "nodes/agent_interface/page.py", "nodes/description/page.py",
               "nodes/arm/page.py"]:
         s = page_html(f)
         head = s[s.index("ru-head"):]

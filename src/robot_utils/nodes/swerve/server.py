@@ -46,8 +46,14 @@ class LeaseOut(BaseModel):
 
 
 class CommandIn(BaseModel):
-    twist: list[float] = Field(min_length=3, max_length=3,
-                               description="[vx m/s forward, vy m/s left, omega rad/s CCW], robot frame.")
+    twist: Optional[list[float]] = Field(None, min_length=3, max_length=3,
+                                         description="[vx m/s forward, vy m/s left, omega rad/s CCW], robot frame.")
+    steer: Optional[list[float]] = Field(None, min_length=3, max_length=3,
+                                         description="Instead of a twist: a unit twist [vx, vy, omega] (only its direction "
+                                                     "matters). Every wheel is set the way it would roll for it (each takes "
+                                                     "the nearer direction along that line) with the drive motors off, so they "
+                                                     "coast and the base rolls freely along that twist if pushed (steer-only). "
+                                                     "Holds 0.25 s like a twist.")
     seq: int = Field(0, description="Optional, for debugging only: echoed in the stream (`cmd_seq`). "
                                     "Never used for ordering or rejection; leave it 0 if you don't need it.")
     model_config = ConfigDict(json_schema_extra={"examples": [{"twist": [0.2, 0.0, 0.0]},
@@ -176,6 +182,9 @@ _TELEMETRY_DOC = {
     "lease_id": "id of the lease in force (0 = none)",
     "cmd_seq": "`seq` of the command in the slot (0 = none)",
     "cmd_source": "writer of the command in the slot: 0 none, 1 slow (POST /command), 2 fast",
+    "steer_vx": "steer-only twist in force, vx (direction only): wheels set for it, drive motors off (coasting); NaN otherwise",
+    "steer_vy": "steer-only twist in force, vy (direction only); NaN otherwise",
+    "steer_omega": "steer-only twist in force, omega (direction only); NaN otherwise",
     "cmd_age": "t_tick minus the time the command was written; null if none",
     "req_vx": "requested forward speed, robot frame; null if no command",
     "req_vy": "requested left speed, robot frame; null if no command",
@@ -346,7 +355,7 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     async def command(body: CommandIn, token: LeaseToken = None):
         """The slow path: one command per request. It writes the same latest-command slot a future
         streaming fast path will write; the control tick applies whatever was written last."""
-        return node.command(token, body.twist, body.seq, source="slow")
+        return node.command(token, body.twist, body.seq, source="slow", steer=body.steer)
 
     @app.get("/limits", response_model=Limits, tags=["control"], summary="Hard and soft limits")
     async def get_limits():

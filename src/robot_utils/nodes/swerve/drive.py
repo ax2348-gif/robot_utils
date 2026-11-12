@@ -99,6 +99,15 @@ class SwerveDrive:
         """
         self._set_command("wheels", angle, max(-MAX_WHEEL_SPEED, min(MAX_WHEEL_SPEED, speed)))
 
+    def steer_only(self, vx: float, vy: float, omega: float) -> None:
+        """Point every wheel the way it would roll for the twist (vx, vy, omega) (only its direction matters: a unit
+        twist; each wheel takes whichever direction along that line is nearer its heading) with the drive motors
+        left disabled, so they coast (idle mode coast): pushed along that twist, the base rolls freely. Holds for
+        COMMAND_TIMEOUT seconds."""
+        if math.hypot(vx, vy, omega) < 1e-9:
+            raise ValueError("a steer-only twist needs a direction (not all zero)")
+        self._set_command("steer", vx, vy, omega)
+
     def _set_command(self, kind: str, *values: float) -> None:
         if not all(math.isfinite(v) for v in values):
             raise ValueError("command values must be finite")
@@ -201,7 +210,7 @@ class SwerveDrive:
                 else:
                     enabled = True
                     kind, values = command
-                    if kind == "twist":
+                    if kind in ("twist", "steer"):
                         velocities = wheel_velocities(*values)
                     enabled_ids = []
                     for i, m in enumerate(MODULES):
@@ -214,6 +223,16 @@ class SwerveDrive:
                             drive.set_setpoint(0.0, ControlType.VELOCITY)
                             continue
                         heading = self.wheel_angle(reading, i)
+                        if kind == "steer":   # steering only; the drive is left out of the heartbeat (coasts)
+                            wx, wy = velocities[i]
+                            angle = math.atan2(wy, wx) if math.hypot(wx, wy) > 1e-12 else heading
+                            if abs(wrap_angle(angle - heading)) > math.pi / 2:
+                                angle = wrap_angle(angle + math.pi)
+                            target = (angle / (2 * math.pi) + m.steer_offset) % 1.0
+                            self.steers[i].get_closed_loop_controller().set_setpoint(target, ControlType.POSITION)
+                            setpoints[i] = (angle, math.nan)
+                            enabled_ids.append(m.steer_id)
+                            continue
                         if kind == "twist":
                             angle, speed = module_command(*velocities[i], heading)
                         else:  # "wheels": exactly this angle (bench tests)

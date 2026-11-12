@@ -62,7 +62,7 @@ def test_routes(tmp_path):
         assert c.get("/themes/..%2Fpage.css").status_code == 404
 
 
-PAGE_FILES = ["nodes/swerve/page.py", "nodes/pose_servo/page.py", "nodes/agent_nav/page.py", "nodes/agent/page.py", "nodes/description/page.py",
+PAGE_FILES = ["nodes/swerve/page.py", "nodes/pose_servo/page.py", "nodes/agent_nav/page.py", "nodes/agent_interface/page.py", "nodes/description/page.py",
               "nodes/estimator/page.py", "nodes/perception3d/page.py", "nodes/orbbec/page.py", "nodes/power/page.py",
               "frontend/page.html", "frontend/tools/swerve_teleop.html", "frontend/tools/remote_teleop.html"]
 

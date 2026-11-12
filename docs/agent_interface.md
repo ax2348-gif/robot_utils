@@ -1,4 +1,4 @@
-# Agent MoMa node (`agent`)
+# Agent MoMa node (`agent_interface`)
 
 Started on 2026-11-11 as a copy of agent_nav (docs/agent_nav.md, now frozen). Everything below
 was agent_nav's design and applies here; the MoMa additions (arm through this node, defensive wheel
@@ -6,16 +6,16 @@ alignment, reflex force / opt-in, `since_last_call` events) are planned in docs/
 will be documented here as they land.
 
 
-`python -m robot_utils.nodes.agent` is the boundary between an AI agent and the robot. The agent
+`python -m robot_utils.nodes.agent_interface` is the boundary between an AI agent and the robot. The agent
 looks, measures and plans through read-only calls, and moves the base only with explicit goals. A
 human can watch, and take part in, the exchange on the node's page.
 
-- **For agents:** `GET http://<robot>/nodes/agent/guide.md` is the whole briefing. Its
-  source is `src/robot_utils/nodes/agent/guide.md`. Give an agent that URL before a
+- **For agents:** `GET http://<robot>/nodes/agent_interface/guide.md` is the whole briefing. Its
+  source is `src/robot_utils/nodes/agent_interface/guide.md`. Give an agent that URL before a
   session; no agent-specific wrapper is needed.
-- Page: `http://<robot>/nodes/agent/`: the dialogue, the live view (image + BEV), controls, a
+- Page: `http://<robot>/nodes/agent_interface/`: the dialogue, the live view (image + BEV), controls, a
   command line for humans.
-- API docs: `http://<robot>/nodes/agent/docs`
+- API docs: `http://<robot>/nodes/agent_interface/docs`
 
 ## Principles (agreed 2026-11-08)
 
@@ -223,7 +223,7 @@ skip the last two), `--profile cautious|normal`,
 
 ## Simulation
 
-`robot_utils.nodes.agent.sim` holds a synthetic scene: floor, vertical rectangles (whiteboard)
+`robot_utils.nodes.agent_interface.sim` holds a synthetic scene: floor, vertical rectangles (whiteboard)
 and boxes in the world frame, rendered through the robot's real colour calibration and camera
 mount. It also has `fake_perception_app(scene, pose_fn)`, which serves `/calibration` and `/frame`
 like 3d_perception. tests/test_agent.py runs the whole stack on it: swerve sim, estimator

@@ -13,9 +13,9 @@ import numpy as np
 import pytest
 import uvicorn
 
-from robot_utils.nodes.agent import chat
-from robot_utils.nodes.agent import geometry as G
-from robot_utils.nodes.agent.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_perception_app
+from robot_utils.nodes.agent_interface import chat
+from robot_utils.nodes.agent_interface import geometry as G
+from robot_utils.nodes.agent_interface.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_perception_app
 
 CAM = G.Camera.from_calibration(CALIBRATION)
 T_BC = np.array(CALIBRATION["base_to_color"])
@@ -130,8 +130,8 @@ def serve(app):
 
 @pytest.fixture
 def stack(tmp_path, request):
-    from robot_utils.nodes.agent.node import AgentNav
-    from robot_utils.nodes.agent.server import create_app as nav_app
+    from robot_utils.nodes.agent_interface.node import AgentNav
+    from robot_utils.nodes.agent_interface.server import create_app as nav_app
     from robot_utils.nodes.estimator.node import EstimatorNode
     from robot_utils.nodes.estimator.server import create_app as est_app
     from robot_utils.nodes.pose_servo.node import PoseServoNode
@@ -324,7 +324,7 @@ def test_page_meta_and_refusals(stack):
     page = get(st, "/").text
     assert 'src="common/ui.js"' in page and 'api("/' not in page and "innerHTML = r" not in page
     meta = get(st, "/meta").json()
-    assert meta["name"] == "agent" and meta["guide"] == "guide.md"
+    assert meta["name"] == "agent_interface" and meta["guide"] == "guide.md"
     post(st, "/session", {"agent": "T"})
     assert post(st, "/query/plane", {"select": {"box": [0, 0, 10, 10]}}).status_code == 409   # no snapshot yet
     post(st, "/look")

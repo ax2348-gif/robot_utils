@@ -15,7 +15,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
-from robot_utils.nodes.agent.sim import demo_scene, fake_perception_app
+from robot_utils.nodes.agent_interface.sim import demo_scene, fake_perception_app
 
 NON_JSON = {"/guide.md", "/events", "/sessions/{sid}/export.zip", "/sessions/{sid}/log.jsonl",
             "/sessions/{sid}/thumbs/{fn}", "/images/{name}", "/images/{sid}/grid.jpg"}
@@ -69,8 +69,8 @@ def same(a, b, path="$"):
 @pytest.fixture
 def api(monkeypatch, tmp_path):
     """(call, nav, routes): ``call(method, path, ...)`` returns the response JSON after checking it."""
-    from robot_utils.nodes.agent.node import AgentNav
-    from robot_utils.nodes.agent.server import create_app
+    from robot_utils.nodes.agent_interface.node import AgentNav
+    from robot_utils.nodes.agent_interface.server import create_app
     from robot_utils.nodes.estimator.node import EstimatorNode
     from robot_utils.nodes.estimator.server import create_app as est_app
     from robot_utils.nodes.pose_servo.node import PoseServoNode
@@ -225,8 +225,8 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
 
 
 def test_openapi_documents_shapes_and_media_types(tmp_path):
-    from robot_utils.nodes.agent.node import AgentNav
-    from robot_utils.nodes.agent.server import create_app
+    from robot_utils.nodes.agent_interface.node import AgentNav
+    from robot_utils.nodes.agent_interface.server import create_app
     spec = create_app(AgentNav(None, None, None, str(tmp_path), description=None), start=False).openapi()
     ok = {(m.upper(), p): op["responses"]["200"] for p, ops in spec["paths"].items() for m, op in ops.items()}
     media = {p: set(r["content"]) for (m, p), r in ok.items() if p in NON_JSON}

@@ -1,6 +1,6 @@
 # agent_nav node
 
-> **Frozen (2026-11-11).** Superseded by Agent MoMa (`agent`, docs/agent.md); kept as it is for older briefs
+> **Frozen (2026-11-11).** Superseded by Agent MoMa (`agent_interface`, docs/agent_interface.md); kept as it is for older briefs
 > and episodes, not maintained.
 
 `python -m robot_utils.nodes.agent_nav` is the boundary between an AI agent and the robot. The agent

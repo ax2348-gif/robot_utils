@@ -2,7 +2,7 @@
 
 You are about to drive a real robot: a swerve-drive base with an RGB-D camera, in a room with
 people and things. This guide is all you need. Every call is plain HTTP + JSON. `N` below is
-this node's base URL, e.g. `http://botcore/nodes/agent` (all paths in replies are relative to it).
+this node's base URL, e.g. `http://botcore/nodes/agent_interface` (all paths in replies are relative to it).
 
 An arm stands on the base's front-right corner. You move it through the arm node
 (`http://botcore/nodes/arm`, its own `/docs`), not here; its `GET /geometry` says where its
@@ -41,7 +41,7 @@ as an obstacle for the stop reflex (keep a carried object behind the bumper whil
 ## Workflow
 
 ```bash
-N=http://botcore/nodes/agent
+N=http://botcore/nodes/agent_interface
 curl -s $N/guide.md                                                    # this file
 curl -s -X POST $N/session -H 'content-type: application/json' -d '{"agent": "Claude", "avatar": "🦉"}'
 curl -s -X POST $N/enable  -H 'content-type: application/json' -d '{"comment": "starting the task"}'

@@ -87,6 +87,37 @@ def test_lease_enable_command_drives_and_is_echoed(node_url):
         assert b.get("/state")["lease"] == {"held": True, "holder": "alice", "lease_id": 1, "expires_in": pytest.approx(1.0, abs=0.3)}
 
 
+def test_steer_only_holds_the_wheels_on_an_axis_with_the_drives_off(node_url):
+    """Steer-only: steering enabled and set the way each wheel would roll for the unit twist (either direction
+    along that line), drive motors left disabled (they coast); the stream shows the twist; a twist drives again."""
+    url, node, sims = node_url
+    with SwerveClient(url) as a:
+        a.acquire("aligner")
+        a.enable()
+        for steer, want in (((math.cos(0.5), math.sin(0.5), 0.0), lambda m: 0.5),          # a translation: all at 0.5 rad
+                            ((0.0, 0.0, 1.0), lambda m: math.atan2(m.x, -m.y))):           # a turn in place: tangent
+            for _ in range(60):
+                a.steer(*steer)
+                time.sleep(0.02)
+            wait_for(lambda: all(sims[m.steer_id].enabled for m in c.MODULES))
+            assert not any(sims[m.drive_id].enabled for m in c.MODULES)
+            row = latest(node)
+            assert [row["steer_vx"], row["steer_vy"], row["steer_omega"]] == pytest.approx(list(steer))
+            for m in c.MODULES:
+                sp, w = row[f"{m.name}_steer_sp"], want(m)
+                assert min(abs(math.remainder(sp - w, 2 * math.pi)), abs(math.remainder(sp - w - math.pi, 2 * math.pi))) < 1e-6
+                assert math.isnan(row[f"{m.name}_drive_sp"])
+        for bad in ({"twist": [0.1, 0, 0], "steer": [1, 0, 0]}, {"steer": [0, 0, 0]}):
+            with pytest.raises(NodeError) as e:
+                a.post("/command", bad)
+            assert e.value.status == 422
+        for _ in range(10):
+            a.command(0.2, 0.0, 0.0)
+            time.sleep(0.02)
+        wait_for(lambda: all(sims[m.drive_id].enabled for m in c.MODULES))
+        assert math.isnan(latest(node)["steer_vx"])
+
+
 def test_soft_limits_clamp_and_reset_with_the_lease(node_url):
     url, node, _ = node_url
     with SwerveClient(url) as a:

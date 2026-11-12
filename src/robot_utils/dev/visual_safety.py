@@ -39,7 +39,7 @@ PAGES = [
     Page("pose_servo", "/nodes/pose_servo/", estop="#estop button.ru-estop"),
     Page("description", "/nodes/description/", estop="#estop button.ru-estop"),
     Page("agent_nav", "/nodes/agent_nav/", estop="#estop button.ru-estop"),
-    Page("agent", "/nodes/agent/", estop="#estop button.ru-estop"),
+    Page("agent_interface", "/nodes/agent_interface/", estop="#estop button.ru-estop"),
     Page("arm", "/nodes/arm/", estop="#estop button.ru-estop"),
     Page("estimator", "/nodes/estimator/"),
     Page("camera", "/nodes/camera/"),

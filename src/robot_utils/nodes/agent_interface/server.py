@@ -1,4 +1,4 @@
-"""HTTP API of agent (FastAPI). Guide for agents: GET /guide.md (docs/agent.md)."""
+"""HTTP API of agent (FastAPI). Guide for agents: GET /guide.md (docs/agent_interface.md)."""
 from __future__ import annotations
 
 import asyncio
@@ -260,7 +260,7 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
         node.close()
 
     app = FastAPI(
-        title="agent",
+        title="agent_interface",
         description=(
             "Navigation for agents. **Read `GET /guide.md` first.**\n\n"
             "Perception and planning calls are read-only and return data, proposals and overlay images. "
@@ -274,8 +274,8 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     async def _value_error(request: Request, exc: ValueError):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-    add_base_routes(app, lambda: {"node": "agent", "session": (node.session or {}).get("agent")})
-    add_page_routes(app, node_meta("agent", "Agent MoMa", __version__, "agent", actuated=True,
+    add_base_routes(app, lambda: {"node": "agent_interface", "session": (node.session or {}).get("agent")})
+    add_page_routes(app, node_meta("agent_interface", "Agent MoMa", __version__, "agent_interface", actuated=True,
                                    guide="guide.md"))
 
     def actor(op: Optional[str]) -> str:
@@ -560,6 +560,6 @@ def _safe_path(root: str, *parts: str) -> str:
 
 
 try:
-    GUIDE = resources.files("robot_utils.nodes.agent").joinpath("guide.md").read_text()
+    GUIDE = resources.files("robot_utils.nodes.agent_interface").joinpath("guide.md").read_text()
 except Exception:   # source checkout without package data
     GUIDE = "# agent\n\nguide.md missing from the package"

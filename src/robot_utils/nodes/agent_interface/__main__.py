@@ -1,7 +1,7 @@
-"""python -m robot_utils.nodes.agent [--name agent] [--pose-servo NAME|URL] [--perception NAME|URL]
+"""python -m robot_utils.nodes.agent_interface [--name agent] [--pose-servo NAME|URL] [--perception NAME|URL]
                                        [--estimator NAME|URL] [--profile cautious|normal] [--data-dir DIR]
 
-The agent <-> robot boundary (docs/agent.md; agents read GET /guide.md). Read-only perception and
+The agent <-> robot boundary (docs/agent_interface.md; agents read GET /guide.md). Read-only perception and
 planning; motion only by explicit goals through pose_servo; a stop-only reflex; a dialogue transcript.
 """
 import argparse
@@ -19,9 +19,9 @@ def main() -> None:
     p.add_argument("--arm", default="arm", help="arm node, for the robot drawn by /plan/check ('none' to skip)")
     p.add_argument("--profile", default="cautious", choices=["cautious", "normal"])
     p.add_argument("--no-require-imu", action="store_true", help="allow goals without IMU heading (simulation)")
-    p.add_argument("--data-dir", default=None, help="transcripts (default ~/.local/share/robot_utils/agent)")
+    p.add_argument("--data-dir", default=None, help="transcripts (default ~/.local/share/robot_utils/agent_interface)")
     p.add_argument("-v", "--verbose", action="store_true")
-    add_serve_args(p, "agent")
+    add_serve_args(p, "agent_interface")
     a = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")

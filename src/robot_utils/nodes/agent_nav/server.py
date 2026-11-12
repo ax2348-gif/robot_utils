@@ -277,7 +277,7 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     add_base_routes(app, lambda: {"node": "agent_nav", "session": (node.session or {}).get("agent")})
     add_page_routes(app, node_meta("agent_nav", "Agent navigation", __version__, "agent_nav", actuated=True,
                                    guide="guide.md",
-                                   frozen="superseded by agent (Agent MoMa, /nodes/agent/); kept as it is for old briefs and "
+                                   frozen="superseded by agent_interface (Agent MoMa, /nodes/agent_interface/); kept as it is for old briefs and "
                                           "episodes, not maintained"))
 
     def actor(op: Optional[str]) -> str:
