@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..common.server import (EStopCleared, EStopState, EStopTriggered, Event, LeaseToken, LockOut, add_base_routes,
                              add_page_routes, node_meta, rows_stream, setup_app, sse)
+from ..common.realtime import RealtimeOut
 from .constants import COMMAND_TIMEOUT, MODULES
 from .node import (AUTO_INTERVAL_S, AUTO_STILL_S, FIELD_DOC, FIELDS, HARD_MAX_OMEGA, HARD_MAX_SPEED, LEASE_HEARTBEAT,
                    REBASE_STILL_S, UNITS, SwerveNode)
@@ -243,6 +244,7 @@ class SwerveState(BaseModel):
     lease_heartbeat: float = Field(description="s without a renew or command before the lease lapses.")
     loop_hz: Optional[float] = Field(description="Control tick rate measured over the last ~100 ticks (Hz); null "
                                                  "while there are too few.")
+    realtime: RealtimeOut = Field(description="How the drive loop's thread is scheduled.")
     clients: int = Field(description="Open /stream subscribers.")
     encoders: Encoders
     events: list[Event] = Field(description="Latest node events (up to 20), oldest first.")

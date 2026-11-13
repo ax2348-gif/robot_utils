@@ -29,6 +29,7 @@ import numpy as np
 from ..common.hub import RowHub
 from ..common.lease import RequestError
 from ..common.server import EventLog
+from ..common import realtime
 from ..estimator.node import Upstream
 from ..swerve.client import SwerveClient
 from ..swerve.constants import MODULES
@@ -199,6 +200,7 @@ class PoseServoNode:
         self._last_renew = 0.0
         self._prev_sent = Cmd()
         self._tick_times: list = []
+        self.realtime = realtime.not_started(realtime.PRIO_CONTROL)   # set by the control thread
         self._threads = [threading.Thread(target=self._read, name="in", daemon=True),
                          threading.Thread(target=self._control, name="control", daemon=True)]
 
@@ -293,6 +295,8 @@ class PoseServoNode:
     # -- control thread -----------------------------------------------------------------------
 
     def _control(self):
+        self.realtime = realtime.make_realtime(realtime.PRIO_CONTROL, "pose servo control loop")
+        self.events.add(realtime.describe(self.realtime), "info" if self.realtime["error"] is None else "warn")
         nxt = time.monotonic()
         while not self.stop_ev.is_set():
             nxt += PERIOD
@@ -685,6 +689,7 @@ class PoseServoNode:
                 "inputs": {k: u.status() for k, u in self.inputs.items()},
                 "violations": self.servo.violations,
                 "loop_hz": None if rate is None else round(rate, 1),
+                "realtime": dict(self.realtime),
                 "latest": latest,
                 "events": self.events.list()[-30:],
             }

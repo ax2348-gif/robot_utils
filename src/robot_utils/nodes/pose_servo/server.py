@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..common.server import (Event, LockOut, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app,
                              sse)
+from ..common.realtime import RealtimeOut
 from ..estimator.server import UpstreamStatus
 from . import __version__
 from .node import FIELD_DOC, FIELDS, PERIOD, UNITS, PoseServoNode
@@ -285,6 +286,7 @@ class ServoState(BaseModel):
     violations: int = Field(description="Control steps that broke a constraint (expected 0 always).")
     loop_hz: Optional[float] = Field(description="Control tick rate over the last ~100 ticks (Hz, 0.1 resolution); "
                                                  "null while there are too few.")
+    realtime: RealtimeOut = Field(description="How the control loop's thread is scheduled.")
     latest: Optional[ServoTick] = Field(description="The last tick's row; null before the first tick.")
     events: list[Event] = Field(description="Latest node events (up to 30), oldest first.")
 

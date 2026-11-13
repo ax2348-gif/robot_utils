@@ -46,6 +46,7 @@ from ..common.estop import EStop, EStopInfo
 from ..common.hub import RowHub
 from ..common.lease import Lease, RequestError
 from ..common.locks import LockStore, describe as describe_locks
+from ..common import realtime
 from ..common.server import EventLog
 from .constants import COMMAND_TIMEOUT, MODULES
 from .drive import SwerveDrive
@@ -163,6 +164,7 @@ class SwerveNode:
         self.lease = Lease(LEASE_HEARTBEAT, on_end=self._lease_ended)
         self.estop = EStop(on_trigger=self._estop_triggered)
         self.drive: Optional[SwerveDrive] = None
+        self._rt_reported = False      # the drive loop's scheduling was put in the event log
         self.drive_error: Optional[str] = None
         self.enabled = False
         self.soft = (HARD_MAX_SPEED, HARD_MAX_OMEGA)
@@ -189,6 +191,7 @@ class SwerveNode:
             self.drive = SwerveDrive(self.interface, pre_tick=self._pre_tick, on_tick=self._on_tick)
             self.drive_error = None
             self.events.add(f"drive started on {self.interface}")
+            self._rt_reported = False
         except Exception as e:
             self.drive, self.drive_error = None, f"{type(e).__name__}: {e}"
             self.events.add(f"drive failed to start: {self.drive_error}", "error")
@@ -533,6 +536,16 @@ class SwerveNode:
 
     # -- state for /state and /events -----------------------------------------------------------
 
+    def _realtime(self) -> dict:
+        """The drive loop's scheduling (and, once, an event saying whether it is real time)."""
+        if self.drive is None:
+            return realtime.not_started(realtime.PRIO_BUS)
+        rt = dict(self.drive.realtime)
+        if not self._rt_reported and (rt["policy"] == "SCHED_FIFO" or rt["error"] is not None):
+            self._rt_reported = True       # before the event: adding one rebuilds the state
+            self.events.add(realtime.describe(rt), "info" if rt["error"] is None else "warn")
+        return rt
+
     def state(self) -> dict:
         info, e = self.lease.info, self.estop.info
         cmd = self.slot.read()
@@ -561,6 +574,7 @@ class SwerveNode:
             "command_timeout": COMMAND_TIMEOUT,
             "lease_heartbeat": LEASE_HEARTBEAT,
             "loop_hz": None if rate is None else round(rate, 1),
+            "realtime": self._realtime(),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],
             "encoders": self.encoders(),

@@ -32,6 +32,7 @@ import time
 from sparkcan import ControlType, PeriodicFrame, SparkFlex
 from sparkcan.protocol import to_slcan
 
+from ..common import realtime
 from .constants import COMMAND_TIMEOUT, MAX_WHEEL_SPEED, MODULES
 from .kinematics import (MIN_SPEED, module_command, robot_twist,  # noqa: F401 (re-exported)
                          wheel_velocities, wrap_angle)
@@ -78,6 +79,7 @@ class SwerveDrive:
         # CANable each serial write costs about 0.6 ms (one USB transfer), so 9 separate writes
         # took most of the 10 ms tick (measured: tick body 6 ms -> 1 ms).
         self._batch = None
+        self.realtime = realtime.not_started(realtime.PRIO_BUS)   # set by the loop's thread
         self.bus.send = self._send
         self.error = None   # set if the control loop stopped on an exception
         self._lock = threading.Lock()
@@ -191,6 +193,7 @@ class SwerveDrive:
         raise RuntimeError(f"{MODULES[i].name}: no steering encoder reading (run python -m robot_utils.nodes.swerve.setup_sparks?)")
 
     def _loop(self) -> None:
+        self.realtime = realtime.make_realtime(realtime.PRIO_BUS, "swerve control loop")
         enabled = False
         deadline = time.monotonic()
         nan = (math.nan, math.nan)

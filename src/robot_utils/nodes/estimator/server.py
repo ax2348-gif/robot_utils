@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..common.lease import RequestError
+from ..common.realtime import RealtimeOut
 from ..common.server import Event, add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
 from ..swerve.constants import MODULES
 from . import __version__
@@ -72,6 +73,7 @@ class EstimatorState(BaseModel):
     pose: Optional[EstimatorPose] = Field(description="The latest pose; null before the first.")
     rate_hz: Optional[float] = Field(description="Poses published per second over the last ~200 (0.1 Hz "
                                                  "resolution); null while not running or too few.")
+    realtime: RealtimeOut = Field(description="How the fusion loop's thread is scheduled.")
     imu_coverage: Optional[float] = Field(description="Share (0..1) of the last 500 odometry ticks (5 s) whose "
                                                       "heading came from the IMU (imu_ok); null before the first tick.")
     imu_still: bool = Field(description="The camera IMU filter's latest record flags the camera as still.")

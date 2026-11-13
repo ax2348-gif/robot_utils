@@ -30,6 +30,7 @@ from ..common.client import NodeClient
 from ..common.hub import RowHub
 from ..common.protocol import RowsDecoder
 from ..common.server import EventLog
+from ..common import realtime
 from .fusion import FIELDS, MASTER_IMU, PoseFusion, odometry_sample
 from .history import PoseHistory
 
@@ -138,6 +139,7 @@ class EstimatorNode:
         self._last_odom_rx = -1e9
         self._out_times: deque = deque(maxlen=200)
         self._imu_used: deque = deque(maxlen=500)    # imu_ok of the last 500 ticks (5 s)
+        self.realtime = realtime.not_started(realtime.PRIO_ESTIMATE)   # set by the fusion thread
         self._thread = threading.Thread(target=self._run, name="fusion", daemon=True)
 
     # -- lifecycle ----------------------------------------------------------------------------
@@ -163,6 +165,8 @@ class EstimatorNode:
     # -- fusion thread ------------------------------------------------------------------------
 
     def _run(self):
+        self.realtime = realtime.make_realtime(realtime.PRIO_ESTIMATE, "estimator fusion loop")
+        self.events.add(realtime.describe(self.realtime), "info" if self.realtime["error"] is None else "warn")
         while not self.stop.is_set():
             try:
                 item = self.q.get(timeout=0.02)
@@ -268,6 +272,7 @@ class EstimatorNode:
             "mode": mode,
             "pose": pose,
             "rate_hz": None if rate is None else round(rate, 1),
+            "realtime": dict(self.realtime),
             "imu_coverage": None if not used else round(sum(used) / len(used), 4),   # last 5 s of ticks
             "imu_still": self.fusion.heading.still,
             "inputs": inputs,

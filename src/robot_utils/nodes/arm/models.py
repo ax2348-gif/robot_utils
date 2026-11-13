@@ -14,6 +14,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, create_model
 
+from ..common.realtime import RealtimeOut
 from ..common.server import EStopState, Event, LockOut
 from .node import FIELD_DOC, FIELDS, PHASES, SOURCES, STATES, UNITS
 
@@ -612,6 +613,8 @@ class ArmStateOut(BaseModel):
                                         "motors' own watchdog is 100 ms).")
     read_misses: int = Field(description="Ticks with missed motor replies since the node started.")
     read_misses_by_motor: dict[str, int] = Field(description="Missed replies per motor name (`joint1`..`gripper`).")
+    realtime: RealtimeOut = Field(description="How the control loop's thread is scheduled. Without real time, other "
+                                              "work on the computer can hold the loop past the motors' 100 ms watchdog.")
     clients: int = Field(description="Open stream / event subscriptions.")
     events: list[Event] = Field(description="The last 20 events, oldest first.")
     latest: Optional[TickRow] = Field(description="The latest control tick; null before the first.")

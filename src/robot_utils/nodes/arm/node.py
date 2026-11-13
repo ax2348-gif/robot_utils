@@ -44,6 +44,7 @@ from ..common.estop import EStop, EStopInfo
 from ..common.hub import RowHub
 from ..common.lease import Lease, RequestError
 from ..common.locks import LockStore, describe as describe_locks
+from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
 from .bus import ArmBus, BusError, ReadMiss
@@ -263,6 +264,7 @@ class ArmNode:
         self.read_misses = 0
         self.misses_by_motor: dict = {}
         self.late_ticks = 0
+        self.realtime = realtime.not_started(realtime.PRIO_BUS)   # set by the loop's thread
         self._tick = 0
         self._last_t: Optional[float] = None
         self.overruns = 0
@@ -320,6 +322,8 @@ class ArmNode:
         self.bus, self.motors_on, self.g_motor_on = None, False, False
 
     def _run(self) -> None:
+        self.realtime = realtime.make_realtime(realtime.PRIO_BUS, "arm control loop")
+        self.events.add(realtime.describe(self.realtime), "info" if self.realtime["error"] is None else "warn")
         next_t = time.monotonic()
         while not self._stop.is_set():
             try:
@@ -1557,6 +1561,7 @@ class ArmNode:
             "twist_timeout": TWIST_TIMEOUT, "lease_heartbeat": LEASE_HEARTBEAT,
             "loop_hz": None if rate is None else round(rate, 1), "overruns": self.overruns,
             "late_ticks": self.late_ticks, "read_misses": self.read_misses, "read_misses_by_motor": dict(self.misses_by_motor),
+            "realtime": dict(self.realtime),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],
             "latest": latest,
