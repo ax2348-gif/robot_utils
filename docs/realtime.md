@@ -21,14 +21,21 @@ in `GET /state` (`policy`, `priority`, `requested`, `error`).
 ## The one-time setup (root)
 
 A user may not use real-time priorities by default (`ulimit -r` prints 0). The nodes run under
-the user's systemd manager, so raise that manager's limit and restart it:
+the user's systemd manager, which gets its limits from PAM (`pam_limits`), so allow the user
+there and restart the manager:
 
 ```bash
-sudo mkdir -p /etc/systemd/system/user@.service.d && printf '[Service]\nLimitRTPRIO=50\n' | sudo tee /etc/systemd/system/user@.service.d/rtprio.conf && sudo systemctl daemon-reload && sudo systemctl restart "user@$(id -u).service"
+echo "$USER - rtprio 50" | sudo tee /etc/security/limits.d/90-robot-rtprio.conf && sudo systemctl restart "user@$(id -u).service"
 ```
 
-The restart stops every node (a reboot does the same). Do it with the robot disabled and the arm
-supported. Afterwards each of the four nodes reports `"policy": "SCHED_FIFO"`.
+`LimitRTPRIO=` in a `user@.service` drop-in is not enough: systemd applies it, then `pam_limits`
+(in `/usr/lib/pam.d/systemd-user`) sets the limit back to 0 before the manager starts (seen on
+the robot, 2026-11-13). Check what the manager really has with
+`grep -i realtime /proc/$(pgrep -u $USER -f "systemd --user" | head -1)/limits`.
+
+The restart stops every node (a reboot does the same); start them again from the landing page.
+Do it with the robot disabled and the arm supported. Afterwards each of the four nodes reports
+`"policy": "SCHED_FIFO"`.
 
 ## Limits
 
