@@ -69,6 +69,10 @@ class ArmBus:
     sim = False
     names = [f"joint{i}" for i in range(1, N + 1)] + ["gripper"]
     setpoint_limits: dict = {}
+    # s from a read's requests to the last of their replies, set by each complete read (None: no
+    # measurement, e.g. a missed reply or a simulated bus). The next read collects them about one tick
+    # later, so a reply slower than that counts as missed.
+    reply_latency: Optional[float] = None
 
     def connect(self) -> None: ...
     def check_gripper(self) -> float: ...
@@ -92,6 +96,7 @@ class HardwareBus(ArmBus):
         self.names = [j.name for j in self.arm._all_joints]
         self.on: set = set()          # groups whose motors are on
         self._requested = False       # requests in flight for the next read
+        self._t_req: Optional[float] = None   # when they were sent
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
@@ -181,7 +186,10 @@ class HardwareBus(ArmBus):
         from reBotArm_control_py.actuator import rebotarm as rb
         mm, cm = self.arm._motor_map, self.arm._ctrl_map
 
+        arrived: dict = {}
+
         def request():
+            self._t_req = time.monotonic()
             if not rb._request_xout(mm, self.names):
                 raise BusError("motorbridge without non-blocking register reads: upgrade it")
             for n in self.names:
@@ -196,16 +204,19 @@ class HardwareBus(ArmBus):
                 cached = mm[n].get_cached_register_f32(rb.DM_RID_XOUT)   # replies to the last request only
                 if cached is not None:
                     out[n] = float(cached[0])
+                    arrived[n] = time.monotonic() - float(cached[1])     # (value, age since it arrived)
             return out
 
         try:
             if not self._requested:                  # first read: request and wait
                 request()
+                t_req = self._t_req
                 deadline = time.monotonic() + FIRST_READ_WAIT_S
                 xout = collect()
                 while len(xout) < len(self.names) and time.monotonic() < deadline:
                     xout = collect()
             else:                                    # the replies to last tick's requests
+                t_req = self._t_req
                 xout = collect()
             sts = [mm[n].get_state() for n in self.names]
             request()                                # for the next tick
@@ -213,7 +224,9 @@ class HardwareBus(ArmBus):
             raise BusError(f"read failed: {e}") from e
         missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
         if missing:
+            self.reply_latency = None
             raise ReadMiss(missing, f"no reply since the last tick from {', '.join(dict.fromkeys(missing))}")
+        self.reply_latency = None if t_req is None else max(arrived.values()) - t_req
         a = lambda f: np.array([getattr(s, f) for s in sts[:N]], dtype=float)   # noqa: E731
         g = sts[N]
         return Reading(time.monotonic(), np.array([xout[n] for n in self.names[:N]]), a("pos"), a("vel"), a("torq"),

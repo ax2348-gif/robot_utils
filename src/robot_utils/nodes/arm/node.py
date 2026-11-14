@@ -34,6 +34,7 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -62,6 +63,12 @@ LEASE_HEARTBEAT = 3.0         # s: a browser sharing its 6 connections across ro
                               # reliably within 1 s, and a lapse disables (gripper into damping)
 STALE_ON = 0.05               # s the latest complete reading may age (missed replies) with the motors on
 STALE_OFF = 1.0               # s ... with the motors off
+STALE_WARN = 0.03             # s without a complete reading (motors on) that is reported as a warning event,
+STALE_WARN_EVERY = 5.0        # at most this often (the gaps in between are counted in the next one)
+LATENCY_WINDOW = 500          # ticks (5 s) of reply latencies behind the stats in /state
+LATENCY_FIRST = 300           # ticks after connecting whose latencies are reported as one event
+LATENCY_MARGIN_WARN = 0.001   # s between the p99 reply latency and the tick period below which it warns:
+LATENCY_WARN_EVERY = 60.0     # replies later than one tick count as missed (at most one warning a minute)
 LATE_WARN = 0.08              # s between ticks reported as an event (the motors' own 100 ms watchdog
                               # protects them: they drop to damping and report it, which faults)
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
@@ -263,6 +270,13 @@ class ArmNode:
         self.read_age = 0.0
         self.read_misses = 0
         self.misses_by_motor: dict = {}
+        self._lat: deque = deque(maxlen=LATENCY_WINDOW)   # s, complete reads only
+        self._lat_n = 0
+        self._lat_reported = False
+        self._lat_warn_t = -math.inf
+        self._stale_warned = False          # this gap has been counted
+        self._stale_gaps = 0                # gaps over STALE_WARN not yet reported
+        self._stale_warn_t = -math.inf
         self.late_ticks = 0
         self.realtime = realtime.not_started(realtime.PRIO_BUS)   # set by the loop's thread
         self._tick = 0
@@ -367,6 +381,8 @@ class ArmNode:
             self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
             Planner.warm(self.kin)          # start the planner process now, not on the first plan
             self._base, self.error = "uninitialized", None
+            self._lat.clear()
+            self._lat_reported = False      # report the new connection's reply latency
             self._last_t = None             # the tick clock starts afresh (no bogus "late" tick)
             self._fresh_t = None
             self.events.add("connected (watchdog and joint readings checked); enable runs the gripper check")
@@ -393,12 +409,16 @@ class ArmNode:
         try:
             r = self.bus.read()
             self.reading, self._fresh_t, self.read_age = r, now, 0.0
+            self._stale_warned = False
+            self._note_latency(now)
         except ReadMiss as e:
             self.read_misses += 1
             for m in e.missing:
                 self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
             age = math.inf if self._fresh_t is None else now - self._fresh_t
             limit = STALE_ON if self.motors_on else STALE_OFF
+            if self.motors_on and STALE_WARN <= age <= limit and not self._stale_warned:
+                self._stale_warn(now, age, e.missing)
             if self.reading is None or age > limit:
                 self._fault(f"{e} (no complete reading for {age * 1e3:.0f} ms)")
                 return
@@ -434,6 +454,63 @@ class ArmNode:
         if self.motors_on:
             self._control(now, r)
         self._publish(now, dt_tick, r)
+
+    def _stale_warn(self, now: float, age: float, missing: list) -> None:
+        """Control thread: a gap in the readings is nearing the fault (STALE_ON): say so, at most
+        every STALE_WARN_EVERY s."""
+        self._stale_warned = True
+        self._stale_gaps += 1
+        if now - self._stale_warn_t < STALE_WARN_EVERY:
+            return
+        more = self._stale_gaps - 1
+        self._stale_warn_t, self._stale_gaps = now, 0
+        self.events.add(f"no complete reading for {age * 1e3:.0f} ms (no reply from "
+                        f"{', '.join(dict.fromkeys(missing))}); with the motors on the arm faults at "
+                        f"{STALE_ON * 1e3:.0f} ms" + (f" ({more} more since the last report)" if more else ""),
+                        "warn")
+
+    def _note_latency(self, now: float) -> None:
+        """Control thread: keep the bus's reply latency; report it once after connecting, then warn
+        when the slowest replies come close to the tick period."""
+        lat = getattr(self.bus, "reply_latency", None)
+        if lat is None:
+            return
+        self._lat.append(lat)
+        self._lat_n += 1
+        if not self._lat_reported:
+            if len(self._lat) < LATENCY_FIRST:
+                return
+            self._lat_reported = True
+            st = self.latency_stats()
+            if st is None:
+                return
+            low = st["margin_ms"] < LATENCY_MARGIN_WARN * 1e3
+            self.events.add(f"reply latency over the first {st['n']} complete reads: p50 {st['p50_ms']:.1f} ms, "
+                            f"p99 {st['p99_ms']:.1f} ms, max {st['max_ms']:.1f} ms: {st['margin_ms']:.1f} ms margin "
+                            f"to the {DT * 1e3:.0f} ms tick" + (" (too little: later replies count as missed)" if low else ""),
+                            "warn" if low else "info")
+            return
+        if self._lat_n % LATENCY_WINDOW or now - self._lat_warn_t < LATENCY_WARN_EVERY:
+            return
+        st = self.latency_stats()
+        if st is not None and st["margin_ms"] < LATENCY_MARGIN_WARN * 1e3:
+            self._lat_warn_t = now
+            self.events.add(f"reply latency p99 {st['p99_ms']:.1f} ms (max {st['max_ms']:.1f} ms) over the last "
+                            f"{st['n']} complete reads: {st['margin_ms']:.1f} ms margin to the {DT * 1e3:.0f} ms tick; "
+                            "later replies count as missed, and with the motors on "
+                            f"{STALE_ON * 1e3:.0f} ms without a complete reading faults", "warn")
+
+    def latency_stats(self) -> Optional[dict]:
+        """Reply latency over the last LATENCY_WINDOW complete reads (ms), or None with too few."""
+        try:
+            a = np.array(list(self._lat), dtype=float) * 1e3
+        except RuntimeError:          # appended to meanwhile
+            return None
+        if len(a) < 50:
+            return None
+        p50, p99 = np.percentile(a, [50, 99])
+        return {"n": int(len(a)), "p50_ms": round(float(p50), 2), "p99_ms": round(float(p99), 2),
+                "max_ms": round(float(a.max()), 2), "margin_ms": round(DT * 1e3 - float(p99), 2)}
 
     def _motors_off(self, why: str) -> None:
         """Control thread: motors disabled (damping)."""
@@ -1561,6 +1638,7 @@ class ArmNode:
             "twist_timeout": TWIST_TIMEOUT, "lease_heartbeat": LEASE_HEARTBEAT,
             "loop_hz": None if rate is None else round(rate, 1), "overruns": self.overruns,
             "late_ticks": self.late_ticks, "read_misses": self.read_misses, "read_misses_by_motor": dict(self.misses_by_motor),
+            "reply_latency": self.latency_stats(),
             "realtime": dict(self.realtime),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],

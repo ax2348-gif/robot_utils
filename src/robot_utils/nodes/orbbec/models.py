@@ -15,6 +15,10 @@ STEREO = ("depth", "ir_left", "ir_right")    # share one resolution/fps on the d
 # Changing any of these restarts the video pipeline.
 PIPELINE_KEYS = ("streams", "color_profile", "stereo_mode", "align", "frame_sync")
 IMU_RESTART_KEYS = ("enabled", "sample_rate", "accel_range", "gyro_range")   # filter changes apply live
+# The colour profile the node starts with (the device default if the device lacks it). Not the
+# Gemini's own default (1280x720@10): at that size a full-resolution look in agent_interface held
+# the arm's control loop long enough for its readings to go stale and the arm to fault (2026-11-13).
+DEFAULT_COLOR_PROFILE = "640x480@15 MJPG"
 
 
 class SettingsError(ValueError):
@@ -82,8 +86,10 @@ class Settings(_Strict):
     streams: dict[StreamName, bool] = Field(
         default_factory=lambda: {"color": True, "depth": True, "ir_left": False, "ir_right": False},
         description="Which video streams the camera runs.")
-    color_profile: Optional[str] = Field(None, description="Key from `GET /catalog` → `color`, "
-                                                           "e.g. `1280x720@10 MJPG`. null = device default.")
+    color_profile: Optional[str] = Field(DEFAULT_COLOR_PROFILE, description="Key from `GET /catalog` → `color`, "
+                                                                            "e.g. `640x480@15 MJPG` (the node's default). "
+                                                                            "null or a profile the device lacks = the device "
+                                                                            "default.")
     stereo_mode: Optional[str] = Field(None, description="Depth/IR mode from `GET /catalog` → `stereo`, "
                                                          "e.g. `848x480@10` (depth and both IRs share it).")
     align: bool = Field(False, description="Align depth to color (SDK software D2C). Aligned depth has the "
@@ -95,7 +101,7 @@ class Settings(_Strict):
 
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{
         "streams": {"color": True, "depth": True, "ir_left": False, "ir_right": False},
-        "color_profile": "1280x720@10 MJPG", "stereo_mode": "848x480@10", "align": False,
+        "color_profile": "640x480@15 MJPG", "stereo_mode": "848x480@10", "align": False,
         "frame_sync": False, "display": DisplaySettings().model_dump(), "imu": ImuSettings().model_dump()}]})
 
 
@@ -189,6 +195,11 @@ class Catalog(BaseModel):
     imu: ImuCatalog = Field(default_factory=ImuCatalog)
     colormaps: dict[str, list[str]] = Field({}, description="Colormap name -> a few #rrggbb stops (for a legend).")
     catalog_id: int = Field(0, description="Changes when the device is (re)opened.")
+
+
+def usb2_link(connection: str) -> bool:
+    """The device reports a USB 2 connection (e.g. `USB2.1`): limited bandwidth, MJPG colour only."""
+    return connection.replace(" ", "").upper().startswith("USB2")
 
 
 def fix_settings(s: Settings, cat: Catalog) -> Settings:

@@ -1007,6 +1007,50 @@ def test_occasional_missed_replies_are_tolerated_and_reported(rig):
     assert rig.row()["read_misses"] == 10 and rig.row()["read_age"] == 0.0
 
 
+def test_a_gap_nearing_the_fault_is_warned_once_and_counted(rig):
+    from robot_utils.nodes.arm.node import STALE_ON, STALE_WARN
+    n = engaged(rig).node
+    ticks = 4                                          # 40 ms: past the warning, short of the fault
+    assert STALE_WARN < (ticks - 0.5) * DT and ticks * DT < STALE_ON
+    rig.sim.drop_reads = ticks
+    rig.step(ticks + 2)
+    warns = [e["msg"] for e in n.events.list() if "no complete reading" in e["msg"]]
+    assert n.state == "servoing" and len(warns) == 1 and "joint4" in warns[0] and "faults at 50 ms" in warns[0]
+    rig.sim.drop_reads = ticks                         # a second gap within 5 s: counted, not reported
+    rig.step(ticks + 2)
+    assert len([e for e in n.events.list() if "no complete reading" in e["msg"]]) == 1
+    rig.step(500)                                      # 5 s of complete readings
+    rig.sim.drop_reads = ticks
+    rig.step(ticks + 2)
+    warns = [e["msg"] for e in n.events.list() if "no complete reading" in e["msg"]]
+    assert len(warns) == 2 and "(1 more since the last report)" in warns[1]
+
+
+def test_short_gaps_are_not_warned(rig):
+    n = engaged(rig).node
+    rig.sim.drop_reads = 2                             # 20 ms: ordinary
+    rig.step(4)
+    assert not any("no complete reading" in e["msg"] for e in n.events.list())
+
+
+def test_reply_latency_is_reported_after_connecting_and_warned_when_near_the_tick(rig):
+    from robot_utils.nodes.arm.node import LATENCY_FIRST, LATENCY_WINDOW
+    n = engaged(rig).node
+    assert n.latency_stats() is None                   # the simulated bus measures nothing
+    rig.sim.reply_latency = 0.006
+    rig.step(LATENCY_FIRST)
+    ev = [e for e in n.events.list() if "reply latency" in e["msg"]]
+    assert len(ev) == 1 and ev[0]["level"] == "info" and "4.0 ms margin" in ev[0]["msg"]
+    st = n.latency_stats()
+    assert st["p50_ms"] == 6.0 and st["margin_ms"] == 4.0
+    rig.sim.reply_latency = 0.0095                     # 0.5 ms margin
+    rig.step(2 * LATENCY_WINDOW)
+    ev = [e for e in n.events.list() if "reply latency p99" in e["msg"]]
+    assert len(ev) == 1 and ev[0]["level"] == "warn" and "0.5 ms margin" in ev[0]["msg"]
+    rig.step(2 * LATENCY_WINDOW)                       # at most one warning a minute
+    assert len([e for e in n.events.list() if "reply latency p99" in e["msg"]]) == 1
+
+
 def test_a_late_tick_is_reported_not_a_fault(rig):
     n = engaged(rig).node
     rig.clock.t += 0.07                                # the loop stalled 80 ms (motors' watchdog: 100 ms)

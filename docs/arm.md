@@ -80,7 +80,15 @@ Each tick:
 **Robustness.** Replies are awaited at most 5 ms per tick. A missed reply (an ordinary event on a
 serial bus) keeps the latest complete reading for that tick; the node faults only when that
 reading is older than 50 ms with the motors on (1 s with them off). Misses are counted, per motor,
-in `/state` and the stream (`read_age`, `read_misses`). A late tick is reported (an event, the
+in `/state` and the stream (`read_age`, `read_misses`). A gap of 30 ms or more with the motors on is
+a warning event (at most one every 5 s, counting the gaps in between), so a fault has warnings
+before it. The bus also times each tick's replies (requests to the last reply): `/state`
+`reply_latency` has p50, p99 and max over the last 500 complete reads and the margin to the 10 ms
+tick (replies later than about one tick count as missed). The first 300 complete reads after
+connecting are reported as one event (motors off then, so lighter than in use), and a margin under
+1 ms is a warning event, at most one a minute. On 2026-11-13 a full-resolution look in
+agent_interface (1280x720 colour) stretched the replies until gaps passed 50 ms and the arm faulted;
+see docs/realtime.md. A late tick is reported (an event, the
 `late_ticks` count), not a fault: the motors' own 100 ms watchdog protects them, and if it trips
 they report "communication lost", which faults. Setup steps that block (mode switches, the gripper
 check) are only ever run with every motor off; the bus refuses them otherwise. The lease

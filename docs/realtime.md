@@ -44,3 +44,15 @@ Do it with the robot disabled and the arm supported. Afterwards each of the four
 - `ROBOT_UTILS_RT=0` in a node's environment switches it off.
 - The kernel keeps 5 % of each second for normal threads (`sched_rt_runtime_us`), so a loop that
   spins cannot lock the machine up.
+
+## Not enough for full-resolution looks (2026-11-13)
+
+With every loop real time, a `scale: 1.0` look at 1280x720 colour still left the arm without a
+complete reading for up to 121 ms (motors off, nothing moving), and with the motors on it faulted
+twice in a session. The arm thread itself was never kept off a CPU; the stalls came from what it
+depends on at normal priority (the motor bridge's receive thread, the node's other threads holding
+the interpreter lock, the kernel's USB serial work, all CPU0 interrupts), and from the read's thin
+margin: replies take up to ~9 ms of the 10 ms tick, and a later one counts as missed. Pinning
+nodes to cores (four layouts tried) did not remove the gaps. What changed: the camera's default
+colour is 640x480@15 (docs/orbbec_node.md), larger looks warn when the arm's motors are on, and the
+arm warns at 30 ms gaps and on a thin reply-latency margin (docs/arm.md).

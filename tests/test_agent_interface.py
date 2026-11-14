@@ -689,3 +689,27 @@ def test_reflex_force_and_opt_in(stack):
     assert g["reflex"] == {"on": True, "why": "on: requested"} and nav.reflex["armed"]
     get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
     assert get(st, "/state").json()["reflex"]["force"] is False
+
+
+def test_look_cost_warnings_name_depth_upsampling_and_an_engaged_arm():
+    from robot_utils.nodes.agent_interface.node import AgentNav
+    from robot_utils.nodes.common.lease import RequestError
+    n = AgentNav.__new__(AgentNav)
+    arm = {"motors_on": False}
+
+    def call(key, method, path, body=None, timeout=5.0, **kw):
+        assert (key, method, path) == ("arm", "GET", "/state")
+        if arm is None:
+            raise RequestError(503, "arm unreachable")
+        return arm
+    n._call = call
+    hd = {"color": {"width": 1280, "height": 720}, "depth": {"width": 848, "height": 480}}
+    vga = {"color": {"width": 640, "height": 480}, "depth": {"width": 848, "height": 480}}
+    assert n._look_cost_warnings(vga, 1.0) == []                     # 640x480 grid: no upsampling, arm off
+    w = n._look_cost_warnings(hd, 1.0)
+    assert len(w) == 1 and "upsamples depth" in w[0] and "scale 0.66" in w[0]
+    arm["motors_on"] = True
+    w = n._look_cost_warnings(vga, 1.0)
+    assert len(w) == 1 and "motors are on" in w[0]
+    arm = None                                                        # no arm node: no arm warning
+    assert n._look_cost_warnings(vga, 1.0) == []

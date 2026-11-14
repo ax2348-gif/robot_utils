@@ -100,8 +100,9 @@ class GridIn(BaseModel):
 
 
 class LookIn(Commented):
-    scale: Optional[float] = Field(None, description="Depth grid = colour x scale; default the node's (0.5); 1.0 = full "
-                                   "resolution (slower, briefly applies to every viewer).")
+    scale: Optional[float] = Field(None, description="Depth grid = colour x scale; default the node's (0.5); 1.0 = the "
+                                   "colour size (slower, briefly applies to every viewer; warns if it upsamples the depth "
+                                   "or the arm's motors are on).")
     grid: bool | GridIn = Field(False, description="Draw a labelled pixel grid on the returned image: true (100 px), or "
                                                    "{step, values} to set the spacing and write the depth's base-frame value "
                                                    "(e.g. `z`: a height grid) at each intersection, also returned as `grid.samples`.")

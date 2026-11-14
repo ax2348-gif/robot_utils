@@ -572,6 +572,17 @@ class JamState(BaseModel):
     recent: list[JamEvent] = Field(description="The last 20 jams, oldest first.")
 
 
+class ReplyLatency(BaseModel):
+    """From a tick's read requests to the last motor's reply. The next tick collects them about one tick
+    (10 ms) later: a reply slower than that counts as missed, so missed reads are not in these numbers
+    (they are in `read_misses`). With the motors on, 50 ms without a complete reading faults the arm."""
+    n: int = Field(description="Complete reads the numbers are over.")
+    p50_ms: float = Field(description="Median, ms.")
+    p99_ms: float = Field(description="99th percentile, ms.")
+    max_ms: float = Field(description="Slowest, ms.")
+    margin_ms: float = Field(description="Tick period minus p99, ms: under 1 ms is reported as a warning event.")
+
+
 class ArmStateOut(BaseModel):
     """GET /state (and every /events message). Non-finite numbers are null."""
     state: ArmState = Field(description=STATE_DOC)
@@ -613,6 +624,9 @@ class ArmStateOut(BaseModel):
                                         "motors' own watchdog is 100 ms).")
     read_misses: int = Field(description="Ticks with missed motor replies since the node started.")
     read_misses_by_motor: dict[str, int] = Field(description="Missed replies per motor name (`joint1`..`gripper`).")
+    reply_latency: Optional[ReplyLatency] = Field(description="How long the motors take to answer a tick's requests, "
+                                                              "over the last 500 complete reads; null on a simulated "
+                                                              "arm or with fewer than 50.")
     realtime: RealtimeOut = Field(description="How the control loop's thread is scheduled. Without real time, other "
                                               "work on the computer can hold the loop past the motors' 100 ms watchdog.")
     clients: int = Field(description="Open stream / event subscriptions.")

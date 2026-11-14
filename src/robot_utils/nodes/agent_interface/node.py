@@ -547,11 +547,15 @@ class AgentNav:
                 time.sleep(0.1)
         cal = self._call("perception", "GET", "/calibration")
         restore = None
+        cost_warnings = []
         if scale is not None:
             if not (0.25 <= scale <= 1.0):
-                raise ValueError("scale must be within [0.25, 1.0] (1.0 = depth at 1280x720)")
+                raise ValueError(f"scale must be within [0.25, 1.0] (1.0 = depth at the colour size, "
+                                 f"{cal['color']['width']}x{cal['color']['height']})")
             cur = self._call("perception", "GET", "/settings").get("scale")
             if cur is not None and abs(cur - scale) > 1e-6:
+                if scale > cur:
+                    cost_warnings = self._look_cost_warnings(cal, scale)
                 self._call("perception", "POST", "/settings", {"scale": scale})
                 restore = cur
         try:
@@ -597,6 +601,7 @@ class AgentNav:
             warnings.append("the robot was moving (motion-compensated registration; geometry less exact)")
         if self._corr_active("camera"):
             warnings.append("session camera correction active (GET /session/geometry): base/world coordinates use it")
+        warnings += cost_warnings
         out = {"snapshot": sid, "image": f"images/{img}", "bev": f"images/{bev}",
                "image_size": [cam.color_w, cam.color_h], "depth_size": [cam.width, cam.height],
                "pose_world": None if p is None else [round(v, 4) for v in p[:3]], "mode": snap.mode,
@@ -605,6 +610,31 @@ class AgentNav:
         if ginfo and ginfo.get("values"):
             out["grid"] = ginfo
         self.turn(actor, "look", {"scale": scale, "grid": grid, "settle": settle}, out, comment, [img, bev])
+        return out
+
+    def _look_cost_warnings(self, cal: dict, scale: float) -> list[str]:
+        """Why a look at ``scale`` (above 3d_perception's own) costs more than it gives, or risks the arm.
+
+        A larger depth grid makes every frame 3d_perception registers while the look waits more work,
+        and on the robot's 4 cores that work delayed the arm's control loop: at 1280x720 colour a
+        full-scale look left the arm without a complete reading for > 50 ms, and with its motors on
+        the arm faults (it drops, limp) after 50 ms. At 640x480 colour the worst gap was 63 ms."""
+        out = []
+        cw, ch = cal["color"]["width"], cal["color"]["height"]
+        dep = cal.get("depth") or {}
+        gw, gh = int(round(cw * scale)), int(round(ch * scale))
+        if dep.get("width") and gw > dep["width"] * 1.02:
+            out.append(f"scale {scale:g} upsamples depth: a {gw}x{gh} grid from {dep['width']}x{dep['height']} depth "
+                       f"adds no detail and costs {(gw * gh) / (dep['width'] * dep['height']):.1f}x the work; "
+                       f"scale {dep['width'] / cw:.2f} gives all the depth there is")
+        try:
+            arm = self._call("arm", "GET", "/state", timeout=1.0)
+        except RequestError:
+            arm = {}
+        if arm.get("motors_on"):
+            out.append(f"the arm's motors are on: a scale {scale:g} look loads the computer enough to delay the arm's "
+                       "control loop, and 50 ms without a complete arm reading faults the arm (it goes limp and "
+                       "drops); prefer the default scale, and zoom, while the arm is engaged")
         return out
 
     def zoom(self, actor: str, snapshot: Optional[str], box: Optional[list], step: Optional[int] = None,

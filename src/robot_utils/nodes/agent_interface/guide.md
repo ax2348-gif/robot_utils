@@ -77,7 +77,9 @@ draws labelled pixel lines every 100 px, so you can name coordinates; `{"grid": 
 "values": "xz"}}` sets the spacing and also writes the depth's base-frame values at each grid
 intersection: `xz` (distance ahead and height: with the pixel, a full 3D point), or `x`, `y`, `z`,
 `range`, `xyz`. They are returned as numbers too (`grid.samples`, always x, y, z). The depth grid is half the colour size by default; `{"scale": 1.0}` gives
-full-resolution depth for fine work. The BEV is top-down in the robot's frame at capture: the robot at the bottom,
+a depth grid the size of the colour image for fine work. It is much more work for the robot's computer:
+**while the arm's motors are on, prefer the default scale and `/zoom`**, because a large look can delay
+the arm's control loop until the arm faults and goes limp (the look's `warnings` say so). The BEV is top-down in the robot's frame at capture: the robot at the bottom,
 x forward (up), y left, 0.5 m grid. Floor points are grey, obstacles orange/yellow by height, the
 blue line is the nearest visible floor.
 
