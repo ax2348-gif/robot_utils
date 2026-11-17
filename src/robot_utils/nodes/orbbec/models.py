@@ -191,6 +191,11 @@ class Catalog(BaseModel):
     catalog_id: int = Field(0, description="Changes when the device is (re)opened.")
 
 
+def usb2_link(connection: str) -> bool:
+    """The device reports a USB 2 connection (e.g. `USB2.1`): limited bandwidth, MJPG colour only."""
+    return connection.replace(" ", "").upper().startswith("USB2")
+
+
 def fix_settings(s: Settings, cat: Catalog) -> Settings:
     """Make settings valid for the connected device: unknown profiles become the device default,
     unavailable streams are switched off."""

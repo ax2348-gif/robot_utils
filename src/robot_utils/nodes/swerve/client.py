@@ -84,6 +84,10 @@ class SwerveClient(NodeClient):
         """One twist (holds 0.25 s). ``seq`` is optional, for debugging (echoed as cmd_seq)."""
         return self.post("/command", {"twist": [vx, vy, omega], "seq": seq})
 
+    def steer(self, vx: float, vy: float, omega: float, seq: int = 0) -> dict:
+        """Steer-only (holds 0.25 s): wheels set for the unit twist (vx, vy, omega), drive motors off (coasting)."""
+        return self.post("/command", {"steer": [vx, vy, omega], "seq": seq})
+
     def drive_for(self, twist, seconds: float, rate: float = 20.0) -> None:
         """Hold a twist for ``seconds`` by resending it at ``rate`` Hz, then send zero."""
         end = time.monotonic() + seconds
@@ -115,6 +119,13 @@ class SwerveClient(NodeClient):
     def rebase_encoders(self) -> dict:
         """Drive encoders to 0 now; NodeError 409 unless the base is stationary."""
         return self.post("/encoders/rebase")
+
+    def status_period(self) -> dict:
+        return self.get("/status_period")
+
+    def set_status_period(self, ms: int) -> dict:
+        """The SPARKs' per-tick status frame period (ms; anyone, moves nothing, applied at the next tick)."""
+        return self.post("/status_period", {"status_period_ms": ms})
 
     def set_auto_rebase(self, enabled: Optional[bool] = None, interval_s: Optional[float] = None,
                         still_s: Optional[float] = None) -> dict:

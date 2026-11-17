@@ -168,6 +168,12 @@ or no frame, 504 the camera thread did not answer within 20 s.
 
 - `color_profile` / `stereo_mode` must be keys from `GET /catalog`. Depth, left IR and right IR
   always share one `stereo_mode` (the device requires it).
+- The node starts with the device's colour default, `1280x720@10 MJPG`. Settings are not saved: a
+  restart returns to it. (From 2026-11-13 19:01 to 20:40 the node started at `640x480@15 MJPG` instead,
+  to spare the arm's control loop during full-resolution looks; that was reverted because it left
+  agents with a quarter of the depth detail, and the arm still faulted.)
+- On a USB 2 link (`device.connection` `USB2.x`) the node logs a warning event when it opens the
+  camera: colour must be MJPG and the bandwidth is limited; use a USB 3 port and cable.
 - `align`: SDK software depth-to-color alignment; aligned depth has the color resolution and
   implies frame sync.
 - `frame_sync`: the SDK pairs color and depth of the same instant. Off (default), each frame leaves

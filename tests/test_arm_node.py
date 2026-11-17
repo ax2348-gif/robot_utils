@@ -258,6 +258,61 @@ def test_servo_aborts_on_obstruction(rig):
     assert n.last_motion.phase == "aborted" and "tracking error" in n.last_motion.reason
 
 
+def _hold_stuck(rig, stuck, seconds):
+    """Something holds the arm still at ``stuck`` (the command elsewhere): the arm pushes against it."""
+    rig.sim.stuck = stuck
+    rig.keep(seconds)
+    rig.sim.stuck = None
+
+
+def test_jam_fires_only_on_a_static_arm_and_holds_where_it_is(rig):
+    """A static arm still pushing (after the move): the jam fires after hold_s, the command is pulled to the reading
+    (it stops pushing), the move ends `jammed`; while a move is executing nothing is judged."""
+    n = ready(rig).node
+    n.settings.abort_pos, n.settings.settle_timeout_s = 10.0, 5.0   # the abort and not_reached out of the way
+    n.set_jam({"bands": [0.2] * 6})                    # the sim's soft push is small: the mechanism, not the bands
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.0, 0.04])
+    n.servo_cmd(rig.tok, T, lin_vel=0.02, duration=4.0)
+    rig.keep(0.3)
+    stuck = rig.sim.q.copy()
+    _hold_stuck(rig, stuck, 2.0)                       # executing: pushing but moving, not judged
+    assert n.motion is not None and n.motion.phase == "executing" and n.jam_count == 0
+    _hold_stuck(rig, stuck, 4.0)                       # the planned end passes: static and pushing
+    assert n.jam_count == 1, [e["msg"] for e in n.events.list()][-5:]
+    j = n.jams[-1]
+    assert j["response"] == "hold" and abs(j["residual_nm"]) > n.jam.bands[j["joint"] - 1]
+    assert n.last_motion.phase == "jammed" and "static" in n.last_motion.reason
+    assert np.allclose(n.q_cmd, rig.sim.q_mot if hasattr(rig.sim, "q_mot") else rig.sim.q, atol=0.02)
+    assert rig.row()["jam"] in (0.0, 1.0)
+    st = n.state_dict()["jam"]
+    assert st["count"] == 1 and st["config"]["response"] == "hold"
+
+
+def test_jam_report_off_and_config(rig):
+    n = ready(rig).node
+    n.settings.abort_pos = 10.0
+    n.set_jam({"bands": [0.2] * 6})
+    with pytest.raises(ValueError):
+        n.set_jam({"bands": [1, 2, 3]})
+    with pytest.raises(ValueError):
+        n.set_jam({"response": "explode"})
+    n.set_jam({"response": "off"})
+    assert rig.node.track_cmd(rig.tok, rig.tcp())["ok"]       # engaged, holding its own pose
+    rig.keep(0.3)
+    q0 = rig.sim.q.copy()
+    stuck = q0.copy()
+    stuck[1] -= 0.05                                    # pushed off its command on joint 2
+    n.track = None                                      # a hold (no track), so `report` isn't forced by tracking
+    _hold_stuck(rig, stuck, 3.0)
+    assert n.jam_count == 0                             # off: not checked
+    n.set_jam({"response": "report"})
+    q_cmd_before = n.q_cmd.copy()
+    _hold_stuck(rig, stuck, 3.0)
+    assert n.jam_count >= 1 and n.jams[-1]["response"] == "report"
+    assert np.allclose(n.q_cmd, q_cmd_before)           # report only: the command is left alone
+
+
 def test_home_and_named_pose(rig):
     n = ready(rig).node
     m = n.home(rig.tok)
@@ -521,6 +576,11 @@ def test_http_api_end_to_end(tmp_path):
         r = c.post("/ik/render", json={"pose": pose, "render": {"azimuth_deg": 90}})
         assert r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG" and r.headers["x-ik-ok"] == "true"
         assert c.post("/ik", json={"pose": pose, "render": {"width": 5000}}).status_code == 422
+        jam = c.get("/jam").json()
+        assert jam["config"]["response"] == "hold" and jam["active"] is None
+        assert c.post("/jam", json={"response": "report"}).status_code == 403             # not the human
+        assert c.post("/jam", json={"response": "report"}, headers={"X-Operator": "human"}).json()["config"]["response"] == "report"
+        assert c.post("/jam", json={"response": "nope"}, headers={"X-Operator": "human"}).status_code == 422
         k = c.post("/kinematics", json={"q": [list(Q0)], "frame": "tcp"}).json()["results"][0]
         assert k["within_limits"] and len(k["jacobian"]) == 6
         assert c.post("/kinematics", json={"q": [[0, 0, 0]]}).status_code == 422
@@ -945,6 +1005,59 @@ def test_occasional_missed_replies_are_tolerated_and_reported(rig):
         rig.step(6)
     assert n.state == "servoing" and n.read_misses == 10 and n.misses_by_motor == {"joint4": 10}
     assert rig.row()["read_misses"] == 10 and rig.row()["read_age"] == 0.0
+
+
+def test_a_late_reply_waits_a_tick_without_counting_as_missed(rig):
+    n = engaged(rig).node
+    for _ in range(5):
+        rig.sim.late_reads = 1                         # joint6's reply arrives a tick late, five times
+        rig.step(6)
+    assert n.state == "servoing" and n.read_misses == 0 and n.misses_by_motor == {}
+    assert rig.row()["read_misses"] == 0 and rig.row()["read_age"] == 0.0
+
+
+def test_a_gap_nearing_the_fault_is_warned_once_and_counted(rig):
+    from robot_utils.nodes.arm.node import STALE_ON, STALE_WARN
+    n = engaged(rig).node
+    ticks = 4                                          # 40 ms: past the warning, short of the fault
+    assert STALE_WARN < (ticks - 0.5) * DT and ticks * DT < STALE_ON
+    rig.sim.drop_reads = ticks
+    rig.step(ticks + 2)
+    warns = [e["msg"] for e in n.events.list() if "no complete reading" in e["msg"]]
+    assert n.state == "servoing" and len(warns) == 1 and "joint4" in warns[0] and "faults at 50 ms" in warns[0]
+    rig.sim.drop_reads = ticks                         # a second gap within 5 s: counted, not reported
+    rig.step(ticks + 2)
+    assert len([e for e in n.events.list() if "no complete reading" in e["msg"]]) == 1
+    rig.step(500)                                      # 5 s of complete readings
+    rig.sim.drop_reads = ticks
+    rig.step(ticks + 2)
+    warns = [e["msg"] for e in n.events.list() if "no complete reading" in e["msg"]]
+    assert len(warns) == 2 and "(1 more since the last report)" in warns[1]
+
+
+def test_short_gaps_are_not_warned(rig):
+    n = engaged(rig).node
+    rig.sim.drop_reads = 2                             # 20 ms: ordinary
+    rig.step(4)
+    assert not any("no complete reading" in e["msg"] for e in n.events.list())
+
+
+def test_reply_latency_is_reported_after_connecting_and_warned_when_near_the_tick(rig):
+    from robot_utils.nodes.arm.node import LATENCY_FIRST, LATENCY_WINDOW
+    n = engaged(rig).node
+    assert n.latency_stats() is None                   # the simulated bus measures nothing
+    rig.sim.reply_latency = 0.006
+    rig.step(LATENCY_FIRST)
+    ev = [e for e in n.events.list() if "reply latency" in e["msg"]]
+    assert len(ev) == 1 and ev[0]["level"] == "info" and "4.0 ms margin" in ev[0]["msg"]
+    st = n.latency_stats()
+    assert st["p50_ms"] == 6.0 and st["margin_ms"] == 4.0
+    rig.sim.reply_latency = 0.0095                     # 0.5 ms margin
+    rig.step(2 * LATENCY_WINDOW)
+    ev = [e for e in n.events.list() if "reply latency p99" in e["msg"]]
+    assert len(ev) == 1 and ev[0]["level"] == "warn" and "0.5 ms margin" in ev[0]["msg"]
+    rig.step(2 * LATENCY_WINDOW)                       # at most one warning a minute
+    assert len([e for e in n.events.list() if "reply latency p99" in e["msg"]]) == 1
 
 
 def test_a_late_tick_is_reported_not_a_fault(rig):

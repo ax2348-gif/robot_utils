@@ -130,6 +130,10 @@ def test_every_json_endpoint_is_typed_and_lossless(raw, upstreams, tmp_locks_dir
         assert call("POST", "/stop")["status"] in ("idle", "braking")
         st = wait_for(lambda: (s := call("GET", "/state"))["goal"]["result"] and s, 5)
         assert st["goal"]["result"] == "stopped"
+        wait_for(lambda: call("GET", "/state")["status"] == "idle", 5)
+        assert call("POST", "/align", json={"twist": [2.0, 0.0, 0.0]})["twist"] == [1.0, 0.0, 0.0]
+        assert call("GET", "/state")["align"]["twist"] == [1.0, 0.0, 0.0]
+        assert call("DELETE", "/align")["twist"] is None
         assert call("POST", "/disable") == {"enabled": False, "was_enabled": True}
         assert call("POST", "/disable") == {"enabled": False, "was_enabled": False}
         st = call("GET", "/state")

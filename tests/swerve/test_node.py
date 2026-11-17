@@ -87,6 +87,37 @@ def test_lease_enable_command_drives_and_is_echoed(node_url):
         assert b.get("/state")["lease"] == {"held": True, "holder": "alice", "lease_id": 1, "expires_in": pytest.approx(1.0, abs=0.3)}
 
 
+def test_steer_only_holds_the_wheels_on_an_axis_with_the_drives_off(node_url):
+    """Steer-only: steering enabled and set the way each wheel would roll for the unit twist (either direction
+    along that line), drive motors left disabled (they coast); the stream shows the twist; a twist drives again."""
+    url, node, sims = node_url
+    with SwerveClient(url) as a:
+        a.acquire("aligner")
+        a.enable()
+        for steer, want in (((math.cos(0.5), math.sin(0.5), 0.0), lambda m: 0.5),          # a translation: all at 0.5 rad
+                            ((0.0, 0.0, 1.0), lambda m: math.atan2(m.x, -m.y))):           # a turn in place: tangent
+            for _ in range(60):
+                a.steer(*steer)
+                time.sleep(0.02)
+            wait_for(lambda: all(sims[m.steer_id].enabled for m in c.MODULES))
+            assert not any(sims[m.drive_id].enabled for m in c.MODULES)
+            row = latest(node)
+            assert [row["steer_vx"], row["steer_vy"], row["steer_omega"]] == pytest.approx(list(steer))
+            for m in c.MODULES:
+                sp, w = row[f"{m.name}_steer_sp"], want(m)
+                assert min(abs(math.remainder(sp - w, 2 * math.pi)), abs(math.remainder(sp - w - math.pi, 2 * math.pi))) < 1e-6
+                assert math.isnan(row[f"{m.name}_drive_sp"])
+        for bad in ({"twist": [0.1, 0, 0], "steer": [1, 0, 0]}, {"steer": [0, 0, 0]}):
+            with pytest.raises(NodeError) as e:
+                a.post("/command", bad)
+            assert e.value.status == 422
+        for _ in range(10):
+            a.command(0.2, 0.0, 0.0)
+            time.sleep(0.02)
+        wait_for(lambda: all(sims[m.drive_id].enabled for m in c.MODULES))
+        assert math.isnan(latest(node)["steer_vx"])
+
+
 def test_soft_limits_clamp_and_reset_with_the_lease(node_url):
     url, node, _ = node_url
     with SwerveClient(url) as a:
@@ -176,6 +207,43 @@ def test_stream_framing_every_tick(node_url):
         assert set(got[0].dtype.names) == set(FIELDS)
         assert header["kind"] == "tick"
         assert a.get("/fields")["fields"] == FIELDS
+
+
+def test_status_period_is_set_live_and_kept_across_a_reset(node_url):
+    url, node, sims = node_url
+    from sparkcan._params import SparkParameter as P
+    drives, steers = [sims[m.drive_id] for m in c.MODULES], [sims[m.steer_id] for m in c.MODULES]
+
+    def periods():   # the per-tick frames as the simulated SPARKs hold them (STATUS_0 and the signal frame)
+        return ({s.params[int(P.STATUS_0_PERIOD)] for s in drives + steers},
+                {s.params[int(P.STATUS_2_PERIOD)] for s in drives}, {s.params[int(P.STATUS_5_PERIOD)] for s in steers})
+    with SwerveClient(url) as a:
+        assert a.status_period() == {"status_period_ms": 10, "applied_ms": 10}
+        assert a.state()["status_period_ms"] == 10 and periods() == ({10}, {10}, {10})
+        a.set_status_period(20)                                  # anyone: no lease
+        wait_for(lambda: a.status_period()["applied_ms"] == 20)
+        wait_for(lambda: periods() == ({20}, {20}, {20}))
+        assert a.state()["status_period_ms"] == 20
+        assert any("status frames every 20 ms" in e["msg"] for e in a.state()["events"])
+        for bad in (4, 51, 12.5):
+            with pytest.raises(NodeError) as e:
+                a.post("/status_period", {"status_period_ms": bad})
+            assert e.value.status == 422
+        a.acquire()
+        a.reset()                                                # a rebuilt drive keeps the setting
+        wait_for(lambda: a.status_period() == {"status_period_ms": 20, "applied_ms": 20})
+        wait_for(lambda: periods() == ({20}, {20}, {20}))
+        a.enable()
+        a.command(0.1, 0, 0)                                     # and still drives
+        wait_for(lambda: latest(node)["motors_enabled"] == 1)
+
+
+def test_status_period_start_value_and_range():
+    from robot_utils.nodes.swerve.drive import check_status_period
+    assert SwerveNode("virtual:unused", status_period_ms=25).status_period() == {"status_period_ms": 25, "applied_ms": None}
+    for bad in (4, 51, 12.5, True, "20"):
+        with pytest.raises(ValueError):
+            check_status_period(bad)
 
 
 def test_reset_rebuilds_a_crashed_drive(node_url):

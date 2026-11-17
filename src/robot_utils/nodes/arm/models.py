@@ -14,6 +14,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, create_model
 
+from ..common.realtime import RealtimeOut
 from ..common.server import EStopState, Event, LockOut
 from .node import FIELD_DOC, FIELDS, PHASES, SOURCES, STATES, UNITS
 
@@ -435,8 +436,8 @@ class MotionOut(BaseModel):
     name: Optional[str] = Field(description="Named pose (pose, home, stow); null otherwise.")
     phase: Phase = Field(description="executing → settling → reached | not_reached (chunk: done); or aborted "
                                      "(obstruction, cancel, disable, e-stop, lease end) | preempted (by a newer "
-                                     "command).")
-    reason: Optional[str] = Field(description="Why it ended as it did (aborted, preempted, not_reached); null "
+                                     "command) | jammed (static but still pushing: the arm holds where it is; GET /jam).")
+    reason: Optional[str] = Field(description="Why it ended as it did (aborted, preempted, not_reached, jammed); null "
                                               "otherwise.")
     progress: float = Field(description="0..1 over the planned duration.")
     duration: float = Field(description="Planned duration (s).")
@@ -534,6 +535,54 @@ class TrackState(BaseModel):
     twist_frame: Literal["arm", "tcp"] = Field(description="Axes of the twist.")
 
 
+class JamConfigOut(BaseModel):
+    """Jam detection: a STATIC arm still pushing (the aftermath of a contact, not the instant of it)."""
+    bands: list[float] = Field(description="Nm per joint: the residual |measured torque - gravity model| above which a "
+                                           "joint counts as pushing.")
+    hold_s: float = Field(description="s a residual must stay above its band before it fires.")
+    release: float = Field(description="It clears once every residual is below release x its band (hysteresis).")
+    static_qd: float = Field(description="rad/s: the arm counts as static while every joint is slower than this (and "
+                                         "no motion is executing).")
+    settle_s: float = Field(description="s static before judging (after a move ends or stops).")
+    response: Literal["hold", "report", "off"] = Field(
+        description="hold: the command is pulled to where the arm is (it stops pushing; a planned move ends `jammed`); "
+                    "report: an event only; off: not checked. While tracking it only reports.")
+    refire: bool = Field(description="Fire again after clearing (e.g. the base keeps pushing the arm in); false = once "
+                                     "per command.")
+
+
+class JamEvent(BaseModel):
+    t: float = Field(description="Server time.monotonic() (s) when it fired.")
+    wall: float = Field(description="Unix epoch s.")
+    joint: int = Field(description="The joint (1-6) furthest over its band.")
+    residual_nm: float = Field(description="Its residual, Nm (sign = direction of the push).")
+    band_nm: float = Field(description="Its band, Nm.")
+    held_s: float = Field(description="s it had been over its band.")
+    response: Literal["hold", "report"] = Field(description="What was done.")
+    source: str = Field(description="Arm source then (hold, servo, pose, track, ...).")
+    residuals_nm: list[float] = Field(description="Every joint's residual, Nm.")
+    count: int = Field(description="Jams since the node started.")
+
+
+class JamState(BaseModel):
+    config: JamConfigOut
+    active: Optional[JamEvent] = Field(description="The jam in force (until every residual is well under its band); "
+                                                   "null if none.")
+    count: int = Field(description="Jams since the node started.")
+    recent: list[JamEvent] = Field(description="The last 20 jams, oldest first.")
+
+
+class ReplyLatency(BaseModel):
+    """From a tick's read requests to the last motor's reply. The next tick collects them about one tick
+    (10 ms) later: a reply slower than that is waited for one more tick and counts as missed only if it
+    has not arrived by then, so missed reads are not in these numbers (they are in `read_misses`). With the motors on, 50 ms without a complete reading faults the arm."""
+    n: int = Field(description="Complete reads the numbers are over.")
+    p50_ms: float = Field(description="Median, ms.")
+    p99_ms: float = Field(description="99th percentile, ms.")
+    max_ms: float = Field(description="Slowest, ms.")
+    margin_ms: float = Field(description="Tick period minus p99, ms: under 1 ms is reported as a warning event.")
+
+
 class ArmStateOut(BaseModel):
     """GET /state (and every /events message). Non-finite numbers are null."""
     state: ArmState = Field(description=STATE_DOC)
@@ -555,6 +604,7 @@ class ArmStateOut(BaseModel):
     track: Optional[TrackState] = Field(description="The track command in force; null unless tracking.")
     motion: Optional[MotionOut] = Field(description="The planned motion in force, or else the last one; null if "
                                                     "none yet.")
+    jam: JamState = Field(description="Jam detection (GET /jam).")
     gripper: GripperOut
     profile: str = Field(description="Gain profile in force.")
     profiles: list[str] = Field(description="Gain profiles available.")
@@ -574,6 +624,11 @@ class ArmStateOut(BaseModel):
                                         "motors' own watchdog is 100 ms).")
     read_misses: int = Field(description="Ticks with missed motor replies since the node started.")
     read_misses_by_motor: dict[str, int] = Field(description="Missed replies per motor name (`joint1`..`gripper`).")
+    reply_latency: Optional[ReplyLatency] = Field(description="How long the motors take to answer a tick's requests, "
+                                                              "over the last 500 complete reads; null on a simulated "
+                                                              "arm or with fewer than 50.")
+    realtime: RealtimeOut = Field(description="How the control loop's thread is scheduled. Without real time, other "
+                                              "work on the computer can hold the loop past the motors' 100 ms watchdog.")
     clients: int = Field(description="Open stream / event subscriptions.")
     events: list[Event] = Field(description="The last 20 events, oldest first.")
     latest: Optional[TickRow] = Field(description="The latest control tick; null before the first.")

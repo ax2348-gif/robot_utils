@@ -35,6 +35,9 @@ input[type=number]{width:70px}
     <div class="ru-row" style="margin-top:10px">soft limits <input type="number" id="lv" step="0.1" min="0" max="2"> m/s
       <input type="number" id="lw" step="0.1" min="0" max="4"> rad/s <button class="ru" id="setlim">Set</button></div>
     <div class="ru-muted" id="lim"></div>
+    <div class="ru-row" style="margin-top:10px">status frames every <select id="sp"><option>5</option><option>10</option><option>15</option><option>20</option><option>25</option><option>50</option></select> ms
+      <button class="ru" id="setsp">Set</button></div>
+    <div class="ru-muted" id="spinfo"></div>
   </div>
   <div class="ru-card" data-panel="velocity" data-role="telemetry">
     <b>Drive velocity</b> <span class="ru-muted">m/s, last 5 s</span>
@@ -64,6 +67,7 @@ $("#enable").onclick = () => call("enable");
 $("#disable").onclick = () => call("disable");
 $("#clear").onclick = () => call("estop/clear");
 $("#setlim").onclick = () => call("limits", {max_speed: +$("#lv").value, max_omega: +$("#lw").value});
+$("#setsp").onclick = () => call("status_period", {status_period_ms: +$("#sp").value});
 
 // jog: while a key/button is held, send the twist at 20 Hz (the node stops 0.25 s after the last one)
 const held = new Set();
@@ -96,6 +100,13 @@ RU.sse("events", st => {
     ` · auto ${en.auto.enabled ? "every " + en.auto.interval_s + " s when still" : "off"}` + (en.last_error ? ` · ${en.last_error}` : "");
   const l = st.limits; $("#lim").textContent = `hard ${l.hard.max_speed} m/s, ${l.hard.max_omega} rad/s · soft ${l.soft.max_speed} m/s, ${l.soft.max_omega} rad/s`;
   if (!$("#lv").value) { $("#lv").value = l.soft.max_speed; $("#lw").value = l.soft.max_omega; }
+  const sp = st.status_period_ms;
+  if (sp !== undefined && document.activeElement !== $("#sp") && $("#sp").dataset.v !== String(sp)) {
+    if (![...$("#sp").options].some(o => +o.value === sp)) $("#sp").add(new Option(String(sp)));
+    $("#sp").value = String(sp); $("#sp").dataset.v = String(sp);
+  }
+  $("#spinfo").textContent = sp === undefined ? "" : `SPARK status frames every ${sp} ms (${Math.round(1000 / sp)} Hz): ` +
+    (sp > 10 ? "fewer frames on the CAN bus and the serial link; ticks between frames reuse the last reading" : "a fresh reading every tick");
   $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : (e.level === "warn" || e.level === "warning") ? "ru-ev-warn" : ""}">${new Date(e.wall*1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 

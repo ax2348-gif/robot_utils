@@ -1,6 +1,6 @@
 # Agent MoMa node, v1: plan
 
-Status: draft for review (2026-11-11). Nothing built yet.
+Status (2026-11-11): steps 1–5 built on `claude/agent-node` (tests green in simulation, with a fake arm node for agent_interface); step 6, the supervised robot test, is next.
 
 ## Goal
 
@@ -35,8 +35,9 @@ briefs, links and episode docs keep working) and is stopped by default.
 
 ### 1. agent node (copy of agent_nav)
 
-- **Copy and rename:** package `robot_utils.nodes.agent`, service unit `robot-node-agent`, proxy path
-  `/nodes/agent/`, data directory `~/.local/share/robot_utils/agent`, own tests, title **"Agent MoMa"**
+- **Copy and rename:** package `robot_utils.nodes.agent_interface` (it is the agents' interface, not an agent),
+  service unit `robot-node-agent_interface`, proxy path `/nodes/agent_interface/`, data directory
+  `~/.local/share/robot_utils/agent_interface`, own tests, title **"Agent MoMa"**
   (MoMa = mobile manipulation; fits a landing-page tile on one row). The guide becomes the MoMa guide.
 - **One enable for the whole robot.** `POST /enable` enables the base (pose_servo lease, caps) and the
   arm (the node takes the arm lease and enables it: the arm floats under gravity compensation until a
@@ -56,8 +57,9 @@ briefs, links and episode docs keep working) and is stopped by default.
   1. From the measured TCP and the target, the horizontal direction of travel in base axes.
   2. If the horizontal travel is under the deadzone (default 0.02 m) or within the hysteresis angle
      (default 15°) of the current alignment (axis, no sign): no change.
-  3. Otherwise ask pose_servo to align the wheels to that axis with the drives coasting, wait until
-     aligned (timeout ~1 s), then forward the servo.
+  3. Otherwise ask pose_servo to align the wheels for the unit twist of that horizontal direction (a
+     translation; the swerve takes any unit twist) with the drives coasting, wait until aligned (timeout ~1 s),
+     then forward the servo.
   4. If the base was left out of the enable (`"base": false`), alignment is skipped and the reply says so.
 
   The human toggle "force defensive alignment" (human-only, as `/reflex` today) makes it apply even when
@@ -84,9 +86,14 @@ briefs, links and episode docs keep working) and is stopped by default.
 ### 2. arm node
 
 - **Jam detector** (v1: joint space, from the offline study):
+  - **only on a static arm** (it detects the aftermath, not the instant of contact; dynamic cases are out of
+    scope): no planned motion executing (a finished move counts, `not_reached` settles included), measured
+    joint speeds near zero, and a short settle time after the last motion. All four labelled jams (J1–J4)
+    were static holds after a move ended;
   - signal: residual τ − τ_g per joint, held ≥ `hold_s` (1 s), hysteresis (release at 0.7×);
   - bands per joint (study's draft: 1.0, 4.0, 4.0, 1.5, 0.8, 0.6 Nm), to be confirmed when the study is
-    finished; payload handled by re-baselining (decision below);
+    finished. Fixed bands, no payload re-baselining: agents aren't expected to grasp anything heavy enough
+    to read as a jam (said in the guide);
   - response, configurable: `hold` (default: setpoint pulled to the current reading during
     servo / chunk / home; the motion ends `jammed` with joint, residual and duration), `report`, `off`;
     report-only during `track`;
@@ -99,11 +106,11 @@ briefs, links and episode docs keep working) and is stopped by default.
 
 ### 3. pose_servo and swerve
 
-- **swerve: steer-only mode.** A command that points each wheel at an angle with the drive motors
-  left out of the heartbeat (disabled, so they coast in coast idle mode). Same lease rules as other
-  commands.
-- **pose_servo: `POST /align {angle}`** (holder only, only when no goal is running): steer-only at that
-  axis until the next goal or `stop`; reports when aligned. A goal ends the alignment. Off when pose_servo
+- **swerve: steer-only mode.** `POST /command {"steer": [vx, vy, omega]}`: a unit twist (only its direction
+  matters); each wheel is set the way it would roll for it, with the drive motors left out of the heartbeat
+  (disabled, so they coast in coast idle mode). Same lease rules and 0.25 s hold as a twist.
+- **pose_servo: `POST /align {twist}`** (holder only, only when no goal is running): steer-only for that unit
+  twist until the next goal or `stop`; reports when aligned. A goal ends the alignment. Off when pose_servo
   isn't enabled.
 
 ## Open decisions
@@ -111,12 +118,8 @@ briefs, links and episode docs keep working) and is stopped by default.
 Settled: title "Agent MoMa"; one enable for base and arm (alignment always available while enabled);
 anomaly threshold 1 cm, guarded so it can't fire while the base is driven.
 
-1. **Jam payload handling in v1.** Re-baseline the residual after a grasp + lift (proposed), or bands
-   wide enough to cover the heaviest payload?
-2. **Order of work.**
-   - Land the reviewed agent_nav part of the API audit (typed models, chat options) first, so the copy
-     starts from it.
-   - The arm part of the audit (it touched `arm/node.py`) needs review before landing.
+None left: payload = fixed bands (no heavy grasps); jams only on a static arm; the API audit landed first
+(`5652f75`).
 
 ## Order of work (proposed)
 

@@ -108,6 +108,9 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     call("GET", "/limits")
     call("GET", "/gains")
     call("GET", "/gripper")
+    call("GET", "/jam")
+    call("POST", "/jam", json={"hold_s": 1.5}, headers={"X-Operator": "human"})
+    call("POST", "/jam", json={"hold_s": 1.0}, headers={"X-Operator": "human"})
 
     tok = call("POST", "/lease", json={"client": "t"})["token"]
     h = {"X-Lease-Token": tok}

@@ -38,10 +38,19 @@ class ReadMiss(BusError):
         self.missing = list(missing)
 
 
+class ReadLate(ReadMiss):
+    """Some replies have not arrived yet, but their requests are only one tick old: they stay in
+    flight (nothing is re-requested) and the next read collects them. Not a miss: the node keeps the
+    latest complete reading for this tick, as for a miss, without counting one."""
+
+
 FIRST_READ_WAIT_S = 0.05   # s the first read after connecting waits for its replies
 # Measured on the robot (7 motors, batched xout + feedback requests over the serial bridge): replies
-# take 5.3 ms median, 8.5 ms p99. So reads are pipelined: each tick collects the replies to the
-# requests sent the tick before (~10 ms to arrive, no waiting) and then sends the next requests.
+# took 5.3 ms median, 8.5 ms p99 when this was written; on 2026-11-13 7.2 ms median and 11-15 ms p99
+# under load. So reads are pipelined: each tick collects the replies to the requests sent the tick
+# before (~10 ms to arrive, no waiting) and then sends the next requests. A reply that misses that
+# tick is waited for one more tick before it counts as missed (REPLY_WAIT_TICKS).
+REPLY_WAIT_TICKS = 1       # extra ticks a read's requests may stay in flight before missing replies count
 
 
 @dataclass
@@ -69,6 +78,10 @@ class ArmBus:
     sim = False
     names = [f"joint{i}" for i in range(1, N + 1)] + ["gripper"]
     setpoint_limits: dict = {}
+    # s from a read's requests to the last of their replies, set by each complete read (None: no
+    # measurement, e.g. a missed reply or a simulated bus). The next read collects them about one tick
+    # later; a reply slower than that is waited for one more tick (REPLY_WAIT_TICKS), then counts as missed.
+    reply_latency: Optional[float] = None
 
     def connect(self) -> None: ...
     def check_gripper(self) -> float: ...
@@ -92,6 +105,8 @@ class HardwareBus(ArmBus):
         self.names = [j.name for j in self.arm._all_joints]
         self.on: set = set()          # groups whose motors are on
         self._requested = False       # requests in flight for the next read
+        self._t_req: Optional[float] = None   # when they were sent
+        self._waited = 0              # ticks the requests in flight have already been waited for
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
@@ -181,7 +196,10 @@ class HardwareBus(ArmBus):
         from reBotArm_control_py.actuator import rebotarm as rb
         mm, cm = self.arm._motor_map, self.arm._ctrl_map
 
+        arrived: dict = {}
+
         def request():
+            self._t_req = time.monotonic()
             if not rb._request_xout(mm, self.names):
                 raise BusError("motorbridge without non-blocking register reads: upgrade it")
             for n in self.names:
@@ -196,24 +214,36 @@ class HardwareBus(ArmBus):
                 cached = mm[n].get_cached_register_f32(rb.DM_RID_XOUT)   # replies to the last request only
                 if cached is not None:
                     out[n] = float(cached[0])
+                    arrived[n] = time.monotonic() - float(cached[1])     # (value, age since it arrived)
             return out
 
         try:
             if not self._requested:                  # first read: request and wait
                 request()
+                t_req = self._t_req
                 deadline = time.monotonic() + FIRST_READ_WAIT_S
                 xout = collect()
                 while len(xout) < len(self.names) and time.monotonic() < deadline:
                     xout = collect()
-            else:                                    # the replies to last tick's requests
+            else:                                    # the replies to the requests in flight
+                t_req = self._t_req
                 xout = collect()
             sts = [mm[n].get_state() for n in self.names]
+            missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
+            if missing and self._waited < REPLY_WAIT_TICKS:
+                self._waited += 1                    # slow, not lost: leave the requests in flight
+                self.reply_latency = None
+                raise ReadLate(missing, f"replies still due from {', '.join(dict.fromkeys(missing))} "
+                                        f"(waiting {self._waited} more tick)")
+            self._waited = 0
             request()                                # for the next tick
         except CallError as e:
             raise BusError(f"read failed: {e}") from e
-        missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
         if missing:
-            raise ReadMiss(missing, f"no reply since the last tick from {', '.join(dict.fromkeys(missing))}")
+            self.reply_latency = None
+            raise ReadMiss(missing, f"no reply within {REPLY_WAIT_TICKS + 1} ticks from "
+                                    f"{', '.join(dict.fromkeys(missing))}")
+        self.reply_latency = None if t_req is None else max(arrived.values()) - t_req
         a = lambda f: np.array([getattr(s, f) for s in sts[:N]], dtype=float)   # noqa: E731
         g = sts[N]
         return Reading(time.monotonic(), np.array([xout[n] for n in self.names[:N]]), a("pos"), a("vel"), a("torq"),
@@ -290,6 +320,7 @@ class SimBus(ArmBus):
         self.q = np.array(q0, dtype=float)
         self.qd = np.zeros(N)
         self.tau = np.zeros(N)
+        self.stuck: Optional[np.ndarray] = None   # tests: an obstruction holds the arm at this pose
         self.g_q, self.g_qd, self.g_tau = -0.5, 0.0, 0.0
         self.enabled = False
         self.g_enabled = False
@@ -301,6 +332,7 @@ class SimBus(ArmBus):
         self.mot_offset = np.zeros(N)                # motor side minus output (backlash, a slipped zero)
         self.fail_reads = False                      # tests: make the next reads fail
         self.drop_reads = 0                          # tests: this many reads miss joint4's reply
+        self.late_reads = 0                          # tests: this many reads find joint6's reply still due
         self.fault_code = 0                          # tests: a motor fault on joint1
         self.setpoint_limits = dict(limits or {})
 
@@ -363,6 +395,8 @@ class SimBus(ArmBus):
             self.qd += (self.tau - g - 0.1 * self.qd) / self.INERTIA * dt     # + a little joint friction
         self.q += self.qd * dt
         self._stops()
+        if self.stuck is not None:     # an obstruction holds the arm here (it pushes, it doesn't move)
+            self.q, self.qd = np.array(self.stuck, float), np.zeros(N)
         gc = self.gcmd if (self.enabled and self.g_enabled) else None
         if gc is None:                 # damping: comes to rest
             self.g_tau = 0.0
@@ -385,6 +419,9 @@ class SimBus(ArmBus):
         if self.drop_reads > 0:
             self.drop_reads -= 1
             raise ReadMiss(["joint4"], "sim: no reply within 5 ms from joint4")
+        if self.late_reads > 0:
+            self.late_reads -= 1
+            raise ReadLate(["joint6"], "sim: reply still due from joint6")
         now = self.clock()
         if self.t is not None:
             dt = min(max(now - self.t, 0.0), 0.2)

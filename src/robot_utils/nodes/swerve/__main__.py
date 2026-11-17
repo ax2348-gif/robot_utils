@@ -41,6 +41,8 @@ def main() -> None:
     p.add_argument("--interface", default=None, help="sparkcan interface (default: $CAN, else the CANable "
                                                      "under /dev/serial/by-id, else slcan:/dev/ttyACM0)")
     p.add_argument("--sim", action="store_true", help="simulated SPARKs on a virtual bus (no hardware)")
+    p.add_argument("--status-ms", type=int, default=None, help="SPARK status frame period at start, ms (default 10; "
+                                                               "changed live with POST /status_period)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "swerve")
     args = p.parse_args()
@@ -56,7 +58,7 @@ def main() -> None:
         sims, interface = start_sim()
     else:
         interface = args.interface or default_interface()
-    node = SwerveNode(interface)
+    node = SwerveNode(interface) if args.status_ms is None else SwerveNode(interface, status_period_ms=args.status_ms)
     app = create_app(node)
     try:
         serve(app, args, banner=f"swerve node {args.name!r} on {interface}")

@@ -25,7 +25,7 @@ from .encode import colormap_stops
 from .hub import Frame, Hub
 from .imu_filter import AttitudeFilter, Calibration, FilterConfig
 from .models import (STREAM_LABELS, STREAM_NAMES, Catalog, DeviceInfo, ImuSettings, Settings, SettingsError,
-                     SettingsPatch, apply_patch, describe, fix_settings)
+                     SettingsPatch, apply_patch, describe, fix_settings, usb2_link)
 
 IMU_FLUSH_MS = 2.0   # the IMU thread hands raw samples over at least this often (SDK bursts are ~10 ms)
 IMU_CALIBRATION_FILE = os.path.expanduser("~/.config/robot_utils/orbbec_imu.json")
@@ -250,6 +250,10 @@ class Owner:
             self._set_settings(fix_settings(self.settings, cat))
             want = self.settings
         self._event(f"opened {info.name} ({info.serial}, fw {info.firmware}, {info.connection})")
+        if usb2_link(info.connection):
+            self._event(f"the camera is on a USB 2 link ({info.connection}): colour must be MJPG (uncompressed "
+                        "formats deliver nothing) and the bandwidth is limited; connect it to a USB 3 port with a "
+                        "USB 3 cable", error=True)
         self._start_video(want, prev=None)
         self._start_imu(want)
 
