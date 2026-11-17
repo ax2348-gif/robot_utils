@@ -33,6 +33,7 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 #zoom img{max-width:96vw;max-height:94vh}
 .sbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0 6px}
 .sbar .info{flex:1;min-width:180px;font-size:13px}
+#release.held{border-color:var(--caution);color:var(--caution);font-weight:600}
 .banner{background:var(--caution-bg);border:1px solid var(--caution);border-radius:6px;padding:4px 8px;margin-bottom:6px;font-size:13px;display:none}
 #sessions{display:none;max-height:300px;overflow:auto;margin-bottom:6px}
 #sessions table{width:100%;border-collapse:collapse;font-size:13px}
@@ -40,7 +41,7 @@ details summary{cursor:pointer;font-size:11px;color:var(--muted)}
 </style><script src="../../themes/theme.js"></script>
 </head><body data-page="agent_interface"><div id="band"></div><div class="ru-wrap">
 <div class="ru-row ru-head">
-  <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span></h2>
+  <h2 style="margin:6px 0">Agent navigation <span id="who" class="ru-pill">no session</span> <span id="held" class="ru-pill ru-warn" hidden></span></h2>
   <div class="ru-row"><span id="status" class="ru-muted"></span><a class="ru-muted" href="guide.md">guide.md</a><a class="ru-muted" href="docs">API docs</a><span id="estop"></span></div>
 </div>
 <div id="err" class="ru-err"></div>
@@ -218,7 +219,14 @@ RU.sse("events", s => {
   $("#enable").title = s.chocked ? "Chocked: an admin removes the chock over SSH" : "";
   $("#who").textContent = s.session ? (s.session.avatar && !s.session.avatar.startsWith("data:") ? s.session.avatar + " " : "") + s.session.agent : "no session";
   const L = s.latest || {}, f = v => v === null || v === undefined ? "–" : Number(v).toFixed(3);
-  $("#status").textContent = `servo ${s.servo || "?"}${s.enabled_by ? " · enabled by " + s.enabled_by : ""}${s.latch ? " · HELD by human" : ""}`;
+  $("#status").textContent = `servo ${s.servo || "?"}${s.enabled_by ? " · enabled by " + s.enabled_by : ""}`;
+  // the human hold: the agent can't enable, move the base or the arm until it is released
+  const held = s.latch ? "held: " + s.latch.why : "";
+  $("#held").hidden = !held; $("#held").textContent = held;
+  $("#held").title = held ? "The agent gets 423 on enable, goals and arm moves until you release it (or enable as the human)" : "";
+  $("#release").disabled = !held; $("#release").classList.toggle("held", !!held);
+  $("#release").title = held ? "Let the agent enable and move again" : "Nothing is held";
+  if (!s.chocked) $("#enable").title = held ? "Enabling as the human also releases the hold" : "";
   $("#state").textContent = `pose ${s.pose_world ? s.pose_world.map(f).join(", ") : "–"}   twist ${f(L.vx)}, ${f(L.vy)}, ${f(L.omega)}` +
     (s.reflex ? `\n⚠ ${s.reflex}` : "");
   if (s.turns > last || ((s.session && s.session.id) !== (session && session.id))) pull();
