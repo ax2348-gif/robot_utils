@@ -18,7 +18,10 @@ from robot_utils.frontend.manager import (ManagerError, NodeManager, SubprocessR
 
 def test_start_recipe_parsed_and_packaged():
     nodes = {n.name: n for n in load_config()}
-    assert nodes["camera"].start == StartRecipe("robot_utils.nodes.orbbec")
+    assert nodes["camera"].start == StartRecipe("robot_utils.nodes.orbbec", ("--serial", "CPC64630004G"))
+    assert nodes["wrist_camera"].start == StartRecipe("robot_utils.nodes.orbbec",
+                                                      ("--serial", "CV2C8610017M", "--no-imu"))
+    assert nodes["wrist_camera"].kind == "camera"
     assert nodes["swerve"].start == StartRecipe("robot_utils.nodes.swerve")
     assert nodes["arm"].start == StartRecipe("robot_utils.nodes.arm")
     n = parse_config({"nodes": [{"name": "a", "port": 1, "start": {"module": "x.y", "args": ["--v"]}}]})[0]

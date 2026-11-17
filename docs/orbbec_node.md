@@ -27,6 +27,12 @@ python -m robot_utils.nodes.orbbec --streams color,depth,ir_left --no-imu -v
 python -m robot_utils.nodes.orbbec --fake --port 8765                   # synthetic camera, any machine (TCP for debugging)
 ```
 
+With several cameras attached, pin each instance to its camera with `--serial` (the SDK's device
+order is arbitrary): the robot runs `camera` (head Gemini 336L, `--serial CPC64630004G`) and
+`wrist_camera` (Gemini 305 on the wrist, `--name wrist_camera --serial CV2C8610017M --no-imu`; it has no
+IMU), both from `frontend/nodes.yaml`. A pinned instance whose camera is absent waits for it and says
+which serials it sees; it never opens another camera.
+
 It listens on its unix socket (instance `camera`, `--name` for another); through the robot's port-80
 proxy that is `http://192.168.8.209/nodes/camera/` (LAN) or `http://100.80.153.120/nodes/camera/`
 (Tailscale). Open it in a browser for live tiles, settings, device controls,

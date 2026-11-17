@@ -236,10 +236,10 @@ class Owner:
     def _open(self):
         try:
             info, cat = self.backend.open()
-        except NoDevice:
+        except NoDevice as e:
             with self.lock:
                 if self.state != "no device":
-                    self._event("no camera found; waiting for one to be plugged in", error=True)
+                    self._event(f"{e or 'no camera found'}; waiting for it to be plugged in", error=True)
                 self.state = "no device"
             raise
         cat.colormaps = colormap_stops()

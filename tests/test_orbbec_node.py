@@ -340,3 +340,39 @@ def test_imu_fields_describe_every_column(fake_node):
         assert all(u for u in d["units"]) and all(d["doc"][f] for f in names)
         latest = httpx.get(fake_node + "/imu/latest", params={"n": 1, "raw": raw}).json()
         assert latest["fields"] == d["fields"]                                  # same columns as the data
+
+
+def test_sdk_backend_opens_only_the_pinned_serial():
+    """--serial: the backend opens that camera whatever the SDK's device order, and refuses
+    (NoDevice naming what it sees) rather than open another one."""
+    from robot_utils.nodes.orbbec.owner import NoDevice
+    from robot_utils.nodes.orbbec.sdk_backend import SdkBackend
+
+    class Devices:
+        def __init__(self, serials): self.serials = serials
+        def get_count(self): return len(self.serials)
+        def get_device_serial_number_by_index(self, i): return self.serials[i]
+        def get_device_by_index(self, i): return ("dev", self.serials[i])
+        def get_device_by_serial_number(self, s): return ("dev", s)
+
+    class Opened(Exception):
+        pass
+
+    def backend(serial, serials):
+        b = SdkBackend.__new__(SdkBackend)          # no pyorbbecsdk on the test machine
+        b.serial, b.ctx, b.ob = serial, type("Ctx", (), {"query_devices": lambda self: Devices(serials)})(), None
+        # stop right after the device is chosen
+        b.__class__ = type("B", (SdkBackend,), {"dev": property(lambda s: s.__dict__.get("_d"),
+                                                                 lambda s, v: (_ for _ in ()).throw(Opened(v)))})
+        return b
+
+    with pytest.raises(Opened) as e:
+        backend("HEAD", ["WRIST", "HEAD"]).open()
+    assert e.value.args[0] == ("dev", "HEAD")
+    with pytest.raises(Opened) as e:
+        backend(None, ["WRIST", "HEAD"]).open()
+    assert e.value.args[0] == ("dev", "WRIST")
+    with pytest.raises(NoDevice, match="no camera with serial HEAD .connected: WRIST."):
+        backend("HEAD", ["WRIST"]).open()
+    with pytest.raises(NoDevice):
+        backend(None, []).open()

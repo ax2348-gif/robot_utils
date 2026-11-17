@@ -81,7 +81,8 @@ def _try(fn, default):
 
 
 class SdkBackend:
-    def __init__(self):
+    def __init__(self, serial: Optional[str] = None):
+        self.serial = serial   # open only the camera with this serial; None = the first one listed
         import pyorbbecsdk as ob   # imported here so the package works without the SDK (tests, --fake)
         self.ob = ob
         self.ctx = self.dev = self.pipe = self.align = None
@@ -109,9 +110,16 @@ class SdkBackend:
         if self.ctx is None:
             self.ctx = ob.Context()     # keep it referenced: devices hold a pointer into it
         devices = self.ctx.query_devices()
-        if devices.get_count() == 0:
-            raise NoDevice()
-        self.dev = devices.get_device_by_index(0)
+        n = devices.get_count()
+        if self.serial is None:
+            if n == 0:
+                raise NoDevice()
+            self.dev = devices.get_device_by_index(0)
+        else:
+            found = [devices.get_device_serial_number_by_index(i) for i in range(n)]
+            if self.serial not in found:
+                raise NoDevice(f"no camera with serial {self.serial} (connected: {', '.join(found) or 'none'})")
+            self.dev = devices.get_device_by_serial_number(self.serial)
         self.global_ts = False
         try:
             if self.dev.is_global_timestamp_supported():

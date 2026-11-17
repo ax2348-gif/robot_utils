@@ -1,4 +1,4 @@
-"""python -m robot_utils.nodes.orbbec [--name camera] [--streams color,depth] [--fake] [--port 8101]
+"""python -m robot_utils.nodes.orbbec [--name camera] [--serial SN] [--streams color,depth] [--fake] [--port 8101]
 
 Serves on the unix socket <runtime dir>/robot/<name>.sock, i.e. http://<robot>/nodes/<name>/
 through the robot's port-80 proxy; --port adds a TCP port for debugging (docs/nodes.md)."""
@@ -12,6 +12,9 @@ def main(argv=None):
     from .models import STREAM_NAMES, Settings, ImuSettings
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.orbbec",
                                 description="HTTP node for the Orbbec depth camera (docs/orbbec_node.md).")
+    p.add_argument("--serial", default=None,
+                   help="open only the camera with this serial number (default: the first one the SDK lists, "
+                        "which is arbitrary with several cameras attached)")
     p.add_argument("--streams", default="color,depth", help="video streams on at start: " + ",".join(STREAM_NAMES))
     p.add_argument("--no-imu", action="store_true", help="start with the IMU off")
     p.add_argument("--fake", action="store_true", help="synthetic camera (no SDK / hardware needed)")
@@ -37,7 +40,7 @@ def main(argv=None):
         backend = FakeBackend()
     else:
         from .sdk_backend import SdkBackend
-        backend = SdkBackend()
+        backend = SdkBackend(serial=a.serial)
     settings = Settings(streams={n: n in streams for n in STREAM_NAMES}, imu=ImuSettings(enabled=not a.no_imu))
     hub = Hub()
     from .owner import IMU_CALIBRATION_FILE
