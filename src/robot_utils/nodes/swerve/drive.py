@@ -44,8 +44,21 @@ ANGLE_MAX_AGE = 0.1  # s; an older steering reading is stale
 # position and velocity; steers: STATUS_5, absolute angle). The other signal frame is turned
 # off and STATUS_1 (faults/warnings) slowed down, which keeps the bus near 40% at 100 Hz and
 # halves the frames the receive thread has to parse (measured on the robot: 2,990 -> 1,750/s).
+# The period of those per-tick frames is a setting (SwerveDrive(status_period_ms=...), changed live
+# with set_status_period): at 20 ms (the SPARKs' stored default) every other tick reuses the last
+# reading, and the frames (CAN load and the serial link's receive work) halve. The motors' own
+# position / velocity loops and the 100 Hz setpoints and heartbeat are unaffected; the upper bound
+# keeps readings well inside ANGLE_MAX_AGE (and the node's DRIVE_MAX_AGE).
 STATUS_PERIOD_MS = 10
+STATUS_PERIOD_RANGE_MS = (5, 50)
 STATUS_1_PERIOD_MS = 250
+
+
+def check_status_period(ms) -> int:
+    lo, hi = STATUS_PERIOD_RANGE_MS
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms != int(ms) or not lo <= ms <= hi:
+        raise ValueError(f"status period must be a whole number of ms within {lo}..{hi}")
+    return int(ms)
 
 
 class SwerveDrive:
@@ -60,7 +73,9 @@ class SwerveDrive:
     the (steering angle rad, drive speed m/s) sent to each module, NaN where nothing was sent.
     """
 
-    def __init__(self, interface: str, pre_tick=None, on_tick=None):
+    def __init__(self, interface: str, pre_tick=None, on_tick=None, status_period_ms: int = STATUS_PERIOD_MS):
+        self.status_period_ms = check_status_period(status_period_ms)
+        self._status_req = None   # a new status period, applied by the loop thread at its next tick
         self.drives = [SparkFlex(interface, m.drive_id) for m in MODULES]
         self.steers = [SparkFlex(interface, m.steer_id) for m in MODULES]
         self.bus = self.drives[0].bus
@@ -136,9 +151,24 @@ class SwerveDrive:
                                   (self.steers, PeriodicFrame.STATUS_5, PeriodicFrame.STATUS_2)):
             for s in sparks:
                 s.set_periodic_frames_enabled({PeriodicFrame.STATUS_0: True, keep: True, off: False})
-                s.set_periodic_frame_period(PeriodicFrame.STATUS_0, STATUS_PERIOD_MS)
-                s.set_periodic_frame_period(keep, STATUS_PERIOD_MS)
                 s.set_periodic_frame_period(PeriodicFrame.STATUS_1, STATUS_1_PERIOD_MS)
+        self._apply_status_period(self.status_period_ms)
+
+    def _apply_status_period(self, ms: int) -> None:
+        """The period of each SPARK's per-tick frames: STATUS_0 and its signal frame (drives STATUS_2,
+        steers STATUS_5)."""
+        for sparks, keep in ((self.drives, PeriodicFrame.STATUS_2), (self.steers, PeriodicFrame.STATUS_5)):
+            for s in sparks:
+                s.set_periodic_frame_period(PeriodicFrame.STATUS_0, ms)
+                s.set_periodic_frame_period(keep, ms)
+        self.status_period_ms = ms
+
+    def set_status_period(self, ms: int) -> None:
+        """Change the per-tick status frames' period (ms, STATUS_PERIOD_RANGE_MS). Applied by the loop
+        thread at its next tick, in that tick's batched write; nothing moves."""
+        ms = check_status_period(ms)
+        with self._lock:
+            self._status_req = ms
 
     def _send(self, frame, **kw) -> None:
         """CANBus.send for this bus: frames from the loop thread are batched during a tick."""
@@ -201,6 +231,10 @@ class SwerveDrive:
             while self._running:
                 now_tick = time.monotonic()
                 self._batch = []
+                with self._lock:
+                    status_req, self._status_req = self._status_req, None
+                if status_req is not None:
+                    self._apply_status_period(status_req)
                 if self.pre_tick is not None:
                     self.pre_tick(self)
                 setpoints = [nan] * len(MODULES)

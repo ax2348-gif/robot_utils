@@ -84,7 +84,8 @@ in `/state` and the stream (`read_age`, `read_misses`). A gap of 30 ms or more w
 a warning event (at most one every 5 s, counting the gaps in between), so a fault has warnings
 before it. The bus also times each tick's replies (requests to the last reply): `/state`
 `reply_latency` has p50, p99 and max over the last 500 complete reads and the margin to the 10 ms
-tick (replies later than about one tick count as missed). The first 300 complete reads after
+tick (a reply later than one tick is waited for one more; only one missing after two ticks counts as
+missed, and the waiting tick reuses the latest complete reading). The first 300 complete reads after
 connecting are reported as one event (motors off then, so lighter than in use), and a margin under
 1 ms is a warning event, at most one a minute. On 2026-11-13 a full-resolution look in
 agent_interface (1280x720 colour) stretched the replies until gaps passed 50 ms and the arm faulted;

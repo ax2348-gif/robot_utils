@@ -169,12 +169,11 @@ def test_fix_settings_fills_defaults_and_drops_missing_streams():
     assert s.streams["ir_left"] is False and s.imu.sample_rate == "100Hz" and s.imu.gyro_range == "1000dps"
 
 
-def test_the_node_starts_at_its_own_colour_default_when_the_device_has_it():
-    from robot_utils.nodes.orbbec.models import DEFAULT_COLOR_PROFILE
+def test_the_node_starts_at_the_device_colour_default():
     cat = _cat()
-    assert fix_settings(Settings(), cat).color_profile == "1280x720@10 MJPG"      # device lacks it: device default
-    cat.color.append(ProfileOption(key=DEFAULT_COLOR_PROFILE, width=640, height=480, fps=15, format="MJPG"))
-    assert fix_settings(Settings(), cat).color_profile == DEFAULT_COLOR_PROFILE == "640x480@15 MJPG"
+    cat.color.append(ProfileOption(key="640x480@15 MJPG", width=640, height=480, fps=15, format="MJPG"))
+    assert Settings().color_profile is None
+    assert fix_settings(Settings(), cat).color_profile == "1280x720@10 MJPG"      # the device's own default
 
 
 def test_usb2_link():

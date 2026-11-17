@@ -49,7 +49,7 @@ from ..common.locks import LockStore, describe as describe_locks
 from ..common import realtime
 from ..common.server import EventLog
 from .constants import COMMAND_TIMEOUT, MODULES
-from .drive import SwerveDrive
+from .drive import STATUS_PERIOD_MS, SwerveDrive, check_status_period
 
 HARD_MAX_SPEED = 2.0      # m/s, translation (norm of vx, vy); fixed
 HARD_MAX_OMEGA = 4.0      # rad/s; fixed
@@ -154,8 +154,10 @@ def clamp(twist, max_speed: float, max_omega: float) -> tuple[tuple[float, float
 
 
 class SwerveNode:
-    def __init__(self, interface: str, hub: Optional[RowHub] = None, locks: Optional[LockStore] = None):
+    def __init__(self, interface: str, hub: Optional[RowHub] = None, locks: Optional[LockStore] = None,
+                 status_period_ms: int = STATUS_PERIOD_MS):
         self.interface = interface
+        self.status_period_ms = check_status_period(status_period_ms)   # kept across drive resets
         self.locks = locks or LockStore()
         self.lock_names = {"swerve"}        # + the instance name (server.py adds it)
         self.hub = hub or RowHub({"tick": len(FIELDS)})
@@ -188,7 +190,8 @@ class SwerveNode:
 
     def start(self) -> None:
         try:
-            self.drive = SwerveDrive(self.interface, pre_tick=self._pre_tick, on_tick=self._on_tick)
+            self.drive = SwerveDrive(self.interface, pre_tick=self._pre_tick, on_tick=self._on_tick,
+                                     status_period_ms=self.status_period_ms)
             self.drive_error = None
             self.events.add(f"drive started on {self.interface}")
             self._rt_reported = False
@@ -293,6 +296,21 @@ class SwerveNode:
         self.soft = (s, w)
         self.events.add(f"soft limits {s} m/s, {w} rad/s")
         return self.limits()
+
+    def set_status_period(self, ms: int) -> dict:
+        """The SPARKs' per-tick status frame period (ms). Anyone (it moves nothing); applied at the next
+        tick and kept across drive resets; back to the start value when the node restarts."""
+        ms = check_status_period(ms)
+        if self.drive is not None:
+            self.drive.set_status_period(ms)
+        old, self.status_period_ms = self.status_period_ms, ms
+        if ms != old:
+            self.events.add(f"status frames every {ms} ms (was {old} ms)")
+        return self.status_period()
+
+    def status_period(self) -> dict:
+        applied = None if self.drive is None else self.drive.status_period_ms
+        return {"status_period_ms": self.status_period_ms, "applied_ms": applied}
 
     def limits(self) -> dict:
         return {"hard": {"max_speed": HARD_MAX_SPEED, "max_omega": HARD_MAX_OMEGA},
@@ -574,6 +592,7 @@ class SwerveNode:
             "command_timeout": COMMAND_TIMEOUT,
             "lease_heartbeat": LEASE_HEARTBEAT,
             "loop_hz": None if rate is None else round(rate, 1),
+            "status_period_ms": self.status_period_ms,
             "realtime": self._realtime(),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],

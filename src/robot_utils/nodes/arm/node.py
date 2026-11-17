@@ -48,7 +48,7 @@ from ..common.locks import LockStore, describe as describe_locks
 from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
-from .bus import ArmBus, BusError, ReadMiss
+from .bus import ArmBus, BusError, ReadLate, ReadMiss
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from .planner import Planner
@@ -68,7 +68,7 @@ STALE_WARN_EVERY = 5.0        # at most this often (the gaps in between are coun
 LATENCY_WINDOW = 500          # ticks (5 s) of reply latencies behind the stats in /state
 LATENCY_FIRST = 300           # ticks after connecting whose latencies are reported as one event
 LATENCY_MARGIN_WARN = 0.001   # s between the p99 reply latency and the tick period below which it warns:
-LATENCY_WARN_EVERY = 60.0     # replies later than one tick count as missed (at most one warning a minute)
+LATENCY_WARN_EVERY = 60.0     # replies later than one tick are waited for one more (at most one warning a minute)
 LATE_WARN = 0.08              # s between ticks reported as an event (the motors' own 100 ms watchdog
                               # protects them: they drop to damping and report it, which faults)
 ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
@@ -125,8 +125,8 @@ FIELD_DOC = {
     "goal_err_pos / rot": "commanded TCP vs the goal of the source",
     "w / w_lin / sigma_min": "manipulability sqrt(det(J J^T)) of the 6x6 TCP Jacobian, of its translational rows, and its smallest singular value, at the measured pose",
     "limited": "the joint speed limit held q_cmd back this tick (the step limit)",
-    "read_age": "age of the reading this tick used: 0 normally; > 0 when replies were missed and the latest complete reading was kept (fault beyond 50 ms with the motors on)",
-    "read_misses": "ticks with missed replies since the node started (per motor in /state)",
+    "read_age": "age of the reading this tick used: 0 normally; > 0 when replies were late (still awaited, one tick) or missed and the latest complete reading was kept (fault beyond 50 ms with the motors on)",
+    "read_misses": "ticks with missed replies (none within two ticks) since the node started (per motor in /state)",
     "twist_age": "s since the track twist feedforward was written (NaN if none)",
     "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
     "g_force": "squeeze force applied, estimated: the gripper's MIT law plus the force-limit feedforward, over the pinion (N)",
@@ -412,9 +412,10 @@ class ArmNode:
             self._stale_warned = False
             self._note_latency(now)
         except ReadMiss as e:
-            self.read_misses += 1
-            for m in e.missing:
-                self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
+            if not isinstance(e, ReadLate):          # a late reply (still in flight, one tick) is not a miss
+                self.read_misses += 1
+                for m in e.missing:
+                    self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
             age = math.inf if self._fresh_t is None else now - self._fresh_t
             limit = STALE_ON if self.motors_on else STALE_OFF
             if self.motors_on and STALE_WARN <= age <= limit and not self._stale_warned:
@@ -487,7 +488,7 @@ class ArmNode:
             low = st["margin_ms"] < LATENCY_MARGIN_WARN * 1e3
             self.events.add(f"reply latency over the first {st['n']} complete reads: p50 {st['p50_ms']:.1f} ms, "
                             f"p99 {st['p99_ms']:.1f} ms, max {st['max_ms']:.1f} ms: {st['margin_ms']:.1f} ms margin "
-                            f"to the {DT * 1e3:.0f} ms tick" + (" (too little: later replies count as missed)" if low else ""),
+                            f"to the {DT * 1e3:.0f} ms tick" + (" (too little: later replies are waited for one more tick, then count as missed)" if low else ""),
                             "warn" if low else "info")
             return
         if self._lat_n % LATENCY_WINDOW or now - self._lat_warn_t < LATENCY_WARN_EVERY:
@@ -497,7 +498,7 @@ class ArmNode:
             self._lat_warn_t = now
             self.events.add(f"reply latency p99 {st['p99_ms']:.1f} ms (max {st['max_ms']:.1f} ms) over the last "
                             f"{st['n']} complete reads: {st['margin_ms']:.1f} ms margin to the {DT * 1e3:.0f} ms tick; "
-                            "later replies count as missed, and with the motors on "
+                            "later replies are waited for one more tick (missed after two), and with the motors on "
                             f"{STALE_ON * 1e3:.0f} ms without a complete reading faults", "warn")
 
     def latency_stats(self) -> Optional[dict]:

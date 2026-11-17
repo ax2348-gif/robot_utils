@@ -148,7 +148,7 @@ or no frame, 504 the camera thread did not answer within 20 s.
 ```json
 {
   "streams": {"color": true, "depth": true, "ir_left": false, "ir_right": false},
-  "color_profile": "640x480@15 MJPG",
+  "color_profile": "1280x720@10 MJPG",
   "stereo_mode": "848x480@10",
   "align": false,
   "frame_sync": false,
@@ -162,11 +162,10 @@ or no frame, 504 the camera thread did not answer within 20 s.
 
 - `color_profile` / `stereo_mode` must be keys from `GET /catalog`. Depth, left IR and right IR
   always share one `stereo_mode` (the device requires it).
-- The node starts with colour `640x480@15 MJPG` (the device default, `1280x720@10 MJPG`, only if the
-  device lacks it). Settings are not saved: a restart returns to these defaults. At 1280x720 a
-  full-resolution look in agent_interface held the arm's control loop until the arm faulted
-  (2026-11-13); at 640x480 the same looks left the arm's readings at most 63 ms old (fault: 50 ms
-  with its motors on), so prefer default-scale looks while the arm is engaged.
+- The node starts with the device's colour default, `1280x720@10 MJPG`. Settings are not saved: a
+  restart returns to it. (From 2026-11-13 19:01 to 20:40 the node started at `640x480@15 MJPG` instead,
+  to spare the arm's control loop during full-resolution looks; that was reverted because it left
+  agents with a quarter of the depth detail, and the arm still faulted.)
 - On a USB 2 link (`device.connection` `USB2.x`) the node logs a warning event when it opens the
   camera: colour must be MJPG and the bandwidth is limited; use a USB 3 port and cable.
 - `align`: SDK software depth-to-color alignment; aligned depth has the color resolution and

@@ -574,8 +574,8 @@ class JamState(BaseModel):
 
 class ReplyLatency(BaseModel):
     """From a tick's read requests to the last motor's reply. The next tick collects them about one tick
-    (10 ms) later: a reply slower than that counts as missed, so missed reads are not in these numbers
-    (they are in `read_misses`). With the motors on, 50 ms without a complete reading faults the arm."""
+    (10 ms) later: a reply slower than that is waited for one more tick and counts as missed only if it
+    has not arrived by then, so missed reads are not in these numbers (they are in `read_misses`). With the motors on, 50 ms without a complete reading faults the arm."""
     n: int = Field(description="Complete reads the numbers are over.")
     p50_ms: float = Field(description="Median, ms.")
     p99_ms: float = Field(description="99th percentile, ms.")

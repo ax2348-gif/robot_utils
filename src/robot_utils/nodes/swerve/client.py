@@ -120,6 +120,13 @@ class SwerveClient(NodeClient):
         """Drive encoders to 0 now; NodeError 409 unless the base is stationary."""
         return self.post("/encoders/rebase")
 
+    def status_period(self) -> dict:
+        return self.get("/status_period")
+
+    def set_status_period(self, ms: int) -> dict:
+        """The SPARKs' per-tick status frame period (ms; anyone, moves nothing, applied at the next tick)."""
+        return self.post("/status_period", {"status_period_ms": ms})
+
     def set_auto_rebase(self, enabled: Optional[bool] = None, interval_s: Optional[float] = None,
                         still_s: Optional[float] = None) -> dict:
         return self.post("/encoders/auto", {"enabled": enabled, "interval_s": interval_s, "still_s": still_s})

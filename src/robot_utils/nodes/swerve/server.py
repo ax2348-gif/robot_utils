@@ -20,6 +20,7 @@ from ..common.server import (EStopCleared, EStopState, EStopTriggered, Event, Le
                              add_page_routes, node_meta, rows_stream, setup_app, sse)
 from ..common.realtime import RealtimeOut
 from .constants import COMMAND_TIMEOUT, MODULES
+from .drive import STATUS_PERIOD_RANGE_MS
 from .node import (AUTO_INTERVAL_S, AUTO_STILL_S, FIELD_DOC, FIELDS, HARD_MAX_OMEGA, HARD_MAX_SPEED, LEASE_HEARTBEAT,
                    REBASE_STILL_S, UNITS, SwerveNode)
 
@@ -67,6 +68,15 @@ class LimitsIn(BaseModel):
     model_config = ConfigDict(json_schema_extra={"examples": [{"max_speed": 0.5, "max_omega": 1.0}]})
 
 
+class StatusPeriodIn(BaseModel):
+    status_period_ms: int = Field(ge=STATUS_PERIOD_RANGE_MS[0], le=STATUS_PERIOD_RANGE_MS[1],
+                                  description="Period of each SPARK's per-tick status frames (STATUS_0 and the drive / "
+                                              "steering signal frame), ms. 10 = one fresh reading every 10 ms tick; "
+                                              "20 (the SPARKs' stored default) halves the frames, and every other tick "
+                                              "reuses the last reading.")
+    model_config = ConfigDict(json_schema_extra={"examples": [{"status_period_ms": 20}, {"status_period_ms": 10}]})
+
+
 class AutoRebaseIn(BaseModel):
     enabled: Optional[bool] = Field(None, description="Rebase automatically when due and stationary.")
     interval_s: Optional[float] = Field(None, ge=1.0, allow_inf_nan=False, description="Due when the last rebase is older than this (s).")
@@ -91,6 +101,13 @@ class Limits(BaseModel):
     hard: SpeedLimits = Field(description="Fixed.")
     soft: SpeedLimits = Field(description="Set by the lease holder within the hard limits; back to the hard "
                                           "limits when the lease ends.")
+
+
+class StatusPeriodOut(BaseModel):
+    status_period_ms: int = Field(description="The setting (ms): applied at the next tick, kept across drive resets, back "
+                                              "to the start value (`--status-ms`, default 10) when the node restarts.")
+    applied_ms: Optional[int] = Field(description="The period the running drive has applied (ms); null without a drive. "
+                                                  "Equals the setting from the tick after a change.")
 
 
 class LeaseState(BaseModel):
@@ -244,6 +261,7 @@ class SwerveState(BaseModel):
     lease_heartbeat: float = Field(description="s without a renew or command before the lease lapses.")
     loop_hz: Optional[float] = Field(description="Control tick rate measured over the last ~100 ticks (Hz); null "
                                                  "while there are too few.")
+    status_period_ms: int = Field(description="Period of the SPARKs' per-tick status frames (ms; GET / POST /status_period).")
     realtime: RealtimeOut = Field(description="How the drive loop's thread is scheduled.")
     clients: int = Field(description="Open /stream subscribers.")
     encoders: Encoders
@@ -366,6 +384,15 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     @app.post("/limits", response_model=Limits, tags=["control"], summary="Set soft limits within the hard limits (holder; reset when the lease ends)")
     async def set_limits(body: LimitsIn, token: LeaseToken = None):
         return node.set_limits(token, body.max_speed, body.max_omega)
+
+    @app.get("/status_period", response_model=StatusPeriodOut, tags=["control"], summary="The SPARKs' status frame period")
+    async def get_status_period():
+        return node.status_period()
+
+    @app.post("/status_period", response_model=StatusPeriodOut, tags=["control"],
+              summary="Set the SPARKs' status frame period (anyone: it moves nothing; applied at the next tick)")
+    async def set_status_period(body: StatusPeriodIn):
+        return node.set_status_period(body.status_period_ms)
 
     @app.post("/estop", response_model=EStopTriggered, tags=["control"], summary="E-stop: anyone; latches until the holder clears it")
     async def estop(request: Request, body: Optional[EStopIn] = None):

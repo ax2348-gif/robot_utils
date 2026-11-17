@@ -209,6 +209,43 @@ def test_stream_framing_every_tick(node_url):
         assert a.get("/fields")["fields"] == FIELDS
 
 
+def test_status_period_is_set_live_and_kept_across_a_reset(node_url):
+    url, node, sims = node_url
+    from sparkcan._params import SparkParameter as P
+    drives, steers = [sims[m.drive_id] for m in c.MODULES], [sims[m.steer_id] for m in c.MODULES]
+
+    def periods():   # the per-tick frames as the simulated SPARKs hold them (STATUS_0 and the signal frame)
+        return ({s.params[int(P.STATUS_0_PERIOD)] for s in drives + steers},
+                {s.params[int(P.STATUS_2_PERIOD)] for s in drives}, {s.params[int(P.STATUS_5_PERIOD)] for s in steers})
+    with SwerveClient(url) as a:
+        assert a.status_period() == {"status_period_ms": 10, "applied_ms": 10}
+        assert a.state()["status_period_ms"] == 10 and periods() == ({10}, {10}, {10})
+        a.set_status_period(20)                                  # anyone: no lease
+        wait_for(lambda: a.status_period()["applied_ms"] == 20)
+        wait_for(lambda: periods() == ({20}, {20}, {20}))
+        assert a.state()["status_period_ms"] == 20
+        assert any("status frames every 20 ms" in e["msg"] for e in a.state()["events"])
+        for bad in (4, 51, 12.5):
+            with pytest.raises(NodeError) as e:
+                a.post("/status_period", {"status_period_ms": bad})
+            assert e.value.status == 422
+        a.acquire()
+        a.reset()                                                # a rebuilt drive keeps the setting
+        wait_for(lambda: a.status_period() == {"status_period_ms": 20, "applied_ms": 20})
+        wait_for(lambda: periods() == ({20}, {20}, {20}))
+        a.enable()
+        a.command(0.1, 0, 0)                                     # and still drives
+        wait_for(lambda: latest(node)["motors_enabled"] == 1)
+
+
+def test_status_period_start_value_and_range():
+    from robot_utils.nodes.swerve.drive import check_status_period
+    assert SwerveNode("virtual:unused", status_period_ms=25).status_period() == {"status_period_ms": 25, "applied_ms": None}
+    for bad in (4, 51, 12.5, True, "20"):
+        with pytest.raises(ValueError):
+            check_status_period(bad)
+
+
 def test_reset_rebuilds_a_crashed_drive(node_url):
     url, node, _ = node_url
 

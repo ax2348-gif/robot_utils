@@ -52,7 +52,8 @@ complete reading for up to 121 ms (motors off, nothing moving), and with the mot
 twice in a session. The arm thread itself was never kept off a CPU; the stalls came from what it
 depends on at normal priority (the motor bridge's receive thread, the node's other threads holding
 the interpreter lock, the kernel's USB serial work, all CPU0 interrupts), and from the read's thin
-margin: replies take up to ~9 ms of the 10 ms tick, and a later one counts as missed. Pinning
+margin: replies take up to ~9 ms of the 10 ms tick (11-15 ms p99 under load on 2026-11-13), and a later
+one counted as missed (since 2026-11-13 it is waited for one more tick first). Pinning
 nodes to cores (four layouts tried) did not remove the gaps. What changed: the camera's default
 colour is 640x480@15 (docs/orbbec_node.md), larger looks warn when the arm's motors are on, and the
 arm warns at 30 ms gaps and on a thin reply-latency margin (docs/arm.md).

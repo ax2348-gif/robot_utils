@@ -1007,6 +1007,15 @@ def test_occasional_missed_replies_are_tolerated_and_reported(rig):
     assert rig.row()["read_misses"] == 10 and rig.row()["read_age"] == 0.0
 
 
+def test_a_late_reply_waits_a_tick_without_counting_as_missed(rig):
+    n = engaged(rig).node
+    for _ in range(5):
+        rig.sim.late_reads = 1                         # joint6's reply arrives a tick late, five times
+        rig.step(6)
+    assert n.state == "servoing" and n.read_misses == 0 and n.misses_by_motor == {}
+    assert rig.row()["read_misses"] == 0 and rig.row()["read_age"] == 0.0
+
+
 def test_a_gap_nearing_the_fault_is_warned_once_and_counted(rig):
     from robot_utils.nodes.arm.node import STALE_ON, STALE_WARN
     n = engaged(rig).node
