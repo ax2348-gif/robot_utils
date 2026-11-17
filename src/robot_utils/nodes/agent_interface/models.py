@@ -222,6 +222,20 @@ class RobotOut(Reply):
 
 # -- perception ------------------------------------------------------------------------------------
 
+class ViewOut(Reply):
+    """POST /view: a camera's latest colour frame as the camera node serves it."""
+    camera: str = Field(description="The camera it came from.")
+    image: str = Field(description="The JPEG, base64 (decode it, or use `url`). Not a snapshot: no depth, pose or "
+                                   "selections refer to it.")
+    media_type: Literal["image/jpeg"] = Field(description="Format of `image`.")
+    url: str = Field(description="Relative URL of the same JPEG (kept with the last rendered images).")
+    image_size: list[Optional[int]] = Field(description="[width, height] pixels.")
+    seq: Optional[int] = Field(description="The camera's frame number.")
+    age_s: Optional[float] = Field(description="Seconds from capture to this reply (null if not known).")
+    covered: bool = Field(description="A cover lock is on that camera: the image is blank.")
+    warnings: list[str] = Field(description="Read these (e.g. covered).")
+
+
 class LookOut(Reply):
     snapshot: str = Field(description="Snapshot id (s1, s2, ...; the last 30 are kept).")
     image: str = Field(description="Relative URL of the colour JPEG (with a pixel grid if `grid`).")

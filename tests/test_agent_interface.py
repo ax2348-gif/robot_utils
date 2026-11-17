@@ -689,3 +689,41 @@ def test_reflex_force_and_opt_in(stack):
     assert g["reflex"] == {"on": True, "why": "on: requested"} and nav.reflex["armed"]
     get(st, f"/goals/{g['goal_id']}/wait", timeout=30)
     assert get(st, "/state").json()["reflex"]["force"] is False
+
+
+def test_view_returns_the_cameras_latest_frame_as_is(tmp_path):
+    """POST /view: the selected camera node's latest colour JPEG, base64, without a session; unknown cameras
+    are refused naming the known ones; an unreachable camera is a 503."""
+    import base64
+    from robot_utils.nodes.agent_interface.node import AgentNav
+    from robot_utils.nodes.agent_interface.server import create_app as nav_app
+    from robot_utils.nodes.orbbec.fake_backend import FakeBackend
+    from robot_utils.nodes.orbbec.hub import Hub
+    from robot_utils.nodes.orbbec.models import Settings
+    from robot_utils.nodes.orbbec.owner import Owner
+    from robot_utils.nodes.orbbec.server import create_app as cam_app
+
+    hub = Hub()
+    cam_url, *cam = serve(cam_app(Owner(FakeBackend(), hub, Settings(), startup_s=0.2, calibration_file=None), hub))
+    nav = AgentNav("http://127.0.0.1:9", "http://127.0.0.1:9", None, str(tmp_path / "nav"), require_imu=False,
+                   description=None, arm=None, swerve=None,
+                   cameras={"wrist_camera": cam_url, "gone": "http://127.0.0.1:9"})
+    url, *srv = serve(nav_app(nav))
+    try:
+        wait_for(lambda: httpx.get(cam_url + "/snapshot/color", timeout=5).status_code == 200, 15)
+        r = httpx.post(url + "/view", json={"camera": "wrist_camera", "comment": "first look"}, timeout=10)
+        assert r.status_code == 200, r.text
+        v = r.json()
+        jpg = base64.b64decode(v["image"])
+        assert jpg[:3] == b"\xff\xd8\xff" and v["media_type"] == "image/jpeg" and v["camera"] == "wrist_camera"
+        assert all(v["image_size"]) and v["seq"] is not None and v["covered"] is False and v["warnings"] == []
+        assert v["age_s"] is not None and 0 <= v["age_s"] < 5 and "since_last_call" in v
+        assert httpx.get(url + "/" + v["url"], timeout=5).content == jpg
+        assert nav.turns[-1]["kind"] == "view" and "image" not in nav.turns[-1]["reply"]
+        bad = httpx.post(url + "/view", json={"camera": "tail"}, timeout=10)
+        assert bad.status_code == 422 and "wrist_camera" in bad.json()["detail"]
+        assert httpx.post(url + "/view", json={"camera": "gone"}, timeout=10).status_code == 503
+    finally:
+        for s, t in (srv, cam):
+            s.should_exit = True
+            t.join(10)

@@ -99,6 +99,11 @@ class GridIn(BaseModel):
                           "xyz = all three. Also returned as numbers (`grid.samples`).")
 
 
+class ViewIn(Commented):
+    camera: str = Field("camera", description="Which camera: `camera` (head) or `wrist_camera` (on the arm's wrist).")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"camera": "wrist_camera"}]})
+
+
 class LookIn(Commented):
     scale: Optional[float] = Field(None, description="Depth grid = colour x scale; default the node's (0.5); 1.0 = full "
                                    "resolution (slower, briefly applies to every viewer).")
@@ -517,6 +522,13 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     async def look(body: LookIn = LookIn(), x_operator: Optional[str] = Operator):
         grid = body.grid.model_dump() if isinstance(body.grid, GridIn) else body.grid
         return await run(node.look, actor(x_operator), body.scale, grid, body.settle, body.comment)
+
+    @app.post("/view", response_model=M.ViewOut, response_model_exclude_unset=True, tags=["perception"],
+              summary="A camera's latest colour frame, at once (base64 JPEG; no snapshot)")
+    async def view(body: ViewIn = ViewIn(), x_operator: Optional[str] = Operator):
+        """The selected camera node's latest colour frame as it serves it: no capture, depth, registration or overlay,
+        so it works for any camera (the wrist camera has no robot-frame pose yet). Read-only; no session needed."""
+        return await run(node.view, actor(x_operator), body.camera, body.comment)
 
     GEO_DOC = ("Placements of the camera and the arm mount on the robot, as described and as this session corrects them. "
                "Corrections are for display and perception only (look, zoom values, queries, the robot drawn by "

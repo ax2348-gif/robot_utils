@@ -45,6 +45,8 @@ log = logging.getLogger("agent_interface")
 DATA_DIR = os.path.expanduser("~/.local/share/robot_utils/agent_interface")
 KEEP_SNAPSHOTS = 30          # full-resolution snapshots kept in memory (thumbnails are stored)
 KEEP_IMAGES = 200            # rendered overlay images kept in memory
+VIEW_TIMEOUT = 3.0           # s: POST /view's request to the camera node
+CAMERAS = {"camera": "camera", "wrist_camera": "wrist_camera"}   # POST /view: name -> camera node instance / URL
 KEEP_LOG = 1000              # dialogue turns kept in memory (all are in the session's log.jsonl)
 POSE_HISTORY_S = 30.0
 REFLEX_HZ = 6.0
@@ -128,7 +130,8 @@ class AgentNav:
     def __init__(self, pose_servo: str = "pose_servo", perception: str = "3d_perception",
                  estimator: str = "estimator", data_dir: str = DATA_DIR, profile: str = "cautious",
                  require_imu: bool = True, description: Optional[str] = "description", arm: Optional[str] = "arm",
-                 swerve: Optional[str] = "swerve"):
+                 swerve: Optional[str] = "swerve", cameras: Optional[dict] = None):
+        self.cameras = dict(CAMERAS if cameras is None else cameras)
         self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator,
                         "description": description, "arm": arm, "swerve": swerve}
         self.data_dir = data_dir
@@ -315,6 +318,39 @@ class AgentNav:
             while len(self.images) > KEEP_IMAGES:
                 self.images.popitem(last=False)
             return name
+
+    # -- view: a camera's latest frame, as it is -----------------------------------------------------
+
+    def view(self, actor: str = "agent", camera: str = "camera", comment: str = "") -> dict:
+        """The selected camera node's latest colour frame, as the JPEG it serves (no capture, registration or
+        overlay), base64 in the reply. Logged as a turn with the image."""
+        target = self.cameras.get(camera)
+        if target is None:
+            raise RequestError(422, f"unknown camera {camera!r}; cameras: {', '.join(self.cameras) or 'none'}")
+        try:
+            with NodeClient(target, timeout=VIEW_TIMEOUT) as c:
+                r = c.http.get("/snapshot/color", params={"format": "jpg"})
+        except Exception as e:
+            raise RequestError(503, f"{camera} unreachable: {type(e).__name__}: {e}")
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail", r.text)
+            except ValueError:
+                detail = r.text
+            raise RequestError(r.status_code if r.status_code < 500 else 502, f"{camera}: {detail}")
+        h = json.loads(r.headers.get("x-frame-header") or "{}")
+        t_cap = h.get("t_capture")
+        age = time.monotonic() - t_cap if isinstance(t_cap, (int, float)) else None
+        warnings = []
+        if h.get("covered"):
+            warnings.append("the camera is covered (a cover lock): the image is blank")
+        name = self.store_image(r.content, f"view-{camera}", "jpg")
+        meta = {"camera": camera, "media_type": "image/jpeg", "url": f"images/{name}",
+                "image_size": [h.get("width"), h.get("height")], "seq": h.get("seq"),
+                "age_s": round(age, 3) if age is not None and 0 <= age < 3600 else None,
+                "covered": bool(h.get("covered")), "warnings": warnings}
+        self.turn(actor, "view", {"camera": camera}, meta, comment, [name], level="warn" if warnings else "info")
+        return {**meta, "image": base64.b64encode(r.content).decode("ascii")}
 
     # -- session / ownership ----------------------------------------------------------------------
 

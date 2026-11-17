@@ -34,6 +34,13 @@ docs/plans/agent_node_v1.md. On top of agent_nav's design (below):
 
 The fake arm node for tests and offline trials is `sim.fake_arm_app()`.
 
+- **`POST /view {camera}`** (2026-11-16): the selected camera node's latest colour frame, returned at
+  once as base64 JPEG with its size, frame number and age. It is the camera node's own JPEG (`GET
+  /snapshot/color`; MJPEG cameras' frames pass through unchanged): no capture, depth, registration or
+  overlay, so it works for a camera with no robot-frame pose yet, such as the wrist camera. Cameras are
+  `camera` (head) and `wrist_camera` by default (`--cameras`, names or name=URL). Read-only and needs no
+  session; it is logged as a turn with the image, and the JPEG is also kept at `images/<name>`.
+
 
 `python -m robot_utils.nodes.agent_interface` is the boundary between an AI agent and the robot. The agent
 looks, measures and plans through read-only calls, and moves the base only with explicit goals. A

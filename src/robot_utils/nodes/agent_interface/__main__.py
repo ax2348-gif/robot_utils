@@ -17,6 +17,8 @@ def main() -> None:
     p.add_argument("--estimator", default="estimator")
     p.add_argument("--description", default="description", help="robot description node ('none' to skip)")
     p.add_argument("--arm", default="arm", help="arm node, for the robot drawn by /plan/check ('none' to skip)")
+    p.add_argument("--cameras", default="camera,wrist_camera",
+                   help="cameras POST /view may read: names of camera node instances, or name=URL, comma separated")
     p.add_argument("--profile", default="cautious", choices=["cautious", "normal"])
     p.add_argument("--no-require-imu", action="store_true", help="allow goals without IMU heading (simulation)")
     p.add_argument("--data-dir", default=None, help="transcripts (default ~/.local/share/robot_utils/agent_interface)")
@@ -31,7 +33,8 @@ def main() -> None:
     node = AgentNav(a.pose_servo, a.perception, a.estimator, a.data_dir or DATA_DIR, a.profile,
                     require_imu=not a.no_require_imu,
                     description=None if a.description.lower() == "none" else a.description,
-                    arm=None if a.arm.lower() == "none" else a.arm)
+                    arm=None if a.arm.lower() == "none" else a.arm,
+                    cameras=dict((c.split("=", 1) if "=" in c else (c, c)) for c in a.cameras.split(",") if c))
     serve(create_app(node), a, banner=f"agent {a.name!r} (profile {a.profile})")
 
 

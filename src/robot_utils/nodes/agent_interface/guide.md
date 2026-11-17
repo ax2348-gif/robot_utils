@@ -302,6 +302,7 @@ then `GET /memory`. Places are lost when the estimator resets.
 | `GET /robot` | body, wheels, frames, limits, camera pose / field of view / blind zone, diagram |
 | `POST /enable {caps?, base?, arm?, comment}` / `POST /disable` | base (pose_servo + swerve lease) and arm on / both off at once |
 | `POST /look {scale?, grid?, settle?}` | snapshot: image, BEV, pose at capture (`grid`: true or {step, values}) |
+| `POST /view {camera?}` | a camera's latest colour frame at once, base64 JPEG: `camera` (head) or `wrist_camera`; not a snapshot (no depth, pose or selections) |
 | `POST /zoom {snapshot?, box?, step?, values?}` | enlarge part of a snapshot, grid in full-image pixels, depth values |
 | `POST /query/region`, `POST /query/plane` `{snapshot?, select, exclude?}` | read-only geometry with overlays |
 | `POST /query/line {snapshot?, points \| select, exclude?}` | 3D line: direction, heading, length (edges, alignment) |
