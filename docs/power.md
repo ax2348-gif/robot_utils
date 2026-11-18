@@ -216,6 +216,32 @@ The defaults are those of the old service, except for two changes:
 - **It adds a cancellable 10 s countdown** after the 10 s hold. The old service powered off
   straight after the hold.
 
+## Power log and watch
+
+Every UPS poll (1 Hz) is appended to `~/.local/state/robot_utils/power/log/ups-YYYY-MM-DD.csv` (local date):
+`wall, time, percent, pack_v, cell1_v..cell4_v, current_a (+ charging), power_w, input_v, input_a,
+input_present, charging, fast_charge, charger_state, remaining_mah, error`. A failed read is a row with only the
+time and the error. Rows are flushed as written and the file is fsynced every 5 s, so a brownout or power cut
+loses at most the last ~5 s (the journal can lose its last minutes). Files older than 30 days are deleted. At
+startup the node refills its 24 h history (`GET /history`) from the log, so a reboot no longer wipes it.
+
+The node also writes a journal line (and a page event) when one of these starts or ends:
+
+| Condition | Starts | Ends |
+|---|---|---|
+| input lost | input not present | present again |
+| draining on input | input present, current below -50 mA for 10 s | current >= 0 for 10 s |
+| low cell | any cell below 3.30 V for 5 s | all above 3.40 V |
+| unbalanced | cells more than 0.20 V apart for 5 s | within 0.15 V |
+
+"Charging" in `/state` is the charger's status bit: it stays set while the input is present even when the pack
+is net draining (the load is more than the input supplies). Read `current_a` for the net flow.
+
+```
+tail -f ~/.local/state/robot_utils/power/log/ups-$(date +%F).csv
+journalctl --user -u robot-node-power -p warning
+```
+
 ## Cutover from `~/ups-dashboard`
 
 The old service, `ups-dashboard.service` (port 8081, system `python3`), still runs on the robot.

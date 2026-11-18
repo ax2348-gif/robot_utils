@@ -499,3 +499,71 @@ def test_power_off_write_is_the_only_write():
     UpsHat(bus).arm_power_off()
     assert bus.writes == [(0x2d, REG_POWER_OFF, POWER_OFF_MAGIC)]
     assert sd_mod.CONFIRM == "shutdown"
+
+
+# -- disk log and watch -------------------------------------------------------------------------------
+
+def logged_node(tmp_path, bus=None, clock=None):
+    bus, clock = bus or FakeBus(), clock or Clock()
+    node = PowerNode([UpsSource(UpsHat(bus)), TetherSource("main")], estop=Recorder().estop,
+                     power_off=Recorder().power_off, clock=clock, settings_path=tmp_path / "power.json",
+                     audit_path=tmp_path / "shutdown.jsonl", spawn=lambda fn: fn(), log_dir=tmp_path / "log")
+    return node, bus, clock
+
+
+def test_disk_log_every_poll_with_cells_and_input_and_restores_history(tmp_path):
+    import csv
+    from robot_utils.nodes.power.powerlog import FIELDS
+    node, bus, clock = logged_node(tmp_path)
+    for _ in range(3):
+        node.step(clock.t)
+        clock.t += 1.0
+    bus.fail = "Remote I/O error"
+    node.step(clock.t)
+    node.close()
+    files = list((tmp_path / "log").glob("ups-*.csv"))
+    assert len(files) == 1
+    rows = list(csv.reader(open(files[0])))
+    assert rows[0] == FIELDS and len(rows) == 5
+    r = dict(zip(FIELDS, rows[1]))
+    assert (r["percent"], r["pack_v"], r["cell2_v"], r["current_a"]) == ("59", "15.587", "3.874", "0.512")
+    assert (r["input_v"], r["input_a"], r["input_present"], r["charging"]) == ("8.675", "2.090", "1", "1")
+    bad = dict(zip(FIELDS, rows[4]))
+    assert bad["pack_v"] == "" and "Remote I/O error" in bad["error"]
+    again, _, _ = logged_node(tmp_path)          # after a restart the history comes back from the disk log
+    assert again.restore_history() == 1           # one row per HISTORY_S: the three good polls were 1 s apart
+    assert again.history_rows("ups", 86400)["rows"][0][2:5] == [59, 15.587, 0.512]
+
+
+def test_disk_log_prunes_old_files_and_survives_write_errors(tmp_path):
+    from robot_utils.nodes.power.powerlog import DiskLog
+    d = tmp_path / "log"
+    d.mkdir()
+    (d / "ups-2020-01-01.csv").write_text("old\n")
+    (d / "notes.txt").write_text("keep\n")
+    dl = DiskLog(d)
+    dl.write(1794956581.0, None, "no HAT")
+    assert not (d / "ups-2020-01-01.csv").exists() and (d / "notes.txt").exists() and dl.rows == 1
+    dl.close()
+    blocked = DiskLog(tmp_path / "notes-file")
+    (tmp_path / "notes-file").write_text("a file, not a directory")
+    blocked.write(1794956581.0, None)           # must not raise into the owner loop
+    assert blocked.error and blocked.rows == 0
+
+
+def test_watch_reports_drain_on_input_low_cell_spread_and_input_loss(tmp_path, caplog):
+    node, bus, clock = logged_node(tmp_path)
+    bus.set_word(0x22, -300)                     # on input, but net out of the pack
+    for i, mv in enumerate([3570, 3316, 3250, 3712]):
+        bus.set_word(0x30 + 2 * i, mv)
+    with caplog.at_level("INFO", logger="power"):
+        for _ in range(12):
+            node.step(clock.t)
+            clock.t += 1.0
+        bus.set_status(charging=False, vbus=False)
+        node.step(clock.t)
+    msgs = [e["msg"] for e in node.events.list()]
+    text = "\n".join(msgs)
+    assert text.count("DRAINING while on input") == 1
+    assert "cell 3 LOW at 3.25 V" in text and "0.46 V apart" in text and "input power LOST" in text
+    assert "DRAINING while on input" in caplog.text            # in the journal too, not only the page

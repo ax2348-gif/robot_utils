@@ -8,6 +8,9 @@ never powers anything off: at the end of a shutdown countdown it e-stops the nod
 then only logs "would power off". Without --fake, the real power-off arms the HAT (0x01 <- 0x55)
 and runs `systemctl poweroff`.
 
+Every UPS reading (1 Hz) is logged to ~/.local/state/robot_utils/power/log/ups-YYYY-MM-DD.csv (fsynced
+every 5 s, kept 30 days), and input loss, draining on input, a low cell or unbalanced cells go to the journal.
+
 Serves on <runtime dir>/robot/<name>.sock = http://<robot>/nodes/<name>/; --port is for debugging.
 """
 import argparse
@@ -51,8 +54,10 @@ def main() -> None:
             log.error("UPS HAT unavailable: %s", e)
         power_off = system_power_off(ups)
     sources = [UpsSource(ups, error=err), TetherSource("main", role="main")]
-    node = PowerNode(sources, power_off=power_off, fake=a.fake, name=a.name, config=a.config,
-                     **PowerNode.default_paths())
+    paths = PowerNode.default_paths()
+    if a.fake:
+        paths["log_dir"] = None             # a simulated HAT must not write the robot's power log
+    node = PowerNode(sources, power_off=power_off, fake=a.fake, name=a.name, config=a.config, **paths)
     if a.fake:      # a 24 h history on the simulated curve, so the plots have something to show
         now, wall, rows = time.monotonic(), time.time(), []
         for k in range(HISTORY_LEN, 0, -1):
@@ -61,6 +66,12 @@ def main() -> None:
             rows.append([t, wall - k * HISTORY_S, d["percent"], d["pack_mv"] / 1000, d["current_ma"] / 1000,
                          1.0 if d["vbus_present"] else 0.0, 1.0 if d["charging"] else 0.0])
         node.backfill("ups", rows)
+    else:
+        try:
+            n = node.restore_history()
+            log.info("power log: %s (history: %d rows restored)", node.disklog.dir if node.disklog else "off", n)
+        except Exception as e:  # noqa: BLE001 - an unreadable old log must not stop the node
+            log.warning("power log: history not restored: %s", e)
     app = create_app(node)
     serve(app, a, banner=f"power node {a.name!r} ({'fake UPS' if a.fake else f'UPS HAT on i2c-{a.bus} 0x{a.addr:02x}'})")
 

@@ -20,6 +20,7 @@ from ..common.lease import RequestError
 from ..common.server import EventLog
 from .lowvolt import LowVoltage
 from .lowvolt import default_path as default_settings_path
+from .powerlog import DiskLog, Watch
 from .shutdown import CONFIRM, DELAY_MIN_S, AuditLog, ShutdownController, default_state_dir, refuse_power_off
 from .sources import HISTORY_FIELDS, Source, UpsSource
 
@@ -82,7 +83,8 @@ class PowerNode:
     def __init__(self, sources: list[Source], *, estop: Optional[Callable[[], list]] = None,
                  power_off: Callable[[], None] = refuse_power_off, clock: Callable[[], float] = time.monotonic,
                  settings_path: Optional[Path] = None, audit_path: Optional[Path] = None,
-                 spawn=None, fake: bool = False, name: str = "power", config: Optional[str] = None):
+                 spawn=None, fake: bool = False, name: str = "power", config: Optional[str] = None,
+                 log_dir: Optional[Path] = None):
         self.sources = sources
         self.clock, self.fake, self.name = clock, fake, name
         self.hub = RowHub(1)
@@ -94,6 +96,8 @@ class PowerNode:
             on_event=lambda msg, level: self.events.add(msg, level))
         self.low = LowVoltage(settings_path, self._low_trigger)
         self.history = {s.name: deque(maxlen=HISTORY_LEN) for s in sources if s.telemetry}
+        self.disklog = DiskLog(log_dir) if log_dir is not None else None     # every UPS poll, on disk
+        self.watch = Watch(self._note)
         self._lock = threading.Lock()
         self._last_poll = self._last_hist = -1e18
         self._prev_err: dict[str, Optional[str]] = {}
@@ -106,7 +110,8 @@ class PowerNode:
 
     @classmethod
     def default_paths(cls) -> dict:
-        return {"settings_path": default_settings_path(), "audit_path": default_state_dir() / "shutdown.jsonl"}
+        return {"settings_path": default_settings_path(), "audit_path": default_state_dir() / "shutdown.jsonl",
+                "log_dir": default_state_dir() / "log"}
 
     @property
     def ups(self) -> Optional[UpsSource]:
@@ -122,6 +127,13 @@ class PowerNode:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        if self.disklog is not None:
+            self.disklog.close()
+
+    def _note(self, msg: str, level: str = "info") -> None:
+        """An event for the page that also goes to the journal (the page's events are in memory only)."""
+        log.log({"error": logging.ERROR, "warn": logging.WARNING}.get(level, logging.INFO), msg)
+        self.events.add(msg, level)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -139,17 +151,22 @@ class PowerNode:
                 err = getattr(s, "error", None)
                 if err != self._prev_err.get(s.name, None):
                     if err:
-                        self.events.add(f"{s.name}: {err}", "error")
+                        self._note(f"{s.name}: {err}", "error")
                     elif s.name in self._prev_err:
-                        self.events.add(f"{s.name}: reading again")
+                        self._note(f"{s.name}: reading again")
                     self._prev_err[s.name] = err
             ups = self.ups
+            if ups is not None and ups.ups is not None:            # a HAT to read (not: no I2C at all)
+                d = ups.data if ups.t_ok == now else None        # this poll's reading, or None if it failed
+                self.watch.update(now, d)
+                if self.disklog is not None:
+                    self.disklog.write(time.time(), d, ups.error)
             bat = ups.battery() if ups is not None and ups.fresh(now) else None
             self.low.check(now, bat, self.shutdown.pending is not None)
             low = self.low.low_since is not None and self.low.triggered_at is None
             if low and not self._was_low:
                 st = self.low.settings
-                self.events.add(f"pack {bat['pack_mv'] / 1000:.2f} V below {st['volts']:.2f} V and not charging: "
+                self._note(f"pack {bat['pack_mv'] / 1000:.2f} V below {st['volts']:.2f} V and not charging: "
                                 f"low-voltage shutdown in {st['hold_s']:.0f} s unless it recovers", "warn")
             self._was_low = low
             if now - self._last_hist >= HISTORY_S:
@@ -188,6 +205,17 @@ class PowerNode:
         self.audit.write("low_voltage", by=by, client=client, before=before, after=after)
         self.events.add(msg, "warn" if after["enabled"] != before["enabled"] else "info")
         return out
+
+    def restore_history(self) -> int:
+        """Refill the UPS history (last 24 h, one row per HISTORY_S) from the disk log, e.g. after a reboot."""
+        if self.disklog is None or "ups" not in self.history:
+            return 0
+        now, wall = self.clock(), time.time()
+        rows = [[now - (wall - float(r["wall"])), float(r["wall"]), int(r["percent"]), float(r["pack_v"]),
+                 float(r["current_a"]), float(r["input_present"]), float(r["charging"])]
+                for r in self.disklog.recent(wall, HISTORY_LEN * HISTORY_S, HISTORY_S)]
+        self.backfill("ups", rows)
+        return len(rows)
 
     def backfill(self, source: str, rows: list[list]) -> None:
         with self._lock:
