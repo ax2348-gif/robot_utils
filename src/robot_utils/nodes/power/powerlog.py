@@ -16,6 +16,7 @@ import csv
 import logging
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -32,6 +33,8 @@ DRAIN_HOLD_S = 10.0
 CELL_LOW_V, CELL_OK_V = 3.30, 3.40
 SPREAD_V, SPREAD_OK_V = 0.20, 0.15
 CELL_HOLD_S = 5.0
+SPANS_KEPT = 20
+LABELS = {"input": "input lost", "drain": "draining on input", "cell_low": "low cell", "spread": "cells unbalanced"}
 
 
 def row_of(wall: float, d: Optional[dict], error: Optional[str]) -> list:
@@ -129,7 +132,7 @@ class DiskLog:
                             w = float(r["wall"])
                         except (TypeError, ValueError):
                             continue
-                        if w < start or w > wall_now or not r.get("pack_v") or w - last < step_s:
+                        if w < start or w > wall_now + 1.0 or not r.get("pack_v") or w - last < step_s:
                             continue
                         out.append(r)
                         last = w
@@ -139,22 +142,38 @@ class DiskLog:
 
 
 class Watch:
-    """Report conditions as they start and end; ``note(msg, level)`` puts them in the journal and the events."""
+    """Report conditions as they start and end; ``note(msg, level)`` puts them in the journal and the events.
 
-    def __init__(self, note: Callable[[str, str], None]):
+    Each condition is also kept as a span (``spans()``, the last ``SPANS_KEPT``, in memory): ``start`` is when
+    it first held (before its hold time ran out), ``end`` when its end first held, or None while it lasts."""
+
+    def __init__(self, note: Callable[[str, str], None], clock_wall: Callable[[], float] = time.time):
         self.note = note
+        self.wall = clock_wall
         self.active: dict[str, bool] = {}
         self.since: dict[str, float] = {}
+        self._spans: deque = deque(maxlen=SPANS_KEPT)
+        self._open: dict[str, dict] = {}
+        self._detail: dict[str, str] = {}
+
+    def spans(self) -> list[dict]:
+        """Oldest first: {key, label, active, start, end, detail} (start / end Unix epoch s, end None while active)."""
+        return [{"key": s["key"], "label": s["label"], "active": s["end"] is None, "start": s["start"], "end": s["end"],
+                 "detail": s["detail"]} for s in self._spans]
 
     def update(self, now: float, d: Optional[dict]) -> None:
         if d is None:
             return
+        self._wall_now = (now, self.wall())
         cells = [c / 1000 for c in d["cells_mv"]]
         lo, spread = min(cells), max(cells) - min(cells)
         snap = (f"pack {d['pack_mv'] / 1000:.2f} V, {d['percent']} %, cells "
                 + "/".join(f"{c:.2f}" for c in cells)
                 + f" V, {d['current_ma'] / 1000:+.2f} A, input {d['vbus_mv'] / 1000:.2f} V {d['vbus_ma'] / 1000:.2f} A")
         on_input = d["vbus_present"]
+        self._detail = {"input": "", "cell_low": f"cell {cells.index(lo) + 1} {lo:.2f} V", "spread": f"{spread:.2f} V",
+                        "drain": f"{d['current_ma'] / 1000:+.2f} A, {d['pack_mv'] * d['current_ma'] / 1e6:+.1f} W, "
+                                 f"input {d['vbus_mw'] / 1000:.1f} W"}
         self._cond("input", now, not on_input, on_input, 0.0,
                    f"UPS input power LOST: the Pi runs on the pack ({snap})", f"UPS input power back ({snap})")
         self._cond("drain", now, on_input and d["current_ma"] < DRAIN_MA, d["current_ma"] >= 0 or not on_input,
@@ -176,4 +195,14 @@ class Watch:
         if now - t0 >= hold:
             self.active[key] = not act
             self.since.pop(key, None)
+            mono, wall = self._wall_now
+            at = round(wall - (mono - t0), 1)                # when it first held, not when the hold ran out
+            if act:
+                span = self._open.pop(key, None)
+                if span is not None:
+                    span["end"] = at
+            else:
+                span = self._open[key] = {"key": key, "label": LABELS[key], "start": at, "end": None,
+                                          "detail": self._detail.get(key, "")}
+                self._spans.append(span)
             self.note(msg_off if act else msg_on, "info" if act else "warn")

@@ -35,7 +35,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from .node import HISTORY_S, HISTORY_LEN, PowerNode, system_power_off
     from .server import create_app
-    from .sources import TetherSource, UpsSource
+    from .sources import TetherSource, UpsSource, history_row_of
     from .ups import BusUnavailable, SimBus, UpsHat, decode, open_bus
 
     log = logging.getLogger("power")
@@ -62,9 +62,7 @@ def main() -> None:
         now, wall, rows = time.monotonic(), time.time(), []
         for k in range(HISTORY_LEN, 0, -1):
             t = now - k * HISTORY_S
-            d = decode(bus.regs_at(t))
-            rows.append([t, wall - k * HISTORY_S, d["percent"], d["pack_mv"] / 1000, d["current_ma"] / 1000,
-                         1.0 if d["vbus_present"] else 0.0, 1.0 if d["charging"] else 0.0])
+            rows.append(history_row_of(t, wall - k * HISTORY_S, decode(bus.regs_at(t))))
         node.backfill("ups", rows)
     else:
         try:

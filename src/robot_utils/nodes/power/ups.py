@@ -175,10 +175,14 @@ class FakeBus:
 class SimBus(FakeBus):
     """``--fake``: the captured reading, animated on a 4 h cycle so pages have something to show.
 
-    2 h on input (charging at ~1.5 A), then 2 h on battery (~1.2 A load). ``clock`` gives
-    seconds; ``regs_at(t)`` is pure, so a history can be back-filled with the same curve."""
+    1.5 h on input, charging (~+9 W into the pack, ~10 W load); then 30 min on a weak input
+    (4.77 V x 3.07 A = 14.6 W) with a heavier load: the charger bit still says charging, but the
+    pack drains (~-2 W) and cell 3 sags away from the others, below 3.3 V at the end (the brownout
+    seen on the robot); then 2 h on battery (~-11 W). ``clock`` gives seconds; ``regs_at(t)`` is
+    pure, so a history can be back-filled with the same curve."""
 
     PERIOD_S = 4 * 3600.0
+    CHARGE_END, DRAIN_END = 0.375, 0.5          # phase boundaries (fraction of PERIOD_S)
 
     def __init__(self, clock=None):
         super().__init__()
@@ -187,17 +191,31 @@ class SimBus(FakeBus):
 
     def regs_at(self, t: float) -> dict[int, int]:
         ph = (t % self.PERIOD_S) / self.PERIOD_S
-        on_input = ph < 0.5
-        frac = ph / 0.5 if on_input else (ph - 0.5) / 0.5
-        pct = 45 + 45 * frac if on_input else 90 - 45 * frac
-        pct += 1.5 * math.sin(t / 37.0)
-        cell = 3.30 + 0.9 * pct / 100 + (0.06 if on_input else -0.05)
-        ma = int(1500 - 600 * frac) if on_input else int(-1200 - 250 * math.sin(t / 23.0))
-        f = FakeBus(CAPTURED)
-        f.set_status(charging=on_input, vbus=on_input, fast=on_input and pct < 80, state=2 if pct < 80 else 3)
+        on_input = ph < self.DRAIN_END
         offs = [0.012, -0.018, -0.006, 0.010]
+        load_w = None
+        if ph < self.CHARGE_END:                                   # charging
+            frac = ph / self.CHARGE_END
+            pct = 45 + 40 * frac
+            ma = int(600 - 200 * frac)
+            load_w = 10.0 + 0.8 * math.sin(t / 1100.0)
+        elif on_input:                                             # draining on input
+            frac = (ph - self.CHARGE_END) / (self.DRAIN_END - self.CHARGE_END)
+            pct = 85 - 5 * frac
+            ma = int(-130 - 30 * math.sin(t / 700.0))
+            offs[2] -= 0.06 + 0.9 * frac ** 2                      # the weak cell falls away from the others
+        else:                                                      # on battery
+            frac = (ph - self.DRAIN_END) / (1 - self.DRAIN_END)
+            pct = 80 - 35 * frac
+            ma = int(-700 - 150 * math.sin(t / 700.0))
+        pct += 1.5 * math.sin(t / 37.0)
+        cell = 3.30 + 0.9 * pct / 100 + (0.06 if ph < self.CHARGE_END else -0.05)
+        f = FakeBus(CAPTURED)
+        f.set_status(charging=on_input, vbus=on_input, fast=ph < self.CHARGE_END and pct < 80,
+                     state=2 if pct < 80 else 3)
         cells = [int((cell + o) * 1000) for o in offs]
-        f.set_word(0x20, sum(cells))
+        pack_mv = sum(cells)
+        f.set_word(0x20, pack_mv)
         f.set_word(0x22, ma)
         f.set_word(0x24, int(round(pct)))
         f.set_word(0x26, int(5000 * pct / 100))
@@ -205,8 +223,11 @@ class SimBus(FakeBus):
         f.set_word(0x2a, int(5000 * (100 - pct) / 100 / ma * 60) if ma > 0 else NA)
         for i, c in enumerate(cells):
             f.set_word(0x30 + 2 * i, c)
-        if on_input:
-            f.set_word(0x10, 8600); f.set_word(0x12, 2100); f.set_word(0x14, 18000)
+        if load_w is not None:                                     # input = what goes into the pack + the load
+            mw = int(pack_mv * ma / 1000 + load_w * 1000)
+            f.set_word(0x10, 8600); f.set_word(0x12, int(mw / 8.6)); f.set_word(0x14, mw)
+        elif on_input:                                             # the weak input measured on the robot
+            f.set_word(0x10, 4770); f.set_word(0x12, 3070); f.set_word(0x14, 14640)
         else:
             f.set_word(0x10, 0); f.set_word(0x12, 0); f.set_word(0x14, 0)
         return f.regs

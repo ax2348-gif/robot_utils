@@ -29,7 +29,37 @@ from .ups import UpsHat
 
 STALE_S = 5.0                 # a reading older than this is stale
 DISCHARGE_MA = -20            # below this the pack is discharging (noise around 0 is "idle")
-HISTORY_FIELDS = ["t", "wall", "percent", "pack_v", "current_a", "input_present", "charging"]
+DRAIN_A = -0.05              # on input and net below this out of the pack -> draining on input (powerlog.DRAIN_MA)
+# one row per HISTORY_S; the power-flow and cell columns are appended so older readers keep their indices
+HISTORY_FIELDS = ["t", "wall", "percent", "pack_v", "current_a", "input_present", "charging",
+                  "input_w", "battery_w", "load_w", "cell_min_v", "cell_spread_v"]
+HISTORY_UNITS = ["s (monotonic)", "s (epoch)", "%", "V", "A (+ charging)", "0/1", "0/1",
+                 "W (USB-C input)", "W (pack net: + charging, - draining)",
+                 "W (derived: input - pack net; includes converter losses)", "V (lowest cell)", "V (max - min cell)"]
+
+
+def flow(input_w: Optional[float], battery_w: Optional[float], cells_v: list) -> list:
+    """The appended history columns: input_w, battery_w, load_w (derived), cell_min_v, cell_spread_v.
+    None where an input is unknown (e.g. a log row without cells)."""
+    load = None if input_w is None or battery_w is None else round(input_w - battery_w, 2)
+    cells = [c for c in cells_v if c is not None]
+    return [None if input_w is None else round(input_w, 2), None if battery_w is None else round(battery_w, 2), load,
+            round(min(cells), 3) if cells else None, round(max(cells) - min(cells), 3) if cells else None]
+
+
+def history_row_of(t: float, wall: float, d: dict) -> list:
+    """One HISTORY_FIELDS row from a decoded HAT reading (the live history and the --fake backfill)."""
+    pack_v = d["pack_mv"] / 1000
+    input_w = d["vbus_mw"] / 1000 if d["vbus_present"] else 0.0
+    return [t, wall, d["percent"], pack_v, d["current_ma"] / 1000,
+            1.0 if d["vbus_present"] else 0.0, 1.0 if d["charging"] else 0.0,
+            *flow(input_w, pack_v * d["current_ma"] / 1000, [c / 1000 for c in d["cells_mv"]])]
+
+
+def draining_on_input(d: dict) -> bool:
+    """Input present but the pack net discharging: the load is more than the input supplies (the charger
+    bit can still say "charging"). One reading, no hold (powerlog.Watch holds it 10 s for its events)."""
+    return bool(d["vbus_present"]) and d["current_ma"] / 1000 < DRAIN_A
 
 
 class Source:
@@ -149,6 +179,7 @@ class UpsSource(Source):
         out.update({
             "input": {"present": d["vbus_present"], "v": round(d["vbus_mv"] / 1000, 3),
                       "a": round(d["vbus_ma"] / 1000, 3), "w": round(d["vbus_mw"] / 1000, 2)},
+            "draining_on_input": draining_on_input(d),
             "charger_state": d["charger_state"], "links": d["links"], "firmware": d["firmware"],
             "power_off_pending": d["power_off_pending"],
             "control": d["control"],
@@ -158,6 +189,4 @@ class UpsSource(Source):
     def history_row(self, now: float, wall: float) -> Optional[list]:
         if not self.fresh(now):
             return None
-        d = self.data
-        return [now, wall, d["percent"], d["pack_mv"] / 1000, d["current_ma"] / 1000,
-                1.0 if d["vbus_present"] else 0.0, 1.0 if d["charging"] else 0.0]
+        return history_row_of(now, wall, self.data)

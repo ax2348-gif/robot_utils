@@ -102,6 +102,10 @@ class PowerSource(BaseModel):
     time_to_full_min: Optional[int] = Field(None, description="min to full while charging; null otherwise.")
     remaining_mah: Optional[int] = Field(None, description="mAh, remaining capacity.")
     input: Optional[UpsInput] = Field(None, description="UPS only: USB-C input.")
+    draining_on_input: Optional[bool] = Field(None, description="UPS only: input present but the pack net "
+                                              "discharging (current below -0.05 A) in this reading: the load is "
+                                              "more than the input supplies, while `charging` (the charger bit) "
+                                              "can still be true. No hold; see `conditions` for the held span.")
     charger_state: Optional[str] = Field(None, description="UPS only: IP2368 state (standby | trickle charge | "
                                                            "constant current | constant voltage | waiting | full | "
                                                            "timeout | undefined).")
@@ -199,20 +203,42 @@ class AuditLogOut(BaseModel):
     log: list[AuditRecord] = Field(description="The last `n` audit-log entries, oldest first.")
 
 
+class HistoryLimits(BaseModel):
+    """Thresholds of the anomaly spans the page marks on the history charts (powerlog.Watch's, without its hold)."""
+    drain_a: float = Field(description="A: input present and current_a below this = draining on input.")
+    cell_low_v: float = Field(description="V: cell_min_v below this = a low cell.")
+    spread_v: float = Field(description="V: cell_spread_v above this = unbalanced cells.")
+
+
 class HistoryOut(BaseModel):
     source: str = Field(description="The source id.")
     fields: list[str] = Field(description=f"Column names of `rows`: {', '.join(HISTORY_FIELDS)}.")
     interval_s: float = Field(description="s between rows (while the source has fresh readings).")
     now: float = Field(description="Server time.monotonic() (s) when this was built (the clock of the `t` column).")
     units: list[str] = Field(description="Unit of each column.")
-    rows: list[list[Number]] = Field(description=f"Oldest first, one per {HISTORY_S:.0f} s within `seconds`: "
-                                                 "t (server monotonic s), wall (Unix epoch s), percent, pack_v (V), "
-                                                 "current_a (A, + = charging), input_present (0/1), charging (0/1).")
+    limits: HistoryLimits = Field(description="Anomaly thresholds for the columns.")
+    rows: list[list[Optional[Number]]] = Field(
+        description=f"Oldest first, one per {HISTORY_S:.0f} s within `seconds`: t (server monotonic s), wall (Unix "
+                    "epoch s), percent, pack_v (V), current_a (A, + = charging), input_present (0/1), charging (0/1), "
+                    "input_w (W, USB-C input), battery_w (W, pack net: + charging, - draining), load_w (W, derived: "
+                    "input_w - battery_w, so converter losses count as load), cell_min_v (V), cell_spread_v (V, max - "
+                    "min cell). A value a row restored from the disk log lacks is null.")
+
+
+class ConditionSpan(BaseModel):
+    """One condition powerlog.Watch reported (in memory: gone after a restart)."""
+    key: str = Field(description="input | drain | cell_low | spread.")
+    label: str = Field(description="input lost | draining on input | low cell | cells unbalanced.")
+    active: bool = Field(description="Still going on (`end` is null).")
+    start: float = Field(description="Unix epoch s it first held (before its hold time ran out).")
+    end: Optional[float] = Field(description="Unix epoch s its end first held; null while active.")
+    detail: str = Field(description="The reading when it started, e.g. `cell 3 3.25 V`, `-0.13 A, -2.0 W, input 14.6 W`.")
 
 
 class PowerState(BaseModel):
-    state: str = Field(description="Short status for the landing tile, e.g. `UPS 59 % · charging`, `SHUTDOWN in "
-                                   "22 s`, `UPS stale`, `UPS unavailable`, `no UPS`.")
+    state: str = Field(description="Short status for the landing tile, e.g. `UPS 59 % · charging`, `UPS 46 % · "
+                                   "draining on input` (instead of the charger's `charging` while the pack drains on "
+                                   "input), `SHUTDOWN in 22 s`, `UPS stale`, `UPS unavailable`, `no UPS`.")
     error: Optional[str] = Field(description="The UPS read error; null if fine.")
     fake: bool = Field(description="Simulated UPS (--fake): never powers anything off.")
     t: float = Field(description="Server time.monotonic() (s) when this state was built.")
@@ -220,6 +246,8 @@ class PowerState(BaseModel):
     low_voltage: LowVoltageOut
     shutdown: ShutdownState
     events: list[Event] = Field(description="Latest node events (up to 15), oldest first.")
+    conditions: list[ConditionSpan] = Field(description="The latest conditions (up to 10), oldest first, as spans: "
+                                                        "input lost, draining on input, low cell, cells unbalanced.")
 
 
 def default_identify() -> Callable[[str], str]:

@@ -567,3 +567,100 @@ def test_watch_reports_drain_on_input_low_cell_spread_and_input_loss(tmp_path, c
     assert text.count("DRAINING while on input") == 1
     assert "cell 3 LOW at 3.25 V" in text and "0.46 V apart" in text and "input power LOST" in text
     assert "DRAINING while on input" in caplog.text            # in the journal too, not only the page
+
+
+# -- power flow, cells and anomaly spans --------------------------------------------------------------
+
+def test_history_has_power_flow_and_cell_columns(tmp_path):
+    node, bus, clock, _ = make_node(tmp_path)
+    node.step(clock.t)
+    h = node.history_rows("ups", 86400)
+    assert h["fields"] == ["t", "wall", "percent", "pack_v", "current_a", "input_present", "charging",
+                           "input_w", "battery_w", "load_w", "cell_min_v", "cell_spread_v"]
+    assert len(h["units"]) == len(h["fields"]) and "derived" in h["units"][9]
+    assert h["limits"] == {"drain_a": -0.05, "cell_low_v": 3.30, "spread_v": 0.20}
+    row = dict(zip(h["fields"], h["rows"][0]))
+    # the captured reading: input 18.17 W, pack 15.587 V x +0.512 A, cells 3.920 3.874 3.877 3.916
+    assert row["input_w"] == 18.17 and row["battery_w"] == 7.98 and row["load_w"] == pytest.approx(10.19)
+    assert (row["cell_min_v"], row["cell_spread_v"]) == (3.874, 0.046)
+
+
+def test_drain_on_input_shows_in_state_source_and_conditions(tmp_path):
+    node, bus, clock, _ = make_node(tmp_path)
+    node.step(clock.t)
+    st = node.state()
+    assert st["state"] == "UPS 59 % · charging" and st["sources"][0]["draining_on_input"] is False
+    assert st["conditions"] == []
+    node.watch.wall = lambda: 1.8e9 + clock.t      # a wall clock that moves with the test clock
+    bus.set_word(0x22, -130)                      # on input, the charger bit still set, but net out of the pack
+    t_start = clock.t + 1
+    for _ in range(12):
+        clock.t += 1.0
+        node.step(clock.t)
+    st = node.state()
+    ups = st["sources"][0]
+    assert ups["draining_on_input"] is True and ups["charging"] is True and ups["power_w"] < 0
+    assert st["state"] == "UPS 59 % · draining on input"
+    (c,) = st["conditions"]
+    assert (c["key"], c["label"], c["active"], c["end"]) == ("drain", "draining on input", True, None)
+    assert "-0.13 A" in c["detail"]
+    assert c["start"] == 1.8e9 + t_start          # when it first held, not when its 10 s hold ran out
+    clock.t += node_mod.HISTORY_S                 # the next history row
+    node.step(clock.t)
+    h = node.history_rows("ups", 86400)
+    row = dict(zip(h["fields"], h["rows"][-1]))
+    assert row["battery_w"] < 0 and row["load_w"] > row["input_w"]
+    bus.set_word(0x22, 400)                       # charging again: the span ends
+    t_end = clock.t + 1
+    for _ in range(12):
+        clock.t += 1.0
+        node.step(clock.t)
+    st = node.state()
+    (c,) = st["conditions"]
+    assert c["active"] is False and c["end"] == 1.8e9 + t_end and st["state"] == "UPS 59 % · charging"
+
+
+def test_restore_history_carries_power_flow_and_cells_and_tolerates_missing(tmp_path):
+    import csv
+    from robot_utils.nodes.power.powerlog import FIELDS
+    node, bus, clock = logged_node(tmp_path)
+    node.step(clock.t)
+    node.close()
+    (path,) = (tmp_path / "log").glob("ups-*.csv")
+    rows = list(csv.reader(open(path)))
+    new = dict(zip(FIELDS, rows[1]), wall=f"{float(rows[1][0]) - 60:.3f}")   # a minute ago: never "in the future"
+    old = dict(new, wall=f"{float(rows[1][0]) - 120:.3f}", cell1_v="", cell2_v="", cell3_v="", cell4_v="",
+               input_v="", input_a="")         # a row before that lacks cells and input (e.g. hand-edited)
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerows([rows[0], [old[k] for k in FIELDS], [new[k] for k in FIELDS]])
+    again, _, _ = logged_node(tmp_path)
+    assert again.restore_history() == 2
+    h = again.history_rows("ups", 86400)
+    b, a = (dict(zip(h["fields"], r)) for r in h["rows"])
+    assert a["input_w"] == pytest.approx(8.675 * 2.09, abs=0.01) and a["battery_w"] == 7.98
+    assert a["load_w"] == pytest.approx(a["input_w"] - 7.98, abs=0.01)
+    assert (a["cell_min_v"], a["cell_spread_v"]) == (3.874, 0.046)
+    assert (b["input_w"], b["load_w"], b["cell_min_v"], b["cell_spread_v"]) == (None, None, None, None)
+    assert b["battery_w"] == 7.98
+    c = TestClient(create_app(again, start=False, identify=lambda ip: ip))
+    assert c.get("/history").json()["rows"][0][7] is None          # null passes the response model
+
+
+def test_sim_bus_has_a_drain_on_input_stretch_with_a_sagging_cell():
+    from robot_utils.nodes.power.sources import UpsSource as U, draining_on_input
+    s = SimBus(clock=Clock(0.0))
+    mid = decode(s.regs_at(SimBus.PERIOD_S * 0.44))
+    end = decode(s.regs_at(SimBus.PERIOD_S * 0.499))
+    assert mid["vbus_present"] and mid["charging"] and mid["current_ma"] < -50 and draining_on_input(mid)
+    assert U.readings(mid)["charge_state"] == "charging"               # what the charger bit alone says
+    cells = [c / 1000 for c in end["cells_mv"]]
+    assert min(cells) < 3.30 and max(cells) - min(cells) > 0.20
+    assert not draining_on_input(decode(s.regs_at(100.0)))             # charging
+
+
+def test_page_has_power_flow_chart_and_anomaly_spans():
+    from robot_utils.nodes.power.page import PAGE
+    assert 'id="ch-flow"' in PAGE and 'fill: "battery_w"' in PAGE and '"load_w"' in PAGE and '"input_w"' in PAGE
+    assert 'id="ch-cell"' in PAGE and 'id="ch-spread"' in PAGE
+    assert "spansOf(" in PAGE and 'marks: ["drain"]' in PAGE and "cell_low" in PAGE and "--caution" in PAGE
+    assert 'id="flow"' in PAGE and "draining_on_input" in PAGE and "renderConds" in PAGE

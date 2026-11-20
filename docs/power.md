@@ -35,7 +35,7 @@ Paths are relative to the node root. The common endpoints (`/time`, `/health`, `
 |---|---|
 | `GET /state` | sources, low-voltage status, the shutdown, last 15 events (stable shape below) |
 | `GET /events` | SSE: `/state` on every change and every second |
-| `GET /history?source=ups&seconds=86400` | one row per 30 s, up to 24 h: `{fields, units, interval_s, rows}` |
+| `GET /history?source=ups&seconds=86400` | one row per 30 s, up to 24 h: `{fields, units, limits, interval_s, rows}` (see History below) |
 | `GET /shutdown` | the shutdown (same as in `/state`) plus `log`, the audit log |
 | `POST /shutdown` | `{confirm: "shutdown", reason, by, delay_s}`: schedule a shutdown (202) |
 | `POST /shutdown/cancel` | `{by, reason}`: cancel during the countdown |
@@ -50,7 +50,8 @@ Other pages build on this shape, such as the landing page's robot overview, so i
 - **Registry entry:** `{name: power, kind: power}` in `nodes.yaml`, listed after swerve with the
   hardware nodes.
 - **`state`**: a short string, shown on the landing tile. Examples: `"UPS 59 % · charging"`,
-  `"SHUTDOWN in 22 s"`, `"UPS stale"`, `"UPS unavailable"`.
+  `"UPS 46 % · draining on input"` (instead of the charger's `charging` while the pack drains on input,
+  held as in the watch below), `"SHUTDOWN in 22 s"`, `"UPS stale"`, `"UPS unavailable"`.
 - **`error`**: the UPS read error, or `null`.
 - **`sources`**: a list, one object per power source. The keys are described under Sources below.
 - **`shutdown`**: one flat object with the same keys whether or not a shutdown is pending.
@@ -67,8 +68,12 @@ Other pages build on this shape, such as the landing page's robot overview, so i
 
   Every field except `pending`, `phase`, `confirm`, `delay_bounds_s` and `last` is `null` when idle.
 - **`low_voltage`**: the settings and the status (see Low-voltage shutdown below).
+- **`conditions`** (added; additive): the latest 10 conditions the watch reported (Power log and watch below),
+  oldest first, as spans: `{key, label, active, start, end, detail}`. `key` is `input`, `drain`, `cell_low` or
+  `spread`; `start` and `end` are epoch seconds (`end` is `null` while `active`); `detail` is the reading when it
+  started, e.g. `"cell 3 3.25 V"`. In memory only: empty after a restart.
 
-The whole object is about 2 KB.
+The whole object is about 2 KB (up to ~3 KB with conditions).
 
 ```json
 {
@@ -79,7 +84,7 @@ The whole object is about 2 KB.
    "percent": 59, "pack_v": 15.587, "cells_v": [3.92, 3.874, 3.877, 3.916], "current_a": 0.512, "power_w": 7.98,
    "charge_state": "charging", "charging": true, "fast_charge": true, "input_present": true,
    "runtime_min": null, "runtime_source": null, "time_to_full_min": 250, "remaining_mah": 2815,
-   "input": {"present": true, "v": 8.675, "a": 2.09, "w": 18.17},
+   "input": {"present": true, "v": 8.675, "a": 2.09, "w": 18.17}, "draining_on_input": false,
    "charger_state": "constant current", "links": {"fuel_gauge": true, "charger": true}, "firmware": "2.0",
    "power_off_pending": false,
    "control": {"auto_power_on": true, "watchdog": false, "address": 45, "wd_timeout_s": 255, "wd_delay_s": 255}},
@@ -92,7 +97,9 @@ The whole object is about 2 KB.
               "reason": "end of day", "delay_s": 30.0, "requested_at": 1794215560.42, "at": 1794215590.42,
               "in_s": 22.4, "estop": null, "error": null, "confirm": "shutdown",
               "delay_bounds_s": {"default": 30.0, "min": 10.0, "max": 300.0}, "last": null},
- "events": [{"t": 990.2, "wall": 1794215550.1, "msg": "...", "level": "info"}]
+ "events": [{"t": 990.2, "wall": 1794215550.1, "msg": "...", "level": "info"}],
+ "conditions": [{"key": "drain", "label": "draining on input", "active": false, "start": 1794201230.0,
+                 "end": 1794203030.0, "detail": "-0.13 A, -2.0 W, input 14.6 W"}]
 }
 ```
 
@@ -117,7 +124,12 @@ A source with a battery adds the **common battery fields**. Each is `null` when 
 - `time_to_full_min` and `remaining_mah`.
 
 The UPS also reports `input` (USB-C V / A / W), `charger_state`, `links` (fuel gauge and charger
-I2C), `firmware`, `control` (auto power-on, watchdog) and `power_off_pending` (0x01 reads 0x55).
+I2C), `firmware`, `control` (auto power-on, watchdog), `power_off_pending` (0x01 reads 0x55) and
+`draining_on_input`: input present but the pack net discharging (current below -0.05 A) in this reading, while
+`charging` (the charger bit) can still be true. It has no hold; `conditions` has the held span.
+
+The net battery power is `power_w` (+ charging, - draining). The load is not measured: input `input.w` -
+`power_w` is an upper bound, since converter losses count as load.
 
 `RU.viz.Battery.fromSource(src)` (`common/viz.js`) turns any of these into the battery gauge's
 data. The page uses the full gauge on each source card and the compact one (`{compact: true}`,
@@ -234,8 +246,57 @@ The node also writes a journal line (and a page event) when one of these starts 
 | low cell | any cell below 3.30 V for 5 s | all above 3.40 V |
 | unbalanced | cells more than 0.20 V apart for 5 s | within 0.15 V |
 
+Each condition is also kept as a span, from when it first held (before its hold ran out) to when its end first
+held: `/state` `conditions`, shown on the page's Events panel as "since 14:02 (ongoing, 1 h 12 min)" or
+"14:02–15:10 (1 h 08 min)". They are in memory only; the history charts below rebuild their spans from the history.
+
 "Charging" in `/state` is the charger's status bit: it stays set while the input is present even when the pack
-is net draining (the load is more than the input supplies). Read `current_a` for the net flow.
+is net draining (the load is more than the input supplies). Read `current_a` or `power_w` for the net flow, or
+`draining_on_input`; `state` says `draining on input` while the watch holds that condition.
+
+## History
+
+`GET /history` keeps one row per 30 s for 24 h, per source with telemetry (in memory; refilled from the power
+log at startup). `fields` (append-only, so readers that index the first seven keep working) and `units`:
+
+| field | unit |
+|---|---|
+| `t`, `wall` | server monotonic s, epoch s |
+| `percent`, `pack_v`, `current_a` | %, V, A (+ charging) |
+| `input_present`, `charging` | 0/1 (`charging` is the charger bit) |
+| `input_w` | W, the USB-C input (0 without input) |
+| `battery_w` | W, the pack's net power: + charging, - draining |
+| `load_w` | W, **derived**: `input_w - battery_w`. Neither the Pi's draw nor the charger's output is measured, so converter losses count as load |
+| `cell_min_v`, `cell_spread_v` | V, the lowest cell and max - min |
+
+Rows restored from the log compute `input_w` as `input_v x input_a` (the log has no input W column). A value a
+row lacks is `null`. `limits` gives the thresholds the page marks spans with: `{drain_a: -0.05, cell_low_v: 3.30,
+spread_v: 0.20}` (the watch's, without its holds).
+
+## Page
+
+- **Header:** the battery gauge, `state` (caution while it says `draining on input`), and a power-flow pill:
+  `in 14.6 W · pack −2.1 W draining on input · load ≈16.7 W`, caution while `draining_on_input`. While the pack
+  drains on input the gauges drop the charging mark the charger bit would give them.
+- **UPS card:** `state` says `draining on input (charger bit: charging)`; the pack's current and power carry their
+  sign; a `load (derived)` row.
+- **History** (window 1 / 6 / 24 h; one crosshair shared by every chart, with a readout line of every value at it):
+  - **Power flow** (W): input, pack net and the derived load (dashed) on one axis with a zero line. The pack net
+    is filled against zero: a faint tint above it (charging), hatching below it (draining). Below it, the energy
+    into and out of the pack, net, and input and load energy over the window.
+  - **Cells** (V): the lowest cell with the 3.30 V line, and the spread with the 0.20 V line.
+  - Charge, pack voltage and current, as before.
+  - **Anomaly spans** from the history rows: draining on input (input present, current below -0.05 A) on the power
+    flow, charge, voltage and current charts; a low cell on the cells chart; a spread above 0.20 V on the spread
+    chart. Each is a thin hatched caution strip at the top of the chart with dotted edges; on the power-flow chart
+    it is labelled with the pack's mean power in it (`draining on input: pack −1.6 W, input 14.6 W`, shortened to
+    fit). A list under the power-flow chart gives the spans' times and durations.
+- **Events:** the watched conditions as spans above the event lines.
+
+The charts are page-local canvases (not `RU.Plot`, which has no zero fill, spans or time axis); colours come
+from the theme tokens (`--plot-*`, `--caution`, `--ink`, `--muted`, `--rule`), so they follow light, dark and the
+packaged themes, and redraw when the theme changes. `--fake` simulates a 30 min drain on input with cell 3
+sagging below 3.3 V in each 4 h cycle, so the marking shows.
 
 ```
 tail -f ~/.local/state/robot_utils/power/log/ups-$(date +%F).csv
@@ -298,6 +359,8 @@ The tests cover:
 - shutdown: confirm, countdown, cancel, a second request, the rate limit, forged hops, and
   e-stop running before power-off (with fakes);
 - low-voltage logic: hold, charging, stale readings, re-arm, confirm;
+- the history's power-flow and cell columns, live and restored from the log; draining on input in `/state`
+  (`state`, `draining_on_input`, `conditions`); the simulated drain stretch; the page's charts (light check);
 - the API and the CLI.
 
 No test touches I2C, a process or another node.

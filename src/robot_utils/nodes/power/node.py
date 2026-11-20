@@ -20,9 +20,9 @@ from ..common.lease import RequestError
 from ..common.server import EventLog
 from .lowvolt import LowVoltage
 from .lowvolt import default_path as default_settings_path
-from .powerlog import DiskLog, Watch
+from .powerlog import CELL_LOW_V, SPREAD_V, DiskLog, Watch
 from .shutdown import CONFIRM, DELAY_MIN_S, AuditLog, ShutdownController, default_state_dir, refuse_power_off
-from .sources import HISTORY_FIELDS, Source, UpsSource
+from .sources import DRAIN_A, HISTORY_FIELDS, HISTORY_UNITS, Source, UpsSource, flow
 
 log = logging.getLogger("power")
 
@@ -30,6 +30,26 @@ TICK_S = 0.25
 POLL_S = 1.0
 HISTORY_S = 30.0
 HISTORY_LEN = int(24 * 3600 / HISTORY_S)      # 24 h
+CONDITIONS_IN_STATE = 10                       # the latest Watch spans in /state
+# what the page marks as anomaly spans on the history charts (the same thresholds as powerlog.Watch, no hold)
+HISTORY_LIMITS = {"drain_a": DRAIN_A, "cell_low_v": CELL_LOW_V, "spread_v": SPREAD_V}
+
+
+def _num(r: dict, k: str) -> Optional[float]:
+    try:
+        return float(r[k])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def log_history_row(t: float, r: dict) -> list:
+    """One HISTORY_FIELDS row from a disk-log CSV row (``DiskLog.recent``). Input power is input_v x input_a
+    (the log has no input W column); a value the row lacks is None."""
+    iv, ia, present = _num(r, "input_v"), _num(r, "input_a"), _num(r, "input_present")
+    input_w = iv * ia if iv is not None and ia is not None else 0.0 if present == 0 else None
+    return [t, float(r["wall"]), int(r["percent"]), float(r["pack_v"]), float(r["current_a"]),
+            float(r["input_present"]), float(r["charging"]),
+            *flow(input_w, _num(r, "power_w"), [_num(r, f"cell{i}_v") for i in range(1, 5)])]
 
 
 def estop_robot(config: Optional[str] = None, exclude: tuple = ()) -> list[dict]:
@@ -211,8 +231,7 @@ class PowerNode:
         if self.disklog is None or "ups" not in self.history:
             return 0
         now, wall = self.clock(), time.time()
-        rows = [[now - (wall - float(r["wall"])), float(r["wall"]), int(r["percent"]), float(r["pack_v"]),
-                 float(r["current_a"]), float(r["input_present"]), float(r["charging"])]
+        rows = [log_history_row(now - (wall - float(r["wall"])), r)
                 for r in self.disklog.recent(wall, HISTORY_LEN * HISTORY_S, HISTORY_S)]
         self.backfill("ups", rows)
         return len(rows)
@@ -228,7 +247,7 @@ class PowerNode:
         with self._lock:
             rows = [r for r in self.history[source] if now - r[0] <= seconds]
         return {"source": source, "fields": HISTORY_FIELDS, "interval_s": HISTORY_S, "now": now,
-                "units": ["s (monotonic)", "s (epoch)", "%", "V", "A (+ charging)", "0/1", "0/1"], "rows": rows}
+                "units": HISTORY_UNITS, "limits": HISTORY_LIMITS, "rows": rows}
 
     def state(self) -> dict:
         now = self.clock()
@@ -240,11 +259,13 @@ class PowerNode:
         elif ups is None:
             st = "no UPS"
         elif ups["ok"]:
-            st = f"UPS {ups['percent']} % · {ups['charge_state']}"
+            # the charger bit says "charging" while the pack drains on input: say what the pack does instead
+            drain = self.watch.active.get("drain", False)
+            st = f"UPS {ups['percent']} % · {'draining on input' if drain else ups['charge_state']}"
         elif ups["stale"]:
             st = "UPS stale"
         else:
             st = "UPS unavailable"
         return {"state": st, "error": ups["error"] if ups else None, "fake": self.fake, "t": now,
                 "sources": sources, "low_voltage": self.low.public(now), "shutdown": sd,
-                "events": self.events.list()[-15:]}
+                "events": self.events.list()[-15:], "conditions": self.watch.spans()[-CONDITIONS_IN_STATE:]}
