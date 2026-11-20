@@ -1125,16 +1125,21 @@ class AgentNav:
 
     def _watch(self):
         last_status = None
-        while not self.stop_ev.is_set():
+        c = None        # one client for this thread's 10 Hz poll (a fresh one per poll cost ~30% of a core on the Pi);
+        while not self.stop_ev.is_set():        # dropped after any failure, so the next poll reconnects from scratch
             time.sleep(0.1)
             if not self.targets.get("pose_servo"):
                 continue
             t_poll = time.monotonic()
             try:
-                with self._client("pose_servo", 2) as c:
-                    st = c.get("/state")
+                if c is None:
+                    c = self._client("pose_servo", 2)
+                st = c.get("/state")
             except Exception:
                 st = None
+                if c is not None:
+                    c.close()
+                    c = None
             self._ps_status = st
             if st is None:
                 continue
@@ -1166,6 +1171,8 @@ class AgentNav:
             except Exception as e:          # the watcher must keep running
                 self.anomaly["checking"] = False
                 log.warning("anomaly check: %s", e)
+        if c is not None:
+            c.close()
 
     # -- the stop reflex (the only automatic action: it can only stop) ------------------------------------
 
@@ -1255,9 +1262,11 @@ class AgentNav:
 
     # -- the arm (forwarded to the arm node; this node holds its lease for the session) -------------------
 
-    def _arm_call(self, method: str, path: str, body=None, timeout: float = 5.0, lease: bool = False):
+    def _arm_call(self, method: str, path: str, body=None, timeout: float = 5.0, lease: bool = False,
+                  client: Optional[NodeClient] = None):
         """One arm node request. A refusal keeps the arm's status and its machine-readable fields (`code`, `retry`,
-        `nearest`, ...); `lease`: with this node's arm lease token (409 if the arm isn't enabled through here)."""
+        `nearest`, ...); `lease`: with this node's arm lease token (409 if the arm isn't enabled through here);
+        `client`: a kept arm client to send it on (the arm loop's), else a fresh one for this call."""
         headers = {}
         if lease:
             tok = self.arm["token"]
@@ -1265,8 +1274,12 @@ class AgentNav:
                 raise RequestError(409, "the arm is not enabled through agent_interface: POST /enable (or /arm/enable)")
             headers["X-Lease-Token"] = tok
         try:
-            with self._client("arm", timeout) as c:
-                r = c.http.request(method, path, json=body if method == "POST" else None, headers=headers)
+            if client is not None:
+                r = client.http.request(method, path, json=body if method == "POST" else None, headers=headers,
+                                        timeout=timeout)
+            else:
+                with self._client("arm", timeout) as c:
+                    r = c.http.request(method, path, json=body if method == "POST" else None, headers=headers)
         except RequestError:
             raise
         except Exception as e:
@@ -1315,16 +1328,25 @@ class AgentNav:
     def _arm_loop(self):
         """Keep the arm lease while it is held here; report new arm jams as robot turns (`since_last_call`)."""
         last_renew = 0.0
+        c = None        # one arm client for this thread's polls; dropped when the arm is unreachable (503)
         while not self.stop_ev.is_set():
             time.sleep(ARM_POLL_S)
             if not self.targets.get("arm") or self.arm["token"] is None:
                 continue
+            if c is None:
+                try:
+                    c = self._client("arm", 2)
+                except RequestError:
+                    continue
             now = time.monotonic()
             if now - last_renew >= self.arm["heartbeat"] / 3:
                 try:
-                    self._arm_call("POST", "/lease/renew", lease=True, timeout=2)
+                    self._arm_call("POST", "/lease/renew", lease=True, timeout=2, client=c)
                     last_renew = now
                 except RequestError as e:
+                    if e.status == 503:
+                        c.close()
+                        c = None
                     if e.status in (401, 403, 409):
                         self._arm_forget()
                         self.arm["error"] = str(e)
@@ -1332,9 +1354,13 @@ class AgentNav:
                                          "POST /arm/enable to take it again", level="warn", source="arm")
                         continue
             try:
-                self._jam_events(self._arm_call("GET", "/jam", timeout=2))
-            except RequestError:
-                pass
+                self._jam_events(self._arm_call("GET", "/jam", timeout=2, client=c))
+            except RequestError as e:
+                if e.status == 503 and c is not None:
+                    c.close()
+                    c = None
+        if c is not None:
+            c.close()
 
     def _jam_events(self, j: dict) -> None:
         count = int(j.get("count") or 0)

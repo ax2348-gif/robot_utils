@@ -18,6 +18,8 @@ Reaching another node by instance name (the one mechanism every node uses for it
 """
 from __future__ import annotations
 
+import ssl
+import threading
 import time
 from typing import Iterator, Optional
 
@@ -46,6 +48,24 @@ def _resolve(name_or_url: str) -> tuple[str, Optional[str]]:
     return f"http://localhost/nodes/{name_or_url}", None
 
 
+_ssl_lock = threading.Lock()
+_ssl_ctx: Optional[ssl.SSLContext] = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """The process's one verifying TLS context, built on first use (httpx's own default: certifi's CA
+    bundle, or SSL_CERT_FILE / SSL_CERT_DIR). httpx builds a fresh one for every Client and every
+    HTTPTransport unless it is given one, and loading the CA bundle costs milliseconds of CPU with the GIL
+    held, which a client per call (or per 10 Hz poll) paid even for plain HTTP over a unix socket. TLS
+    verification is unchanged for https URLs; this only caches the context."""
+    global _ssl_ctx
+    if _ssl_ctx is None:
+        with _ssl_lock:
+            if _ssl_ctx is None:
+                _ssl_ctx = httpx.create_ssl_context()
+    return _ssl_ctx
+
+
 def node_url(name_or_url: str) -> str:
     """Base URL for a node: a URL passes through; an instance name -> ``http://<name>`` when its
     unix socket exists (use it with ``NodeClient.for_instance``, which adds the socket
@@ -64,8 +84,9 @@ class NodeClient:
         """``target``: a URL (``"http://botcore/nodes/swerve"``) or an instance name on this
         machine (``"swerve"``: its unix socket, else ``http://localhost/nodes/swerve``)."""
         self.base_url, uds = _resolve(target)
-        transport = httpx.HTTPTransport(uds=uds) if uds else None
-        self.http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport)
+        ctx = _ssl_context()
+        transport = httpx.HTTPTransport(uds=uds, verify=ctx) if uds else None
+        self.http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport, verify=ctx)
         self.clock = ClockSync()
         self.headers: dict[str, str] = {}
 
@@ -89,14 +110,18 @@ class NodeClient:
             raise NodeError(r.status_code, str(detail))
         return r.json() if r.content else None
 
-    def get(self, path: str, **params):
-        return self._check(self.http.get(path, params=params, headers=self.headers))
+    # ``request_timeout``: this request's timeout in seconds (else the client's). Not ``timeout``: that stays
+    # a query parameter like any other keyword (perception3d's /frame and the goal waits take one).
 
-    def post(self, path: str, json=None, **params):
-        return self._check(self.http.post(path, json=json, params=params, headers=self.headers))
+    def get(self, path: str, *, request_timeout=httpx.USE_CLIENT_DEFAULT, **params):
+        return self._check(self.http.get(path, params=params, headers=self.headers, timeout=request_timeout))
 
-    def delete(self, path: str):
-        return self._check(self.http.delete(path, headers=self.headers))
+    def post(self, path: str, json=None, *, request_timeout=httpx.USE_CLIENT_DEFAULT, **params):
+        return self._check(self.http.post(path, json=json, params=params, headers=self.headers,
+                                          timeout=request_timeout))
+
+    def delete(self, path: str, *, request_timeout=httpx.USE_CLIENT_DEFAULT):
+        return self._check(self.http.delete(path, headers=self.headers, timeout=request_timeout))
 
     # -- time ----------------------------------------------------------------------------------
 
@@ -142,7 +167,8 @@ class NodeClient:
         """Write a stream's raw bytes to a file (the client-side recording); returns bytes written."""
         n, t_end = 0, None if seconds is None else time.monotonic() + seconds
         with open(filename, "wb") as f, httpx.stream("GET", self.base_url + path, params=params,
-                                                     timeout=None, headers=self.headers) as r:
+                                                     timeout=None, headers=self.headers,
+                                                     verify=_ssl_context()) as r:
             for data in r.iter_raw():
                 f.write(data)
                 n += len(data)
