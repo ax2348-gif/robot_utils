@@ -136,6 +136,8 @@ def serve(app, args: argparse.Namespace, *, banner: Optional[str] = None, public
     import uvicorn
 
     name = check_name(args.name)
+    from .sampler import add_profile_route
+    add_profile_route(app)              # GET /debug/profile: on-demand stack sampling (common/sampler.py)
     meta = getattr(app.state, "node_meta", None)
     if isinstance(meta, dict):
         meta["name"] = name
