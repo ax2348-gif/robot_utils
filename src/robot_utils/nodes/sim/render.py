@@ -82,7 +82,9 @@ class Cameras:
                 "depth": {k: c.cfg["depth"][k] for k in ("width", "height", "fps", "fovy_deg", "delay")},
                 "intrinsics": {s: c.intrinsics(s) for s in STREAMS},
                 "depth_to_color": {"rotation": np.round(R, 9).tolist(), "translation_mm": np.round(t * 1000, 6).tolist()},
-                "depth_range": list(c.cfg.get("depth_range", [0.1, 10.0]))}
+                "depth_range": list(c.cfg.get("depth_range", [0.1, 10.0])),
+                "imu": ({"rate_hz": round(1.0 / self.world.m.opt.timestep), "delay": float(c.cfg["imu"].get("delay", 0.0))}
+                        if name in self.world.imu_adr else None)}
 
     def start(self, name: str, streams) -> None:
         c = self.cam(name)

@@ -177,3 +177,37 @@ def test_orbbec_owner_on_the_world_camera(sim):
         assert rate > 10                                        # 30 fps configured; rendering keeps up mostly
     finally:
         o.close()
+
+
+def test_orbbec_owner_gets_the_world_imu(sim):
+    """The head camera's IMU: 1 kHz samples from MuJoCo sensors through WorldCameraBackend into the camera node's
+    hub and attitude filter; at rest the accelerometer reads gravity in the IMU (depth optical) frame."""
+    from robot_utils.nodes.orbbec.hub import Hub
+    from robot_utils.nodes.orbbec.models import Settings
+    from robot_utils.nodes.orbbec.owner import Owner
+    from robot_utils.nodes.sim.backends.camera import WorldCameraBackend
+    hub = Hub()
+    o = Owner(WorldCameraBackend(SIM, "camera"), hub, Settings(streams={"color": False, "depth": False}),
+              startup_s=5, calibration_file=None)
+    o.start()
+    try:
+        wait_for(lambda: o.catalog is not None and len(hub.imu_recent) > 500, 15)
+        assert o.catalog.imu.available and o.catalog.imu.default_rate == "1kHz"
+        rows = np.array(list(hub.imu_recent))
+        t = rows[:, 2]                                         # t_sensor
+        rate = (len(t) - 1) / (t[-1] - t[0])
+        assert 850 < rate < 1150, rate
+        assert np.all(np.diff(rows[:, 0]) == 1)                # seq: no gaps
+        assert np.allclose(rows[:, 1] - rows[:, 2], 0.002)     # t_capture = t_sensor + delay
+        b = sim.world.m.body("camera_depth_optical").id
+        g = sim.world.d.xmat[b].reshape(3, 3).T @ np.array([0.0, 0.0, 9.81])
+        assert np.allclose(rows[-200:, 4:7].mean(0), g, atol=0.05)
+        assert np.abs(rows[-200:, 7:10]).max() < 0.01          # still
+        wait_for(lambda: len(hub.imu_state_recent) > 5, 10)    # the attitude filter runs on it
+        assert o.imu["error"] is None
+    finally:
+        o.close()
+    no = WorldCameraBackend(SIM, "wrist_camera")
+    no.open()
+    assert not no._catalog().imu.available
+    no.close()
