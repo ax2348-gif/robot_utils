@@ -750,6 +750,12 @@ class ArmNode:
         m = self.motion
         return self.track is not None or (m is not None and m.phase in ("executing", "settling"))
 
+    def _arm_engaged(self) -> bool:
+        """Servoing, or a command accepted that the control loop engages on its next tick. Call under _lock.
+        Checks that mean "is the arm under command" use this, not ``servo`` alone: ``servo`` turns on only at
+        the next tick, up to a loop period after the command was accepted."""
+        return self.servo or (self._has_source() and self.enabled)
+
     def _source(self, now: float):
         """(source, goal, MIT velocity reference, gripper gap goal or None); servoing, under _lock.
         Track: the goal is the IK of the pose, literally; a fresh twist (TWIST_TIMEOUT) gives the
@@ -1164,7 +1170,7 @@ class ArmNode:
                 scaled = True
         g_args = self._check_gripper(**gripper) if gripper is not None else None
         with self._lock:
-            prev = self.track if self.servo else None
+            prev = self.track if self._arm_engaged() else None     # also a track not yet engaged
             seed = self._arm_start()                 # the measured pose: IK seed and jump reference
         if prev is not None and seq and prev.seq and seq < prev.seq:
             return {"ok": False, "seq": seq, "ik": None, "limited": self._limited,
@@ -1370,7 +1376,9 @@ class ArmNode:
 
     def set_profile(self, token, name: str) -> dict:
         self.lease.renew(token)
-        if self.servo or self.g_servo:
+        with self._lock:
+            busy = self._arm_engaged() or self.g_servo or self._g_engage   # incl. commands engaging next tick
+        if busy:
             raise RequestError(409, "switch gain profiles only while nothing is servoing (float or disable first)")
         self.profile = C.load_profile(name)
         self.events.add(f"gain profile {name}")
@@ -1378,7 +1386,9 @@ class ArmNode:
 
     def set_tcp(self, token, offset) -> dict:
         self.lease.renew(token)
-        if self.servo:
+        with self._lock:
+            busy = self._arm_engaged()
+        if busy:
             raise RequestError(409, "change the TCP offset only while the arm is not servoing (float or disable first)")
         self.kin.set_tcp_offset(offset)
         self.events.add(f"TCP offset {list(offset)} m")
@@ -1655,7 +1665,7 @@ class ArmNode:
                 if len(recent) > 10 and recent[-1, 0] > recent[0, 0] else None)
         with self._lock:
             m = self.motion or self.last_motion
-            tr = self.track if self.servo else None
+            tr = self.track if self._arm_engaged() else None      # incl. a track the next tick engages
             motion = m.public(now) if m else None
         ch = self.chocks()
         return finite({

@@ -446,6 +446,30 @@ def test_profile_and_tcp_only_while_not_servoing(rig):
     assert n.set_tcp(rig.tok, [-0.1, 0, 0])["offset"] == [-0.1, 0.0, 0.0]
 
 
+def test_a_command_not_yet_engaged_counts_as_servoing(rig):
+    """servo turns on at the control loop's next tick; until then the accepted command must still count: an older
+    track seq is stale, and gains / TCP must not change under it (the HTTP tests hit this window by chance)."""
+    n = ready(rig).node
+    T = rig.tcp()
+    T.translation = T.translation + np.array([0.0, 0.0, 0.01])
+    assert n.track_cmd(rig.tok, T, seq=3)["ok"] and not n.servo           # accepted, not engaged yet (no tick)
+    old = n.track_cmd(rig.tok, T, seq=1)
+    assert not old["ok"] and "stale" in old["reason"] and n.track.seq == 3
+    assert n.state_dict()["track"]["seq"] == 3                               # reported before the tick too
+    with pytest.raises(RequestError):
+        n.set_profile(rig.tok, "safe")
+    with pytest.raises(RequestError):
+        n.set_tcp(rig.tok, [0, 0, 0])
+    n.cancel(rig.tok)
+    rig.step(1)
+    n.gripper_cmd(rig.tok, gap_mm=20)                                        # gripper engages next tick too
+    assert not n.g_servo
+    with pytest.raises(RequestError):
+        n.set_profile(rig.tok, "safe")
+    rig.step(1)
+    assert n.g_servo
+
+
 def test_kinematics_lookups(rig):
     n = rig.node
     rig.step(2)

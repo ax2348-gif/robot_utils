@@ -141,6 +141,9 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     assert not r["ok"] and r["ik"] is None and "twist_scaled" not in r
     st = call("GET", "/state")                                          # tracking
     assert st["track"]["seq"] == 3
+    deadline = time.monotonic() + 2.0       # the command exists once the control loop has engaged the track
+    while not node.servo and time.monotonic() < deadline:
+        time.sleep(0.005)
     assert call("GET", "/kinematics?which=command&frame=tcp")["which"] == "command"
     call("GET", "/tracking")
     call("POST", "/gripper", headers=h, json={"gap_mm": 20, "max_force_n": 30})
