@@ -25,7 +25,7 @@ from typing import Optional
 import numpy as np
 import yaml
 
-N = 6
+N = 6   # arm joints (the gripper is separate); defined here only: bus, kin, the node, ... import it
 PROFILES = {"soft": "rebotarm_dm_soft.yaml", "safe": "rebotarm_dm_safe.yaml"}
 DEFAULT_PROFILE = "soft"
 

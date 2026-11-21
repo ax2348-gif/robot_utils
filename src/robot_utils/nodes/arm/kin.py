@@ -23,7 +23,8 @@ from reBotArm_control_py.dynamics import compute_generalized_gravity
 from reBotArm_control_py.kinematics import get_arm_joint_count, get_end_effector_frame_id, load_robot_model
 from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
 
-N = 6
+from .config import N
+
 DEFAULT_TCP_OFFSET = (-0.15, 0.0, 0.0)   # m in end_link: the Quest teleop's TCP
 PINV_DAMPING = 0.01                       # damped pseudo-inverse for the twist feedforward
 IK_POS_TOL = 0.002                        # m: an IK solve is accepted within this position error

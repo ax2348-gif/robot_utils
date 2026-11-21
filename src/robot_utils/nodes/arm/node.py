@@ -47,15 +47,16 @@ from ..common.locks import LockStore, describe as describe_locks
 from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
+from . import queries as Q
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
+from .config import N
 from .gripper import Gripper, check_gripper
 from .gripper import free as gripper_free
 from .gripper import holding as gripper_holding
 from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
 from .jam import updated as jam_updated
-from .kin import ArmKinematics, N, pose_error, pose_public
+from .kin import ArmKinematics, pose_error, pose_public
 from .motion import PlanError, Trajectory
-from . import queries as Q
 from .planner import Planner
 from .telemetry import COL, FIELD_DOC, JAC_UNITS, PHASES, UNITS  # noqa: F401  (re-exported: server, models, tests)
 from .telemetry import FIELDS, JAC_FIELDS, SOURCES, STATES, row_dict, tick_row
@@ -250,7 +251,7 @@ class ArmNode:
     def _close_bus(self) -> None:
         """Best effort, step by step: a failing disable must never keep the serial port open."""
         try:                                # bookkeeping only: it must never stand between close and disable
-            fr = getattr(self.bus, "refresh", None)
+            fr = None if self.bus is None else self.bus.refresh
             if fr is not None:              # keep its counts: /state counts since the node started
                 done = self._refresh_done
                 for m, c in fr.fallbacks.items():
@@ -406,7 +407,7 @@ class ArmNode:
     def _note_latency(self, now: float) -> None:
         """Control thread: keep the bus's reply latency; report it once after connecting, then warn
         when the slowest replies come close to the tick period."""
-        lat = getattr(self.bus, "reply_latency", None)
+        lat = self.bus.reply_latency
         if lat is None:
             return
         self._lat.append(lat)
@@ -443,7 +444,7 @@ class ArmNode:
             log.warning("feedback-refresh report: %s", e)
 
     def _report_fallbacks(self) -> None:
-        fr = getattr(self.bus, "refresh", None)
+        fr = self.bus.refresh
         if self._fallback_reported or fr is None or not fr.fallbacks:
             return
         self._fallback_reported = True
@@ -455,7 +456,7 @@ class ArmNode:
         """Feedback refreshes since the node started (this connection's and closed ones')."""
         done = self._refresh_done
         by = dict(done["fallbacks_by_motor"])
-        fr = getattr(self.bus, "refresh", None)
+        fr = None if self.bus is None else self.bus.refresh
         refreshes = done["refreshes"]
         if fr is not None:
             for m, c in list(fr.fallbacks.items()):

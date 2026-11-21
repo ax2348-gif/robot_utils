@@ -24,7 +24,8 @@ import pinocchio as pin
 from reBotArm_control_py.trajectory import IKParams as ClikIKParams
 from reBotArm_control_py.trajectory import TrajPlanParams, TrajProfile, plan_cartesian_geodesic_trajectory, track_trajectory
 
-from .kin import ArmKinematics, N, pose_error, pose_public
+from .config import N
+from .kin import ArmKinematics, pose_error, pose_public
 
 PLAN_DT = 0.02           # s between planned samples
 BRANCH_JUMP = 0.5        # rad between consecutive samples = an IK branch change

@@ -24,9 +24,10 @@ from typing import Optional
 
 import numpy as np
 
+from .config import N
+
 log = logging.getLogger(__name__)
 
-N = 6
 FAULT_CODES = {8: "over-voltage", 9: "under-voltage", 0xA: "over-current", 0xB: "MOS over-temperature",
                0xC: "rotor over-temperature", 0xD: "communication lost (CAN watchdog)", 0xE: "overload"}
 
