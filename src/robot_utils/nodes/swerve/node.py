@@ -298,8 +298,9 @@ class SwerveNode:
         return self.limits()
 
     def set_status_period(self, ms: int) -> dict:
-        """The SPARKs' per-tick status frame period (ms). Anyone (it moves nothing); applied at the next
-        tick and kept across drive resets; back to the start value when the node restarts."""
+        """The SPARKs' per-tick status frame period (ms). Anyone (it moves nothing); applied beside the control loop
+        (it never waits for the SPARKs' confirmations) and kept across drive resets; back to the start value when
+        the node restarts. ``applied_ms`` changes once every SPARK confirmed."""
         ms = check_status_period(ms)
         if self.drive is not None:
             self.drive.set_status_period(ms)
@@ -310,7 +311,11 @@ class SwerveNode:
 
     def status_period(self) -> dict:
         applied = None if self.drive is None else self.drive.status_period_ms
-        return {"status_period_ms": self.status_period_ms, "applied_ms": applied}
+        out = {"status_period_ms": self.status_period_ms, "applied_ms": applied}
+        err = None if self.drive is None else self.drive.status_period_error
+        if err:
+            out["error"] = err
+        return out
 
     def limits(self) -> dict:
         return {"hard": {"max_speed": HARD_MAX_SPEED, "max_omega": HARD_MAX_OMEGA},

@@ -104,10 +104,12 @@ class Limits(BaseModel):
 
 
 class StatusPeriodOut(BaseModel):
-    status_period_ms: int = Field(description="The setting (ms): applied at the next tick, kept across drive resets, back "
-                                              "to the start value (`--status-ms`, default 10) when the node restarts.")
-    applied_ms: Optional[int] = Field(description="The period the running drive has applied (ms); null without a drive. "
-                                                  "Equals the setting from the tick after a change.")
+    status_period_ms: int = Field(description="The setting (ms): applied beside the control loop (which never waits for "
+                                              "it), kept across drive resets, back to the start value (`--status-ms`, "
+                                              "default 10) when the node restarts.")
+    applied_ms: Optional[int] = Field(description="The period every SPARK has confirmed (ms); null without a drive. "
+                                                  "Equals the setting a few tens of ms after a change.")
+    error: Optional[str] = Field(None, description="Which SPARKs did not confirm the last change (absent if all did).")
 
 
 class LeaseState(BaseModel):
@@ -385,12 +387,13 @@ def create_app(node: SwerveNode, start: bool = True) -> FastAPI:
     async def set_limits(body: LimitsIn, token: LeaseToken = None):
         return node.set_limits(token, body.max_speed, body.max_omega)
 
-    @app.get("/status_period", response_model=StatusPeriodOut, tags=["control"], summary="The SPARKs' status frame period")
+    @app.get("/status_period", response_model=StatusPeriodOut, response_model_exclude_unset=True, tags=["control"],
+             summary="The SPARKs' status frame period")
     async def get_status_period():
         return node.status_period()
 
-    @app.post("/status_period", response_model=StatusPeriodOut, tags=["control"],
-              summary="Set the SPARKs' status frame period (anyone: it moves nothing; applied at the next tick)")
+    @app.post("/status_period", response_model=StatusPeriodOut, response_model_exclude_unset=True, tags=["control"],
+              summary="Set the SPARKs' status frame period (anyone: it moves nothing; applied beside the control loop)")
     async def set_status_period(body: StatusPeriodIn):
         return node.set_status_period(body.status_period_ms)
 

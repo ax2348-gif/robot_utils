@@ -25,17 +25,21 @@ moved to ``kinematics.py`` and are re-exported here.
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import threading
 import time
+from typing import Optional
 
-from sparkcan import ControlType, PeriodicFrame, SparkFlex
+from sparkcan import ControlType, PeriodicFrame, REVLibError, SparkFlex
 from sparkcan.protocol import to_slcan
 
 from ..common import realtime
 from .constants import COMMAND_TIMEOUT, MAX_WHEEL_SPEED, MODULES
 from .kinematics import (MIN_SPEED, module_command, robot_twist,  # noqa: F401 (re-exported)
                          wheel_velocities, wrap_angle)
+
+log = logging.getLogger("swerve.drive")
 
 LOOP_PERIOD = 0.01   # s; the heartbeat must come at least every 20 ms
 ANGLE_MAX_AGE = 0.1  # s; an older steering reading is stale
@@ -75,7 +79,9 @@ class SwerveDrive:
 
     def __init__(self, interface: str, pre_tick=None, on_tick=None, status_period_ms: int = STATUS_PERIOD_MS):
         self.status_period_ms = check_status_period(status_period_ms)
-        self._status_req = None   # a new status period, applied by the loop thread at its next tick
+        self._status_req = None   # a new status period, applied by _status_worker (never the loop thread)
+        self._status_thread: Optional[threading.Thread] = None
+        self.status_period_error: Optional[str] = None
         self.drives = [SparkFlex(interface, m.drive_id) for m in MODULES]
         self.steers = [SparkFlex(interface, m.steer_id) for m in MODULES]
         self.bus = self.drives[0].bus
@@ -140,6 +146,9 @@ class SwerveDrive:
     def close(self) -> None:
         self._running = False
         self._thread.join()
+        t = self._status_thread
+        if t is not None:
+            t.join(timeout=2)
         if self.bus.__dict__.get("send") == self._send:
             del self.bus.send   # back to CANBus.send
         self.bus.disable()
@@ -154,21 +163,50 @@ class SwerveDrive:
                 s.set_periodic_frame_period(PeriodicFrame.STATUS_1, STATUS_1_PERIOD_MS)
         self._apply_status_period(self.status_period_ms)
 
-    def _apply_status_period(self, ms: int) -> None:
+    def _apply_status_period(self, ms: int) -> list:
         """The period of each SPARK's per-tick frames: STATUS_0 and its signal frame (drives STATUS_2,
-        steers STATUS_5)."""
+        steers STATUS_5). Each write waits for the SPARK's confirmation, so never call this on the loop thread
+        while it runs (its frames are batched until the tick ends: every write would time out, 16 x 50 ms with no
+        heartbeats). Returns the writes that were not confirmed."""
+        failed = []
         for sparks, keep in ((self.drives, PeriodicFrame.STATUS_2), (self.steers, PeriodicFrame.STATUS_5)):
             for s in sparks:
-                s.set_periodic_frame_period(PeriodicFrame.STATUS_0, ms)
-                s.set_periodic_frame_period(keep, ms)
-        self.status_period_ms = ms
+                for frame in (PeriodicFrame.STATUS_0, keep):
+                    r = s.set_periodic_frame_period(frame, ms)
+                    if r is not None and r != REVLibError.OK:
+                        failed.append(f"{s!r} {frame.name}: {getattr(r, 'name', r)}")
+        if not failed:
+            self.status_period_ms = ms
+        return failed
 
     def set_status_period(self, ms: int) -> None:
-        """Change the per-tick status frames' period (ms, STATUS_PERIOD_RANGE_MS). Applied by the loop
-        thread at its next tick, in that tick's batched write; nothing moves."""
+        """Change the per-tick status frames' period (ms, STATUS_PERIOD_RANGE_MS). Applied by a short-lived helper
+        thread beside the loop (frames from other threads go straight to the bus), so the 100 Hz loop and its
+        heartbeats never wait for the confirmations; nothing moves. ``status_period_ms`` changes once every SPARK
+        confirmed; ``status_period_error`` says what did not."""
         ms = check_status_period(ms)
         with self._lock:
             self._status_req = ms
+            if self._status_thread is None or not self._status_thread.is_alive():
+                self._status_thread = threading.Thread(target=self._status_worker, name="swerve status period",
+                                                       daemon=True)
+                self._status_thread.start()
+
+    def _status_worker(self) -> None:
+        while self._running:
+            with self._lock:
+                ms, self._status_req = self._status_req, None
+                if ms is None:
+                    self._status_thread = None
+                    return
+            try:
+                failed = self._apply_status_period(ms)
+            except Exception as e:  # noqa: BLE001 - reported, never raised into anything
+                failed = [f"{type(e).__name__}: {e}"]
+            self.status_period_error = (f"status period {ms} ms not confirmed by: {'; '.join(failed)}"
+                                        if failed else None)
+            if failed:
+                log.warning(self.status_period_error)
 
     def _send(self, frame, **kw) -> None:
         """CANBus.send for this bus: frames from the loop thread are batched during a tick."""
@@ -231,10 +269,6 @@ class SwerveDrive:
             while self._running:
                 now_tick = time.monotonic()
                 self._batch = []
-                with self._lock:
-                    status_req, self._status_req = self._status_req, None
-                if status_req is not None:
-                    self._apply_status_period(status_req)
                 if self.pre_tick is not None:
                     self.pre_tick(self)
                 setpoints = [nan] * len(MODULES)

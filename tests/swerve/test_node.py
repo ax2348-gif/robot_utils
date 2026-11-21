@@ -302,3 +302,21 @@ def test_cross_origin_estop_and_preflight(node_url):
     t = time.monotonic()
     httpx.get(url + "/state")
     assert time.monotonic() - t < 0.2                    # the dashboard polls with a 0.9 s timeout
+
+
+def test_changing_the_status_period_never_stalls_the_control_loop(node_url):
+    """POST /status_period used to apply 16 confirmed SPARK writes on the loop thread, whose frames are batched
+    until the tick ends: every write timed out (50 ms), so the loop and its heartbeats stopped for ~0.8 s (code
+    review 2026-11-21). The writes now run beside the loop."""
+    url, node, _ = node_url
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    with SwerveClient(url) as c:
+        out = c.post("/status_period", {"status_period_ms": 20})
+    assert out["status_period_ms"] == 20
+    wait_for(lambda: node.status_period()["applied_ms"] == 20, 3)
+    time.sleep(0.3)
+    rows = [r for r in node.hub.recent(200, "tick") if r[0] >= t0 - 0.05]
+    gaps = [b[0] - a[0] for a, b in zip(rows, rows[1:])]
+    assert gaps and max(gaps) < 0.05, f"the loop stalled {max(gaps) * 1e3:.0f} ms"
+    assert "error" not in node.status_period()
