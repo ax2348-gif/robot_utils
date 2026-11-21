@@ -102,3 +102,77 @@ def test_no_cpufreq(tmp_path):
     assert cg.read()["available"] is False
     with pytest.raises(RequestError):
         cg.set("performance")
+
+
+# -- the node's API (power/server.py) --------------------------------------------------------------
+
+def cpu_api(tmp_path, gov="ondemand", installed=True):
+    from fastapi.testclient import TestClient
+
+    from robot_utils.nodes.power.node import PowerNode
+    from robot_utils.nodes.power.server import create_app
+    from robot_utils.nodes.power.sources import TetherSource, UpsSource
+    from robot_utils.nodes.power.ups import FakeBus, UpsHat
+    root, helper = fake_sysfs(tmp_path, gov=gov)
+    if not installed:
+        helper.unlink()
+    calls = []
+    cg = CpuGovernor(tmp_path / "power.json", run=helper_runner(root, calls), sysfs=root, helper_unit_file=helper,
+                     clock=Clock())
+    node = PowerNode([UpsSource(UpsHat(FakeBus())), TetherSource("main")], power_off=refuse_run,
+                     settings_path=tmp_path / "power.json", audit_path=tmp_path / "shutdown.jsonl",
+                     spawn=lambda fn: fn(), cpu=cg)
+    return TestClient(create_app(node, start=False, identify=lambda ip: ip)), node, root, calls
+
+
+def test_api_get_and_post_cpu_with_audit_and_event(tmp_path):
+    c, node, root, calls = cpu_api(tmp_path)
+    with c:
+        assert c.get("/cpu").json()["governor"] == "ondemand"
+        assert c.get("/state").json()["cpu"]["governors"] == sorted(GOVS.split())
+        r = c.post("/cpu", json={"governor": "schedutil", "by": "avery"})
+        assert r.status_code == 200 and r.json()["governor"] == "schedutil"
+        assert calls == [["systemctl", "start", UNIT.format("schedutil")]]
+        assert (root / "policy0" / "scaling_governor").read_text().strip() == "schedutil"
+        assert any("CPU governor ondemand -> schedutil by avery" in e["msg"] for e in c.get("/state").json()["events"])
+        log = [x for x in c.get("/log").json()["log"] if x["event"] == "cpu_governor"]
+        assert log[-1]["before"] == "ondemand" and log[-1]["after"] == "schedutil" and log[-1]["by"] == "avery"
+        r = c.post("/cpu", json={"governor": "turbo", "by": "avery"})
+        assert r.status_code == 422 and "unknown governor" in r.json()["detail"] and len(calls) == 1
+        assert [x for x in c.get("/log").json()["log"] if x["event"] == "cpu_governor"][-1]["status"] == "failed"
+        assert json.loads((tmp_path / "power.json").read_text())["cpu"] == {"governor": "schedutil"}
+
+
+def test_api_cpu_without_helper_and_without_cpu_control(tmp_path):
+    c, node, root, calls = cpu_api(tmp_path, installed=False)
+    with c:
+        st = c.get("/cpu").json()
+        assert st["helper_installed"] is False
+        r = c.post("/cpu", json={"governor": "performance"})
+        assert r.status_code == 503 and "install.sh" in r.json()["detail"] and calls == []
+        node.cpu = None
+        assert c.get("/cpu").status_code == 404 and "cpu" not in c.get("/state").json()
+
+
+def test_node_reapplies_saved_governor_at_start_and_notes_it(tmp_path):
+    (tmp_path / "power.json").write_text(json.dumps({"cpu": {"governor": "performance"}}))
+    c, node, root, calls = cpu_api(tmp_path)              # the kernel booted on ondemand
+    node.apply_cpu_saved()
+    assert calls == [["systemctl", "start", UNIT.format("performance")]]
+    assert any("ondemand -> performance (saved choice)" in e["msg"] for e in node.events.list())
+
+
+def test_state_reads_cpu_at_most_once_a_second(tmp_path):
+    c, node, root, calls = cpu_api(tmp_path)
+    reads = []
+    orig = node.cpu.read
+    node.cpu.read = lambda: reads.append(1) or orig()
+    t = [10.0]
+    node.clock = lambda: t[0]
+    for _ in range(4):
+        node.state()
+        t[0] += 0.25
+    assert len(reads) == 1
+    t[0] += 1
+    node.state()
+    assert len(reads) == 2

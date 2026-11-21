@@ -50,11 +50,16 @@ def fmt_status(st: dict) -> str:
         ok = "ok" if s["ok"] else "STALE" if s["stale"] else "NO READING"
         line = f"  {s['id']:5s} {s['type']} [{ok}]"
         if s.get("percent") is not None:
-            rt = f", ~{s['runtime_min']} min left ({s['runtime_source']})" if s.get("runtime_min") is not None else ""
+            rt = (f", gauge ~{s['runtime_min']} min left ({s['runtime_source']})" if s.get("runtime_min") is not None
+                  else "")
             line += (f" {s['percent']} % {s['pack_v']:.2f} V {s['current_a']:+.2f} A, {s['charge_state']}, "
                      f"input {'present' if s.get('input_present') else 'absent'}{rt}")
             if s.get("cells_v"):
                 line += "\n        cells " + " ".join(f"{v:.3f}" for v in s["cells_v"]) + " V"
+            pl = s.get("power_loss")
+            if pl:
+                line += "\n        " + pl["text"] + (f" (range {pl['range_min'][0]:.0f}-{pl['range_min'][1]:.0f} min, "
+                                                     f"confidence {pl['confidence']})" if pl.get("range_min") else "")
         out.append(line)
     lv = st["low_voltage"]
     out.append(f"low-voltage shutdown: {lv['status']} (threshold {lv['volts']:.2f} V, hold {lv['hold_s']:.0f} s)")

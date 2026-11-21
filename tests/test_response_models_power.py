@@ -174,3 +174,43 @@ def test_openapi_documents_shapes_and_media_types(tmp_path):
     schemas = spec["components"]["schemas"]
     assert "charging" in schemas["PowerSource"]["properties"]["current_a"]["description"]
     assert schemas["AuditRecord"]["additionalProperties"] is True
+
+
+def test_power_loss_and_cpu_are_typed_and_lossless(api, tmp_path):
+    """A draining power-loss estimate (every PowerLoss field filled) and the CPU governor (GET/POST /cpu, /state cpu)."""
+    import time
+
+    from robot_utils.nodes.power.cpu import CpuGovernor
+    from test_power_cpu import Clock as CpuClock
+    from test_power_cpu import fake_sysfs, helper_runner
+    call, node, clock, bus, routes = api
+    wall = time.time()
+    for k in range(1200, 0, -1):                       # 20 min on input, the charger bit set, cell 3 falling 4 mV/min
+        v3 = 3.55 - 0.004 * (1200 - k) / 60
+        cells = (3.60, 3.58, v3, 3.63)
+        node.loss.add((wall - k - 1, cells, sum(cells), -0.14, True, True))
+    bus.set_word(0x22, -140)
+    for i, mv in enumerate([3600, 3580, 3470, 3630]):
+        bus.set_word(0x30 + 2 * i, mv)
+    node.step(clock.t)
+    pl = call("GET", "/state")["sources"][0]["power_loss"]
+    assert pl["status"] == "draining" and pl["limit"]["kind"] == "cutoff" and isinstance(pl["range_min"], list)
+    assert "cpu" not in call("GET", "/state")                           # no CPU control: absent
+
+    root, helper = fake_sysfs(tmp_path)
+    runs = []
+    node.cpu = CpuGovernor(tmp_path / "power.json", run=helper_runner(root, runs), sysfs=root,
+                           helper_unit_file=helper, clock=CpuClock())
+    c = call("GET", "/cpu")
+    assert c["governor"] == "ondemand" and c["ghz"] == 1.9 and c["helper_installed"] is True
+    assert call("GET", "/state")["cpu"]["governor"] == "ondemand"
+    c = call("POST", "/cpu", json={"governor": "performance", "by": "me"}, headers={"X-Forwarded-For": "100.64.0.9"})
+    assert c["governor"] == "performance" and c["saved"] == "performance" and runs
+    assert call("GET", "/state")["cpu"]["governor"] == "performance"
+    rec = [x for x in call("GET", "/log")["log"] if x["event"] == "cpu_governor"][-1]
+    assert (rec["before"], rec["after"], rec["by"], rec["client"]) == ("ondemand", "performance", "me", "user@100.64.0.9")
+    nocpu = CpuGovernor(None, sysfs=tmp_path / "none", helper_unit_file=helper)
+    node.cpu, node._cpu_state = nocpu, None
+    c = call("GET", "/cpu")                                             # no cpufreq: the short shape
+    assert c == {"available": False, "governor": None, "governors": [], "error": "no cpufreq on this machine"}
+    assert call("GET", "/state")["cpu"]["available"] is False

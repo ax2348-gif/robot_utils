@@ -6,7 +6,9 @@ Guide: docs/power.md. Stable contract for other pages (the landing page's overvi
 - ``GET /state`` -> ``sources``: a list of ``{id, type, role, telemetry, ok, stale, error, age_s}``
   (``id`` "ups" / "main" / later "aux"; ``type`` "ups" / "tether" / later "battery") plus, for a
   source with a battery, ``percent, pack_v, cells_v, current_a, power_w, charge_state, charging,
-  input_present, runtime_min, runtime_source, time_to_full_min, remaining_mah`` (null = unknown);
+  input_present, runtime_min, runtime_source, time_to_full_min, remaining_mah`` (null = unknown); the UPS
+  adds ``power_loss`` (time until the Pi loses power and how: powerloss.py), which is what to show, not the
+  gauge's ``runtime_min``;
 - ``GET /state`` -> ``shutdown``: flat, same keys whether pending or not: ``{pending, phase, at,
   in_s, requested_at, by, client, source, reason, delay_s, estop, error, confirm, delay_bounds_s,
   last}`` (times in epoch s; null when idle);

@@ -22,6 +22,8 @@ It does run an E-STOP ALL of its own before it powers the Pi off.
 | `sources.py` | `Source` classes: `UpsSource`, `TetherSource`; the shared source envelope |
 | `shutdown.py` | `ShutdownController`: confirm, countdown, cancel, e-stop then power-off, audit log, rate limit |
 | `lowvolt.py` | `LowVoltage`: settings and the check |
+| `cpu.py` | `CpuGovernor`: read, switch and keep the CPU frequency governor (`deploy/power/`: the root helper) |
+| `powerloss.py` | `PowerLoss`: time until the Pi loses power, and whether that is a clean shutdown or a UPS cutoff |
 | `node.py` | `PowerNode`: owner thread, history, `estop_robot()`, `system_power_off()` |
 | `server.py`, `page.py` | the HTTP API and the page |
 | `admin/power.py` | the SSH CLI |
@@ -40,6 +42,7 @@ Paths are relative to the node root. The common endpoints (`/time`, `/health`, `
 | `POST /shutdown` | `{confirm: "shutdown", reason, by, delay_s}`: schedule a shutdown (202) |
 | `POST /shutdown/cancel` | `{by, reason}`: cancel during the countdown |
 | `GET /low_voltage`, `POST /low_voltage` | `{enabled, volts, hold_s, confirm, by}` |
+| `GET /cpu`, `POST /cpu` | the CPU governor; `{governor, by}` switches it (CPU governor below) |
 | `GET /log?n=50` | the audit log |
 
 `/meta` reports `kind: "power"`, `actuated: false` and `has_page: true`.
@@ -51,7 +54,13 @@ Other pages build on this shape, such as the landing page's robot overview, so i
   hardware nodes.
 - **`state`**: a short string, shown on the landing tile. Examples: `"UPS 59 % · charging"`,
   `"UPS 46 % · draining on input"` (instead of the charger's `charging` while the pack drains on input,
-  held as in the watch below), `"SHUTDOWN in 22 s"`, `"UPS stale"`, `"UPS unavailable"`.
+  held as in the watch below), `"SHUTDOWN in 22 s"`, `"UPS stale"`, `"UPS unavailable"`. While the pack drains
+  and the power-loss estimate has one (below), it ends with when and how the Pi goes down:
+  `"UPS 46 % · draining on input · auto-shutdown in ≈ 34 min"` or `"... · power cut in ≈ 2 h 10 min"`.
+- **`cpu`** (added; additive): the CPU governor, the same object as `GET /cpu` (read at most once a second).
+  Absent when the node runs without CPU control.
+- **`sources[ups].power_loss`** (added; additive): the time until the Pi loses power and how. See Time until
+  power loss below for the fields and the method. Show this, not `runtime_min`.
 - **`error`**: the UPS read error, or `null`.
 - **`sources`**: a list, one object per power source. The keys are described under Sources below.
 - **`shutdown`**: one flat object with the same keys whether or not a shutdown is pending.
@@ -87,7 +96,11 @@ The whole object is about 2 KB (up to ~3 KB with conditions).
    "input": {"present": true, "v": 8.675, "a": 2.09, "w": 18.17}, "draining_on_input": false,
    "charger_state": "constant current", "links": {"fuel_gauge": true, "charger": true}, "firmware": "2.0",
    "power_off_pending": false,
-   "control": {"auto_power_on": true, "watchdog": false, "address": 45, "wd_timeout_s": 255, "wd_delay_s": 255}},
+   "control": {"auto_power_on": true, "watchdog": false, "address": 45, "wd_timeout_s": 255, "wd_delay_s": 255},
+   "power_loss": {"status": "not_draining", "in_min": null, "range_min": null, "at": null, "event": null,
+                  "clean": null, "limit": null, "cutoff_in_min": null, "blocked_reason": null, "method": "...",
+                  "confidence": null, "note": null, "cell": null, "cell_v": null, "slope_mv_min": null,
+                  "current_a": 0.512, "on_input": true, "window_min": null, "text": "not draining (charging)"}},
   {"id": "main", "type": "tether", "role": "main", "telemetry": false, "ok": null, "stale": false, "error": null,
    "age_s": null, "note": "bench supply on a tether; no battery installed"}
  ],
@@ -120,7 +133,9 @@ A source with a battery adds the **common battery fields**. Each is `null` when 
 - `charge_state`: `charging`, `full`, `discharging` or `idle`;
 - `charging` and `input_present`;
 - `runtime_min`, with `runtime_source`: `gauge` (the fuel gauge's time to empty) or `estimate`
-  (remaining mAh divided by the current);
+  (remaining mAh divided by the current). Only while the charger bit is off, and from the gauge's idea of the
+  pack's capacity, so it never covers a drain on input and doesn't see a weak cell (on 2026-11-20 the UPS cut
+  power at 45 %). Kept unchanged for compatibility; the UPS's `power_loss` is the time to show;
 - `time_to_full_min` and `remaining_mah`.
 
 The UPS also reports `input` (USB-C V / A / W), `charger_state`, `links` (fuel gauge and charger
@@ -134,6 +149,115 @@ The net battery power is `power_w` (+ charging, - draining). The load is not mea
 `RU.viz.Battery.fromSource(src)` (`common/viz.js`) turns any of these into the battery gauge's
 data. The page uses the full gauge on each source card and the compact one (`{compact: true}`,
 24 px) in the header.
+
+## Time until power loss
+
+`sources[ups].power_loss` says when the Pi will lose power and whether that is a **clean automatic shutdown**
+(the node's low-voltage shutdown) or an **abrupt UPS cutoff**. It is refreshed every 5 s.
+
+**Why the weakest cell.** On 2026-11-20 the pack drained about 2 W on input from midnight (62 % at 12:30, 45 % at
+18:21) with the charger bit saying "charging". Cell 3 fell away from the others (3.73 V at 16:40, 3.38 V at 18:03)
+and the UPS cut power at 18:21:25 with cell 3 at 3.05 V under 0.22 A, the pack at 13.32 V and the gauge at 45 %.
+So the limit is the weakest cell reaching the UPS's own cutoff, `CELL_CUTOFF_V = 3.05` V, an estimate from that
+one observed cutoff. The gauge's percent and time to empty can't see it.
+
+**Method** (`powerloss.py`):
+1. Every 1 Hz reading goes into a 35 min ring (refilled from the disk log at startup; `--fake` back-fills it from
+   the simulated curve). Readings are reduced to per-minute medians, which drops load spikes.
+2. Only the trailing run of draining minutes (median net current below -0.05 A) with the same input state as now
+   is used, up to 30 min. One odd minute is skipped; two, a gap of more than 3 min or a change of input end it.
+3. A least-squares line through the weakest cell's medians gives its slope at the middle of the window.
+4. The knee: a cell falls faster as it nears empty (cell 3 fell 0.4 mV/min on the plateau, 3.5 at 3.65 V, 9 at
+   3.32 V, ~40 in its last minute). The model is that the slope grows as `exp(dv / λ)` as the voltage falls by
+   `dv`, with `λ = 0.15` V. The measured slope is moved from the window's middle to now with that rule, and the
+   time to reach a target is `λ / slope · (1 − exp(−(v − target) / λ))`. A straight line is optimistic near the
+   end and, on the plateau, says days.
+5. Limits: the UPS cutoff (weakest cell → 3.05 V) always; with the low-voltage shutdown enabled also its
+   `cell_volts` (weakest cell) and `volts` (the pack's trend, with `4λ`: errs towards later, i.e. towards calling it
+   a cutoff). The auto-shutdown's time is its threshold + `hold_s` + the 10 s countdown. It is **clean** when that
+   plus 30 s for the power-off itself still comes before the cutoff, judged with the gentler knee `λ = 0.25` V (the
+   steep one squeezes the last 0.1 V into too little time: cell 3 took about 2.5 min from 3.15 V to the cutoff).
+6. `range_min` reruns it with `λ = 0.10` and `0.25` V. `confidence` is `low` while the weakest cell is above
+   3.65 V (on the plateau the knee isn't visible yet), `medium` below.
+
+**Backtest** on the 2026-11-20 log (1 Hz, replayed up to each point; auto-shutdown off, so the event is the
+cutoff; `tests/test_power.py::test_power_loss_backtest_2026_11_20` repeats it on a 30 s extract,
+`tests/data/ups-2026-11-20-cutoff.csv.gz`):
+
+| before the cutoff | weakest cell | estimate | range | confidence | estimate / real |
+|---|---|---|---|---|---|
+| 6 h | cell 2, 3.836 V | 6 h 16 min | 4 h 07 – 10 h 12 | low | 1.04 (by luck) |
+| 3 h | cell 3, 3.759 V | 4 h 08 min | 2 h 42 – 6 h 42 | low | 1.38 |
+| 2 h | cell 2, 3.732 V | 7 h 02 min | 4 h 40 – 11 h 14 | low | 3.5 |
+| 1 h 30 | cell 3, 3.713 V | 3 h 37 min | 2 h 22 – 5 h 50 | low | 2.4 |
+| 1 h | cell 3, 3.618 V | 34 min | 20 – 59 min | medium | 0.57 |
+| 30 min | cell 3, 3.471 V | 18 min | 10 – 31 min | medium | 0.59 |
+| 20 min | cell 3, 3.395 V | 12 min | 6.5 – 22 min | medium | 0.62 |
+| 10 min | cell 3, 3.290 V | 7.1 min | 3.6 – 12.7 min | medium | 0.71 |
+| 5 min | cell 3, 3.209 V | 4.1 min | 2.0 – 7.4 min | medium | 0.82 |
+| 2 min | cell 3, 3.133 V | 1.9 min | 0.9 – 3.6 min | medium | 0.95 |
+
+With the auto-shutdown on (`cell_volts` 3.15 V) it reports a clean auto-shutdown from 6 h out to the end, about
+1 min before the cutoff estimate near the end (e.g. 17 min at 30 min out, 6 min at 10 min out).
+
+**How far to trust it.** One event set `λ`, the 3.65 V plateau line and the 3.05 V cutoff; a straight line, a
+generic Li-ion voltage-to-charge table (this pack's cells stay near 3.8 V far longer than one says) and windows of
+10 to 60 min did worse. In the last hour it was 0.55–0.95x the real time, on the short side, and the real time was
+inside the range (the top of the range an hour out was 59.4 min at 1 Hz). On the plateau it is a guess: it said
+3.5x too long 2 h out, before the knee showed, which is why it says `confidence: low` there. A load step shortens
+the end (the last 3 min here ran at 0.22 A instead of 0.14 A). The log has no stretch on battery longer than 3 min,
+so the on-battery case is untested on real data: the same method applies (the 30 min window restarts when the
+input goes) and the node shows it there too, not the gauge's `time_to_empty_min` (`runtime_min`), which comes from
+a 4800 mAh capacity the pack no longer has (it gave about 2.5 Ah from full before cell 3 cut out).
+
+Fields (null when not applicable):
+- `status`: `draining` (an estimate), `not_draining` (net current at or above -0.05 A, or the weakest cell isn't
+  falling), `estimating` (draining, but under 10 min of it), `no_data` (no reading in the last 2 min),
+  `shutdown_pending` (a shutdown is scheduled: it comes first; `event: "shutdown"`, `in_min` its countdown).
+- `in_min`: minutes until the Pi goes down: the end of a clean auto-shutdown's countdown (power-off then takes
+  ~30 s), or the UPS cutoff. `at`: the same as epoch seconds. `range_min`: `[short, long]`.
+- `event`: `auto_shutdown` or `ups_cutoff` (or `shutdown`); `clean`: true for the first.
+- `limit`: `{kind: "cutoff" | "cell" | "pack", cell, target_v, v, label}`, e.g. `cell 3 → 3.05 V`.
+- `cutoff_in_min`: minutes until the weakest cell reaches the cutoff, whatever the auto-shutdown does.
+- `blocked_reason`: why it ends in a cutoff: `auto-shutdown is off`, or `auto-shutdown (cell 3 → 3.15 V) would come
+  too late` (a threshold too close to the cutoff, or a long hold).
+- `method`, `confidence` (`low`, `medium`; `high` for a pending shutdown), `note`.
+- `cell`, `cell_v`, `slope_mv_min` (+ = falling), `current_a`, `on_input`, `window_min`: what it was computed from.
+- `text`: one line, e.g. `power loss in ≈ 34 min: clean auto-shutdown (cell 3 → 3.15 V)` or `power loss in ≈ 2 h
+  10 min: UPS cutoff (cell 3 → 3.05 V); auto-shutdown is off (rough: knee not visible yet)`.
+
+`RU.viz.Battery.fromSource` takes `power_loss.in_min` as the gauge's runtime when the source has it (and doesn't
+draw a pack draining on input as charging), so the landing tile's gauge says `~34 min left` too. The SSH CLI's
+`status` prints `text` with its range and confidence.
+
+## CPU governor
+
+The Pi 5 has one cpufreq policy for all four cores, and its governor trades latency against power. Measured on
+2026-11-20 at a light robot load:
+- `ondemand` (the kernel's default here): about 1.9 GHz median and ~62 frequency changes/s (each a firmware
+  mailbox call), costing ~16 % more CPU time and ~6 ms more estimator lag;
+- `performance`: 2.4 GHz fixed, about 0.45 W more drain on the UPS pack (which matters while the input can't keep
+  up: Time until power loss above);
+- `schedutil`: a middle ground, untested.
+
+`GET /cpu` (and `/state` `cpu`): `{available, governor, governors, ghz, ghz_range, transitions_s, policies, saved,
+helper_installed, error}`; without cpufreq only `{available: false, governor: null, governors: [], error}`.
+`transitions_s` is the change rate since the previous read (at least 1 s earlier). `POST /cpu {governor, by}` runs
+`systemctl start robot-cpu-governor@<governor>.service`; 422 for a governor the kernel doesn't offer, 503 without
+cpufreq or the helper, 502 if the switch failed. Every switch (and failure) goes to the audit log
+(`cpu_governor`, with `before` and `after`), the journal and the page's events. The choice is saved in
+`power.json` (`cpu`) and re-applied at startup, since the kernel boots on its default. `--fake` reads the local
+cpufreq but never switches it.
+
+Writing the governor needs root, so it goes through a oneshot unit that validates the name and writes every policy,
+and a polkit rule that lets `botcore` start only that unit. Install it once on the robot:
+
+```bash
+sudo sh ~/robot_utils/deploy/power/install.sh
+```
+
+The page's CPU governor panel shows the governor, the clock, the changes per second, the saved choice, whether the
+helper is installed (with that line if not) and the last error, with a select and Apply.
 
 ## Shutdown
 
@@ -289,12 +413,17 @@ spread_v: 0.20}` (the watch's, without its holds).
   `in 14.6 W · pack −2.1 W draining on input · load ≈16.7 W`, caution while `draining_on_input`. While the pack
   drains on input the gauges drop the charging mark the charger bit would give them.
 - **UPS card:** `state` says `draining on input (charger bit: charging)`; the pack's current and power carry their
-  sign; a `load (derived)` row.
+  sign; a `load (derived)` row; a `power loss` row with the estimate's `text`, and under it its range, confidence,
+  the cutoff time when a clean shutdown comes first, and the cell's slope. The gauge's own runtime, when it has one,
+  is a separate `gauge runtime` row.
+- **Header:** a power-loss pill with the same `text`, caution under 30 min.
 - **History** (window 1 / 6 / 24 h; one crosshair shared by every chart, with a readout line of every value at it):
   - **Power flow** (W): input, pack net and the derived load (dashed) on one axis with a zero line. The pack net
     is filled against zero: a faint tint above it (charging), hatching below it (draining). Below it, the energy
     into and out of the pack, net, and input and load energy over the window.
-  - **Cells** (V): the lowest cell with the 3.30 V line, and the spread with the 0.20 V line.
+  - **Cells** (V): the lowest cell with the 3.30 V line, and the spread with the 0.20 V line. While the pack
+    drains and the lowest cell is within 0.5 V of the limit the estimate runs to, that limit is a second line,
+    labelled `UPS cutoff 3.05 V · ≈ 34 min` or `auto-shutdown 3.15 V · ≈ 33 min`.
   - Charge, pack voltage and current, as before.
   - **Anomaly spans** from the history rows: draining on input (input present, current below -0.05 A) on the power
     flow, charge, voltage and current charts; a low cell on the cells chart; a spread above 0.20 V on the spread
@@ -371,6 +500,11 @@ The tests cover:
 - low-voltage logic: hold, charging, stale readings, re-arm, confirm;
 - the history's power-flow and cell columns, live and restored from the log; draining on input in `/state`
   (`state`, `draining_on_input`, `conditions`); the simulated drain stretch; the page's charts (light check);
-- the API and the CLI.
+- the API and the CLI;
+- the power-loss estimate: not draining, too little history, draining on input (cutoff with the auto-shutdown off,
+  clean auto-shutdown with it on, a threshold too close to the cutoff), on battery, load spikes, `/state` and the
+  tile string, a pending shutdown, and the 2026-11-20 backtest (a 5 KB gzipped extract of the log);
+- the CPU governor (`tests/test_power_cpu.py`, a fake sysfs and runner): read, switch, save, re-apply at start,
+  `GET`/`POST /cpu`, the audit record and event, no helper, and `/state` reading it at most once a second.
 
 No test touches I2C, a process or another node.

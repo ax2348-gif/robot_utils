@@ -1,10 +1,12 @@
 """The power node's page (served at the node root). Relative URLs only.
 
 Sources as cards (RU.viz.Battery for every source with a battery), a live power-flow pill in the
-header (input, pack net with its sign, derived load; caution while the pack drains on input), the
+header (input, pack net with its sign, derived load; caution while the pack drains on input), the time until
+the Pi loses power and how (header pill and UPS card; caution under 30 min; its limit line on the cell chart), the
 24 h history as page-local canvas charts (power flow with the pack's net power filled against zero,
 cells, charge, voltage, current; anomaly spans marked; one shared crosshair), the watched
-conditions as spans, low-voltage settings, and the shutdown control: a hazard button opens a confirm step that says
+conditions as spans, low-voltage settings, the CPU governor (current, clock, changes/s, a select with Apply), and the
+shutdown control: a hazard button opens a confirm step that says
 what will happen; a pending shutdown shows as a banner with its countdown and a Cancel button,
 also on load. User-supplied text (reasons, names) is always inserted as text, never as HTML.
 """
@@ -59,6 +61,7 @@ button.ru.big{min-height:44px;font-weight:600;width:100%}
 <div class="ru-row ru-head">
   <h2 style="margin:6px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">Power <span id="hdr-batt" style="width:120px"></span>
     <span id="state" class="ru-pill">…</span>
+    <span id="loss" class="ru-pill" hidden title="Time until the Pi loses power, from the weakest cell's voltage trend (not the fuel gauge)"></span>
     <span id="flow" class="ru-pill ru-num" hidden title="USB-C input, pack net (+ charging, − draining) and the load derived from them (input − pack net, includes converter losses)"></span></h2>
   <div class="ru-row"><span id="fake" class="ru-pill ru-warn" hidden>simulated UPS (--fake)</span><a class="ru-muted" href="docs">API docs</a></div>
 </div>
@@ -120,15 +123,26 @@ button.ru.big{min-height:44px;font-weight:600;width:100%}
       <div id="sd-last" class="ru-muted" style="margin-top:8px"></div>
     </div>
     <div class="ru-card" data-panel="low_voltage" data-role="config"><b>Low-voltage shutdown</b> <span id="lv-status" class="ru-pill">…</span>
-      <p class="ru-muted" style="margin:4px 0">When the UPS pack stays below the threshold for the hold time while not
-        charging, the node schedules a shutdown (10 s countdown, cancellable). Stale or missing readings never trigger it.</p>
-      <p class="ru-warn" style="margin:4px 0">Leave this off until the old ups-dashboard service is retired: it does the
-        same job (docs/power.md, Cutover).</p>
+      <p class="ru-muted" style="margin:4px 0">When the pack is net draining (whatever the charger's "charging" says) and the
+        pack, or its weakest cell, stays below its threshold for the hold time, the node schedules a shutdown (10 s
+        countdown, cancellable). A charging pack and stale or missing readings never trigger it.</p>
+      <div id="lv-reason" class="ru-warn" style="margin:4px 0" hidden></div>
       <label><input type="checkbox" id="lv-on"> enabled</label>
       <div class="row2"><div><label class="f" for="lv-v">Threshold (V)</label><input class="f" id="lv-v" type="number" min="11" max="16" step="0.1"></div>
         <div><label class="f" for="lv-hold">Hold (s)</label><input class="f" id="lv-hold" type="number" min="5" max="120" step="1"></div></div>
-      <div class="ru-muted" style="font-size:12px;margin-top:2px">11-16 V; 13.2 V = 3.3 V per cell (4 cells)</div>
+      <div class="row2"><div><label class="f" for="lv-cell">Weakest cell (V)</label><input class="f" id="lv-cell" type="number" min="2.9" max="3.6" step="0.01"></div>
+        <div><label class="f">Weakest now</label><div id="lv-mincell" class="f" style="padding:6px 0">–</div></div></div>
+      <div class="ru-muted" style="font-size:12px;margin-top:2px">pack 11-16 V (13.2 V = 3.3 V per cell); weakest cell 2.9-3.6 V,
+        keep it above the UPS's own cutoff (~3.05 V seen under load)</div>
       <div class="ru-row" style="margin-top:8px"><button class="ru" id="lv-save">Save</button><span id="lv-msg" class="ru-muted"></span></div>
+    </div>
+    <div class="ru-card" data-panel="cpu" data-role="config" id="cpu-card" hidden><b>CPU governor</b> <span id="cpu-gov" class="ru-pill">…</span>
+      <p class="ru-muted" style="margin:4px 0">Clock policy for all cores. ondemand: ~1.9 GHz, many clock changes, more
+        CPU time and a little lag; performance: 2.4 GHz fixed, ~0.45 W more from the pack; schedutil: in between, untested.</p>
+      <div class="kv" id="cpu-kv"></div>
+      <div class="ru-row" style="margin-top:8px"><select id="cpu-sel" aria-label="governor"></select>
+        <button class="ru" id="cpu-apply">Apply</button><span id="cpu-msg" class="ru-muted"></span></div>
+      <div id="cpu-err" class="ru-err"></div>
     </div>
   </div>
 </div>
@@ -179,7 +193,13 @@ function card(s){
   if (s.input && s.power_w !== null && s.power_w !== undefined)
     rows.push(["load (derived)", `≈${f((s.input.present ? s.input.w : 0) - s.power_w, 1, "W")} = input − pack net (includes converter losses)`]);
   if (s.cells_v) rows.push(["cells", s.cells_v.map(v => f(v, 3)).join(" ") + " V"]);
-  rows.push(["runtime", s.runtime_min !== null && s.runtime_min !== undefined ? `~${mins(s.runtime_min)} (${s.runtime_source})` : s.charging ? "on input" : "–"]);
+  if (s.power_loss){ const pl = s.power_loss;
+    rows.push(["power loss", pl.text]);
+    if (pl.status === "draining") rows.push(["", `range ${mins(pl.range_min[0])}–${mins(pl.range_min[1])} · confidence ${pl.confidence}: ${pl.note}` +
+      (pl.event !== "ups_cutoff" ? ` · the UPS cutoff would be in ≈ ${mins(pl.cutoff_in_min)}` : "") +
+      ` · cell ${pl.cell} falling ${f(pl.slope_mv_min, 1)} mV/min over ${mins(pl.window_min)}`]);
+    if (s.runtime_min !== null && s.runtime_min !== undefined) rows.push(["gauge runtime", `~${mins(s.runtime_min)} (${s.runtime_source}; the gauge doesn't see a weak cell)`]);
+  } else rows.push(["runtime", s.runtime_min !== null && s.runtime_min !== undefined ? `~${mins(s.runtime_min)} (${s.runtime_source})` : "–"]);
   if (s.time_to_full_min !== null && s.time_to_full_min !== undefined) rows.push(["time to full", mins(s.time_to_full_min)]);
   if (s.remaining_mah !== undefined) rows.push(["remaining", f(s.remaining_mah, 0, "mAh")]);
   if (s.charger_state) rows.push(["charger", s.charger_state + (s.fast_charge ? " (fast)" : "")]);
@@ -241,7 +261,8 @@ class Chart {
     for (const r of rows) for (const i of cols){ const y = r[i]; if (y !== null && isFinite(y)){ lo = Math.min(lo, y); hi = Math.max(hi, y); } }
     if (!isFinite(lo)){ lo = 0; hi = 1; }
     if (o.zero){ lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
-    for (const rf of o.refs || []){ const y = rf.v(lim); lo = Math.min(lo, y); hi = Math.max(hi, y); }
+    const refs = (o.refs || []).filter(rf => !rf.show || rf.show(lim));
+    for (const rf of refs){ const y = rf.v(lim); lo = Math.min(lo, y); hi = Math.max(hi, y); }
     if (hi - lo < 1e-6){ lo -= 0.5; hi += 0.5; }
     const pad = (hi - lo) * 0.08;
     lo = o.ymin !== undefined ? o.ymin : lo - pad; hi = o.ymax !== undefined ? o.ymax : hi + pad;
@@ -295,9 +316,10 @@ class Chart {
       }
     }
     if (o.zero && lo < 0 && hi > 0){ g.strokeStyle = ink; g.globalAlpha = .5; g.lineWidth = 1; g.beginPath(); g.moveTo(L, Math.round(y0) + .5); g.lineTo(W - R, Math.round(y0) + .5); g.stroke(); g.globalAlpha = 1; }
-    for (const rf of o.refs || []){ const y = Math.round(Y(rf.v(lim))) + .5;
+    for (const rf of refs){ const y = Math.round(Y(rf.v(lim))) + .5;
       g.strokeStyle = caution; g.lineWidth = 1; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.setLineDash([]);
-      g.fillStyle = caution; g.textBaseline = "bottom"; g.fillText(rf.name(lim), L + 4, y - 1); }
+      g.fillStyle = caution; g.textBaseline = "bottom";
+      if (rf.right){ g.textAlign = "right"; g.fillText(rf.name(lim), W - R - 4, y - 1); g.textAlign = "left"; } else g.fillText(rf.name(lim), L + 4, y - 1); }
     o.series.forEach((s, k) => {
       g.strokeStyle = col(s.color); g.lineWidth = s.width || 1.4; g.setLineDash(s.dash || []); g.lineJoin = "round";
       for (const run of runs(cols[k])){ g.beginPath(); run.forEach(([x, y], j) => j ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); }
@@ -335,7 +357,8 @@ new Chart($("#ch-flow"), {zero: true, fill: "battery_w", digits: 1, marks: ["dra
   {key: "battery_w", name: "pack net", color: "--plot-5", width: 1.8},
   {key: "load_w", name: "load (derived)", color: "--muted", dash: [5, 3], width: 1.3}]});
 new Chart($("#ch-cell"), {digits: 2, marks: ["cell_low"], series: [{key: "cell_min_v", name: "lowest cell", color: "--plot-3"}],
-  refs: [{v: lim => lim.cell_low_v, name: lim => "low " + lim.cell_low_v.toFixed(2) + " V"}]});
+  refs: [{v: lim => lim.cell_low_v, name: lim => "low " + lim.cell_low_v.toFixed(2) + " V"},
+         {v: lim => lim.loss_v, show: lim => lim.loss_v !== undefined, name: lim => lim.loss_name, right: true}]});
 new Chart($("#ch-spread"), {digits: 2, ymin: 0, marks: ["spread"], series: [{key: "cell_spread_v", name: "spread", color: "--plot-4"}],
   refs: [{v: lim => lim.spread_v, name: lim => "unbalanced > " + lim.spread_v.toFixed(2) + " V"}]});
 new Chart($("#ch-pct"), {digits: 0, ymin: 0, ymax: 100, marks: ["drain"], series: [{key: "percent", name: "%", color: "--plot-1"}]});
@@ -360,6 +383,12 @@ function buildView(){
   const last = hist.rows[hist.rows.length - 1], off = last ? last[iw] - last[it] : Date.now() / 1000 - t1;
   const lim = Object.assign({}, DEF_LIMITS, hist.limits || {}), v0 = (r, k) => { const x = r[I(k)]; return x === null || x === undefined ? NaN : x; };
   const wallNow = t1 + off;
+  // while draining near the knee, the cell chart shows the limit the power-loss estimate runs to
+  const pl = lossNow, cmin = last ? last[I("cell_min_v")] : null;
+  if (pl && pl.status === "draining" && pl.limit && pl.limit.kind !== "pack" && cmin !== null && cmin - pl.limit.target_v < 0.5){
+    lim.loss_v = pl.limit.target_v;
+    lim.loss_name = (pl.event === "auto_shutdown" ? "auto-shutdown " : "UPS cutoff ") + pl.limit.target_v.toFixed(2) + " V · ≈ " + mins(pl.in_min);
+  }
   const sp = pred => spansOf(rows, it, iw, iv, t1, wallNow, pred);
   return {rows, t0, t1, iv, it, limits: lim, col: I, wallOf: t => t + off, tOf: w => w - off,
     at: t => { let best = null; for (const r of rows){ if (best === null || Math.abs(r[it] - t) < Math.abs(best[it] - t)) best = r; } return best && Math.abs(best[it] - t) <= 2 * iv ? best : null; },
@@ -476,10 +505,14 @@ let lvFilled = false;
 function renderLow(lv){
   $("#lv-status").textContent = lv.status;
   $("#lv-status").className = "ru-pill " + (!lv.enabled ? "" : lv.low ? "ru-err" : lv.status === "armed" ? "ru-ok" : "ru-warn");
-  if (!lvFilled){ $("#lv-on").checked = lv.enabled; $("#lv-v").value = lv.volts; $("#lv-hold").value = lv.hold_s; lvFilled = true; }
+  if (!lvFilled){ $("#lv-on").checked = lv.enabled; $("#lv-v").value = lv.volts; $("#lv-hold").value = lv.hold_s;
+                  $("#lv-cell").value = lv.cell_volts; lvFilled = true; }
+  $("#lv-mincell").textContent = lv.min_cell_v == null ? "–" : lv.min_cell_v.toFixed(3) + " V";
+  $("#lv-reason").hidden = !lv.reason; $("#lv-reason").textContent = lv.reason ? "low: " + lv.reason : "";
 }
 async function saveLow(confirm){
-  const body = {enabled: $("#lv-on").checked, volts: +$("#lv-v").value, hold_s: +$("#lv-hold").value, confirm: !!confirm,
+  const body = {enabled: $("#lv-on").checked, volts: +$("#lv-v").value, hold_s: +$("#lv-hold").value,
+                cell_volts: +$("#lv-cell").value, confirm: !!confirm,
                 by: store.get("ru-client") || "browser"};
   try { const lv = await RU.api("low_voltage", {body}); lvFilled = false; renderLow(lv); $("#lv-msg").textContent = "saved"; }
   catch(e){
@@ -488,6 +521,48 @@ async function saveLow(confirm){
   }
 }
 $("#lv-save").onclick = () => saveLow(false);
+
+// ---------------- power loss --------------------------------------------------------------------------
+// the estimate in the header: plain while far off, caution under 30 min; the cell chart gets its limit line
+let lossNow = null, lossKey = "";
+function renderLoss(pl){
+  const box = $("#loss");
+  lossNow = pl || null;
+  const key = pl && pl.status === "draining" && pl.limit ? `${pl.event} ${pl.limit.target_v} ${Math.round(pl.in_min)}` : "";
+  if (key !== lossKey){ lossKey = key; if (hist) drawHistory(); }     // the cell chart's limit line and its label
+  box.hidden = !pl || pl.status === "no_data";
+  if (box.hidden) return;
+  const soon = (pl.status === "draining" || pl.status === "shutdown_pending") && pl.in_min !== null && pl.in_min < 30;
+  box.textContent = pl.text; box.className = "ru-pill" + (soon ? " ru-warn" : "");
+}
+
+// ---------------- CPU governor --------------------------------------------------------------------------
+function renderCpu(c){
+  $("#cpu-card").hidden = !c;
+  if (!c) return;
+  $("#cpu-gov").textContent = c.governor || "unavailable";
+  const rows = [];
+  if (c.available){
+    rows.push(["clock", `${f(c.ghz, 2, "GHz")}` + (c.ghz_range ? ` (range ${f(c.ghz_range[0], 1)}–${f(c.ghz_range[1], 1)} GHz)` : "")]);
+    rows.push(["changes", c.transitions_s === null || c.transitions_s === undefined ? "–" : `${f(c.transitions_s, 1)} /s`]);
+    rows.push(["saved", c.saved ? c.saved + " (re-applied at startup)" : "none (the kernel's default at boot)"]);
+    rows.push(["helper", c.helper_installed ? "installed" : "not installed: sudo sh ~/robot_utils/deploy/power/install.sh"]);
+  }
+  kv($("#cpu-kv"), rows);
+  const sel = $("#cpu-sel"), want = (c.governors || []).join(" ");
+  if (sel.dataset.list !== want){ sel.dataset.list = want; sel.replaceChildren(...(c.governors || []).map(g => el("option", {value: g, textContent: g}))); sel.value = c.governor || ""; }
+  if (document.activeElement !== sel && !sel.dataset.touched) sel.value = c.governor || "";
+  $("#cpu-apply").disabled = !c.available || !c.helper_installed;
+  $("#cpu-sel").parentElement.hidden = !c.available;
+  $("#cpu-err").textContent = c.error || ""; $("#cpu-err").className = c.available ? "ru-err" : "ru-muted";
+}
+$("#cpu-sel").onchange = () => { $("#cpu-sel").dataset.touched = "1"; };
+$("#cpu-apply").onclick = async () => {
+  $("#cpu-apply").disabled = true; $("#cpu-msg").textContent = "switching…";
+  try { const c = await RU.api("cpu", {body: {governor: $("#cpu-sel").value, by: store.get("ru-client") || "browser"}});
+        delete $("#cpu-sel").dataset.touched; $("#cpu-msg").textContent = "applied"; renderCpu(c); }
+  catch(e){ $("#cpu-msg").textContent = e.message; $("#cpu-apply").disabled = false; }
+};
 
 // ---------------- log --------------------------------------------------------------------------------
 function renderEvents(evs){
@@ -525,6 +600,7 @@ RU.sse("events", st => {
   const fl = $("#flow"), live = ups && ups.ok && ups.power_w !== undefined && ups.power_w !== null;
   fl.hidden = !live;
   if (live){ fl.textContent = flowText(ups); fl.className = "ru-pill ru-num" + (ups.draining_on_input ? " ru-warn" : ""); }
+  renderLoss(ups && ups.power_loss); renderCpu(st.cpu);
   renderSources(st.sources); renderShutdown(sd); renderLow(st.low_voltage); renderEvents(st.events); renderConds(st.conditions || []);
   if (sd.phase !== lastPhase){ lastPhase = sd.phase; loadAudit(); }
 });

@@ -63,7 +63,9 @@ Components
   alarm, ``--signal`` charging, ``--muted`` stale or unknown.
   ``RU.viz.Battery.fromSource(src)``: data from one entry of the power node's ``/state`` ``sources``
   (``percent``, ``pack_v``, ``current_a``, ``cells_v``, ``charge_state``, ``input_present``,
-  ``runtime_min``, ``ok``, ``stale``); every battery source shares those fields (power/sources.py).
+  ``runtime_min``, ``ok``, ``stale``); every battery source shares those fields (power/sources.py). When the
+  source has ``power_loss`` (the UPS: time until the Pi loses power) its ``in_min`` is the runtime, and a pack
+  ``draining_on_input`` is not drawn as charging.
 """
 
 VIZ_JS = r"""
@@ -444,9 +446,13 @@ class Battery {
 
   static fromSource(s){
     s = s || {};
+    // power_loss (the power node's estimate from the weakest cell) wins over the gauge's runtime_min when present;
+    // a pack draining on input is not charging, whatever the charger bit says
+    const pl = s.power_loss;
     return {percent: s.percent, volts: s.pack_v, current: s.current_a, cells: s.cells_v,
-            charging: s.charge_state === "charging", full: s.charge_state === "full", input: s.input_present,
-            runtime_min: s.runtime_min, stale: s.ok === false || !!s.stale, low: !!s.low};
+            charging: s.charge_state === "charging" && !s.draining_on_input, full: s.charge_state === "full", input: s.input_present,
+            runtime_min: pl ? (pl.status === "draining" || pl.status === "shutdown_pending" ? pl.in_min : null) : s.runtime_min,
+            stale: s.ok === false || !!s.stale, low: !!s.low};
   }
 }
 Battery.defaults = BATTERY_DEFAULTS;

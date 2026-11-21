@@ -711,3 +711,150 @@ def test_node_low_voltage_fires_while_charger_bit_set(tmp_path):
     assert sd["pending"] and sd["source"] == "low_voltage" and "cell 3" in sd["reason"]
     lv = node.state()["low_voltage"]
     assert lv["min_cell_v"] == 3.05 and lv["cell_volts"] == 3.15
+
+
+# -- time until power loss (powerloss.py) ----------------------------------------------------------
+
+from robot_utils.nodes.power import powerloss as pl_mod  # noqa: E402
+from robot_utils.nodes.power.powerloss import PowerLoss  # noqa: E402
+
+W0 = 1.8e9
+LV_ON = {"enabled": True, "volts": 13.2, "hold_s": 10.0, "cell_volts": 3.15}
+LV_OFF = dict(LV_ON, enabled=False)
+
+
+def ramp(minutes, v3_start, mv_per_min, amps=-0.14, on_input=True, charging=True, t0=W0, step=1.0, others=3.60):
+    """1 Hz samples: cell 3 falling linearly, the others steady; (wall, cells, pack, A, input, charging)."""
+    out = []
+    for k in range(int(minutes * 60 / step)):
+        t = t0 + k * step
+        v3 = v3_start - mv_per_min / 1000 * (t - t0) / 60
+        cells = (others, others - 0.02, v3, others + 0.03)
+        out.append((t, cells, sum(cells), amps, on_input, charging))
+    return out
+
+
+def test_power_loss_not_draining_and_too_little_history():
+    pl = PowerLoss()
+    assert pl.estimate(W0)["status"] == "no_data"
+    pl.extend(ramp(20, 3.6, 0, amps=+0.2))                      # charging
+    e = pl.estimate(W0 + 20 * 60)
+    assert e["status"] == "not_draining" and e["in_min"] is None and e["text"] == "not draining (charging)"
+    pl = PowerLoss()
+    pl.extend(ramp(5, 3.6, 3.0))                                # draining, 5 min of it
+    e = pl.estimate(W0 + 5 * 60, LV_ON)
+    assert e["status"] == "estimating" and e["in_min"] is None and "estimating" in e["text"]
+    pl = PowerLoss()                                            # charged until 5 min ago: only the drain counts
+    pl.extend(ramp(20, 3.6, 0, amps=+0.3) + ramp(5, 3.6, 3.0, t0=W0 + 20 * 60))
+    assert pl.estimate(W0 + 25 * 60)["status"] == "estimating"
+    assert pl.estimate(W0 + 40 * 60)["status"] == "no_data"     # the readings stopped: no stale estimate
+
+
+def test_power_loss_draining_on_input_cutoff_or_clean_auto_shutdown():
+    pl = PowerLoss()
+    pl.extend(ramp(20, 3.55, 4.0))       # on input, the charger bit set, cell 3 at 3.47 V falling 4 mV/min
+    now = W0 + 20 * 60
+    off = pl.estimate(now, LV_OFF)
+    assert off["status"] == "draining" and off["on_input"] is True and off["cell"] == 3
+    assert off["event"] == "ups_cutoff" and off["clean"] is False and off["blocked_reason"] == "auto-shutdown is off"
+    assert off["limit"]["kind"] == "cutoff" and off["limit"]["target_v"] == pl_mod.CELL_CUTOFF_V
+    straight = (3.47 - pl_mod.CELL_CUTOFF_V) / 0.004             # a straight line: 105 min
+    assert 0.2 * straight < off["in_min"] < 0.5 * straight        # the knee model makes it much shorter
+    lo, hi = off["range_min"]
+    assert lo <= off["in_min"] <= hi and off["confidence"] == "medium"
+    assert off["text"].startswith("power loss in ≈ ") and "UPS cutoff (cell 3 → 3.05 V); auto-shutdown is off" in off["text"]
+    assert off["at"] == pytest.approx(now + off["in_min"] * 60, abs=6)
+    on = pl.estimate(now, LV_ON)
+    assert on["event"] == "auto_shutdown" and on["clean"] is True and on["blocked_reason"] is None
+    assert on["limit"] == {"kind": "cell", "cell": 3, "target_v": 3.15, "v": on["limit"]["v"], "label": "cell 3 → 3.15 V"}
+    assert on["in_min"] < off["in_min"] and on["cutoff_in_min"] == off["in_min"]
+    assert "clean auto-shutdown (cell 3 → 3.15 V)" in on["text"]
+    late = pl.estimate(now, dict(LV_ON, cell_volts=3.06, hold_s=120.0))   # threshold too close to the cutoff
+    assert late["event"] == "ups_cutoff" and "would come too late" in late["blocked_reason"]
+
+
+def test_power_loss_on_battery_uses_only_the_battery_minutes():
+    pl = PowerLoss()
+    pl.extend(ramp(15, 3.80, 0.5, amps=-0.14, others=3.95) +                  # draining on input, then on battery
+              ramp(15, 3.79, 8.0, amps=-0.9, on_input=False, charging=False, t0=W0 + 15 * 60, others=3.95))
+    e = pl.estimate(W0 + 30 * 60, LV_OFF)
+    assert e["status"] == "draining" and e["on_input"] is False and e["window_min"] <= 15
+    assert e["slope_mv_min"] == pytest.approx(8.0, rel=0.05)
+    assert e["cell"] == 3 and e["confidence"] == "low"                       # 3.67 V: still on the plateau
+    assert 10 < e["in_min"] < (3.67 - 3.05) / 0.008
+
+
+def test_power_loss_ignores_load_spikes():
+    base = ramp(20, 3.50, 4.0)
+    spiky = [(t, tuple(c - 0.15 for c in cells), p - 0.6, -1.0, i, ch) if k % 97 == 0 else (t, cells, p, a, i, ch)
+             for k, (t, cells, p, a, i, ch) in enumerate(base)]
+    a, b = PowerLoss(), PowerLoss()
+    a.extend(base)
+    b.extend(spiky)
+    now = W0 + 20 * 60
+    assert b.estimate(now)["in_min"] == pytest.approx(a.estimate(now)["in_min"], rel=0.05)
+
+
+def load_cutoff_fixture():
+    """The 2026-11-20 log around the UPS cutoff at 18:21:25 (cell 3 at 3.05 V, input present, charger bit set):
+    one row per 30 s, 35 min before 6 h and 3 h ahead, and the last 95 min (tests/data, from the 1 Hz power log)."""
+    import csv
+    import gzip
+    from pathlib import Path
+    with gzip.open(Path(__file__).parent / "data" / "ups-2026-11-20-cutoff.csv.gz", "rt", newline="") as f:
+        return [pl_mod.sample_of_log(r) for r in csv.DictReader(f)]
+
+
+CUTOFF_WALL = 1795216885.769     # last reading before the UPS cut power
+
+
+@pytest.mark.parametrize("before_min", [360, 180, 60, 30, 10, 5])
+def test_power_loss_backtest_2026_11_20(before_min):
+    """Replay the estimator up to ``before_min`` before the real cutoff. Near the end (the last hour) it must be
+    on the short side, within 0.4-1.0x of the real time, with the real time inside its range (5 % slack: the 30 s
+    fixture puts the top of the range at 59.1 min an hour out, 59.4 at 1 Hz); earlier, on the
+    plateau, it can be hours off and must say so (confidence low)."""
+    now = CUTOFF_WALL - before_min * 60
+    pl = PowerLoss()
+    pl.extend(s for s in load_cutoff_fixture() if s[0] <= now)
+    e = pl.estimate(now, LV_OFF)
+    assert e["status"] == "draining" and e["event"] == "ups_cutoff" and e["on_input"] is True
+    if before_min >= 90:
+        assert e["confidence"] == "low" and "too long" in e["note"]
+        return
+    assert e["cell"] == 3 and e["confidence"] == "medium"
+    assert 0.4 * before_min <= e["in_min"] <= 1.0 * before_min
+    assert e["range_min"][0] <= before_min <= e["range_min"][1] * 1.05
+    on = pl.estimate(now, LV_ON)                 # with the auto-shutdown on, a clean shutdown comes first
+    assert on["event"] == "auto_shutdown" and on["limit"]["kind"] == "cell" and on["in_min"] <= e["in_min"]
+
+
+def test_node_state_has_power_loss_and_the_tile_says_it(tmp_path):
+    import time as _time
+    node, bus, clock, _ = make_node(tmp_path)
+    bus.set_word(0x22, -140)                     # on input, the charger bit set, net draining
+    for i, mv in enumerate([3600, 3580, 3470, 3630]):
+        bus.set_word(0x30 + 2 * i, mv)
+    wall = _time.time()
+    node.loss.extend(ramp(20, 3.55, 4.0, t0=wall - 20 * 60 - 1))
+    node.step(clock.t)
+    st = node.state()
+    pl = st["sources"][0]["power_loss"]
+    assert pl["status"] == "draining" and pl["event"] == "ups_cutoff" and pl["blocked_reason"] == "auto-shutdown is off"
+    assert st["state"].startswith("UPS 59 % · ") and " · power cut in ≈ " in st["state"]
+    assert "power_loss" not in st["sources"][1]                      # the tether has none
+    node.set_low_voltage(True, 13.2, 10, True, "tester", "local")
+    clock.t += 1                                 # the next poll refreshes the estimate
+    node._last_est = -1e18
+    node.step(clock.t)
+    pl = node.state()["sources"][0]["power_loss"]
+    assert pl["event"] == "auto_shutdown" and pl["clean"] is True and " · auto-shutdown in ≈ " in node.state()["state"]
+    node.shutdown.request(confirm="shutdown", reason="test", by="t", client="c", source="web", delay_s=30)
+    pl = node.state()["sources"][0]["power_loss"]
+    assert pl["status"] == "shutdown_pending" and pl["event"] == "shutdown" and pl["in_min"] == 0.5
+    assert pl["text"] == "shutdown in 30 s (countdown)"
+
+
+def test_page_shows_power_loss():
+    from robot_utils.nodes.power.page import PAGE
+    assert 'id="loss"' in PAGE and "renderLoss(" in PAGE and "power_loss" in PAGE and "lim.loss_v" in PAGE

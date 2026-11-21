@@ -9,6 +9,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
+from ..common.lease import RequestError
 from ..common.server import Event, add_base_routes, add_page_routes, node_meta, setup_app, sse
 from . import __version__
 from .node import PowerNode
@@ -19,7 +20,7 @@ from .sources import HISTORY_FIELDS, STALE_S
 TAGS = [
     {"name": "state", "description": "Sources (UPS, main), low-voltage status, the pending shutdown, events."},
     {"name": "shutdown", "description": "Remote shutdown of the Pi: confirm string, countdown, cancel."},
-    {"name": "config", "description": "Low-voltage auto-shutdown settings."},
+    {"name": "config", "description": "Low-voltage auto-shutdown settings; the CPU governor."},
 ]
 
 
@@ -30,6 +31,12 @@ class ShutdownIn(BaseModel):
     delay_s: float = Field(DELAY_DEFAULT_S, description=f"Countdown, {DELAY_MIN_S:.0f}..{DELAY_MAX_S:.0f} s.")
     model_config = ConfigDict(json_schema_extra={"examples": [
         {"confirm": CONFIRM, "reason": "end of day", "by": "avery", "delay_s": 30}]})
+
+
+class CpuIn(BaseModel):
+    governor: str = Field(description="One of the kernel's governors (`GET /cpu` `governors`), e.g. ondemand, "
+                                      "performance, schedutil.")
+    by: str = ""
 
 
 class CancelIn(BaseModel):
@@ -74,6 +81,53 @@ class UpsControl(BaseModel):
     wd_delay_s: Optional[int] = Field(description="s, watchdog start-up delay (0x43).")
 
 
+class PowerLossLimit(BaseModel):
+    """The limit the power loss comes from."""
+    kind: str = Field(description="cutoff (the weakest cell reaching the UPS's own cutoff) | cell (the low-voltage "
+                                  "shutdown's weakest-cell threshold) | pack (its pack threshold).")
+    cell: Optional[int] = Field(description="1-based cell number; null for the pack.")
+    target_v: float = Field(description="V, the threshold.")
+    v: float = Field(description="V, the trend's value now (cell or pack).")
+    label: str = Field(description="e.g. `cell 3 → 3.05 V`, `pack → 13.20 V`.")
+
+
+class PowerLoss(BaseModel):
+    """Time until the Pi loses power and how (powerloss.py; docs/power.md, "Time until power loss"). From the
+    weakest cell's voltage trend, not the fuel gauge. Refreshed every 5 s."""
+    status: str = Field(description="draining (an estimate) | not_draining | estimating (draining, under 10 min "
+                                    "of history) | no_data | shutdown_pending (a shutdown is scheduled: it comes "
+                                    "first).")
+    in_min: Optional[float] = Field(description="min until the Pi goes down (0.1 min resolution): a clean "
+                                                "auto-shutdown's power-off step, or the UPS cutoff. null unless "
+                                                "draining / shutdown_pending.")
+    range_min: Optional[list[float]] = Field(description="min, [short, long] with a steeper and a gentler knee; "
+                                                         "null unless draining.")
+    at: Optional[float] = Field(description="Unix epoch s of `in_min`.")
+    event: Optional[str] = Field(description="auto_shutdown (clean: the node's low-voltage shutdown fires first) | "
+                                             "ups_cutoff (abrupt: the UPS cuts power) | shutdown (one is pending).")
+    clean: Optional[bool] = Field(description="True for a clean shutdown, false for an abrupt cut.")
+    limit: Optional[PowerLossLimit] = Field(description="What sets `in_min`.")
+    cutoff_in_min: Optional[float] = Field(description="min until the weakest cell would reach the UPS cutoff "
+                                                       "(whatever the auto-shutdown does).")
+    blocked_reason: Optional[str] = Field(description="Why it ends in a UPS cutoff rather than a clean shutdown: "
+                                                      "`auto-shutdown is off`, `auto-shutdown (cell 3 → 3.15 V) would "
+                                                      "come too late`; null when clean.")
+    method: str = Field(description="How it is estimated, in words.")
+    confidence: Optional[str] = Field(description="low (the weakest cell is still on the plateau above 3.65 V: "
+                                                  "the knee isn't visible yet, can be several times too long) | "
+                                                  "medium (near the knee; errs short) | high (a pending shutdown).")
+    note: Optional[str] = Field(description="What the confidence means, or the pending shutdown's reason.")
+    cell: Optional[int] = Field(description="The weakest cell (1-based).")
+    cell_v: Optional[float] = Field(description="V, its latest per-minute median.")
+    slope_mv_min: Optional[float] = Field(description="mV/min it falls (window average; + = falling).")
+    current_a: Optional[float] = Field(description="A, the pack's net current (latest per-minute median).")
+    on_input: Optional[bool] = Field(description="Input present.")
+    window_min: Optional[float] = Field(description="min of draining history used.")
+    text: str = Field(description="One line for people, e.g. `power loss in ≈ 34 min: clean auto-shutdown (cell 3 "
+                                  "→ 3.15 V)`, `power loss in ≈ 2 h 10 min: UPS cutoff (cell 3 → 3.05 V); "
+                                  "auto-shutdown is off`, `not draining`.")
+
+
 class PowerSource(BaseModel):
     """One power source (sources.py). Every source has the envelope (id .. age_s); a tether adds
     `note`; the UPS adds `model`, then, once it has a good reading, the common battery fields
@@ -98,7 +152,9 @@ class PowerSource(BaseModel):
     charging: Optional[bool] = Field(None, description="The charger is charging.")
     fast_charge: Optional[bool] = Field(None, description="Fast charge active.")
     input_present: Optional[bool] = Field(None, description="Input power present.")
-    runtime_min: Optional[int] = Field(None, description="min to empty while discharging; null otherwise.")
+    runtime_min: Optional[int] = Field(None, description="The fuel gauge's min to empty while the charger bit is "
+                                                         "off; null otherwise. Not the time until the Pi loses power "
+                                                         "(a weak cell cuts it first): see `power_loss`.")
     runtime_source: Optional[str] = Field(None, description="gauge (the fuel gauge's time to empty) | estimate "
                                                             "(remaining mAh / current); null without a runtime.")
     time_to_full_min: Optional[int] = Field(None, description="min to full while charging; null otherwise.")
@@ -116,6 +172,9 @@ class PowerSource(BaseModel):
     power_off_pending: Optional[bool] = Field(None, description="UPS only: the power-off trigger is armed (0x01 reads "
                                                                 "0x55): power is cut ~30 s after it was written.")
     control: Optional[UpsControl] = Field(None, description="UPS only: power-on and watchdog registers.")
+    power_loss: Optional[PowerLoss] = Field(None, description="UPS only (added; additive): time until the Pi loses "
+                                                              "power and whether that is a clean auto-shutdown or "
+                                                              "an abrupt UPS cutoff. Use this, not `runtime_min`.")
 
 
 class LowVoltageOut(BaseModel):
@@ -201,7 +260,7 @@ class AuditRecord(BaseModel):
     wall: float = Field(description="Unix epoch s (1 ms resolution).")
     time: str = Field(description="Local time, `%Y-%m-%d %H:%M:%S %z`.")
     event: str = Field(description="requested | refused | cancelled | cancel_refused | executing | estopped | "
-                                   "powered_off | failed | low_voltage.")
+                                   "powered_off | failed | low_voltage | cpu_governor.")
     model_config = ConfigDict(extra="allow")
 
 
@@ -245,6 +304,24 @@ class ConditionSpan(BaseModel):
     detail: str = Field(description="The reading when it started, e.g. `cell 3 3.25 V`, `-0.13 A, -2.0 W, input 14.6 W`.")
 
 
+class CpuOut(BaseModel):
+    """The CPU frequency governor (cpu.py). Without cpufreq only `available`, `governor`, `governors` and `error`."""
+    available: bool = Field(description="cpufreq is there to read.")
+    governor: Optional[str] = Field(description="The governor of every policy (`mixed` if they differ); null if "
+                                                "unavailable.")
+    governors: list[str] = Field(description="The governors the kernel offers (on every policy).")
+    ghz: Optional[float] = Field(None, description="GHz, the clock now (policy 0).")
+    ghz_range: Optional[list[Optional[float]]] = Field(None, description="GHz, [min, max] the governor may use.")
+    transitions_s: Optional[float] = Field(None, description="Frequency changes per second since the read before "
+                                                             "(at least 1 s earlier); null on the first read.")
+    policies: Optional[int] = Field(None, description="cpufreq policies (1 on the Pi 5: all four cores).")
+    saved: Optional[str] = Field(None, description="The saved choice, re-applied at startup; null if none.")
+    helper_installed: Optional[bool] = Field(None, description="The root helper unit is installed (sudo sh "
+                                                               "~/robot_utils/deploy/power/install.sh); without it "
+                                                               "the governor can't be switched.")
+    error: Optional[str] = Field(description="The last switch error, or why cpufreq is unavailable; null if none.")
+
+
 class PowerState(BaseModel):
     state: str = Field(description="Short status for the landing tile, e.g. `UPS 59 % · charging`, `UPS 46 % · "
                                    "draining on input` (instead of the charger's `charging` while the pack drains on "
@@ -258,6 +335,8 @@ class PowerState(BaseModel):
     events: list[Event] = Field(description="Latest node events (up to 15), oldest first.")
     conditions: list[ConditionSpan] = Field(description="The latest conditions (up to 10), oldest first, as spans: "
                                                         "input lost, draining on input, low cell, cells unbalanced.")
+    cpu: Optional[CpuOut] = Field(None, description="Added; additive: the CPU governor (same as `GET /cpu`, read at "
+                                                    "most once a second). Absent when the node has no CPU control.")
 
 
 def default_identify() -> Callable[[str], str]:
@@ -376,6 +455,22 @@ def create_app(node: PowerNode, start: bool = True, identify: Optional[Callable[
         client, _, _ = await who(request)
         return node.set_low_voltage(body.enabled, body.volts, body.hold_s, body.confirm,
                                     (body.by or "?").strip()[:80], client, body.cell_volts)
+
+    @app.get("/cpu", response_model=CpuOut, response_model_exclude_unset=True, tags=["config"],
+             summary="CPU frequency governor, clock and frequency changes/s")
+    async def get_cpu():
+        if node.cpu is None:
+            raise RequestError(404, "this power node has no CPU governor control")
+        return await asyncio.to_thread(node.cpu.read)
+
+    @app.post("/cpu", response_model=CpuOut, response_model_exclude_unset=True, tags=["config"],
+              summary="Switch the CPU frequency governor (saved; re-applied at startup)")
+    async def post_cpu(request: Request, body: CpuIn):
+        """Runs the root helper unit (`systemctl start robot-cpu-governor@<governor>.service`; polkit lets the
+        node's user start only that). 422: a governor the kernel doesn't offer; 503: no cpufreq, or the helper
+        isn't installed; 502: the switch failed. Logged in the audit log and the events."""
+        client, _, _ = await who(request)
+        return await asyncio.to_thread(node.set_cpu_governor, body.governor, (body.by or "?").strip()[:80], client)
 
     @app.get("/log", response_model=AuditLogOut, response_model_exclude_unset=True, tags=["state"],
              summary="Audit log: shutdown requests, cancellations, outcomes, settings")

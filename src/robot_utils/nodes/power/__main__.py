@@ -11,6 +11,9 @@ and runs `systemctl poweroff`.
 Every UPS reading (1 Hz) is logged to ~/.local/state/robot_utils/power/log/ups-YYYY-MM-DD.csv (fsynced
 every 5 s, kept 30 days), and input loss, draining on input, a low cell or unbalanced cells go to the journal.
 
+The CPU governor toggle (GET/POST /cpu) switches through a root helper unit (deploy/power/install.sh, once);
+the saved choice is re-applied at startup. --fake reads the local cpufreq but never switches it.
+
 Serves on <runtime dir>/robot/<name>.sock = http://<robot>/nodes/<name>/; --port is for debugging.
 """
 import argparse
@@ -33,6 +36,7 @@ def main() -> None:
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    from .cpu import CpuGovernor, refuse_run, system_run
     from .node import HISTORY_S, HISTORY_LEN, PowerNode, system_power_off
     from .server import create_app
     from .sources import TetherSource, UpsSource, history_row_of
@@ -57,13 +61,17 @@ def main() -> None:
     paths = PowerNode.default_paths()
     if a.fake:
         paths["log_dir"] = None             # a simulated HAT must not write the robot's power log
-    node = PowerNode(sources, power_off=power_off, fake=a.fake, name=a.name, config=a.config, **paths)
+    # the CPU governor toggle: the real runner only without --fake (it reads this machine's cpufreq either way)
+    cpu = CpuGovernor(paths["settings_path"], run=refuse_run if a.fake else system_run)
+    node = PowerNode(sources, power_off=power_off, fake=a.fake, name=a.name, config=a.config, cpu=cpu, **paths)
     if a.fake:      # a 24 h history on the simulated curve, so the plots have something to show
         now, wall, rows = time.monotonic(), time.time(), []
         for k in range(HISTORY_LEN, 0, -1):
             t = now - k * HISTORY_S
             rows.append(history_row_of(t, wall - k * HISTORY_S, decode(bus.regs_at(t))))
         node.backfill("ups", rows)
+        from .powerloss import KEEP_S, sample_of     # the power-loss estimate's minutes, on the same curve
+        node.loss.extend(sample_of(wall - k, decode(bus.regs_at(now - k))) for k in range(int(KEEP_S), 0, -5))
     else:
         try:
             n = node.restore_history()
