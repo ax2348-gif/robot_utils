@@ -127,7 +127,14 @@ headset side.
   when the stream already answers in the wanted mode and nothing was pulled; waits for port 9391; prints session,
   rate, focus, scheme and battery. The scheme works without `-s`: the script writes `off body-frozen` to
   `~/.config/quest-env/demo-mode` and native reads the second word independently of the demo flag.
-- `quest_down`: `quest stop`. `quest_status`: `quest status`, the mode file, stream liveness, battery.
+- `quest_down`: `quest stop`. `quest_status`: `quest status`, the mode file, the XR session state (the telemetry
+  process's last `OpenXR session state` line in logcat), stream liveness, battery.
+- Live check (2026-11-21, headset awake but not worn): SSH, the root, fetch/behind/dirty, `quest run`, `quest stop`
+  and `quest status` all work non-interactively (`ssh -T`). The telemetry process starts and logs "controller server
+  listening on 0.0.0.0:9391", but its XR session stays IDLE and the port does not answer (connects time out, even
+  on the headset itself) until the headset is worn; `quest_up` then fails with "XR session: IDLE (headset not
+  worn?)". The battery is not readable from the runtime's sandbox (sysfs permission denied, no `battery` service):
+  it prints "unknown".
 - `--ssh-host`, `--stream-host` (default: `ssh -G`'s HostName for the ssh host), `--port`.
 
 Nothing destructive is ever sent (read-only queries, `fetch`, `pull --ff-only` through the script, `run`, `stop`).

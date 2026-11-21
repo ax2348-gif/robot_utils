@@ -42,6 +42,8 @@ STREAM_PORT = 9391
 SCHEMA = "teleop.quest_state.v1"
 ROOT = 'R=$(cat "$HOME/.config/quest-env/root" 2>/dev/null || echo "$HOME/workspace/quest_env"); '
 MODE_FILE = '"$HOME/.config/quest-env/demo-mode"'
+XR_STATES = {"0": "UNKNOWN", "1": "IDLE (headset not worn?)", "2": "READY", "3": "SYNCHRONIZED", "4": "VISIBLE",
+             "5": "FOCUSED", "6": "STOPPING", "7": "LOSS_PENDING", "8": "EXITING"}
 UNREACHABLE = ("the headset does not answer SSH ({detail}). Is it asleep, off, or off the network, or is the "
                "quest-dev-runtime SSH server not running? Wake it (put it on / press power) and retry.")
 
@@ -54,14 +56,16 @@ class Result:
 
 
 class SshRunner:
-    """Runs one shell command on the headset: ``ssh -o BatchMode=yes -o ConnectTimeout=N <host> <command>``."""
+    """Runs one shell command on the headset: ``ssh -T -o BatchMode=yes -o ConnectTimeout=N <host> <command>``."""
 
     def __init__(self, host: str = "quest", connect_timeout: int = 5):
         self.host = host
         self.connect_timeout = connect_timeout
 
     def __call__(self, command: str, timeout: float = 60.0) -> Result:
-        argv = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.connect_timeout}", self.host, command]
+        # -T: never a tty (with one, `quest run` would start its curses viewer and block)
+        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.connect_timeout}", self.host,
+                command]
         try:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -181,6 +185,22 @@ class QuestCtl:
         r = self.run(f"cat {MODE_FILE} 2>/dev/null", 15)
         return " ".join(r.out.split()) if r.rc == 0 else ""
 
+    def xr_state(self) -> str:
+        """The telemetry process's last OpenXR session state, from ``quest status`` (its pid) and logcat (read-only).
+        The stream only flows once the session runs (FOCUSED/VISIBLE): IDLE means the headset is not being worn."""
+        r = self.q("status", 30)
+        try:
+            st = json.loads(r.out)
+            pid = st["last_load"]["pid"]
+            alive = st.get("last_load_process_alive")
+        except (ValueError, KeyError, TypeError):
+            return "unknown"
+        if not alive:
+            return "not running"
+        r = self.run(f"logcat -d 2>/dev/null | grep ' {int(pid)} ' | grep 'OpenXR session state' | tail -1", 30)
+        word = r.out.strip().split(" ")[-1] if r.rc == 0 and r.out.strip() else ""
+        return XR_STATES.get(word, f"unknown ({word or 'no log line'})")
+
     def battery(self) -> str:
         r = self.run("cat /sys/class/power_supply/battery/capacity 2>/dev/null || "
                      "dumpsys battery 2>/dev/null | grep -m1 'level:'", 15)
@@ -231,7 +251,8 @@ class QuestCtl:
         info = self.wait_stream(wait)
         if not info.live:
             self.log(f"port {self.port} on {self.stream_host} did not answer within {wait:.0f} s: {info.error}. "
-                     "The XR app may need the headset on the head (focus) or `q focus` on the headset.")
+                     f"XR session: {self.xr_state()}. The stream flows only while the XR session runs: put the "
+                     "headset on (or `q focus` on the headset), then quest_status.")
             return 5
         self.log(info.describe())
         if info.scheme and info.scheme != scheme:
@@ -253,6 +274,7 @@ class QuestCtl:
         r = self.q("status", 30)
         self.log("native: " + (r.out.strip() or r.err.strip() or f"exit {r.rc}"))
         self.log(f"mode file: {self.mode() or 'unset'}")
+        self.log(f"XR session: {self.xr_state()}")
         self.log(self.probe(self.stream_host, self.port, 1.0).describe())
         self.log(f"battery: {self.battery()}")
         return 0

@@ -1,5 +1,6 @@
 """quest_up / quest_down / quest_status (tools/quest_teleop/quest_ctl.py) against a fake SSH runner (the headset's
 shell, scripted) and the fake headset's stream. No real SSH, no headset."""
+import json
 import subprocess
 import sys
 import threading
@@ -20,9 +21,10 @@ class FakeQuest:
     """The headset's shell as seen through SSH: answers the commands quest_ctl sends, records them."""
 
     def __init__(self, *, reachable=True, behind=0, dirty=0, mode="off body-frozen", running=True,
-                 pull_rc=0, run_rc=0, battery="87"):
+                 pull_rc=0, run_rc=0, battery="87", xr=5):
         self.reachable, self.behind, self.dirty, self.mode = reachable, behind, dirty, mode
         self.running, self.pull_rc, self.run_rc, self.battery = running, pull_rc, run_rc, battery
+        self.xr = xr
         self.commands: list[str] = []
 
     def __call__(self, cmd, timeout=60.0):
@@ -47,8 +49,12 @@ class FakeQuest:
         if 'quest" stop' in cmd:
             self.running = False
             return Result(0, "stopped\n")
-        if 'quest" status' in cmd:
-            return Result(0, f"telemetry {'running' if self.running else 'stopped'}\n")
+        if 'quest" status' in cmd:              # the real output shape (live check, 2026-11-21)
+            return Result(0, json.dumps({"ok": True, "runtime_pid": 5939, "xr_pids": [11444] if self.running else [],
+                                         "last_load": {"pid": 11444, "state": "entry-returned"},
+                                         "last_load_process_alive": self.running}) + "\n")
+        if cmd.startswith("logcat"):
+            return Result(0, f"11-21 18:50:44.031 11444 11475 I QuestRuntimeXR: OpenXR session state {self.xr}\n")
         if "demo-mode" in cmd:
             return Result(0, self.mode + "\n")
         if "power_supply" in cmd:
@@ -150,8 +156,10 @@ def test_up_waits_for_the_stream_and_times_out_with_advice():
     ctl, logs = ctl_for(fq, live)
     assert ctl.up() == 0 and calls["n"] == 5
     fq2 = FakeQuest(running=False, mode="")
+    fq2.xr = 1                                                 # what the live check met: session IDLE, not worn
     ctl2, logs2 = ctl_for(fq2, lambda fq_: False)
-    assert ctl2.up(wait=3) == 5 and any("did not answer within 3 s" in s for s in logs2)
+    assert ctl2.up(wait=3) == 5
+    assert any("did not answer within 3 s" in s and "XR session: IDLE (headset not worn?)" in s for s in logs2)
 
 
 def test_restart_forces_run():
@@ -164,12 +172,13 @@ def test_down_and_status():
     fq = FakeQuest()
     ctl, logs = ctl_for(fq)
     assert ctl.status() == 0
-    assert "native: telemetry running" in logs and "mode file: off body-frozen" in logs
+    assert any(s.startswith('native: {"ok": true') for s in logs) and "mode file: off body-frozen" in logs
+    assert "XR session: FOCUSED" in logs
     assert ctl.down() == 0 and fq.ran('quest" stop') and not fq.running
     logs.clear()
     fq.battery = ""
     assert ctl.status() == 0
-    assert "native: telemetry stopped" in logs and "battery: unknown" in logs
+    assert "XR session: not running" in logs and "battery: unknown" in logs
     assert any(s.startswith("stream: not answering") for s in logs)
     assert_safe(fq)
 
@@ -178,7 +187,7 @@ def test_commands_resolve_the_quest_env_root_like_profile_sh():
     fq = FakeQuest()
     ctl, _ = ctl_for(fq)
     ctl.status()
-    (cmd,) = fq.ran('quest" status')
+    cmd = fq.ran('quest" status')[0]
     assert cmd.startswith('R=$(cat "$HOME/.config/quest-env/root" 2>/dev/null || echo "$HOME/workspace/quest_env"); ')
     # the composed command is valid sh (parse only)
     assert subprocess.run(["sh", "-n", "-c", cmd]).returncode == 0
@@ -215,4 +224,4 @@ def test_ssh_runner_builds_a_batch_mode_command(monkeypatch):
 
     monkeypatch.setattr(quest_ctl.subprocess, "run", fake_run)
     r = quest_ctl.SshRunner("quest", 5)("echo quest-ok")
-    assert r.rc == 0 and seen["argv"][:6] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "quest"]
+    assert r.rc == 0 and seen["argv"][:7] == ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "quest"]
