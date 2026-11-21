@@ -27,9 +27,9 @@ does not affect control; the steering (absolute encoder) is never touched.
 Everything else (web requests) only writes small pieces of state under locks: the CommandSlot,
 the Lease, the EStop and a few flags. Requests never touch the CAN bus.
 
-Fast path (not implemented yet; see docs/nodes.md): a streaming command endpoint would call
-``command(token, twist, seq, source="fast")`` for each received command, i.e. write the same
-CommandSlot; the tick reads whatever was written last, from either path.
+Fast path (not implemented yet): datagram commands, arm first, the base later with the same
+pattern; see docs/plans/fast_path_v1.md. It would write the same CommandSlot; the tick reads
+whatever was written last, from either path.
 """
 from __future__ import annotations
 
@@ -213,7 +213,7 @@ class SwerveNode:
             try:
                 self.drive.close()
             except Exception as e:   # the bus may already be gone
-                self.events.add(f"closing the old drive: {e}", "warning")
+                self.events.add(f"closing the old drive: {e}", "warn")
             self.drive = None
         self.start()
 

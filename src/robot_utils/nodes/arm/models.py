@@ -271,7 +271,7 @@ def _tick_docs() -> dict:
 
 
 _TICK_EXTRA = {
-    "t_tick": "server monotonic time of the tick", "tick": "ticks since the node started",
+    "t_tick": "server monotonic time of the tick's start, before its read (the data is older: see t_meas, t_meas_mot)", "tick": "ticks since the node started",
     "enabled": "1 while enabled", "motors_on": "1 while the motors are on (off = damping)",
     "estop": "1 while the e-stop is latched", "lease_id": "id of the lease in force (0: none)",
     "seq": "`seq` of the track command in force (0: none)", "overruns": "ticks more than 15 ms after the previous one, since the node started",

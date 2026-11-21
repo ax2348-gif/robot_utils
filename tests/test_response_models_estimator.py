@@ -2,45 +2,21 @@
 model passes the handler's dict through unchanged (response_model silently drops undeclared keys,
 so this compares the raw handler output with what the client gets, key order and int/float included)."""
 import json
-import socket
-import threading
 import time
 
 import fastapi.routing
 import pytest
-import uvicorn
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import serve, wait_for
 from robot_utils.nodes.estimator.fusion import FIELDS
 from robot_utils.nodes.estimator.node import EstimatorNode
 from robot_utils.nodes.estimator.server import EstimatorPose, create_app
 
 NON_JSON = {"/events", "/stream"}
 NOWHERE = "http://127.0.0.1:9"      # nothing listens: the input reports its error
-
-
-def wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.02)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                           timeout_graceful_shutdown=1))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait_for(lambda: server.started, 10)
-    return f"http://127.0.0.1:{port}", server, t
 
 
 @pytest.fixture

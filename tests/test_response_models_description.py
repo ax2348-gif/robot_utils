@@ -3,18 +3,16 @@ model passes the handler's output through unchanged: same keys, same key order, 
 (int stays int). response_model silently drops undeclared keys, so this compares the raw handler
 output with what the client gets. Runs against a fake camera node and the simulated swerve node."""
 import json
-import socket
-import threading
 import time
 
 import fastapi.routing
 import pytest
-import uvicorn
 import yaml
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import same, serve, waiter
 from robot_utils.nodes.common.locks import LockStore
 from robot_utils.nodes.description.node import DescriptionNode
 from robot_utils.nodes.description.server import create_app
@@ -23,41 +21,7 @@ NON_JSON = {"/events", "/cameras/{name}/depth.jpg", "/jobs/{jid}/raw.npz", "/cal
             "/model/urdf", "/model/meshes/{component}/{path:path}", "/model/bundle.zip"}
 
 
-def wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        v = predicate()
-        if v:
-            return v
-        time.sleep(0.05)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                           timeout_graceful_shutdown=1))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait_for(lambda: server.started, 10)
-    return f"http://127.0.0.1:{port}", server, t
-
-
-def same(a, b, path="$", order=True):
-    """Equal JSON with the same types (1 and 1.0 differ) and, with ``order``, the same key order."""
-    assert type(a) is type(b), f"{path}: {a!r} vs {b!r}"
-    if isinstance(a, dict):
-        assert (list(a) if order else set(a)) == (list(b) if order else set(b)), f"{path}: keys {list(a)} vs {list(b)}"
-        for k in a:
-            same(a[k], b[k], f"{path}.{k}", order)
-    elif isinstance(a, list):
-        assert len(a) == len(b), f"{path}: length"
-        for i, (x, y) in enumerate(zip(a, b)):
-            same(x, y, f"{path}[{i}]", order)
-    else:
-        assert a == b, f"{path}: {a!r} vs {b!r}"
+wait_for = waiter(5.0, 0.05)
 
 
 @pytest.fixture

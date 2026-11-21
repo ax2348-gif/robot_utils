@@ -7,6 +7,7 @@ import numpy as np
 import pinocchio as pin
 import pytest
 
+from helpers import Clock
 from robot_utils.nodes.arm import config as C
 from robot_utils.nodes.arm.bus import SimBus
 from robot_utils.nodes.arm.node import COL, DT, FIELDS, JAC_FIELDS, PHASES, SOURCES, STATES, ArmNode
@@ -14,14 +15,6 @@ from robot_utils.nodes.common.lease import RequestError
 from robot_utils.nodes.common.locks import LockStore
 
 Q0 = (0.0, -0.6, -0.9, 0.0, 0.5, 0.0)
-
-
-class Clock:
-    def __init__(self):
-        self.t = 1000.0
-
-    def __call__(self):
-        return self.t
 
 
 @pytest.fixture(scope="session", autouse=True)

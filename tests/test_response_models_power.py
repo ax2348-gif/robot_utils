@@ -10,6 +10,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import Clock, same
 from robot_utils.nodes.power import node as node_mod
 from robot_utils.nodes.power.node import PowerNode
 from robot_utils.nodes.power.server import PowerSource, create_app
@@ -27,29 +28,6 @@ def no_system_power_off(monkeypatch):
         raise AssertionError(f"tests must never run processes: {a}")
     monkeypatch.setattr(subprocess, "run", boom)
     monkeypatch.setattr(node_mod, "estop_robot", lambda *a, **k: (_ for _ in ()).throw(AssertionError("real e-stop")))
-
-
-class Clock:
-    def __init__(self, t=1000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
-
-
-def same(a, b, path="$"):
-    """Equal JSON with the same key order and the same types (1 and 1.0 differ)."""
-    assert type(a) is type(b), f"{path}: {a!r} vs {b!r}"
-    if isinstance(a, dict):
-        assert list(a) == list(b), f"{path}: keys {list(a)} vs {list(b)}"
-        for k in a:
-            same(a[k], b[k], f"{path}.{k}")
-    elif isinstance(a, list):
-        assert len(a) == len(b), f"{path}: length"
-        for i, (x, y) in enumerate(zip(a, b)):
-            same(x, y, f"{path}[{i}]")
-    else:
-        assert a == b, f"{path}: {a!r} vs {b!r}"
 
 
 @pytest.fixture
@@ -180,9 +158,8 @@ def test_power_loss_and_cpu_are_typed_and_lossless(api, tmp_path):
     """A draining power-loss estimate (every PowerLoss field filled) and the CPU governor (GET/POST /cpu, /state cpu)."""
     import time
 
+    from power_cpu_fakes import fake_sysfs, helper_runner
     from robot_utils.nodes.power.cpu import CpuGovernor
-    from test_power_cpu import Clock as CpuClock
-    from test_power_cpu import fake_sysfs, helper_runner
     call, node, clock, bus, routes = api
     wall = time.time()
     for k in range(1200, 0, -1):                       # 20 min on input, the charger bit set, cell 3 falling 4 mV/min
@@ -200,7 +177,7 @@ def test_power_loss_and_cpu_are_typed_and_lossless(api, tmp_path):
     root, helper = fake_sysfs(tmp_path)
     runs = []
     node.cpu = CpuGovernor(tmp_path / "power.json", run=helper_runner(root, runs), sysfs=root,
-                           helper_unit_file=helper, clock=CpuClock())
+                           helper_unit_file=helper, clock=Clock(100.0))
     c = call("GET", "/cpu")
     assert c["governor"] == "ondemand" and c["ghz"] == 1.9 and c["helper_installed"] is True
     assert call("GET", "/state")["cpu"]["governor"] == "ondemand"

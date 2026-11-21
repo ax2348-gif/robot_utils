@@ -80,7 +80,7 @@ Each tick:
 **Robustness.** Replies are awaited at most 5 ms per tick. A missed reply (an ordinary event on a
 serial bus) keeps the latest complete reading for that tick; the node faults only when that
 reading is older than 50 ms with the motors on (1 s with them off). Misses are counted, per motor,
-in `/state` and the stream (`read_age`, `read_misses`). A gap of 30 ms or more with the motors on is
+in `/state` and the stream (`read_age`: 0 when this tick's read completed, else the kept reading's age; `read_misses`). A gap of 30 ms or more with the motors on is
 a warning event (at most one every 5 s, counting the gaps in between), so a fault has warnings
 before it. The bus also times each tick's replies (requests to the last reply): `/state`
 `reply_latency` has p50, p99 and max over the last 500 complete reads and the margin to the 10 ms
@@ -287,13 +287,26 @@ from the description node; the shipped default if it is unreachable, and `source
 
 | group | columns |
 |---|---|
-| status | t, state, enabled, motors_on, servo, g_servo, estop, lease_id, source, seq, overruns, `limited` (speed) |
+| status | t (tick start), state, enabled, motors_on, servo, g_servo, estop, lease_id, source, seq, overruns, `limited` (speed) |
 | joints | q (output), q_motor, qd, tau_meas, q_cmd, qd_ff (MIT velocity reference), tau_g, `acc_lim` (per joint), temperature, status |
 | tracking | motor-side e, ė, τ_est = kp·e + kd·ė + τ_g; output-side TCP error (mm, deg) vs command and vs goal; `limited` |
 | TCP | pose from the output encoders (xyz + quaternion) |
 | gripper | gap, gap sent (after the force limit), goal, τ_est, force, τ_ff, force limit active, status |
 | layers | servo {...}, chunk {...} |
 | gains | profile name (full gains on `/gains`, they change only on a switch) |
+| measurement times | `t_meas`, `t_meas_mot` (appended last; below) |
+
+**When the data was measured.** `t_tick` is the tick's start, taken before its read, and the bus is
+pipelined: a tick collects the replies to requests sent at the end of the previous tick's read. So a
+row's output encoders (`q`, `g_gap`) answer requests sent about one tick before `t_tick` (two on a tick
+whose replies were late and that kept the previous reading), and its motor-side feedback (`q_mot`,
+`qd`, `tau`) answers the previous tick's MIT frames: newer than `q` in the same row. `t_meas` is when
+the requests behind `q` were sent (a lower bound of when `q` was measured); `t_meas_mot` is when the
+oldest arm motor's feedback frame arrived (every joint's feedback is at least that new; NaN with a
+motorbridge without the feedback's age). Both are on `t_tick`'s clock. Latency compensation should use
+these, not `t_tick`. `read_age` only says whether this tick's read completed (0) or an earlier reading
+was kept (its age), not how old the data is. The simulated bus samples at the read, so both equal the
+sample time there (no pipeline delay).
 
 ## Simulation
 

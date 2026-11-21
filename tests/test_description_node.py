@@ -1,36 +1,16 @@
 """Description node end to end: fake camera node + simulated swerve node + description node (real servers)."""
-import socket
-import threading
 import time
 
 import httpx
 import pytest
-import uvicorn
 import yaml
 
+from helpers import serve, waiter
 from robot_utils.nodes.description.node import DescriptionNode, compose_camera
 from robot_utils.nodes.description.server import create_app
 
 
-def wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        v = predicate()
-        if v:
-            return v
-        time.sleep(0.05)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait_for(lambda: server.started, 10)
-    return f"http://127.0.0.1:{port}", server, t
+wait_for = waiter(5.0, 0.05)
 
 
 @pytest.fixture

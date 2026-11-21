@@ -24,9 +24,10 @@ from typing import Optional
 
 import numpy as np
 
+from .config import N
+
 log = logging.getLogger(__name__)
 
-N = 6
 FAULT_CODES = {8: "over-voltage", 9: "under-voltage", 0xA: "over-current", 0xB: "MOS over-temperature",
                0xC: "rotor over-temperature", 0xD: "communication lost (CAN watchdog)", 0xE: "overload"}
 
@@ -150,6 +151,10 @@ class Reading:
     g_q_mot: float
     g_qd: float
     g_tau: float
+    # Measurement times (monotonic, the node's clock). The bus is pipelined: a read collects the replies to
+    # requests sent at the end of the previous tick's read, so the data is older than the tick using it.
+    t_meas: float = math.nan       # when the requests whose replies gave q (and g_q) were sent; NaN: unknown
+    t_meas_mot: float = math.nan   # arrival of the oldest arm motor's feedback frame (q_mot, qd, tau); NaN: unknown
 
     def faults(self, names: list[str]) -> list[str]:
         return [f"{n}: {FAULT_CODES.get(int(c), f'status {int(c):#x}')}"
@@ -375,12 +380,17 @@ class HardwareBus(ArmBus):
             raise ReadMiss(missing, f"no reply within {REPLY_WAIT_TICKS + 1} ticks from "
                                     f"{', '.join(dict.fromkeys(missing))}")
         self.reply_latency = None if t_req is None else max(arrived.values()) - t_req
+        # the feedback's arrival: the oldest arm motor's (every joint's feedback is at least this new); unknown
+        # without the feedback's age (a motorbridge without get_state_with_age refreshes every read instead)
+        fed_arm = [fed[n] for n in self.names[:N] if n in fed]
+        t_mot = min(fed_arm) if len(fed_arm) == N else math.nan
         a = lambda f: np.array([getattr(s, f) for s in sts[:N]], dtype=float)   # noqa: E731
         g = sts[N]
         return Reading(time.monotonic(), np.array([xout[n] for n in self.names[:N]]), a("pos"), a("vel"), a("torq"),
                        np.array([s.status_code for s in sts], dtype=float),
                        np.array([s.t_mos for s in sts], dtype=float), np.array([s.t_rotor for s in sts], dtype=float),
-                       float(xout["gripper"]), float(g.pos), float(g.vel), float(g.torq))
+                       float(xout["gripper"]), float(g.pos), float(g.vel), float(g.torq),
+                       t_meas=math.nan if t_req is None else t_req, t_meas_mot=t_mot)
 
     def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
         t = time.monotonic()  # before the first frame: no reply to these can have arrived earlier
@@ -593,7 +603,7 @@ class SimBus(ArmBus):
         status[0] = self.fault_code or status[0]
         return Reading(now, self.q.copy(), self.q + self.mot_offset, self.qd.copy(), self.tau.copy(), status,
                        np.full(N + 1, 35.0), np.full(N + 1, 38.0), self.g_q, self.g_q + self.g_mot_offset,
-                       self.g_qd, self.g_tau)
+                       self.g_qd, self.g_tau, t_meas=now, t_meas_mot=now)   # sampled now: no pipeline delay
 
     def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
         # as the real driver (JointGroup._legal): a setpoint outside the limits is refused unless

@@ -11,11 +11,10 @@ The world holds the motors (enable state, the last MIT frames, a CAN watchdog); 
   connecting waits for its own. ``reply_latency`` is the world's configured value.
 - **the driver's setpoint check**, as ``SimBus`` / rebot_ctl: a setpoint outside the limits is refused
   (``BusError``) unless no further outside than the last one sent; kp = 0 positions are not checked.
-- **measurement times** for the reading's ``t_meas`` / ``t_meas_mot`` (being added to ``Reading`` on
-  another branch): every ``Reading`` this bus returns carries them as attributes, and
-  ``measurement_times()`` returns the latest pair. ``t_meas``: when the requests whose replies gave q were
-  sent (the previous read, host monotonic); ``t_meas_mot``: when the world delivered the motor feedback
-  used for q_mot / qd / tau (the reply to the last MIT frames, or to the read request when none were sent).
+- **measurement times** ``Reading.t_meas`` / ``t_meas_mot`` (the arm row's columns), as the hardware's:
+  ``t_meas``: when the requests whose replies gave q were sent (the previous read, so about one tick
+  before the reading); ``t_meas_mot``: when the world delivered the motor feedback used for q_mot / qd /
+  tau (its answer to the last MIT frames, or to the read request when none were sent).
 """
 from __future__ import annotations
 
@@ -25,7 +24,8 @@ from typing import Optional
 
 import numpy as np
 
-from ...arm.bus import N, ArmBus, BusError, FeedbackRefresh, Reading
+from ...arm.bus import ArmBus, BusError, FeedbackRefresh, Reading
+from ...arm.config import N
 from ..protocol import IpcClient, IpcError, backend_socket
 
 
@@ -43,8 +43,6 @@ class WorldArmBus(ArmBus):
         self._pending: Optional[tuple] = None      # (t request sent, world reply) for the next read
         self._mit_reply_t: Optional[float] = None  # when the world answered the last MIT frames
         self._q_last = np.full(N, np.nan)
-        self.t_meas: Optional[float] = None
-        self.t_meas_mot: Optional[float] = None
         self.connected = False
 
     def _call(self, op: str, **kw) -> dict:
@@ -94,19 +92,13 @@ class WorldArmBus(ArmBus):
             for n in win[1]:
                 fed[n] = t_reply
         self.refresh.plan(fed)
-        self.t_meas = t_req
-        self.t_meas_mot = self._mit_reply_t if (win is not None and self._mit_reply_t is not None) else t_reply
+        t_mot = self._mit_reply_t if (win is not None and self._mit_reply_t is not None) else t_reply
         st = np.asarray(r["status"], float)
         q = np.asarray(r["q"], float)
         out = Reading(self.clock(), q, q.copy(), np.asarray(r["qd"], float), np.asarray(r["tau"], float), st,
                       np.full(N + 1, 35.0), np.full(N + 1, 38.0), float(r["g_q"]), float(r["g_q"]),
-                      float(r["g_qd"]), float(r["g_tau"]))
-        out.t_meas, out.t_meas_mot = self.t_meas, self.t_meas_mot
+                      float(r["g_qd"]), float(r["g_tau"]), t_meas=t_req, t_meas_mot=t_mot)
         return out
-
-    def measurement_times(self) -> tuple[Optional[float], Optional[float]]:
-        """(t_meas, t_meas_mot) of the latest reading (see the module doc)."""
-        return self.t_meas, self.t_meas_mot
 
     def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
         names = [f"joint{i}" for i in range(1, N + 1)]

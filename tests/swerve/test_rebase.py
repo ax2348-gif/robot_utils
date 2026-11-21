@@ -9,6 +9,7 @@ import pytest
 import uvicorn
 from sparkcan import protocol
 
+from helpers import waiter
 from robot_utils.nodes.common.lease import RequestError
 from robot_utils.nodes.swerve import constants as c
 from robot_utils.nodes.swerve import node as swerve_node
@@ -21,14 +22,7 @@ F = {n: i for i, n in enumerate(FIELDS)}
 DRIVES = [m.drive_id for m in c.MODULES]
 
 
-def wait_for(predicate, timeout=3.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.01)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(3.0, 0.01)
 
 
 @pytest.fixture
@@ -116,7 +110,7 @@ def test_rebase_refused_while_moving_allowed_when_stopped(base):
     node, sims = base
     d = Driver(node, (0.3, 0.0, 0.0))
     try:
-        wait_for(lambda: abs(dict(zip(FIELDS, node.hub.recent(1, "tick")[0]))["FL_drive_vel"]) > 0.1)
+        wait_for(lambda: len(r := node.hub.recent(1, "tick")) and abs(dict(zip(FIELDS, r[0]))["FL_drive_vel"]) > 0.1)
         with pytest.raises(RequestError) as e:
             node.rebase()
         assert e.value.status == 409 and "not stationary" in str(e.value)

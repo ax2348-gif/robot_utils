@@ -79,7 +79,7 @@ nodes:
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d}}
-  - {name: agent_nav, kind: agent_nav, start: {module: robot_utils.nodes.agent_nav}}
+  - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface}}
   # a second camera would be e.g.
   # - {name: camera2, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [...]}}
 ```
@@ -341,7 +341,7 @@ the page contracts are untouched):
 
 | Hook | What |
 |---|---|
-| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_nav`, `description`, `estimator`, `perception3d`, `camera`, `power`, `landing`, and the tools `swerve_teleop`, `remote_teleop` (which share element ids, so scope tool rules by page) |
+| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_interface`, `description`, `estimator`, `perception3d`, `camera`, `power`, `landing`, and the tools `swerve_teleop`, `remote_teleop` (which share element ids, so scope tool rules by page) |
 | `.ru-head` | the header row: title, status, e-stop (every e-stop lives here, so it is above the fold on a phone) |
 | `.ru-body`, `.ru-side` | the main grid of panels, and its side column where the page has one |
 | `[data-panel="<name>"]` | one panel, unique within its page (`map`, `jog`, `events`, ...) |
@@ -390,11 +390,11 @@ Pages are HTML and JavaScript strings, isolated from the nodes' logic:
 - the landing page and tools in `frontend/*.html`.
 
 The robot's guards are all server-side, so no page edit can defeat them: speed limits, the 0.25 s
-command timeout, leases, e-stop latches, chocks, pose_servo's caps, agent_nav's profiles. Some page
+command timeout, leases, e-stop latches, chocks, pose_servo's caps, agent_interface's profiles. Some page
 code still matters for safety, though. When restyling:
 - **Restyle through CSS and markup.** Keep element ids and the wiring the contracts check:
   - `#estop` and `RU.estopButton($("#estop"))` on the swerve, pose_servo and description pages;
-  - agent_nav's and the teleop tools' own e-stop handlers;
+  - agent_interface's and the teleop tools' own e-stop handlers;
   - the landing page's E-STOP ALL (`estopAll` / `estopOne`) and lock buttons.
 - **Treat the toolkit's functions as an API.** Change how `RU.estopButton`, `RU.leaseWidget` (and its
   300 ms renewal) and `RU.api` look, not what they do.

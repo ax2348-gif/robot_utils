@@ -28,7 +28,6 @@ PAGES = {
     "remote_teleop_tool": lambda: (ROOT / "frontend" / "tools" / "remote_teleop.html").read_text(),
     "swerve": lambda: node_page("swerve"),
     "pose_servo": lambda: node_page("pose_servo"),
-    "agent_nav": lambda: node_page("agent_nav"),
     "agent_interface": lambda: node_page("agent_interface"),
     "description": lambda: node_page("description"),
     "camera": lambda: node_page("orbbec"),
@@ -62,8 +61,8 @@ def test_node_pages_with_actuation_use_the_shared_estop_button(page):
     assert 'src="common/ui.js"' in html
 
 
-def test_agent_nav_estop_button_posts_estop():
-    html = PAGES["agent_nav"]()
+def test_agent_interface_estop_button_posts_estop():
+    html = PAGES["agent_interface"]()
     assert has(r'id="estop"', html)
     # the shared e-stop button, sent as the human operator (X-Operator: human)
     assert has(r'RU\.estopButton\(\$\("#estop"\), \{headers: H\b', html)
@@ -89,7 +88,7 @@ def test_landing_page_estop_all_and_lock_buttons():
 
 def test_shared_toolkit_estop_and_lease_renewal():
     js = ui_js()
-    # POSTs "estop" by default (opts.path / opts.headers let a page target its own e-stop, e.g. agent_nav as the human)
+    # POSTs "estop" by default (opts.path / opts.headers let a page target its own e-stop, e.g. agent_interface as the human)
     assert has(r'RU\.estopButton = function\(el, opts\)\{.*?b\.onclick = async \(\) => \{ try \{ await RU\.api\(opts\.path \|\| "estop", \{method: "POST"', js)
     assert has(r'setInterval\(async \(\) => \{.*?RU\.api\("lease/renew"', js), "lease auto-renewal is gone"
 

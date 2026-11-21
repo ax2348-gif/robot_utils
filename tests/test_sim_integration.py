@@ -8,21 +8,13 @@ import time
 import numpy as np
 import pytest
 
+from helpers import waiter
 from sim_helpers import make_world, needs_gl
 
 from robot_utils.nodes.sim.node import SimNode
 
 SIM = "simit"
-
-
-def wait_for(pred, timeout=10.0, step=0.02):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        v = pred()
-        if v:
-            return v
-        time.sleep(step)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(10.0, 0.02)
 
 
 @pytest.fixture
@@ -75,7 +67,11 @@ def test_arm_node_on_the_world(sim, tmp_path):
             assert np.linalg.norm(node.kin.fk(r.q).translation - T.translation) < 0.004
             assert r.t_meas is not None and r.t_meas < r.t and r.t_meas_mot <= r.t
             assert r.t - r.t_meas < 0.1                        # about one tick old (pipelined)
-            assert node.bus.measurement_times() == (r.t_meas, r.t_meas_mot) or node.reading is not r
+            from robot_utils.nodes.arm.node import COL, DT
+            rows = node.hub.recent(50, "tick")                 # the row's t_meas columns: one tick behind t_tick
+            lag = rows[:, COL["t_tick"]] - rows[:, COL["t_meas"]]
+            assert np.all(np.isfinite(lag)) and 0.5 * DT < np.median(lag) < 1.6 * DT, np.median(lag)
+            assert np.all(rows[:, COL["t_meas_mot"]] >= rows[:, COL["t_meas"]] - 1e-9)
             # the gripper follows the node's gap goal
             node.gripper_cmd(tok, gap_mm=30.0)
             wait_for(lambda: abs(sim.world.snapshot()["arm"]["gap_mm"] - 30.0) < 1.0, 10)

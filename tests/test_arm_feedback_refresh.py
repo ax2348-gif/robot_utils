@@ -320,3 +320,31 @@ def test_mit_frames_dropped_silently_by_the_driver_fall_back_too(clock):
         refreshed += f.refresh["joint6"]
         assert all(f.refresh[n] == 0 for n in NAMES if n != "joint6")
     assert refreshed >= 8 and b.refresh.fallbacks["joint6"] == refreshed
+
+
+def test_reading_carries_its_measurement_times(clock):
+    """The pipelined bus: tick k's output encoders answer requests sent at the end of tick k-1's read (t_meas about
+    one tick before tick k starts); the motor feedback answers tick k-1's MIT frames and arrives during tick k
+    (t_meas_mot newer than t_meas)."""
+    b, wire = make_bus(clock)
+    tick(b, wire)
+    starts, readings = [], []
+    for _ in range(5):
+        clock.t += DT
+        starts.append(clock.t)
+        readings.append(b.read())
+        z = np.zeros(6)
+        b.send(z, z, z, z, z, 0.0, 0.0, 0.0, 0.0, 0.0)
+    for k in range(1, 5):
+        r = readings[k]
+        assert starts[k - 1] < r.t_meas < starts[k - 1] + 1e-3        # sent at the end of the previous read
+        assert r.t_meas < r.t_meas_mot <= starts[k] + 1e-3            # arrived during this tick's read
+        assert starts[k] - r.t_meas == pytest.approx(DT, abs=1e-3)
+
+
+def test_feedback_arrival_unknown_without_its_age(clock):
+    b, wire = make_bus(clock, OldMotor)
+    tick(b, wire)
+    clock.t += DT
+    r = b.read()
+    assert np.isfinite(r.t_meas) and np.isnan(r.t_meas_mot)

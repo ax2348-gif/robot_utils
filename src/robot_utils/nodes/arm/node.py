@@ -29,7 +29,6 @@ requests → one MIT frame per motor (servo, float or released) → telemetry ro
 """
 from __future__ import annotations
 
-import base64
 import logging
 import math
 import threading
@@ -48,11 +47,20 @@ from ..common.locks import LockStore, describe as describe_locks
 from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
+from . import queries as Q
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
-from .kin import ArmKinematics, N, pose_error, pose_public
+from .config import N
+from .gripper import Gripper, check_gripper
+from .gripper import free as gripper_free
+from .gripper import holding as gripper_holding
+from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
+from .jam import updated as jam_updated
+from .kin import ArmKinematics, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from .planner import Planner
-from .render import VIEW_DEFAULTS
+from .telemetry import COL, FIELD_DOC, JAC_UNITS, PHASES, UNITS  # noqa: F401  (re-exported: server, models, tests)
+from .telemetry import FIELDS, JAC_FIELDS, SOURCES, STATES, row_dict, tick_row
+from .telemetry import tracking as tracking_of_row
 
 log = logging.getLogger(__name__)
 
@@ -80,60 +88,7 @@ STOW_NEAR = math.radians(3.0)  # every joint this close to home: stow turns the 
 SLOW_TICK = 0.015             # s between ticks counted as an overrun
 ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
 CONNECT_RETRY_S = 2.0
-STATES = ["connecting", "uninitialized", "initializing", "off", "disabled", "floating", "servoing", "fault"]
-SOURCES = ["none", "hold", "track", "servo", "pose", "home", "stow", "chunk"]
-PHASES = ["none", "executing", "settling", "reached", "not_reached", "done", "aborted", "preempted", "jammed"]
-JOINT_COLS = [("q", "rad"), ("q_mot", "rad"), ("qd", "rad/s"), ("tau", "Nm"), ("q_cmd", "rad"),
-              ("qd_ff", "rad/s"), ("tau_g", "Nm"), ("e_mot", "rad"), ("tau_est", "Nm"), ("acc_lim", "bool"),
-              ("t_mos", "C"), ("status", "enum")]
-_BASE = [("t_tick", "s"), ("tick", "count"), ("state", "enum"), ("enabled", "bool"), ("motors_on", "bool"),
-         ("servo", "bool"), ("g_servo", "bool"), ("estop", "bool"), ("lease_id", "id"), ("source", "enum"),
-         ("seq", "count"), ("overruns", "count"), ("tick_dt", "s"), ("limited", "bool"), ("twist_age", "s"),
-         ("read_age", "s"), ("read_misses", "count")]
-_TCP = [("x", "m"), ("y", "m"), ("z", "m"), ("qx", ""), ("qy", ""), ("qz", ""), ("qw", ""),
-        ("cmd_x", "m"), ("cmd_y", "m"), ("cmd_z", "m"),
-        ("err_pos", "m"), ("err_rot", "rad"), ("goal_err_pos", "m"), ("goal_err_rot", "rad"),
-        ("w", ""), ("w_lin", ""), ("sigma_min", "")]
-_GRIP = [("g_gap", "m"), ("g_gap_cmd", "m"), ("g_gap_goal", "m"), ("g_qd", "rad/s"), ("g_tau", "Nm"),
-         ("g_tau_est", "Nm"), ("g_force", "N"), ("g_force_demand", "N"), ("g_tau_ff", "Nm"), ("g_force_max", "N"), ("g_limiting", "bool"),
-         ("g_status", "enum")]
-_MOTION = [("motion_id", "id"), ("phase", "enum"), ("progress", "")]
-_JAM = [("jam", "bool")]   # appended last: existing columns keep their positions
-_ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION + _JAM)
-FIELDS = [n for n, _ in _ALL]
-UNITS = [u for _, u in _ALL]
-COL = {n: i for i, n in enumerate(FIELDS)}
-JAC_FIELDS = ["t_tick"] + [f"J{r}{c}" for r in range(6) for c in range(1, N + 1)]
-JAC_UNITS = ["s"] + [""] * 36
-FIELD_DOC = {
-    "state": "index into " + ", ".join(STATES),
-    "servo / g_servo": "arm / gripper closed loop engaged",
-    "source": "arm motion source in force: index into " + ", ".join(SOURCES) + " (none = not servoing)",
-    "phase": "of the planned motion (servo / pose / home / stow / chunk): index into " + ", ".join(PHASES),
-    "jam": "1 while a jam is in force: the arm static but still pushing (residual over its band; GET /jam)",
-    "j<i>_q": "output encoder (xout): the arm's measured pose",
-    "j<i>_q_mot / qd / tau": "motor-side feedback frame",
-    "j<i>_q_cmd / qd_ff": "position command and the MIT velocity reference (track: the twist's joint velocity while fresh; planned motions: the trajectory's) (NaN when not servoing)",
-    "j<i>_acc_lim": "1 if the acceleration limit held back an increase of this joint's commanded speed this tick",
-    "j<i>_e_mot": "q_cmd - q_mot: the error the motor's MIT loop sees",
-    "j<i>_tau_est": "kp*e_mot + kd*(qd_ff - qd) + tau_g: torque the MIT law applies",
-    "j<i>_tau_g": "gravity feedforward (whenever the motors are on)",
-    "j<i>_status": "Damiao status code (1 enabled, 0 disabled, >= 8 fault)",
-    "x..qw": "TCP pose from the output encoders, arm frame (quaternion x, y, z, w)",
-    "cmd_x..z": "TCP position of q_cmd",
-    "err_pos / err_rot": "measured TCP vs commanded TCP (output side)",
-    "goal_err_pos / rot": "commanded TCP vs the goal of the source",
-    "w / w_lin / sigma_min": "manipulability sqrt(det(J J^T)) of the 6x6 TCP Jacobian, of its translational rows, and its smallest singular value, at the measured pose",
-    "limited": "the joint speed limit held q_cmd back this tick (the step limit)",
-    "read_age": "age of the reading this tick used: 0 normally; > 0 when replies were late (still awaited, one tick) or missed and the latest complete reading was kept (fault beyond 50 ms with the motors on)",
-    "read_misses": "ticks with missed replies (none within two ticks) since the node started (per motor in /state)",
-    "twist_age": "s since the track twist feedforward was written (NaN if none)",
-    "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
-    "g_force": "squeeze force applied, estimated: the gripper's MIT law plus the force-limit feedforward, over the pinion (N)",
-    "g_force_demand": "squeeze force the MIT law alone asks for, before the force limit (N); above g_force_max while limiting",
-    "g_tau_ff": "force-limit feedforward (opposes closing; |g_tau_ff| <= g_tau_est)",
-    "J<r><c>": "jacobian channel: TCP Jacobian at the measured pose, arm-frame axes (LOCAL_WORLD_ALIGNED), row r of [vx vy vz wx wy wz], column = joint",
-}
+
 
 
 @dataclass
@@ -163,35 +118,6 @@ class Motion:
                 "progress": round(prog, 4), "duration": round(tr.duration, 3),
                 "t_start": tr.t[0], "t_end_planned": tr.t[-1],
                 "goal": None if tr.goal is None else pose_public(tr.goal), "info": tr.info}
-
-
-@dataclass
-class JamConfig:
-    """Jam detection: a STATIC arm still pushing (the aftermath of a contact, not the instant of it). Judged only
-    while servoing with no motion executing (a finished move counts; a move still settling too), every joint
-    slower than ``static_qd`` for ``settle_s``. A joint's residual |tau - tau_g| above its band for ``hold_s``
-    fires; it clears below ``release`` x band."""
-    bands: list = field(default_factory=lambda: [1.0, 4.0, 4.0, 1.5, 0.8, 0.6])   # Nm per joint (draft, offline study)
-    hold_s: float = 1.0
-    release: float = 0.7
-    static_qd: float = 0.05          # rad/s: every joint slower than this counts as static
-    settle_s: float = 0.5            # s static before judging
-    response: str = "hold"           # hold: command pulled to the reading (a move ends `jammed`) | report | off
-    refire: bool = True              # fire again after clearing (e.g. the base keeps pushing the arm in)
-
-    def public(self) -> dict:
-        return {"bands": list(self.bands), "hold_s": self.hold_s, "release": self.release, "static_qd": self.static_qd,
-                "settle_s": self.settle_s, "response": self.response, "refire": self.refire}
-
-
-JAM_RESPONSES = ("hold", "report", "off")
-
-
-@dataclass
-class Gripper:
-    goal: Optional[float] = None       # m gap: the MIT position command (None while free)
-    sent: Optional[float] = None       # m gap actually sent (the force limit may pull it back)
-    max_force: float = C.DEFAULT_MAX_FORCE
 
 
 def clip_increase(v_prev: np.ndarray, v_des: np.ndarray, dv: np.ndarray) -> np.ndarray:
@@ -290,14 +216,9 @@ class ArmNode:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connect_at = 0.0
-        self.jam = JamConfig()
-        self.jam_active: Optional[dict] = None    # the jam in force: joint, residual, since, response
-        self.jams: list[dict] = []                # recent jams (last 20), newest last
-        self.jam_count = 0
-        self._static_since: Optional[float] = None
-        self._over_since = np.full(N, np.nan)     # per joint: when its residual went over its band (NaN = under)
-        self._jam_fired_cmd: Optional[int] = None # with refire off: the command it fired for (fires once per command)
+        self.jam_detector = JamDetector()         # jam (its config), jam_active, jams, jam_count: properties below
         self._cmd_count = 0                       # every new command / motion (refire off: one jam per command)
+        self._aib: Optional[dict] = None           # arm_in_base's cache (queries.arm_in_base)
 
     # -- state ---------------------------------------------------------------------------------------
 
@@ -330,7 +251,7 @@ class ArmNode:
     def _close_bus(self) -> None:
         """Best effort, step by step: a failing disable must never keep the serial port open."""
         try:                                # bookkeeping only: it must never stand between close and disable
-            fr = getattr(self.bus, "refresh", None)
+            fr = None if self.bus is None else self.bus.refresh
             if fr is not None:              # keep its counts: /state counts since the node started
                 done = self._refresh_done
                 for m, c in fr.fallbacks.items():
@@ -486,7 +407,7 @@ class ArmNode:
     def _note_latency(self, now: float) -> None:
         """Control thread: keep the bus's reply latency; report it once after connecting, then warn
         when the slowest replies come close to the tick period."""
-        lat = getattr(self.bus, "reply_latency", None)
+        lat = self.bus.reply_latency
         if lat is None:
             return
         self._lat.append(lat)
@@ -523,7 +444,7 @@ class ArmNode:
             log.warning("feedback-refresh report: %s", e)
 
     def _report_fallbacks(self) -> None:
-        fr = getattr(self.bus, "refresh", None)
+        fr = self.bus.refresh
         if self._fallback_reported or fr is None or not fr.fallbacks:
             return
         self._fallback_reported = True
@@ -535,7 +456,7 @@ class ArmNode:
         """Feedback refreshes since the node started (this connection's and closed ones')."""
         done = self._refresh_done
         by = dict(done["fallbacks_by_motor"])
-        fr = getattr(self.bus, "refresh", None)
+        fr = None if self.bus is None else self.bus.refresh
         refreshes = done["refreshes"]
         if fr is not None:
             for m, c in list(fr.fallbacks.items()):
@@ -709,33 +630,15 @@ class ArmNode:
             g_goal, max_force, g_on = g.goal, g.max_force, self.g_servo
         tau_g = kin.gravity(r.q) * p.tau_scale
         kp, kd = (p.kp, p.kd) if self.servo else (np.zeros(N), np.zeros(N))
-        if g_on:
-            # Gripper: MIT position at the goal, velocity reference 0 (the damping term never adds
-            # grip force). Force limit from the torque its MIT law applies (motor side): away from
-            # fully open an opposing feedforward, never larger than that torque (the net torque never
-            # opens); within FF_OPEN_MARGIN of fully open no feedforward, the position command is
-            # pulled back toward the jaws instead.
-            g_q = C.gap_to_rad(g_goal)
-            tau_est = p.g_kp * (g_q - r.g_q_mot) + p.g_kd * (0.0 - r.g_qd)
-            force = C.force_of_torque(max(tau_est, 0.0))
-            tau_lim = C.torque_of_force(max_force)
-            g_ff, limiting = 0.0, False
-            if force > max_force:
-                limiting = True
-                if C.rad_to_gap(r.g_q) > C.GAP_MAX - C.FF_OPEN_MARGIN:
-                    g_q = min(g_q, r.g_q_mot + tau_lim / p.g_kp)          # closing is +rad
-                else:
-                    g_ff = -(tau_est - tau_lim)                          # opposes closing; |g_ff| < tau_est
-            g_kp, g_kd = p.g_kp, p.g_kd
-            g.sent = C.rad_to_gap(g_q)
-            # what is applied: the MIT law with the position actually sent, plus the feedforward
-            applied = C.force_of_torque(max(g_kp * (g_q - r.g_q_mot) + g_kd * (0.0 - r.g_qd) + g_ff, 0.0))
+        if g_on:      # holding its goal, with the force limit (gripper.holding)
+            gc = gripper_holding(g_goal, max_force, r.g_q, r.g_q_mot, r.g_qd, p.g_kp, p.g_kd)
+            g.sent = C.rad_to_gap(gc.q)
         else:
-            g_q, tau_est, force, g_ff, limiting, g_kp, g_kd = r.g_q_mot, math.nan, math.nan, 0.0, False, 0.0, 0.0
-            applied = math.nan
-        self._g = {"tau_est": tau_est, "force": applied, "demand": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
+            gc = gripper_free(r.g_q_mot)
+        self._g = {"tau_est": gc.tau_est, "force": gc.applied, "demand": gc.demand, "ff": gc.ff,
+                   "limiting": gc.limiting, "tau_g": tau_g}
         try:
-            self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, g_q, 0.0, g_kp, g_kd, g_ff, gripper=self.g_motor_on)
+            self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, gc.q, 0.0, gc.kp, gc.kd, gc.ff, gripper=self.g_motor_on)
         except BusError as e:
             self._fault(str(e))
             return
@@ -814,54 +717,45 @@ class ArmNode:
 
     # -- jam detection: a static arm still pushing ----------------------------------------------------
 
+    @property
+    def jam(self) -> JamConfig:
+        return self.jam_detector.cfg
+
+    @jam.setter
+    def jam(self, cfg: JamConfig) -> None:
+        self.jam_detector.cfg = cfg
+
+    @property
+    def jam_active(self) -> Optional[dict]:
+        """The jam in force: joint, residual, since, response."""
+        return self.jam_detector.active
+
+    @property
+    def jams(self) -> list:
+        """Recent jams (last 20), newest last."""
+        return self.jam_detector.recent
+
+    @property
+    def jam_count(self) -> int:
+        return self.jam_detector.count
+
     def _jam_reset(self) -> None:
-        self._static_since = None
-        self._over_since[:] = np.nan
-        self.jam_active = None
+        self.jam_detector.reset()
 
     def _jam_check(self, now: float, r, src, tau_g) -> None:
-        """Control thread, while servoing. See JamConfig. Planned motions and holds get the response; track (a
-        teleop stream overwrites the command every tick) is report-only."""
-        cfg = self.jam
-        if cfg.response == "off" or tau_g is None:
-            self._jam_reset()
-            return
+        """Control thread, while servoing (jam.JamDetector judges). Planned motions and holds get the response: the
+        command is pulled to the reading (a motion ends `jammed`); track (a teleop stream overwrites the command
+        every tick) is report-only."""
         m = self.motion
-        moving = (m is not None and m.phase == "executing") or bool(np.any(np.abs(r.qd) > cfg.static_qd))
-        if moving:
-            self._static_since = None
-            self._over_since[:] = np.nan
+        ev = self.jam_detector.check(now, r.qd, r.tau, tau_g, m is not None and m.phase == "executing", src,
+                                     self._cmd_count)
+        if ev is None:
             return
-        self._static_since = self._static_since or now
-        if now - self._static_since < cfg.settle_s:
+        if ev.cleared:
+            self.events.add(f"jam cleared (joint{ev.joint})")
             return
-        res = np.asarray(r.tau, float) - np.asarray(tau_g, float)
-        bands = np.asarray(cfg.bands, float)
-        if self.jam_active is not None:                       # hysteresis: clear only well under every band
-            if np.all(np.abs(res) < cfg.release * bands):
-                self.events.add(f"jam cleared (joint{self.jam_active['joint']})")
-                self.jam_active = None
-                self._over_since[:] = np.nan
-            return
-        over = np.abs(res) > bands
-        self._over_since = np.where(over, np.where(np.isnan(self._over_since), now, self._over_since), np.nan)
-        held = np.where(over, now - self._over_since, 0.0)
-        if not np.any(held >= cfg.hold_s):
-            return
-        if not cfg.refire and self._jam_fired_cmd == self._cmd_count:
-            return
-        i = int(np.argmax(np.where(held >= cfg.hold_s, np.abs(res) / bands, 0.0)))
-        track = src == "track"
-        act = "report" if (cfg.response == "report" or track) else "hold"
-        jam = {"t": now, "wall": time.time(), "joint": i + 1, "residual_nm": round(float(res[i]), 3),
-               "band_nm": float(bands[i]), "held_s": round(float(held[i]), 2), "response": act, "source": src,
-               "residuals_nm": [round(float(v), 3) for v in res]}
-        self.jam_count += 1
-        jam["count"] = self.jam_count
-        self.jam_active, self._jam_fired_cmd = jam, self._cmd_count
-        self.jams = (self.jams + [jam])[-20:]
-        what = (f"jam: joint{i + 1} residual {res[i]:+.1f} Nm (band {bands[i]:g}) for {held[i]:.1f} s while static")
-        if act == "hold":
+        what = ev.message
+        if ev.jam["response"] == "hold":
             with self._lock:     # stop pushing: hold where the arm is, not where it was told to be
                 self._command_from_reading(r, np.zeros(N))
             if self.motion is not None:
@@ -869,7 +763,7 @@ class ArmNode:
             else:
                 self.events.add(what + ": holding where it is", "warn")
         else:
-            self.events.add(what + (" (track: report only)" if track else " (report only)"), "warn")
+            self.events.add(what + (" (track: report only)" if src == "track" else " (report only)"), "warn")
 
     def jam_state(self) -> dict:
         return finite({"config": self.jam.public(), "active": self.jam_active, "count": self.jam_count,
@@ -877,15 +771,7 @@ class ArmNode:
 
     def set_jam(self, changes: dict) -> dict:
         """Change the jam detector (the server allows it for a human only)."""
-        cfg = self.jam
-        new = JamConfig(**{**cfg.public(), **{k: v for k, v in changes.items() if v is not None}})
-        if len(new.bands) != N or not all(math.isfinite(b) and b > 0 for b in new.bands):
-            raise ValueError(f"bands: {N} positive numbers (Nm, one per joint)")
-        if new.response not in JAM_RESPONSES:
-            raise ValueError(f"response: one of {', '.join(JAM_RESPONSES)}")
-        if not (0 < new.release < 1) or new.hold_s <= 0 or new.settle_s < 0 or new.static_qd <= 0:
-            raise ValueError("release in (0, 1); hold_s > 0; settle_s >= 0; static_qd > 0")
-        self.jam = new
+        self.jam = jam_updated(self.jam, changes)
         self.events.add("jam detection: " + ", ".join(f"{k}={v}" for k, v in changes.items() if v is not None))
         return self.jam_state()
 
@@ -928,53 +814,13 @@ class ArmNode:
             seq = tr.seq if tr else 0
             goal = self._goal_pose if servo else None
         on = self.motors_on
-        row = np.full(len(FIELDS), nan)
-        row[:len(_BASE)] = [now, self._tick, STATES.index(self.state), float(self.enabled), float(on),
-                            float(servo), float(g_on), float(self.estop.active), float(info.lease_id if info else 0),
-                            SOURCES.index(src), seq, self.overruns, dt_tick, float(self._limited and servo),
-                            (now - tr.t) if tr and tr.twist is not None else nan, self.read_age, self.read_misses]
-        tau_g = self._g.get("tau_g") if on else None
-        p = self.profile
-        for i in range(N):
-            b = len(_BASE) + i * len(JOINT_COLS)
-            tg = tau_g[i] if tau_g is not None else nan
-            if q_cmd is not None:
-                qc, vc = q_cmd[i], v_cmd[i]
-                e = qc - r.q_mot[i]
-                te = p.kp[i] * e + p.kd[i] * (vc - r.qd[i]) + tg
-                al = float(acc_lim[i])
-            else:
-                qc = vc = e = al = nan
-                te = tg
-            row[b:b + len(JOINT_COLS)] = [r.q[i], r.q_mot[i], r.qd[i], r.tau[i], qc, vc, tg, e, te, al,
-                                          r.t_mos[i], r.status[i]]
-        T = kin.fk(r.q)
-        J = kin.jacobian(r.q, "arm")
-        mn = kin.manipulability(J)
-        quat = pin.Quaternion(T.rotation)
-        b = COL["x"]
-        row[b:b + 7] = [*T.translation, quat.x, quat.y, quat.z, quat.w]
-        if q_cmd is not None:
-            Tc = kin.fk(q_cmd)
-            row[COL["cmd_x"]:COL["cmd_x"] + 3] = Tc.translation
-            row[COL["err_pos"]], row[COL["err_rot"]] = pose_error(T, Tc)
-            if goal is not None:
-                row[COL["goal_err_pos"]], row[COL["goal_err_rot"]] = pose_error(Tc, goal)
-        row[COL["w"]], row[COL["w_lin"]], row[COL["sigma_min"]] = mn["w"], mn["w_lin"], mn["sigma_min"]
-        gd = self._g
-        gl = on and g_on
-        row[COL["g_gap"]:COL["g_gap"] + len(_GRIP)] = [
-            C.rad_to_gap(r.g_q), g.sent if (gl and g.sent is not None) else nan,
-            g.goal if (gl and g.goal is not None) else nan, r.g_qd, r.g_tau,
-            gd["tau_est"] if gl else nan, gd["force"] if gl else nan, gd["demand"] if gl else nan,
-            gd["ff"] if gl else nan, g.max_force,
-            float(gd["limiting"] and gl), r.status[N]]
-        if m is not None:
-            mp = m.public(now)
-            row[COL["motion_id"]], row[COL["phase"]], row[COL["progress"]] = m.traj.id, PHASES.index(m.phase), mp["progress"]
-        else:
-            row[COL["phase"]] = 0
-        row[COL["jam"]] = float(self.jam_active is not None)
+        base = [now, self._tick, STATES.index(self.state), float(self.enabled), float(on),
+                float(servo), float(g_on), float(self.estop.active), float(info.lease_id if info else 0),
+                SOURCES.index(src), seq, self.overruns, dt_tick, float(self._limited and servo),
+                (now - tr.t) if tr and tr.twist is not None else nan, self.read_age, self.read_misses]
+        row, J = tick_row(now, base, r, kin, self.profile, q_cmd, v_cmd, acc_lim,
+                          self._g.get("tau_g") if on else None, goal, g, self._g, on and g_on, m,
+                          self.jam_active is not None)
         self.hub.publish_rows(row[None], "tick")
         self.hub.publish_rows(np.concatenate([[now], J.reshape(-1)])[None], "jacobian")
 
@@ -1195,20 +1041,7 @@ class ArmNode:
                 self._apply_gripper(*g_args)
         return out
 
-    @staticmethod
-    def _check_gripper(gap_mm: Optional[float] = None, max_force_n: Optional[float] = None):
-        """Validated (gap m or None, max force N or None). Raises ValueError before anything changes."""
-        f = None
-        if max_force_n is not None:
-            f = float(max_force_n)
-            if not (math.isfinite(f) and 0.0 <= f <= C.HARD_MAX_FORCE):
-                raise ValueError(f"max_force_n must be within 0..{C.HARD_MAX_FORCE:g} N")
-        gap = None
-        if gap_mm is not None:
-            gap = float(gap_mm) / 1000.0
-            if not (math.isfinite(gap) and 0.0 <= gap <= C.GAP_MAX + 1e-9):
-                raise ValueError(f"gap_mm must be within 0..{C.GAP_MAX * 1000:.1f}")
-        return gap, f
+    _check_gripper = staticmethod(check_gripper)
 
     def _apply_gripper(self, gap: Optional[float], max_force: Optional[float]) -> None:
         """Call under _lock. A gap makes the gripper hold it (from the next tick); the force limit
@@ -1421,68 +1254,32 @@ class ArmNode:
     # reads -----------------------------------------------------------------------------------------
 
     def _need_kin(self) -> ArmKinematics:
-        if self.kin is None:
-            raise RequestError(503, "the arm has not connected yet (no model)")
-        return self.kin
+        return Q.need_kin(self.kin)
+
+    def _servo_cmd(self) -> Optional[np.ndarray]:
+        """A copy of the command while servoing, else None (IK seeds)."""
+        with self._lock:
+            return self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
 
     def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
                  render: Optional[dict] = None) -> dict:
         """IK seed only (never taken as where the arm is): "command" = the command while servoing,
         else the measured pose; "measured" = the measured pose. With ``render`` (view options,
         render.VIEW_DEFAULTS) the answer also carries ``image``: a PNG data URL of the query."""
-        if render is not None:
-            out, png = self.ik_image(pose, seed, max_rot_deg, render)
-            return {**out, "image": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
-                    "view": {**VIEW_DEFAULTS, **{k: v for k, v in render.items() if v is not None}}}
-        kin = self._need_kin()
-        r = self.reading
-        with self._lock:
-            q_cmd = self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
-        if seed == "measured" or q_cmd is None:
-            if r is None:
-                raise RequestError(503, "no reading yet")
-            q0 = r.q
-        else:
-            q0 = q_cmd
-        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
-        out = Planner.run("ik", kin, pose, np.asarray(q0, float).copy(), rot_tol=rot_tol)   # in the planner process
-        return out.public()
+        return Q.ik_check(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, render)
 
     def ik_image(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
                  view: Optional[dict] = None) -> tuple[dict, bytes]:
         """The IK check and its picture (render.py), both in the planner process: (IK answer, PNG).
         Shows the measured arm (and gripper gap), so it needs a reading. No lease; nothing moves."""
-        kin = self._need_kin()
-        r = self.reading
-        if r is None:
-            raise RequestError(503, "no reading yet")
-        with self._lock:
-            q_cmd = self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
-        q0 = r.q if (seed == "measured" or q_cmd is None) else q_cmd
-        gap = C.rad_to_gap(r.g_q) if math.isfinite(r.g_q) else 0.0
-        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
-        out, png = Planner.run("ik_render", kin, pose, np.asarray(q0, float).copy(), np.asarray(r.q, float).copy(),
-                               min(max(gap, 0.0), C.GAP_MAX), dict(view or {}), rot_tol=rot_tol)
-        return out.public(), png
+        return Q.ik_image(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, view)
 
     def kinematics(self, q, frame: str = "arm") -> dict:
-        frame = "arm" if frame == "base" else frame      # "base": the old name of the arm frame
-        kin = self._need_kin()
-        q = np.asarray(q, float)
-        if q.shape != (N,) or not np.all(np.isfinite(q)):
-            raise ValueError(f"a configuration is {N} finite joint angles (rad)")
-        T = kin.fk(q)
-        J = kin.jacobian(q, frame)
-        return {"q": q.tolist(), "within_limits": kin.within_limits(q), "tcp": pose_public(T),
-                "frame": frame, "jacobian": J.round(9).tolist(), **kin.manipulability(J)}
+        return Q.kinematics(self.kin, q, frame)
 
     def kinematics_batch(self, qs: list, frame: str = "arm") -> list:
         """Lookups at many configurations, in the planner process (no lease; nothing moves)."""
-        kin = self._need_kin()
-        arr = np.asarray(qs, float)
-        if arr.ndim != 2 or arr.shape[1] != N or not np.all(np.isfinite(arr)):
-            raise ValueError(f"each configuration is {N} finite joint angles (rad)")
-        return Planner.run("kinematics", kin, [list(map(float, q)) for q in arr], frame="arm" if frame == "base" else frame)
+        return Q.kinematics_batch(self.kin, qs, frame)
 
     def kinematics_now(self, frame: str = "arm", which: str = "measured") -> dict:
         """which "command": the command, only while servoing (409 otherwise)."""
@@ -1505,115 +1302,18 @@ class ArmNode:
     def arm_in_base(self) -> dict:
         """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
         ``arm`` frame (cached 10 s); its shipped default if that node is unreachable. Says which."""
-        now = time.monotonic()
-        c = getattr(self, "_aib", None)
-        if c and now - c["t"] < 10.0:
-            return c["v"]
-        try:
-            from ..common.client import NodeClient
-            with NodeClient(self.description_node, timeout=1.5) as cl:
-                d = cl.get("/transform", **{"from": "base", "to": "arm"})
-            T, src = np.asarray(d["matrix"], float), f"description node ({self.description_node!r}): frame 'arm'"
-        except Exception as e:
-            import yaml
-            from importlib import resources
-            from ..description.frames import frame_T
-            f = yaml.safe_load(resources.files("robot_utils.nodes.description").joinpath("default_description.yaml").read_text())
-            T = frame_T(f["frames"]["arm"])
-            src = f"shipped default (description node unreachable: {type(e).__name__})"
-        v = {"T": T, "source": src}
-        self._aib = {"t": now, "v": v}
+        v, self._aib = Q.arm_in_base(self.description_node, self._aib)
         return v
 
     def geometry(self, q=None, pose: Optional[pin.SE3] = None, seed: str = "measured", max_rot_deg: Optional[float] = None,
                  gap_mm: Optional[float] = None) -> dict:
         """Gripper and finger geometry, and every box of the arm, as numbers in both the arm and the robot
         base frame: at the measured configuration, at ``q``, or at the IK solution of a TCP ``pose``."""
-        from ..swerve.constants import FRAME
-        from .body import GRASP_DEPTH, JAW_HEIGHT_ROOT, JAW_HEIGHT_TIP, JAW_LENGTH, JAW_THICKNESS, body
-        kin = self._need_kin()
-        r = self.reading
-        ik = None
-        if pose is not None:
-            ik = self.ik_check(pose, seed, max_rot_deg)
-            qv, which = np.asarray(ik["q"], float), "ik"
-        elif q is not None:
-            qv, which = np.asarray(q, float), "q"
-            if qv.shape != (N,) or not np.all(np.isfinite(qv)):
-                raise ValueError(f"a configuration is {N} finite joint angles (rad)")
-        else:
-            if r is None:
-                raise RequestError(503, "no reading yet")
-            qv, which = np.asarray(r.q, float), "measured"
-        if gap_mm is not None:
-            gap, gap_src = float(gap_mm) / 1000, "given"
-        elif r is not None and math.isfinite(r.g_q):
-            gap, gap_src = C.rad_to_gap(r.g_q), "measured"
-        else:
-            gap, gap_src = 0.0, "unknown (no reading): 0"
-        F = [T.homogeneous for T in kin.frames(qv)]
-        B = body(F, gap)
-        aib = self.arm_in_base()
-        Tb = aib["T"]
-        rnd = lambda v: [round(float(x), 5) for x in v]
-        pt = lambda p: {"arm": rnd(p), "base": rnd(Tb[:3, :3] @ p + Tb[:3, 3])}
-        vec = lambda v: {"arm": rnd(v), "base": rnd(Tb[:3, :3] @ v)}
-        pose2 = lambda T: {"arm": pose_public(pin.SE3(T)), "base": pose_public(pin.SE3(Tb @ T))}
-        jaws = {k: {"tip": pt(j["tip"]), "inner_face_center": pt(j["inner_face_center"]),
-                    "inner_face_root": pt(j["inner_face_root"]), "outer_face_tip": pt(j["outer_face_tip"]),
-                    "inward": vec(j["inward"])} for k, j in B["jaws"].items()}
-        boxes, allc, grip = [], [], []
-        for name, link, corners, bp in B["boxes"]:
-            cb = corners @ Tb[:3, :3].T + Tb[:3, 3]
-            allc.append(cb)
-            if link in ("end", "finger"):
-                grip.append(cb)
-            boxes.append({"name": name, "link": link, "center": pt(bp["center"]), "size_m": rnd(bp["size"]),
-                          "axes_base": [rnd(Tb[:3, :3] @ bp["axes"][:, k]) for k in range(3)]})
-        allc, grip = np.vstack(allc), np.vstack(grip)
-        h = FRAME / 2
-        ext = lambda P: {"min": rnd(P.min(0)), "max": rnd(P.max(0))}
-        past = {"front": allc[:, 0].max() - h, "rear": -h - allc[:, 0].min(), "left": allc[:, 1].max() - h,
-                "right": -h - allc[:, 1].min()}
-        return {
-            "which": which, "q": rnd(qv), "within_limits": kin.within_limits(qv), "ik": ik,
-            "gap_mm": round(B["gap"] * 1000, 2), "gap_source": gap_src,
-            "frames": {
-                "arm_in_base": {"matrix": [rnd(row) for row in Tb], "xyz": rnd(Tb[:3, 3]), "source": aib["source"]},
-                "note": "Every point is given in both frames: p_base = R p_arm + t (arm_in_base). The arm frame is "
-                        "the arm's URDF base_link: the underside of its mount plate on joint 1's axis, axes parallel to "
-                        "the robot base. Motion commands (/servo, /track, /chunk, /ik) take TCP poses in the arm frame.",
-            },
-            "tcp": {**pose2(B["tcp"]), "offset_in_end_link": kin.tcp_offset,
-                    "note": "the point motion commands target, near the wrist (tcp_offset behind the fingertips)"},
-            "fingertips": {"left": pt(B["jaws"]["left"]["tip"]), "right": pt(B["jaws"]["right"]["tip"]),
-                           "center": pose2(B["end_link"]),
-                           "note": "left/right: each jaw's tip on its inner (gripping) face, mid height; center: end_link, "
-                                   "midway between them. end_link's x axis is the approach direction (out between the "
-                                   "jaws), y the jaw travel (left jaw at +y), z the jaws' height"},
-            "axes": {"approach": vec(B["approach"]), "jaw_travel": vec(B["jaw_axis"]), "up": vec(B["up"])},
-            "jaws": jaws,
-            "jaw_shape_m": {"grasp_depth": round(GRASP_DEPTH, 4), "length": round(JAW_LENGTH, 4),
-                            "thickness": round(JAW_THICKNESS, 4), "height_root": JAW_HEIGHT_ROOT, "height_tip": JAW_HEIGHT_TIP,
-                            "note": "approximate (from the meshes). Each jaw is a prong from its tip back along -approach "
-                                    "to inner_face_root, where the jaw carriage begins: grasp_depth is how far an object "
-                                    "can sit between the jaws, measured from the tips. The inner faces grip; each jaw is "
-                                    "`thickness` thick outward from its inner face and tapers in height from root to tip"},
-            "extent_base": {"arm": ext(allc), "gripper": ext(grip),
-                            "past_footprint_m": {k: round(float(v), 4) for k, v in past.items()},
-                            "note": f"axis-aligned bounds of every box in the robot base frame; past_footprint_m: how far "
-                                    f"the arm reaches beyond each side of the {FRAME:.4f} m square frame (negative: inside)"},
-            "boxes": boxes,
-        }
+        return Q.geometry(self.kin, self.reading, self.ik_check, self.arm_in_base, q, pose, seed, max_rot_deg, gap_mm)
 
     def links(self, q=None) -> list:
         """The joint frames, end_link and tcp at ``q`` (default measured), for drawing."""
-        kin = self._need_kin()
-        if q is None:
-            if self.reading is None:
-                raise RequestError(503, "no reading yet")
-            q = self.reading.q
-        return [pose_public(T) for T in kin.frames(q)]
+        return Q.links(self.kin, self.reading, q)
 
     def gripper_state(self) -> dict:
         r, g = self.reading, self.gripper
@@ -1646,22 +1346,13 @@ class ArmNode:
         last = self.hub.recent(1, "tick")
         if not len(last):
             raise RequestError(503, "no tick yet")
-        row = last[0]
-        g = lambda n: None if not math.isfinite(row[COL[n]]) else float(row[COL[n]])   # noqa: E731
-        return {"servo": bool(row[COL["servo"]] == 1.0),
-                "e_mot": [g(f"j{i}_e_mot") for i in range(1, N + 1)],
-                "tau_est": [g(f"j{i}_tau_est") for i in range(1, N + 1)],
-                "tau_g": [g(f"j{i}_tau_g") for i in range(1, N + 1)],
-                "err_pos_m": g("err_pos"), "err_rot_rad": g("err_rot"),
-                "goal_err_pos_m": g("goal_err_pos"), "goal_err_rot_rad": g("goal_err_rot"),
-                "limited": bool(row[COL["limited"]] == 1.0), "t": float(row[0])}
+        return tracking_of_row(last[0])
 
     def state_dict(self) -> dict:
         info, e = self.lease.info, self.estop.info
         now = self.clock()
         last = self.hub.recent(1, "tick")
-        latest = ({k: (v if math.isfinite(v) else None) for k, v in zip(FIELDS, last[0].tolist())}
-                  if len(last) else None)
+        latest = row_dict(last[0]) if len(last) else None
         recent = self.hub.recent(101, "tick")
         rate = ((len(recent) - 1) / (recent[-1, 0] - recent[0, 0])
                 if len(recent) > 10 and recent[-1, 0] > recent[0, 0] else None)

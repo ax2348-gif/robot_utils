@@ -9,18 +9,9 @@ import httpx
 import pytest
 import uvicorn
 
+from helpers import wait_for
 from robot_utils.nodes.common.lease import RequestError
 from robot_utils.nodes.common.locks import LockStore
-
-
-def wait_for(pred, timeout=5.0, interval=0.02):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        v = pred()
-        if v:
-            return v
-        time.sleep(interval)
-    raise AssertionError("condition not met in time")
 
 
 # -- the store --------------------------------------------------------------------------------------

@@ -190,7 +190,7 @@ class EStopIn(BaseModel):
 
 STREAM_DOC = ("Binary records as every node's /stream (docs/nodes.md): a `schema` record then float64 `rows`. "
               "`channel=tick` (default): one row per control tick, columns as GET /fields. `channel=jacobian`: "
-              "t_tick and the 36 entries of the TCP Jacobian (row-major, base-frame axes) at the measured pose.")
+              "t_tick and the 36 entries of the TCP Jacobian (row-major, arm-frame axes) at the measured pose.")
 
 
 class JamIn(BaseModel):
@@ -230,7 +230,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
             f"{TWIST_TIMEOUT} s, the pose holds), `POST /servo` (planned move, reports reached), `POST /chunk`, "
             "`POST /home`, `POST /gripper`. "
             f"The lease lapses after {LEASE_HEARTBEAT} s without a renew or command, which disables. "
-            "No joint commands exist by design; joint positions are readings, named poses and lookup inputs only."),
+            "No joint-space commands yet: joint positions are readings, named poses and lookup inputs only; a joint-space fast path is planned (docs/plans/fast_path_v1.md)."),
         version="0.1.0", lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 
@@ -379,7 +379,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/track", response_model=M.TrackOut, response_model_exclude_unset=True, tags=["motion"], summary="Stream a TCP pose (+ twist feedforward, gripper); 200 with ok=false if IK fails")
     async def track(body: TrackIn, token: LeaseToken = None):
-        """Low level and rapid: IK from the previous goal; on failure the previous goal stays and
+        """Low level and rapid: IK seeded from the measured pose; on failure the previous goal stays and
         `ok` is false (with the residuals). The pose holds until replaced; the twist feeds forward
         for 0.25 s. There is no "reached": watch the streamed errors."""
         g = body.gripper.model_dump() if body.gripper else None
@@ -466,7 +466,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     # -- settings ---------------------------------------------------------------------------------------
 
-    @app.post("/profile", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="Switch the gain profile (holder; only while disabled)")
+    @app.post("/profile", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="Switch the gain profile (holder; only while nothing is servoing)")
     async def profile(body: ProfileIn, token: LeaseToken = None):
         return node.set_profile(token, body.name)
 
@@ -474,7 +474,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def get_tcp():
         return {"offset": None if node.kin is None else node.kin.tcp_offset}
 
-    @app.post("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="Set the TCP offset (holder; only while disabled)")
+    @app.post("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="Set the TCP offset (holder; only while the arm is not servoing)")
     async def set_tcp(body: TcpIn, token: LeaseToken = None):
         return node.set_tcp(token, body.offset)
 

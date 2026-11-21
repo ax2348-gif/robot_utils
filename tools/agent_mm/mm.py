@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tiny mobile-manipulation helper: logs every robot call and saves every image.
 
-  mm.py nav  METHOD PATH [JSON]     call agent_nav; downloads images it references into img/
+  mm.py nav  METHOD PATH [JSON]     call agent_interface; downloads images it references into img/
   mm.py arm  METHOD PATH [JSON]     call the arm node (adds the lease token if held)
   mm.py keeper                      hold the arm lease (renew every 1 s); run in background
   mm.py tcp                         measured TCP pose + gripper + last motion
@@ -23,7 +23,7 @@ GOAL = os.path.join(RUN, ".last_goal.json")
 
 
 def call(node, method, path, body=None, log=True):
-    url = f"{HOST}/{'agent_nav' if node == 'nav' else node}/{path.lstrip('/')}"
+    url = f"{HOST}/{'agent_interface' if node == 'nav' else node}/{path.lstrip('/')}"
     data = json.dumps(body).encode() if body is not None else (b"{}" if method.upper() == "POST" else None)
     req = urllib.request.Request(url, data=data, method=method.upper())
     req.add_header("content-type", "application/json")
@@ -62,7 +62,7 @@ def fetch_images(resp):
     for p in dict.fromkeys(out):
         dst = os.path.join(IMG, p[len("images/"):].replace("/", "_"))
         try:
-            with urllib.request.urlopen(f"{HOST}/agent_nav/{p}", timeout=30) as r:
+            with urllib.request.urlopen(f"{HOST}/agent_interface/{p}", timeout=30) as r:
                 open(dst, "wb").write(r.read())
             saved.append(dst)
         except Exception as e:

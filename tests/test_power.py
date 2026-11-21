@@ -32,14 +32,6 @@ def no_system_power_off(monkeypatch):
     monkeypatch.setattr(node_mod, "estop_robot", lambda *a, **k: (_ for _ in ()).throw(AssertionError("real e-stop")))
 
 
-class Clock:
-    def __init__(self, t=1000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
-
-
 class Recorder:
     """Injected e-stop and power-off: record the order they ran in; power-off never touches anything."""
 
@@ -717,6 +709,7 @@ def test_node_low_voltage_fires_while_charger_bit_set(tmp_path):
 
 from robot_utils.nodes.power import powerloss as pl_mod  # noqa: E402
 from robot_utils.nodes.power.powerloss import PowerLoss  # noqa: E402
+from helpers import Clock
 
 W0 = 1.8e9
 LV_ON = {"enabled": True, "volts": 13.2, "hold_s": 10.0, "cell_volts": 3.15}

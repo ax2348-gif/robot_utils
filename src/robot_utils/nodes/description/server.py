@@ -149,7 +149,7 @@ class NominalPose(BaseModel):
 
 class Distortion(BaseModel):
     """Lens distortion coefficients as the camera SDK reports them (unitless; OpenCV's rational model, as
-    agent_nav projects with it: radial factor (1 + k1 r² + k2 r⁴ + k3 r⁶) / (1 + k4 r² + k5 r⁴ + k6 r⁶) on the
+    agent_interface projects with it: radial factor (1 + k1 r² + k2 r⁴ + k3 r⁶) / (1 + k4 r² + k5 r⁴ + k6 r⁶) on the
     normalised image point, plus the tangential p1, p2). Keys the SDK does not give are absent."""
     k1: Optional[Number] = Field(None, description="Radial numerator, r² term (k1).")
     k2: Optional[Number] = Field(None, description="Radial numerator, r⁴ term (k2).")

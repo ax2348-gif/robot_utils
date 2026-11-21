@@ -22,17 +22,12 @@ from robot_utils.nodes.orbbec.models import Settings  # noqa: E402
 from robot_utils.nodes.orbbec.owner import Owner  # noqa: E402
 from robot_utils.nodes.orbbec.protocol import IMU_FIELDS  # noqa: E402
 from robot_utils.nodes.orbbec.server import create_app  # noqa: E402
+from helpers import waiter
 
 NON_JSON = {"/events", "/stream", "/frame/{name}", "/snapshot/{name}", "/mjpeg/{name}", "/imu/stream"}
 
 
-def wait_for(predicate, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(10.0, 0.02)
 
 
 def _nan_to_null(x):

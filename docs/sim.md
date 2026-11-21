@@ -73,11 +73,10 @@ bytes of payload`. The client sends `{"op": ..., ...args}`, the world answers `{
 
 - `arm.WorldArmBus(sim, limits)`: an `ArmBus` (`ArmNode(lambda: WorldArmBus("sim", limits=...))`). Pipelined like
   `HardwareBus`: each `read` returns the world's state as of the previous read's request and sends the next;
-  the first read waits for its own. The driver's setpoint check as rebot_ctl. **Measurement times** for the
-  `Reading.t_meas` / `t_meas_mot` fields the arm refactor adds: every reading carries them as attributes and
-  `measurement_times()` returns them; `t_meas` = when the requests that gave `q` were sent (the previous read),
-  `t_meas_mot` = when the world answered the last MIT frames (the motor-side feedback), else the read reply.
-  Wiring them into the row after the merge is a one-liner in the node.
+  the first read waits for its own. The driver's setpoint check as rebot_ctl. **Measurement times** as the hardware's, in `Reading.t_meas` / `t_meas_mot` (the arm row's
+  last columns): `t_meas` = when the requests that gave `q` were sent (the previous read, so `t_tick - t_meas`
+  is about one tick, tested), `t_meas_mot` = when the world answered the last MIT frames (the motor-side
+  feedback), else the read reply.
 - `swerve.start_world_sim(sim)` → `(sparks, interface, coupler)`: eight sparkcan `SimulatedSpark`s configured as
   `setup_sparks` would, on a virtual CAN bus, whose motion is the world's (`SwerveNode(interface)`). The steering
   SPARK turns its POSITION setpoint (absolute encoder, 0..1) into a module angle and reports the world's angle as

@@ -50,7 +50,6 @@ NODES = [  # (instance name, module, extra args): everything in simulation
     ("description", "robot_utils.nodes.description", []),
     ("pose_servo", "robot_utils.nodes.pose_servo", []),
     ("3d_perception", "robot_utils.nodes.perception3d", ["--allow-nominal"]),
-    ("agent_nav", "robot_utils.nodes.agent_nav", ["--no-require-imu"]),
     ("agent_interface", "robot_utils.nodes.agent_interface", ["--no-require-imu"]),
 ]
 LOCAL = {"127.0.0.1", "localhost", "::1"}
