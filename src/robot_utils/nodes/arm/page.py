@@ -510,9 +510,21 @@ function render(){
   modeLine(s);
 }
 
+// feedback refreshes per second, from the change in the cumulative count between /events messages
+// (client arrival times, over at least 1 s; the count restarts with the node)
+let refBase = null, refRate = null;
+function refreshRate(fr){
+  const n = fr && fin(fr.refreshes) ? fr.refreshes : null, now = performance.now();
+  if (n === null){ refBase = null; refRate = null; return; }
+  const dt = refBase ? (now - refBase.t) / 1000 : 0;
+  if (!refBase || n < refBase.n || dt > 5){ refBase = {n, t: now}; refRate = null; return; }   // first, restarted, or after a gap
+  if (dt >= 1){ refRate = (n - refBase.n) / dt; refBase = {n, t: now}; }
+}
+
 let wasServo = false;
 RU.sse("events", x => {
   st = x;
+  refreshRate(st.feedback_refresh);
   // the arm stopped servoing (float, disable, e-stop, fault, stow): it may sink or be moved by hand, so
   // a held control restarts from the measured pose
   if ((wasServo && !st.servo) || !ready()) jp = null;
@@ -581,6 +593,15 @@ RU.rows("stream?max_hz=30", d => {
 // the servo form's target, drawn while edited
 setInterval(() => { const t = sEdited ? servoTarget() : null; view.update({target: t ? {p: t.pos, R: rpyToR(...t.rpy)} : null}); }, 200);
 
+function feedbackLine(fr){
+  if (!fr) return "–";
+  const mode = fr.skip === true ? "2 pairs/motor (refresh skipped while MIT replies arrive)"
+    : fr.skip === false ? "3 pairs/motor (motorbridge without feedback age)" : "–";
+  const by = Object.entries(fr.fallbacks_by_motor || {}).filter(([, c]) => c > 0).map(([m, c]) => `${m} ${c}`).join(", ");
+  const fb = fin(fr.fallbacks) && fr.fallbacks > 0 ? `<span class="ru-warn">fallbacks ${fr.fallbacks}${by ? ` (${by})` : ""}</span>`
+    : `fallbacks ${fin(fr.fallbacks) ? fr.fallbacks : "–"}`;
+  return `${mode}; refreshes ${refRate === null ? "–" : f(refRate, 0)}/s; ${fb}`;
+}
 function kv(){
   const s = st || {}, r = last || {};
   const age = lastAt ? (performance.now() - lastAt) / 1000 : null;
@@ -592,6 +613,7 @@ function kv(){
     ["TCP", `${f(r.x * 1000, 1)}, ${f(r.y * 1000, 1)}, ${f(r.z * 1000, 1)} mm`],
     ["gains", `${s.profile || "–"}; TCP offset ${s.tcp_offset ? s.tcp_offset.map(v => f(v * 1000, 0)).join(", ") + " mm" : "–"}`],
     ["loop", `${f(s.loop_hz, 1)} Hz, tick ${f(r.tick_dt * 1000, 1)} ms, overruns ${fin(s.overruns) ? s.overruns : "–"}`],
+    ["feedback", feedbackLine(s.feedback_refresh)],
     ["stream", age === null ? "waiting" : age > 1 ? `stopped ${f(age, 0)} s ago` : "live, 30 rows/s"],
   ];
   $("#kv").innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");

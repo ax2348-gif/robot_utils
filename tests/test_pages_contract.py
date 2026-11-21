@@ -126,6 +126,13 @@ def test_arm_page_jog_stops_on_release_blur_and_hide():
     assert has(r"else \{ jp = null;", html), "a refused track target must not be integrated from"
 
 
+def test_arm_page_shows_feedback_refresh():
+    html = PAGES["arm"]()
+    assert '["feedback", feedbackLine(s.feedback_refresh)]' in html
+    # the rate comes from the /events state the page already receives, not a new request
+    assert "refreshRate(st.feedback_refresh);" in html
+
+
 @pytest.mark.parametrize("page", ["swerve_teleop_tool", "remote_teleop_tool"])
 def test_teleop_tools_stop_on_release_cancel_and_leaving(page):
     html = PAGES[page]()
