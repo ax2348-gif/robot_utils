@@ -2,7 +2,7 @@
 JAC_FIELDS) and the pure functions that build a row and read one back.
 
 The row schema is append-only: recordings and pages read columns by name, but old recordings were
-written in this order, so a new column goes at the end (``_JAM`` was appended last for that reason).
+written in this order, so a new column goes at the end (``_JAM``, then ``_MEAS``, were appended for that reason).
 """
 from __future__ import annotations
 
@@ -34,8 +34,10 @@ _GRIP = [("g_gap", "m"), ("g_gap_cmd", "m"), ("g_gap_goal", "m"), ("g_qd", "rad/
          ("g_tau_est", "Nm"), ("g_force", "N"), ("g_force_demand", "N"), ("g_tau_ff", "Nm"), ("g_force_max", "N"), ("g_limiting", "bool"),
          ("g_status", "enum")]
 _MOTION = [("motion_id", "id"), ("phase", "enum"), ("progress", "")]
-_JAM = [("jam", "bool")]   # appended last: existing columns keep their positions
-_ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION + _JAM)
+_JAM = [("jam", "bool")]   # appended: existing columns keep their positions
+_MEAS = [("t_meas", "s"), ("t_meas_mot", "s")]   # appended last
+_ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION + _JAM
+        + _MEAS)
 FIELDS = [n for n, _ in _ALL]
 UNITS = [u for _, u in _ALL]
 COL = {n: i for i, n in enumerate(FIELDS)}
@@ -61,7 +63,9 @@ FIELD_DOC = {
     "goal_err_pos / rot": "commanded TCP vs the goal of the source",
     "w / w_lin / sigma_min": "manipulability sqrt(det(J J^T)) of the 6x6 TCP Jacobian, of its translational rows, and its smallest singular value, at the measured pose",
     "limited": "the joint speed limit held q_cmd back this tick (the step limit)",
-    "read_age": "age of the reading this tick used: 0 normally; > 0 when replies were late (still awaited, one tick) or missed and the latest complete reading was kept (fault beyond 50 ms with the motors on)",
+    "read_age": "time since the reading this tick used was collected: 0 when this tick's read completed (its data is still older than t_tick: see t_meas, t_meas_mot); > 0 when replies were late (still awaited, one tick) or missed and the latest complete reading, from an earlier tick, was kept (fault beyond 50 ms with the motors on)",
+    "t_meas": "when the requests whose replies gave this row's output encoders (q, g_gap) were sent, on t_tick's clock: the bus is pipelined, so about one tick before t_tick (two when replies were late and an earlier reading was kept); a lower bound of when q was measured. Simulated bus: the sample time (no pipeline delay; in real time it trails t_tick by the read's own duration). NaN: unknown",
+    "t_meas_mot": "arrival of the motor feedback frames behind q_mot / qd / tau (answers to the previous tick's MIT frames, or a refresh), on t_tick's clock: the oldest across joints 1-6, so every joint's feedback is at least this new; usually newer than t_meas. Simulated bus: the sample time. NaN: unknown (a motorbridge without the feedback's age)",
     "read_misses": "ticks with missed replies (none within two ticks) since the node started (per motor in /state)",
     "twist_age": "s since the track twist feedforward was written (NaN if none)",
     "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
@@ -126,6 +130,7 @@ def tick_row(now: float, base: list, r, kin, profile, q_cmd: Optional[np.ndarray
     else:
         row[COL["phase"]] = 0
     row[COL["jam"]] = float(jam)
+    row[COL["t_meas"]], row[COL["t_meas_mot"]] = r.t_meas, r.t_meas_mot
     return row, J
 
 
