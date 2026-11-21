@@ -1,0 +1,385 @@
+"""The WBC's cost and constraint spec: the node's caps and gains (``Config``) and the hint structure
+(docs/plans/wbc_v1.md "Hints"), shared by every controller (the QP now, an MPC later).
+
+Hints are session defaults (``POST /hints``), overridable per command (a ``base`` field on a target or chunk
+datagram); every numeric hint is bounded by the caps. ``parse_hints`` validates a JSON hint document into
+``Hints``; ``merge`` applies an override (the same keys, any subset) over the hints in force.
+"""
+from __future__ import annotations
+
+import copy
+import math
+from dataclasses import asdict, dataclass, field, fields, replace
+from typing import Optional
+
+import numpy as np
+
+MODES = ("free", "locked", "hint", "commanded")
+
+# Swerve hard limits (pose_servo's planner / the swerve node), the ceiling of every cap here
+WHEEL_SPEED_HARD = 3.0       # m/s, each wheel (pose_servo.planner.WHEEL_SPEED_MAX)
+BASE_SPEED_HARD = 2.0        # m/s (swerve HARD_MAX_SPEED)
+BASE_OMEGA_HARD = 4.0        # rad/s (swerve HARD_MAX_OMEGA)
+
+
+@dataclass(frozen=True)
+class Config:
+    """Caps, gains and timeouts (``--config`` YAML keys; the defaults below)."""
+    rate_hz: float = 100.0
+    # base caps (the swerve's soft limits are set to max_speed / max_omega at enable)
+    max_speed: float = 0.3          # m/s, |(vx, vy)| (inscribed octagon)
+    max_omega: float = 0.8          # rad/s
+    max_accel: float = 0.5          # m/s², |twist rate| linear (octagon)
+    max_alpha: float = 1.5          # rad/s²
+    wheel_speed: float = 0.4        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
+    # base deadband with hysteresis: a stopped base starts only for a desired twist above *_on, a moving one
+    # stops (braking within max_accel) below *_off
+    deadband_lin_on: float = 0.02   # m/s
+    deadband_lin_off: float = 0.008
+    deadband_w_on: float = 0.06     # rad/s
+    deadband_w_off: float = 0.025
+    # arm caps (within the arm node's soft limits)
+    joint_vel: tuple = (1.0, 1.0, 1.0, 2.0, 2.0, 2.0)          # rad/s
+    joint_acc: tuple = (6.0, 6.0, 6.0, 15.0, 15.0, 15.0)       # rad/s²
+    limit_gain: float = 0.5         # joint position velocity damper: a step covers at most this share of the
+                                    # distance to a limit (pink ConfigurationLimit)
+    # yielding at the arm's limits (constraints, not costs: the base hint stops at the boundary)
+    reach_fraction: float = 0.88    # shoulder (joint 1 axis point) to EE target at most this share of the nominal
+    reach: float = 0.0              # m, the nominal shoulder-to-TCP reach (0 = from the model, ~0.68 m)
+    reach_influence: float = 0.80   # the reach damper acts beyond this share of the nominal reach
+    xi_reach: float = 0.3           # m/s, the reach damper's gain (approach speed at the influence distance)
+    w_min: float = 0.0008           # arm-only manipulability (Yoshikawa) floor (~a tenth of the home pose's 0.005)
+    w_influence: float = 0.002      # its damper acts below this
+    xi_manip: float = 2.0           # 1/s: dw/dt >= -xi_manip w_influence (w - w_min) / (w_influence - w_min)
+    lm_singular: float = 0.02       # adaptive damping on the arm, x (1 - w / w_influence)^2 below w_influence
+    resync: float = 0.12            # rad: |q_meas - q_cmd| beyond this (any joint) resyncs the integration
+    # tracking
+    k_pos: float = 4.0              # 1/s, P on the EE position error
+    k_rot: float = 4.0              # 1/s, P on the EE orientation error
+    max_err_pos: float = 0.25       # m: larger position errors are clipped (velocity limits do the rest)
+    max_err_rot: float = 1.0        # rad
+    w_position: float = 1.0         # default EE task weights (hints override)
+    w_orientation: float = 0.3
+    lm_damping: float = 1e-3        # Levenberg-Marquardt damping on the EE task
+    damping: float = 1e-6           # Tikhonov regularisation on everything
+    w_arm: float = 2e-3             # arm joint regularisation (per rad²)
+    # base cost scheduled by the EE's distance to its target: w_base_far beyond far_dist, w_base_near within
+    # near_dist (geometric in between); times hints.arm_vs_base
+    w_base_near: float = 1.0
+    w_base_far: float = 1e-3
+    near_dist: float = 0.05         # m
+    far_dist: float = 0.40          # m
+    w_hint_yaw: float = 1.0         # stage 2 (hints): yaw velocity cost under a position-only base hint
+    base_yaw_radius: float = 0.3    # m: yaw is weighted like a point this far from the centre
+    posture_weight: float = 1e-4    # default (hints override); 2e-3 biased the EE by ~3 mm
+    k_posture: float = 1.0          # 1/s
+    tie_speed: float = 0.05         # m/s: posture and manipulability act fully at this desired EE speed, scaled
+                                    # down below it (0 when the task is satisfied: no self-motion)
+    w_manip: float = 2e-4           # arm-only manipulability gradient
+    k_heading: float = 2.0          # 1/s, base heading hint
+    k_base_pose: float = 2.0        # 1/s, base pose hint / commanded pose
+    # inputs
+    ff_timeout: float = 0.1         # s: past this the twist feedforward fades (to 0 at 2 x) and the pose holds
+    hold_timeout: float = 0.25      # s without a datagram from the client (≈ 2.5 x its period): base stops, arm holds
+    target_t_window: float = 1.0    # s: a target / chunk start must lie within now ± this (Pi clock)
+    chunk_max_len: int = 500
+    chunk_max_horizon: float = 10.0  # s
+    blend_tau: float = 0.15         # s, the chunk cross-fade's time constant
+    max_ttl: float = 1.0            # s, commanded base velocity ttl cap
+    # estimator
+    require_imu: bool = False
+    est_stale: float = 0.2          # s without an estimator row -> hold
+    est_pose_stale: float = 0.3     # s: a pose older than this -> hold
+    max_predict: float = 0.1        # s, pose extrapolation cap
+    jump_pos: float = 0.15          # m between consecutive poses: a jump (targets aborted)
+    jump_theta: float = 0.30        # rad
+    lease_heartbeat: float = 1.0    # s, the WBC's own client lease
+
+    @property
+    def dt(self) -> float:
+        return 1.0 / self.rate_hz
+
+
+def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -> Config:
+    changes = dict(changes or {})
+    names = {f.name for f in fields(Config)}
+    unknown = set(changes) - names
+    if unknown:
+        raise ValueError(f"unknown config keys: {sorted(unknown)}")
+    for k in ("joint_vel", "joint_acc"):
+        if k in changes:
+            changes[k] = tuple(float(v) for v in changes[k])
+    c = replace(base or Config(), **changes)
+    pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
+    for k in pos:
+        v = getattr(c, k)
+        if not (isinstance(v, (int, float)) and math.isfinite(v) and v > 0):
+            raise ValueError(f"{k} must be a positive finite number")
+    if not (math.isfinite(c.reach) and c.reach >= 0):
+        raise ValueError("reach must be >= 0 (0 = from the model)")
+    if not (0 < c.reach_influence < c.reach_fraction <= 1.0) or not (0 < c.w_min < c.w_influence):
+        raise ValueError("need 0 < reach_influence < reach_fraction <= 1 and 0 < w_min < w_influence")
+    if c.max_speed > BASE_SPEED_HARD or c.max_omega > BASE_OMEGA_HARD or c.wheel_speed > WHEEL_SPEED_HARD:
+        raise ValueError(f"base caps beyond the swerve's hard limits ({BASE_SPEED_HARD} m/s, {BASE_OMEGA_HARD} rad/s, "
+                         f"wheels {WHEEL_SPEED_HARD} m/s)")
+    if c.deadband_lin_off >= c.deadband_lin_on or c.deadband_w_off >= c.deadband_w_on:
+        raise ValueError("deadband *_off must be below *_on (the hysteresis)")
+    if c.hold_timeout <= c.ff_timeout:
+        raise ValueError("hold_timeout must exceed ff_timeout")
+    return c
+
+
+# -- hints -------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PoseHint:
+    x: float
+    y: float
+    weight: float = 1.0
+    tol: float = 0.05
+
+
+@dataclass(frozen=True)
+class HeadingHint:
+    yaw: Optional[float] = None       # world rad
+    face: Optional[str] = None        # an EE name: turn so its target lies along the arm's mount x axis
+    point: Optional[tuple] = None     # (x, y) world: face that point
+    weight: float = 0.5
+    tol: float = 0.05
+
+
+@dataclass(frozen=True)
+class VelocityHint:
+    vx: float = 0.0
+    vy: float = 0.0
+    omega: float = 0.0
+    frame: str = "base"
+    ttl: float = 0.3
+
+
+@dataclass(frozen=True)
+class BasePoseCmd:
+    x: float
+    y: float
+    yaw: float
+
+
+@dataclass(frozen=True)
+class BaseLimits:
+    max_speed: Optional[float] = None
+    max_omega: Optional[float] = None
+    max_accel: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class EEHint:
+    position: float = 1.0
+    orientation: float = 0.3
+    orientation_mask: tuple = (1.0, 1.0, 1.0)
+    posture: object = "home"          # a named posture or a joint vector (rad)
+    posture_weight: float = 1e-4
+
+
+@dataclass(frozen=True)
+class Hints:
+    mode: str = "free"
+    target_pose: Optional[PoseHint] = None
+    target_heading: Optional[HeadingHint] = None
+    velocity: Optional[VelocityHint] = None
+    pose: Optional[BasePoseCmd] = None
+    limits: BaseLimits = BaseLimits()
+    arm_vs_base: float = 1.0
+    ees: dict = field(default_factory=dict)        # name -> EEHint
+
+    def ee(self, name: str, cfg: Config) -> EEHint:
+        return self.ees.get(name) or EEHint(cfg.w_position, cfg.w_orientation, (1.0, 1.0, 1.0), "home",
+                                            cfg.posture_weight)
+
+
+def _num(d: dict, k: str, lo: float, hi: float, default=None, path: str = "") -> Optional[float]:
+    v = d.get(k, default)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f"{path}{k} must be a finite number")
+    if not lo <= v <= hi:
+        raise ValueError(f"{path}{k} must be within [{lo:g}, {hi:g}]")
+    return float(v)
+
+
+def _only(d, keys, path):
+    if not isinstance(d, dict):
+        raise ValueError(f"{path or 'hints'} must be an object")
+    bad = set(d) - set(keys)
+    if bad:
+        raise ValueError(f"{path}: unknown keys {sorted(bad)}")
+
+
+def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hints] = None) -> dict:
+    """The ``base`` part of a hint document (or a per-command override) -> Hints field values.
+    ``to_world(x, y, yaw) -> (x, y, yaw)`` converts base-frame poses (None: base frames refused)."""
+    _only(b, ("mode", "target", "velocity", "pose", "limits", "arm_vs_base"), "base")
+    out: dict = {}
+    if "mode" in b:
+        if b["mode"] not in MODES:
+            raise ValueError(f"base.mode must be one of {', '.join(MODES)}")
+        out["mode"] = b["mode"]
+
+    def world(frame, x, y, yaw, path):
+        if frame == "world":
+            return x, y, yaw
+        if frame == "base":
+            if to_world is None:
+                raise ValueError(f"{path}.frame base needs the estimator pose")
+            return to_world(x, y, yaw)
+        raise ValueError(f"{path}.frame must be world or base")
+
+    if "target" in b:
+        t = b["target"] or {}
+        _only(t, ("pose", "heading"), "base.target")
+        out["target_pose"] = out["target_heading"] = None
+        if t.get("pose") is not None:
+            p = t["pose"]
+            _only(p, ("x", "y", "frame", "weight", "tol"), "base.target.pose")
+            x, y, _ = world(p.get("frame", "world"), _num(p, "x", -1e3, 1e3, path="base.target.pose."),
+                            _num(p, "y", -1e3, 1e3, path="base.target.pose."), 0.0, "base.target.pose")
+            if x is None or y is None:
+                raise ValueError("base.target.pose needs x and y")
+            out["target_pose"] = PoseHint(x, y, _num(p, "weight", 0, 100, 1.0, "base.target.pose."),
+                                          _num(p, "tol", 0, 10, 0.05, "base.target.pose."))
+        if t.get("heading") is not None:
+            h = t["heading"]
+            _only(h, ("yaw", "face", "frame", "weight", "tol"), "base.target.heading")
+            w = _num(h, "weight", 0, 100, 0.5, "base.target.heading.")
+            tol = _num(h, "tol", 0, math.pi, 0.05, "base.target.heading.")
+            face = h.get("face")
+            if face is not None:
+                if isinstance(face, str):
+                    if face not in ee_names:
+                        raise ValueError(f"base.target.heading.face: no end effector {face!r} "
+                                         f"(have {', '.join(ee_names)})")
+                    out["target_heading"] = HeadingHint(face=face, weight=w, tol=tol)
+                elif isinstance(face, (list, tuple)) and len(face) == 2:
+                    fx, fy = (float(v) for v in face)
+                    fx, fy, _ = world(h.get("frame", "world"), fx, fy, 0.0, "base.target.heading")
+                    out["target_heading"] = HeadingHint(point=(fx, fy), weight=w, tol=tol)
+                else:
+                    raise ValueError("base.target.heading.face must be an end effector name or a point [x, y]")
+            else:
+                yaw = _num(h, "yaw", -1e3, 1e3, path="base.target.heading.")
+                if yaw is None:
+                    raise ValueError("base.target.heading needs yaw or face")
+                _, _, yaw = world(h.get("frame", "world"), 0.0, 0.0, yaw, "base.target.heading")
+                out["target_heading"] = HeadingHint(yaw=yaw, weight=w, tol=tol)
+    if "velocity" in b:
+        v = b["velocity"]
+        if v is None:
+            out["velocity"] = None
+        else:
+            _only(v, ("vx", "vy", "omega", "frame", "ttl"), "base.velocity")
+            fr = v.get("frame", "base")
+            if fr not in ("base", "world"):
+                raise ValueError("base.velocity.frame must be base or world")
+            out["velocity"] = VelocityHint(_num(v, "vx", -BASE_SPEED_HARD, BASE_SPEED_HARD, 0.0, "base.velocity."),
+                                           _num(v, "vy", -BASE_SPEED_HARD, BASE_SPEED_HARD, 0.0, "base.velocity."),
+                                           _num(v, "omega", -BASE_OMEGA_HARD, BASE_OMEGA_HARD, 0.0, "base.velocity."),
+                                           fr, _num(v, "ttl", 0.0, cfg.max_ttl, 0.3, "base.velocity."))
+    if "pose" in b:
+        p = b["pose"]
+        if p is None:
+            out["pose"] = None
+        else:
+            _only(p, ("x", "y", "yaw", "frame"), "base.pose")
+            x, y, yaw = (_num(p, k, -1e3, 1e3, 0.0 if k == "yaw" else None, "base.pose.") for k in ("x", "y", "yaw"))
+            if x is None or y is None:
+                raise ValueError("base.pose needs x and y")
+            out["pose"] = BasePoseCmd(*world(p.get("frame", "world"), x, y, yaw, "base.pose"))
+    if "limits" in b:
+        lim = b["limits"] or {}
+        _only(lim, ("max_speed", "max_omega", "max_accel"), "base.limits")
+        out["limits"] = BaseLimits(_num(lim, "max_speed", 0, cfg.max_speed, path="base.limits."),
+                                   _num(lim, "max_omega", 0, cfg.max_omega, path="base.limits."),
+                                   _num(lim, "max_accel", 0, cfg.max_accel, path="base.limits."))
+    if "arm_vs_base" in b:
+        out["arm_vs_base"] = _num(b, "arm_vs_base", 0.01, 100.0, path="base.")
+    return out
+
+
+def parse_ee(name: str, e: dict, cfg: Config, postures: dict, n_joints: int) -> EEHint:
+    _only(e, ("weights", "orientation_mask", "posture", "posture_weight"), f"ees.{name}")
+    w = e.get("weights") or {}
+    _only(w, ("position", "orientation"), f"ees.{name}.weights")
+    mask = e.get("orientation_mask", [1, 1, 1])
+    if not (isinstance(mask, (list, tuple)) and len(mask) == 3 and all(isinstance(m, (int, float)) and 0 <= m <= 1
+                                                                       for m in mask)):
+        raise ValueError(f"ees.{name}.orientation_mask must be three numbers in [0, 1]")
+    posture = e.get("posture", "home")
+    if isinstance(posture, str):
+        if posture not in postures:
+            raise ValueError(f"ees.{name}.posture: unknown named posture {posture!r} (have {', '.join(postures)})")
+    else:
+        v = np.asarray(posture, float)
+        if v.shape != (n_joints,) or not np.all(np.isfinite(v)):
+            raise ValueError(f"ees.{name}.posture must be a name or {n_joints} joint angles (rad)")
+        posture = tuple(float(x) for x in v)
+    return EEHint(_num(w, "position", 0, 100, cfg.w_position, f"ees.{name}.weights."),
+                  _num(w, "orientation", 0, 100, cfg.w_orientation, f"ees.{name}.weights."),
+                  tuple(float(m) for m in mask), posture,
+                  _num(e, "posture_weight", 0, 1.0, cfg.posture_weight, f"ees.{name}."))
+
+
+def parse_hints(doc: dict, cfg: Config, ee_names, postures: dict, n_joints: int = 6, to_world=None,
+                cur: Optional[Hints] = None) -> Hints:
+    """A full hint document (``base``, ``ees``): absent keys take the defaults (not the hints in force)."""
+    doc = doc or {}
+    _only(doc, ("base", "ees"), "")
+    h = Hints(**parse_base(doc.get("base") or {}, cfg, ee_names, to_world))
+    ees = {}
+    for name, e in (doc.get("ees") or {}).items():
+        if name not in ee_names:
+            raise ValueError(f"ees: no end effector {name!r} (have {', '.join(ee_names)})")
+        ees[name] = parse_ee(name, e or {}, cfg, postures, n_joints)
+    return replace(h, ees=ees)
+
+
+def merge(h: Hints, override: dict) -> Hints:
+    """``override``: parsed base fields (``parse_base``) applied over ``h``."""
+    return replace(h, **override) if override else h
+
+
+def hints_public(h: Hints) -> dict:
+    """The hint structure back as JSON (world frame)."""
+    base: dict = {"mode": h.mode, "arm_vs_base": h.arm_vs_base}
+    tgt: dict = {}
+    if h.target_pose:
+        tgt["pose"] = {**asdict(h.target_pose), "frame": "world"}
+    if h.target_heading:
+        hh = h.target_heading
+        d = {"weight": hh.weight, "tol": hh.tol}
+        if hh.face:
+            d["face"] = hh.face
+        elif hh.point:
+            d.update(face=list(hh.point), frame="world")
+        else:
+            d.update(yaw=hh.yaw, frame="world")
+        tgt["heading"] = d
+    base["target"] = tgt or None
+    base["velocity"] = asdict(h.velocity) if h.velocity else None
+    base["pose"] = {**asdict(h.pose), "frame": "world"} if h.pose else None
+    base["limits"] = {k: v for k, v in asdict(h.limits).items() if v is not None}
+    ees = {k: {"weights": {"position": e.position, "orientation": e.orientation},
+               "orientation_mask": list(e.orientation_mask),
+               "posture": e.posture if isinstance(e.posture, str) else list(e.posture),
+               "posture_weight": e.posture_weight} for k, e in h.ees.items()}
+    return {"base": base, "ees": ees}
+
+
+def effective_limits(h: Hints, cfg: Config) -> tuple[float, float, float]:
+    lim = h.limits
+    return (min(cfg.max_speed, lim.max_speed if lim.max_speed is not None else math.inf),
+            min(cfg.max_omega, lim.max_omega if lim.max_omega is not None else math.inf),
+            min(cfg.max_accel, lim.max_accel if lim.max_accel is not None else math.inf))
+
+
+def copy_hints(h: Hints) -> Hints:
+    return copy.deepcopy(h)
