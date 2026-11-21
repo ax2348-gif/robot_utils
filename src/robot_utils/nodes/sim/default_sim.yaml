@@ -1,0 +1,65 @@
+# The sim world's configuration: what the URDF lacks (docs/sim.md). Override any key with --config FILE
+# (merged over this one). Units: m, rad, s, kg, N, N m.
+
+physics:
+  timestep: 0.001                # s (1 kHz)
+  integrator: implicitfast       # implicitfast | implicit | euler | rk4
+  gravity: [0.0, 0.0, -9.81]
+
+# The model from the description node: GET /model/bundle.zip with these options (base is always swerve)
+model:
+  variant: full                  # full: mesh collisions and visuals; simple: one capsule per arm link
+
+floor:
+  friction: [1.0, 0.005, 0.0001] # sliding, torsional, rolling
+  size: 20.0                     # m, half side
+
+# The base: the decided kinematic-dynamic hybrid (docs/plans/sim_v1.md, "Decided" 3). Each module's steer and
+# wheel are stiff servos whose setpoints follow the SPARK setpoints through these bounds; the chassis is a free
+# body moved by wheel-floor friction.
+base:
+  steer_rate_max: 12.566         # rad/s: pose_servo planner STEER_RATE_MAX (4 pi)
+  wheel_speed_max: 3.0           # m/s: planner WHEEL_SPEED_MAX
+  wheel_accel_max: 0.85          # m/s^2 at a wheel: the planner caps' max_accel + max_alpha x WHEEL_R (0.5 + 1.5 x 0.234)
+  steer: {kp: 300.0, kv: 6.0, torque_max: 45.0, armature: 0.02}   # torque_max: about the NEO 550 stall through 46.42:1
+  wheel: {kv: 4.0, torque_max: 18.3, armature: 0.01}             # torque_max: about the NEO Vortex stall through 5.08:1
+  # Module compliance: soft wheel-floor contact so all four wheels stay loaded (solref: time constant, damping ratio)
+  wheel_contact: {friction: [1.0, 0.01, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.002]}
+  start: {xyz: [0.0, 0.0, 0.0], yaw: 0.0}
+
+# Fidelity per component: kinematic (ideal tracking within the speed limits) | dynamic (not built yet)
+components:
+  arm:
+    fidelity: kinematic
+    joint_speed_max: 6.0         # rad/s per joint (estimate of the DM motors at the arm's load)
+    servo: {kp: 800.0, kv: 30.0} # the stiff servo that makes the kinematic reference physical (loads the chassis)
+    gripper_speed: 6.0           # rad/s of the gripper motor (0 closed .. -3.1 fully open)
+    finger_force_max: 20.0       # N per finger: fingers stop on objects
+    reply_latency: 0.007         # s, reported as the bus's reply latency (measured median on the robot)
+    watchdog: 0.1                # s without an MIT frame while enabled -> status 0xD (the motors' CAN watchdog)
+    start_q: [0.0, -0.3, -0.6, 0.0, 0.0, 0.0]
+
+# Cameras (rendered offscreen): link = the model link the image is taken from (optical frame: x right, y down,
+# z out of the lens). Profiles as the camera node's catalog keys; delay = camera-to-host latency (measured).
+cameras:
+  camera:
+    serial: SIMHEAD0001
+    color: {link: camera_color_optical, width: 640, height: 480, fps: 30, fovy_deg: 65.0, delay: 0.030}
+    depth: {link: camera_depth_optical, width: 640, height: 400, fps: 30, fovy_deg: 65.0, delay: 0.017}
+    depth_range: [0.15, 10.0]    # m; outside reads 0 (no depth)
+    jpeg_quality: 80
+  wrist_camera:
+    serial: SIMWRIST0001
+    color: {link: wrist_camera_color_optical, width: 640, height: 480, fps: 30, fovy_deg: 65.0, delay: 0.047}
+    depth: {link: wrist_camera_depth_optical, width: 640, height: 400, fps: 30, fovy_deg: 65.0, delay: 0.047}
+    depth_range: [0.07, 5.0]
+    jpeg_quality: 80
+
+# Objects in the scene at start / reset (POST /scene/objects adds more): box (size: full x, y, z) or cylinder
+# (radius, length along z); mass kg; pose xyz + yaw (or rpy).
+scene:
+  objects: []
+
+time:
+  run: true                      # start running in real time (false: paused, advanced by POST /step)
+  rtf: 1.0                       # real-time factor
