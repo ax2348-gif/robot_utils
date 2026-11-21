@@ -143,6 +143,8 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     m = call("GET", "/model")
     assert m["description_frames"]["camera/color_optical"] == "camera_color_optical"
     assert call("GET", "/model", params={"variant": "simple", "base": "planar"})["root"] == "odom"
+    t = call("GET", "/model/tree")
+    assert t["schema"] == "robot_tree.v1" and "arm_joint1" in t["movable"]
     cam = call("POST", "/cameras/camera/nominal", route="/cameras/{name}/nominal",
                json={"xyz": [0.1, 0.0, 0.4], "rpy": [-1.5707963, 0, -1.5707963]})
     assert cam["nominal"]["rpy"][1] == 0.0                              # the body model made it a float

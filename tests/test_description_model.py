@@ -254,3 +254,48 @@ def test_swerve_base_dimensions_equal_swerve_constants(node):
         T = np.array(m["frames_in_base"][f"base_{mod.name}_wheel"])
         assert np.allclose(T[:3, 3], [mod.x, mod.y, K.WHEEL_DIAMETER / 2], atol=1e-9)
     assert {j["name"] for j in m["joints"]} >= {"base_FL_steer", "base_FL_wheel_joint"}
+
+
+@pytest.mark.parametrize("variant,base", [("simple", "swerve"), ("full", "swerve"), ("simple", "fixed")])
+def test_model_tree_reproduces_the_urdf_kinematics(node, variant, base):
+    """GET /model/tree (robot_tree.v1): its joints, composed as documented (tree.fk), give pinocchio's forward
+    kinematics of the same URDF for random joint values; every link with a URDF visual has visuals."""
+    import xml.etree.ElementTree as ET
+
+    import pinocchio as pin
+
+    from robot_utils.nodes.description.tree import fk, tree
+    a = node.model_builder().build(Options.parse(variant, base=base))
+    t = tree(a.urdf, "v")
+    assert t["root"] == "base_link" and t["schema"] == "robot_tree.v1"
+    m = pin.buildModelFromXML(a.urdf)
+    d = m.createData()
+    rng = np.random.default_rng(1)
+    movable = [j for j in t["joints"] if j["type"] in ("revolute", "continuous", "prismatic") and "mimic" not in j]
+    assert {j["name"] for j in movable} >= {f"arm_joint{i}" for i in range(1, 7)}
+    for _ in range(5):
+        qd = {}
+        for j in movable:
+            lo, hi = j.get("lower", -math.pi), j.get("upper", math.pi)
+            qd[j["name"]] = float(rng.uniform(lo, hi)) if j["type"] != "continuous" else float(rng.uniform(-3, 3))
+        q = pin.neutral(m)
+        for j in t["joints"]:
+            if j["type"] == "fixed":
+                continue
+            v = qd.get(j["name"], 0.0)
+            if "mimic" in j:
+                v = j["mimic"]["multiplier"] * qd.get(j["mimic"]["joint"], 0.0) + j["mimic"]["offset"]
+            jid = m.getJointId(j["name"])
+            iq = m.joints[jid].idx_q
+            if m.joints[jid].nq == 2:                  # continuous: (cos, sin)
+                q[iq:iq + 2] = [math.cos(v), math.sin(v)]
+            else:
+                q[iq] = v
+        pin.framesForwardKinematics(m, d, q)
+        T = fk(t, qd)
+        for link, Tl in T.items():
+            f = d.oMf[m.getFrameId(link)]
+            assert np.allclose(Tl[:3, 3], f.translation, atol=1e-6), link
+            assert np.allclose(Tl[:3, :3], f.rotation, atol=1e-6), link
+    with_visual = {lk.get("name") for lk in ET.fromstring(a.urdf).findall("link") if lk.find("visual") is not None}
+    assert with_visual and all(t["links"][n]["visuals"] for n in with_visual)
