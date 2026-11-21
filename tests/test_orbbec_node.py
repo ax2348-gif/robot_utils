@@ -389,3 +389,50 @@ def test_sdk_backend_opens_only_the_pinned_serial():
         backend("HEAD", ["WRIST"]).open()
     with pytest.raises(NoDevice):
         backend(None, []).open()
+
+
+def test_depth_filter_setting_patch_and_device_properties():
+    """depth_filter: hardware by default, a pipeline key (re-applied at start), and set on the device: the hardware
+    filter on and the SDK's software one off; software where the device has no hardware filter; 'device' touches
+    nothing."""
+    from robot_utils.nodes.orbbec.models import PIPELINE_KEYS, Settings, SettingsPatch, apply_patch
+    from robot_utils.nodes.orbbec.sdk_backend import HW_FILTER, SOFT_FILTER, SdkBackend
+
+    assert Settings().depth_filter == "hardware" and "depth_filter" in PIPELINE_KEYS
+    import types
+    cat = types.SimpleNamespace(available=["color", "depth"], color=[], stereo=[], colormaps=None,
+                                imu=types.SimpleNamespace(available=False, sample_rates=[], accel_ranges=[],
+                                                          gyro_ranges=[]))
+    new, restart, _ = apply_patch(Settings(), SettingsPatch(depth_filter="software"), cat)
+    assert new.depth_filter == "software" and restart
+    same, restart, _ = apply_patch(new, SettingsPatch(depth_filter="software"), cat)
+    assert not restart
+
+    class Ids:
+        pass
+    for pid in (HW_FILTER, SOFT_FILTER):
+        setattr(Ids, pid, pid)
+
+    class Dev:
+        def __init__(self, props):
+            self.props, self.set = props, {}
+        def is_property_supported(self, prop, perm):
+            return prop in self.props
+        def set_bool_property(self, prop, v):
+            self.set[prop] = v
+
+    def backend(props):
+        b = SdkBackend.__new__(SdkBackend)
+        b.ob = type("OB", (), {"OBPropertyID": Ids, "OBPermissionType": type("P", (), {"PERMISSION_READ_WRITE": 3})})
+        b.dev = Dev(props)
+        return b
+
+    b = backend({HW_FILTER, SOFT_FILTER})
+    assert b._apply_depth_filter("hardware") == "hardware" and b.dev.set == {HW_FILTER: True, SOFT_FILTER: False}
+    b = backend({HW_FILTER, SOFT_FILTER})
+    b._apply_depth_filter("software")
+    assert b.dev.set == {HW_FILTER: False, SOFT_FILTER: True}
+    b = backend({SOFT_FILTER})                                   # no hardware filter: falls back to software
+    assert "software" in b._apply_depth_filter("hardware") and b.dev.set == {SOFT_FILTER: True}
+    b = backend({HW_FILTER, SOFT_FILTER})
+    assert b._apply_depth_filter("device") == "device defaults" and b.dev.set == {}

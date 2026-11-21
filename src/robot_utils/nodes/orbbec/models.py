@@ -13,7 +13,8 @@ STREAM_NAMES: tuple[str, ...] = ("color", "depth", "ir_left", "ir_right")
 STREAM_LABELS = {"color": "Color", "depth": "Depth", "ir_left": "Left IR", "ir_right": "Right IR"}
 STEREO = ("depth", "ir_left", "ir_right")    # share one resolution/fps on the device
 # Changing any of these restarts the video pipeline.
-PIPELINE_KEYS = ("streams", "color_profile", "stereo_mode", "align", "frame_sync")
+PIPELINE_KEYS = ("streams", "color_profile", "stereo_mode", "align", "frame_sync", "depth_filter")
+DepthFilter = Literal["hardware", "software", "both", "off", "device"]
 IMU_RESTART_KEYS = ("enabled", "sample_rate", "accel_range", "gyro_range")   # filter changes apply live
 
 
@@ -90,6 +91,11 @@ class Settings(_Strict):
                                            "color resolution; implies frame_sync.")
     frame_sync: bool = Field(False, description="SDK frame sync: deliver color and depth of the same instant "
                                                 "together. Off = each frame as soon as it arrives (lower latency).")
+    depth_filter: DepthFilter = Field(
+        "hardware", description="Depth speckle/noise filter, set on the device at every pipeline start. hardware: "
+        "the camera's own noise-removal filter (no host CPU), the SDK's software filter off; software: the SDK's "
+        "software filter on the host (about a third of a Pi 5 core at 848x480@30), the hardware one off; both; off; "
+        "device: leave whatever the device has. A device without a hardware filter falls back to software.")
     display: DisplaySettings = Field(default_factory=DisplaySettings)
     imu: ImuSettings = Field(default_factory=ImuSettings)
 
@@ -143,6 +149,7 @@ class SettingsPatch(_Strict):
     stereo_mode: Optional[str] = None
     align: Optional[bool] = None
     frame_sync: Optional[bool] = None
+    depth_filter: Optional[DepthFilter] = None
     display: Optional[DisplayPatch] = None
     imu: Optional[ImuPatch] = None
 
@@ -247,6 +254,8 @@ def apply_patch(cur: Settings, patch: SettingsPatch, cat: Catalog) -> tuple[Sett
     for k in ("align", "frame_sync"):
         if k in p:
             d[k] = bool(p.pop(k))
+    if "depth_filter" in p:
+        d["depth_filter"] = p.pop("depth_filter")
     disp = p.pop("display", None) or {}
     if "colormap" in disp and cat.colormaps and disp["colormap"] not in cat.colormaps:
         raise SettingsError(f"unknown colormap {disp['colormap']!r}; one of {sorted(cat.colormaps)}")

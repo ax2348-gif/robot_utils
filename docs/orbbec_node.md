@@ -178,6 +178,16 @@ or no frame, 504 the camera thread did not answer within 20 s.
   implies frame sync.
 - `frame_sync`: the SDK pairs color and depth of the same instant. Off (default), each frame leaves
   the SDK as soon as it arrives, which saves tens of ms of latency (see results).
+- `depth_filter` (also `--depth-filter`): the depth speckle/noise filter, set on the device at every
+  pipeline start. `hardware` (default): the camera's own noise-removal filter, with the SDK's software
+  filter off; `software`: the SDK's filter, run on the host; `both`; `off`; `device`: leave the device's
+  own setting. A camera without a hardware filter falls back to `software` (logged). Measured on the
+  Pi 5 with the head 336L at 848x480@30 (2026-11-20): the software filter cost about a third of a core
+  (camera node 65% -> 37% without it); in a cluttered scene the hardware filter gave the stop reflex the
+  same result (no false points in its 0.5 m / 1 m zones, the real obstacle kept in every frame, 99% of
+  its pixels), with 2-4 small speckles per frame left (software: 0) and slightly more depth jitter
+  (median 4.8 mm vs 3.2 mm). With no filter at all, 10 of 40 frames would have triggered a false reflex
+  stop. The Gemini 305's own default is already hardware on, software off.
 - `display.*` only affects the monitoring (`mode=jpeg`) encoding of depth/IR and applies to the next
   frame. `imu.filter.*` also applies immediately. Everything else restarts the video pipeline
   (or the IMU), and the call returns once every enabled stream has delivered a frame.

@@ -36,6 +36,8 @@ from .timesync import epoch_minus_mono
 
 log = logging.getLogger("orbbec_node.sdk")
 
+SOFT_FILTER = "OB_PROP_DEPTH_SOFT_FILTER_BOOL"               # the SDK's host-side depth noise filter
+HW_FILTER = "OB_PROP_HW_NOISE_REMOVE_FILTER_ENABLE_BOOL"   # the camera's own
 COLOR_FORMATS = ["MJPG", "RGB", "BGR", "RGBA", "BGRA", "Y8", "YUYV", "UYVY"]
 STEREO_FORMATS = {"depth": ["Y16"], "ir_left": ["Y8", "Y16"], "ir_right": ["Y8", "Y16"]}
 BYTES_PER_PIXEL = {"Y8": 1, "Y16": 2, "RGB": 3, "BGR": 3, "RGBA": 4, "BGRA": 4, "YUYV": 2, "UYVY": 2}
@@ -83,6 +85,7 @@ def _try(fn, default):
 class SdkBackend:
     def __init__(self, serial: Optional[str] = None):
         self.serial = serial   # open only the camera with this serial; None = the first one listed
+        self.depth_filter: Optional[str] = None   # what _apply_depth_filter put in force at the last start
         import pyorbbecsdk as ob   # imported here so the package works without the SDK (tests, --fake)
         self.ob = ob
         self.ctx = self.dev = self.pipe = self.align = None
@@ -295,10 +298,41 @@ class SdkBackend:
             (self.pipe.enable_frame_sync if sync else self.pipe.disable_frame_sync)()
         except Exception as e:
             log.debug("frame sync: %s", e)
+        self.depth_filter = self._apply_depth_filter(s.depth_filter)
         self.pipe.start(cfg)
         self.running = True
         self.align = (ob.AlignFilter(align_to_stream=ob.OBStreamType.COLOR_STREAM)
                       if s.align and s.streams.get("depth") and s.streams.get("color") else None)
+
+    def _apply_depth_filter(self, mode: str) -> str:
+        """Set the depth noise filter (Settings.depth_filter) on the device; returns what is in force. Never fails
+        the start: a property the device lacks or refuses is logged and left as it is."""
+        if mode == "device":
+            return "device defaults"
+        ob, dev = self.ob, self.dev
+        rw = ob.OBPermissionType.PERMISSION_READ_WRITE
+
+        def supported(pid):
+            prop = getattr(ob.OBPropertyID, pid, None)
+            try:
+                return prop is not None and dev.is_property_supported(prop, rw)
+            except Exception:  # noqa: BLE001
+                return False
+        want_hw, want_soft = mode in ("hardware", "both"), mode in ("software", "both")
+        note = mode
+        if want_hw and not supported(HW_FILTER):
+            want_hw, want_soft = False, True
+            note = "software (this device has no hardware depth filter)"
+            log.warning("depth filter: %s", note)
+        for pid, on in ((HW_FILTER, want_hw), (SOFT_FILTER, want_soft)):
+            if not supported(pid):
+                continue
+            try:
+                dev.set_bool_property(getattr(ob.OBPropertyID, pid), on)
+            except Exception as e:  # noqa: BLE001
+                log.warning("depth filter: could not set %s=%s: %s", pid, on, e)
+        log.info("depth filter: %s", note)
+        return note
 
     def stop(self):
         if self.running:

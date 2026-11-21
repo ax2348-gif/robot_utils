@@ -17,6 +17,9 @@ def main(argv=None):
                         "which is arbitrary with several cameras attached)")
     p.add_argument("--streams", default="color,depth", help="video streams on at start: " + ",".join(STREAM_NAMES))
     p.add_argument("--no-imu", action="store_true", help="start with the IMU off")
+    p.add_argument("--depth-filter", default="hardware", choices=["hardware", "software", "both", "off", "device"],
+                   help="depth noise filter set on the device at start (default hardware: the camera's own, no host "
+                        "CPU; software: the SDK's, on the host; device: leave as is)")
     p.add_argument("--fake", action="store_true", help="synthetic camera (no SDK / hardware needed)")
     p.add_argument("--imu-calibration-file", default=None,
                    help="where IMU calibrations are kept, per camera serial (default "
@@ -41,7 +44,8 @@ def main(argv=None):
     else:
         from .sdk_backend import SdkBackend
         backend = SdkBackend(serial=a.serial)
-    settings = Settings(streams={n: n in streams for n in STREAM_NAMES}, imu=ImuSettings(enabled=not a.no_imu))
+    settings = Settings(streams={n: n in streams for n in STREAM_NAMES}, imu=ImuSettings(enabled=not a.no_imu),
+                        depth_filter=a.depth_filter)
     hub = Hub()
     from .owner import IMU_CALIBRATION_FILE
     cal_file = a.imu_calibration_file or (None if a.fake else IMU_CALIBRATION_FILE)
