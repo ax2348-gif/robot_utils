@@ -4,15 +4,13 @@ pose, and agent_nav itself (real servers)."""
 import json
 import math
 import os
-import socket
-import threading
 import time
 
 import httpx
 import numpy as np
 import pytest
-import uvicorn
 
+from helpers import serve, waiter
 from robot_utils.nodes.agent_nav import chat
 from robot_utils.nodes.agent_nav import geometry as G
 from robot_utils.nodes.agent_nav.sim import CALIBRATION, Box, Rect, Scene, demo_scene, fake_perception_app
@@ -107,25 +105,7 @@ def test_chat_parsing():
 
 # -- end to end -----------------------------------------------------------------------------------------
 
-def wait_for(pred, timeout=10.0, interval=0.05):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        v = pred()
-        if v:
-            return v
-        time.sleep(interval)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1))
-    t = threading.Thread(target=srv.run, daemon=True)
-    t.start()
-    wait_for(lambda: srv.started, 10)
-    return f"http://127.0.0.1:{port}", srv, t
+wait_for = waiter(10.0, 0.05)
 
 
 @pytest.fixture

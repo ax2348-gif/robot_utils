@@ -11,6 +11,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import same, waiter
 from robot_utils.nodes.arm import config as C
 from robot_utils.nodes.arm.bus import SimBus
 from robot_utils.nodes.arm.node import FIELDS, ArmNode
@@ -23,29 +24,7 @@ COMMON = {"Event", "LockOut", "MetaEndpoints", "NodeMeta", "EStopState", "EStopT
 NON_JSON = {"/", "/events", "/stream", "/ik/render"}
 
 
-def wait_for(pred, timeout=10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        v = pred()
-        if v:
-            return v
-        time.sleep(0.02)
-    raise AssertionError("condition not met in time")
-
-
-def same(a, b, path="$"):
-    """Equal as JSON, including key order and int / float / bool types."""
-    assert type(a) is type(b), f"{path}: {a!r} ({type(a).__name__}) != {b!r} ({type(b).__name__})"
-    if isinstance(a, dict):
-        assert list(a) == list(b), f"{path}: keys {list(a)} != {list(b)}"
-        for k in a:
-            same(a[k], b[k], f"{path}.{k}")
-    elif isinstance(a, list):
-        assert len(a) == len(b), f"{path}: length"
-        for i, (x, y) in enumerate(zip(a, b)):
-            same(x, y, f"{path}[{i}]")
-    else:
-        assert a == b, f"{path}: {a!r} != {b!r}"
+wait_for = waiter(10.0, 0.02)
 
 
 @pytest.fixture

@@ -116,7 +116,7 @@ class FakeCamera:
                                     names=["t_sensor", "ax", "ay", "az", "gx", "gy", "gz"]), 0.0
 
     def depth_frames(self, n):
-        from test_description_solvers import floor_depth
+        from depth_fakes import floor_depth
         from robot_utils.nodes.description.frames import make_T
         return [(floor_depth(make_T(R_TRUE, [0, 0, HEIGHT]), K, noise=0.003, seed=i).astype(np.float32),
                  {"seq": i}) for i in range(n)]

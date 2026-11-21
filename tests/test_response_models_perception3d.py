@@ -1,7 +1,7 @@
 """Typed responses of 3d_perception: every JSON endpoint declares a response model, and that model
 passes the handler's dict through unchanged (same keys, same order, same JSON types: response_model
 silently drops undeclared keys and turns ints into floats). Runs on the fake camera node (+ the stub
-estimator and description of test_perception3d_node), with 3d_perception behind a TestClient."""
+estimator and description of perception3d_stubs), with 3d_perception behind a TestClient."""
 import json
 
 import fastapi.routing
@@ -10,10 +10,10 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import same, serve, stop, wait_for
+from perception3d_stubs import camera, stub_description, stub_estimator  # noqa: F401  (camera: a fixture)
 from robot_utils.nodes.perception3d.node import Params, PerceptionNode
 from robot_utils.nodes.perception3d.server import create_app
-from test_perception3d_node import camera, serve, stop, stub_description, stub_estimator, wait_for  # noqa: F401
-from test_response_models_agent_nav import same
 
 NON_JSON = {"/events", "/stream", "/frame", "/color.jpg", "/depth.png"}
 

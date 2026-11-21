@@ -10,6 +10,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import waiter
 from robot_utils.nodes.common.locks import LockStore
 from robot_utils.nodes.swerve.node import FIELDS, SwerveNode
 from robot_utils.nodes.swerve.server import Telemetry, create_app
@@ -18,13 +19,7 @@ from robot_utils.nodes.swerve.sim import start_sim, stop_sim
 NON_JSON = {"/events", "/stream"}
 
 
-def wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(5.0, 0.01)
 
 
 @pytest.fixture

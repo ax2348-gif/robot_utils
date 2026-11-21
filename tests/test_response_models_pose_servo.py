@@ -3,17 +3,15 @@ model passes the handler's dict through unchanged (response_model silently drops
 so this compares the raw handler output with what the client gets, key order and int/float included).
 Simulated swerve + estimator (odometry only) served for real; the pose servo through a TestClient."""
 import json
-import socket
-import threading
 import time
 
 import fastapi.routing
 import pytest
-import uvicorn
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+from helpers import serve, wait_for
 from robot_utils.nodes.common.locks import LockStore
 from robot_utils.nodes.estimator.node import EstimatorNode
 from robot_utils.nodes.estimator.server import create_app as estimator_app
@@ -22,28 +20,6 @@ from robot_utils.nodes.pose_servo.server import ServoTick, create_app
 
 NON_JSON = {"/events", "/stream"}
 NOWHERE = "http://127.0.0.1:9"      # nothing listens
-
-
-def wait_for(predicate, timeout=5.0, interval=0.02):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(interval)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                           timeout_graceful_shutdown=1))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait_for(lambda: server.started, 10)
-    return f"http://127.0.0.1:{port}", server, t
 
 
 def stop(srv, t):

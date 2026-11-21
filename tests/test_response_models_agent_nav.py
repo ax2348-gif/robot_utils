@@ -4,17 +4,16 @@ into floats, so this compares the raw handler output with what the client gets: 
 order, same JSON types). Runs on the simulated stack of test_agent_nav (swerve sim, estimator,
 pose_servo, fake 3d_perception), with agent_nav itself behind a TestClient."""
 import json
-import socket
-import threading
 import time
 
 import fastapi.routing
 import pytest
-import uvicorn
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
+import helpers
+from helpers import same, waiter
 from robot_utils.nodes.agent_nav.sim import demo_scene, fake_perception_app
 
 NON_JSON = {"/guide.md", "/events", "/sessions/{sid}/export.zip", "/sessions/{sid}/log.jsonl",
@@ -23,25 +22,12 @@ HUMAN = {"X-Operator": "human"}
 BOARD = [380, 30, 660, 110]   # colour pixels inside the demo scene's whiteboard, seen from the start pose
 
 
-def wait_for(pred, timeout=10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        v = pred()
-        if v:
-            return v
-        time.sleep(0.05)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(10.0, 0.05)
 
 
 def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1))
-    t = threading.Thread(target=srv.run, daemon=True)
-    t.start()
-    wait_for(lambda: srv.started)
-    return f"http://127.0.0.1:{port}", (srv, t)
+    url, srv, t = helpers.serve(app)
+    return url, (srv, t)
 
 
 def settle(nav):
@@ -49,21 +35,6 @@ def settle(nav):
     late 'disabled' poll does not abort the next goal."""
     wait_for(lambda: (nav._ps_status or {}).get("status") == "idle")
     time.sleep(0.3)
-
-
-def same(a, b, path="$"):
-    """Equal as JSON, including key order and int / float / bool types."""
-    assert type(a) is type(b), f"{path}: {a!r} ({type(a).__name__}) != {b!r} ({type(b).__name__})"
-    if isinstance(a, dict):
-        assert list(a) == list(b), f"{path}: keys {list(a)} != {list(b)}"
-        for k in a:
-            same(a[k], b[k], f"{path}.{k}")
-    elif isinstance(a, list):
-        assert len(a) == len(b), f"{path}: length {len(a)} != {len(b)}"
-        for i, (x, y) in enumerate(zip(a, b)):
-            same(x, y, f"{path}[{i}]")
-    else:
-        assert a == b, f"{path}: {a!r} != {b!r}"
 
 
 @pytest.fixture

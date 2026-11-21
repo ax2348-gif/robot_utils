@@ -54,6 +54,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+src = ["src", "tests"]   # first party: robot_utils and the tests' helper modules (helpers.py, *_fakes.py, ...)
 extend-exclude = ["motorbridge_2ec", "rebot_ctl", "rev_ctl"]
 
 [tool.ruff.lint]

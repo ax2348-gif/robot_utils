@@ -1,38 +1,14 @@
 """Estimator node end to end: simulated swerve node + fake camera node + estimator, real servers."""
-import socket
-import threading
 import time
 
 import httpx
 import pytest
-import uvicorn
 
+from helpers import serve, wait_for
 from robot_utils.nodes.common.client import NodeClient
 from robot_utils.nodes.estimator.fusion import FIELDS
 from robot_utils.nodes.estimator.node import EstimatorNode
 from robot_utils.nodes.estimator.server import create_app as estimator_app
-
-
-def wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.02)
-    raise AssertionError("condition not met in time")
-
-
-def serve(app):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                           timeout_graceful_shutdown=1))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait_for(lambda: server.started, 10)
-    return f"http://127.0.0.1:{port}", server, t
 
 
 @pytest.fixture

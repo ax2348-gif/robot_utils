@@ -4,44 +4,14 @@ import json
 
 import pytest
 
+import helpers
+from power_cpu_fakes import GOVS, fake_sysfs, helper_runner
 from robot_utils.nodes.common.lease import RequestError
 from robot_utils.nodes.power.cpu import UNIT, CpuGovernor, refuse_run
 
-GOVS = "conservative ondemand userspace powersave performance schedutil"
 
-
-class Clock:
-    def __init__(self, t=100.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
-
-
-def fake_sysfs(tmp_path, gov="ondemand", policies=1):
-    root = tmp_path / "cpufreq"
-    for i in range(policies):
-        p = root / f"policy{i * 4}"
-        (p / "stats").mkdir(parents=True)
-        (p / "scaling_available_governors").write_text(GOVS + " \n")
-        (p / "scaling_governor").write_text(gov + "\n")
-        (p / "scaling_cur_freq").write_text("1900000\n")
-        (p / "scaling_min_freq").write_text("1500000\n")
-        (p / "scaling_max_freq").write_text("2400000\n")
-        (p / "stats" / "total_trans").write_text("1000\n")
-    helper = tmp_path / "robot-cpu-governor@.service"
-    helper.write_text("[Service]\n")
-    return root, helper
-
-
-def helper_runner(root, calls):
-    """Stands in for `systemctl start robot-cpu-governor@X.service`: writes X to every policy."""
-    def run(argv):
-        calls.append(argv)
-        g = argv[-1].split("@", 1)[1].rsplit(".service", 1)[0]
-        for p in root.glob("policy*"):
-            (p / "scaling_governor").write_text(g + "\n")
-    return run
+def Clock(t=100.0):     # this module's clocks start at 100 s
+    return helpers.Clock(t)
 
 
 def test_read_reports_governor_clock_and_transition_rate(tmp_path):

@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from helpers import waiter
 from robot_utils.nodes.swerve import constants as c
 from robot_utils.nodes.swerve import setup_sparks as swerve_setup
 from sparkcan import ControlType
@@ -17,15 +18,7 @@ from sparkcan.sim import SimulatedSpark
 from robot_utils.nodes.swerve.drive import SwerveDrive, wrap_angle
 
 
-def wait_for(predicate, timeout=1.0):
-    """Poll until ``predicate()`` is truthy; return its value or fail."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.005)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(1.0, 0.005)
 
 
 def test_geometry_and_drive_ratio():

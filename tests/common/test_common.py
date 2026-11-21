@@ -5,6 +5,7 @@ import io
 import numpy as np
 import pytest
 
+import helpers
 from robot_utils.nodes.common.estop import EStop
 from robot_utils.nodes.common.hub import RowHub
 from robot_utils.nodes.common.lease import Lease, LeaseError
@@ -12,12 +13,8 @@ from robot_utils.nodes.common.protocol import (RecordReader, RowsDecoder, iter_r
                                                pack_record, rows_record, schema_record)
 
 
-class Clock:
-    def __init__(self):
-        self.t = 100.0
-
-    def __call__(self):
-        return self.t
+def Clock(t=100.0):     # this module's clocks start at 100 s
+    return helpers.Clock(t)
 
 
 def test_records_survive_any_chunking():

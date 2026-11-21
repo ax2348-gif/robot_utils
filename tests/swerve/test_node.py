@@ -7,6 +7,7 @@ import time
 import pytest
 import uvicorn
 
+from helpers import waiter
 from robot_utils.nodes.swerve import constants as c
 from robot_utils.nodes.swerve.client import NodeError, SwerveClient
 from robot_utils.nodes.swerve.node import FIELDS, HARD_MAX_OMEGA, HARD_MAX_SPEED, CommandSlot, SwerveNode, clamp
@@ -14,14 +15,7 @@ from robot_utils.nodes.swerve.server import create_app
 from robot_utils.nodes.swerve.sim import start_sim, stop_sim
 
 
-def wait_for(predicate, timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.01)
-    raise AssertionError("condition not met in time")
+wait_for = waiter(2.0, 0.01)
 
 
 @pytest.fixture
