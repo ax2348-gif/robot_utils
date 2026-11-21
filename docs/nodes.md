@@ -10,11 +10,12 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 | camera (Orbbec Gemini 336L + IMU) | `robot_utils.nodes.orbbec` | `camera` → `/nodes/camera/` | no | [orbbec_node.md](orbbec_node.md) |
 | swerve base | `robot_utils.nodes.swerve` | `swerve` → `/nodes/swerve/` | yes | [swerve_node.md](swerve_node.md) |
 | power (Pi UPS HAT: battery, input; remote shutdown; later main / aux batteries) | `robot_utils.nodes.power` | `power` → `/nodes/power/` | no (e-stops the others before powering off) | [power.md](power.md) |
-| arm (planned) | | `arm` | yes | |
+| arm (reBot Arm B601-DM: track, servo to a pose, chunks, gripper) | `robot_utils.nodes.arm` | `arm` → `/nodes/arm/` | yes | [arm.md](arm.md) |
 | estimator (pose: wheel odometry + IMU heading) | `robot_utils.nodes.estimator` | `estimator` → `/nodes/estimator/` | no | [estimator_node.md](estimator_node.md) |
 | pose_servo (pose goals → jerk-limited swerve twists, from the estimator's pose) | `robot_utils.nodes.pose_servo` | `pose_servo` → `/nodes/pose_servo/` | yes (via the swerve lease) | [pose_servo_node.md](pose_servo_node.md) |
 | description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` → `/nodes/description/` | yes | [description_node.md](description_node.md) |
 | 3d_perception (colour + registered depth, motion-compensated; pixel → 3D point) | `robot_utils.nodes.perception3d` | `3d_perception` → `/nodes/3d_perception/` | no | [perception3d_node.md](perception3d_node.md) |
+| agent_interface (Agent MoMa: the agent ↔ robot boundary for mobile manipulation; agents read `/nodes/agent_interface/guide.md`) | `robot_utils.nodes.agent_interface` | `agent_interface` → `/nodes/agent_interface/` | yes (via pose_servo and the arm lease) | [agent_interface.md](agent_interface.md) |
 | agent_nav (agent ↔ robot boundary: read-only perception / planning, explicit goals via pose_servo, stop reflex, transcript) | `robot_utils.nodes.agent_nav` | `agent_nav` → `/nodes/agent_nav/` | yes (via pose_servo) | [agent_nav.md](agent_nav.md) |
 
 ## Routing: one origin on port 80
@@ -206,21 +207,12 @@ for header, rows in iter_rows(iter_records(open("run1.bin", "rb"))):
 {"twist": [vx, vy, omega], "seq": 0}`. Easy from `curl`, a browser or a script; resend it faster
 than the command timeout (0.25 s on the swerve) to keep moving.
 
-**Fast path (not implemented yet; where it plugs in):** a streaming endpoint for scripts, e.g.
-`POST /command/stream` with a chunked body of newline-delimited JSON commands (same model as
-`/command`). Its handler would:
-
-1. check the lease token once, when the stream opens (`X-Lease-Token`);
-2. for every received line, call the same `node.command(token, twist, seq, source="fast")` the
-   slow path calls, which writes the same **CommandSlot** (a latest-command register) and renews
-   the lease. Reading the body as it arrives and only ever keeping the newest command means a
-   burst after a network hiccup collapses to its last command ("drain");
-3. end the response (closing the stream) as soon as the lease ends or lapses, or the e-stop
-   latches (`node.command` raises then).
-
-The control tick doesn't care which path wrote the slot: last write wins, and the same lease
-holder may use both paths at once (e.g. a script streaming while a browser jogs). The source of
-the command in force is in every telemetry row (`cmd_source`: 1 slow, 2 fast) next to its `seq`.
+**Fast path (not implemented yet):** a low-latency command path for controllers that close the
+loop faster than HTTP allows. The current design, for the arm first (the base later, same
+pattern), is datagrams, not a streaming HTTP endpoint: the lease and session stay HTTP requests,
+the per-tick commands and state are fixed-size packets over a Unix datagram socket or UDP. See
+[plans/fast_path_v1.md](plans/fast_path_v1.md). Telemetry rows already name the writer of the
+command in force (swerve `cmd_source`: 0 none, 1 slow, 2 fast).
 
 ## Browser toolkit (`common/ui.js`)
 

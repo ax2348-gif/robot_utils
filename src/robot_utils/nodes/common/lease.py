@@ -1,4 +1,4 @@
-"""Single-controller lease for actuated nodes (swerve, later the arm). Pure Python.
+"""Single-controller lease for actuated nodes (swerve, the arm). Pure Python.
 
 One client at a time holds the lease and may command the hardware; everyone else is read-only.
 
