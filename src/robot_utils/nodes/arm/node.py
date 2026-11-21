@@ -48,6 +48,9 @@ from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
+from .gripper import Gripper, check_gripper
+from .gripper import free as gripper_free
+from .gripper import holding as gripper_holding
 from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
 from .jam import updated as jam_updated
 from .kin import ArmKinematics, N, pose_error, pose_public
@@ -114,13 +117,6 @@ class Motion:
                 "progress": round(prog, 4), "duration": round(tr.duration, 3),
                 "t_start": tr.t[0], "t_end_planned": tr.t[-1],
                 "goal": None if tr.goal is None else pose_public(tr.goal), "info": tr.info}
-
-
-@dataclass
-class Gripper:
-    goal: Optional[float] = None       # m gap: the MIT position command (None while free)
-    sent: Optional[float] = None       # m gap actually sent (the force limit may pull it back)
-    max_force: float = C.DEFAULT_MAX_FORCE
 
 
 def clip_increase(v_prev: np.ndarray, v_des: np.ndarray, dv: np.ndarray) -> np.ndarray:
@@ -633,33 +629,15 @@ class ArmNode:
             g_goal, max_force, g_on = g.goal, g.max_force, self.g_servo
         tau_g = kin.gravity(r.q) * p.tau_scale
         kp, kd = (p.kp, p.kd) if self.servo else (np.zeros(N), np.zeros(N))
-        if g_on:
-            # Gripper: MIT position at the goal, velocity reference 0 (the damping term never adds
-            # grip force). Force limit from the torque its MIT law applies (motor side): away from
-            # fully open an opposing feedforward, never larger than that torque (the net torque never
-            # opens); within FF_OPEN_MARGIN of fully open no feedforward, the position command is
-            # pulled back toward the jaws instead.
-            g_q = C.gap_to_rad(g_goal)
-            tau_est = p.g_kp * (g_q - r.g_q_mot) + p.g_kd * (0.0 - r.g_qd)
-            force = C.force_of_torque(max(tau_est, 0.0))
-            tau_lim = C.torque_of_force(max_force)
-            g_ff, limiting = 0.0, False
-            if force > max_force:
-                limiting = True
-                if C.rad_to_gap(r.g_q) > C.GAP_MAX - C.FF_OPEN_MARGIN:
-                    g_q = min(g_q, r.g_q_mot + tau_lim / p.g_kp)          # closing is +rad
-                else:
-                    g_ff = -(tau_est - tau_lim)                          # opposes closing; |g_ff| < tau_est
-            g_kp, g_kd = p.g_kp, p.g_kd
-            g.sent = C.rad_to_gap(g_q)
-            # what is applied: the MIT law with the position actually sent, plus the feedforward
-            applied = C.force_of_torque(max(g_kp * (g_q - r.g_q_mot) + g_kd * (0.0 - r.g_qd) + g_ff, 0.0))
+        if g_on:      # holding its goal, with the force limit (gripper.holding)
+            gc = gripper_holding(g_goal, max_force, r.g_q, r.g_q_mot, r.g_qd, p.g_kp, p.g_kd)
+            g.sent = C.rad_to_gap(gc.q)
         else:
-            g_q, tau_est, force, g_ff, limiting, g_kp, g_kd = r.g_q_mot, math.nan, math.nan, 0.0, False, 0.0, 0.0
-            applied = math.nan
-        self._g = {"tau_est": tau_est, "force": applied, "demand": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
+            gc = gripper_free(r.g_q_mot)
+        self._g = {"tau_est": gc.tau_est, "force": gc.applied, "demand": gc.demand, "ff": gc.ff,
+                   "limiting": gc.limiting, "tau_g": tau_g}
         try:
-            self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, g_q, 0.0, g_kp, g_kd, g_ff, gripper=self.g_motor_on)
+            self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, gc.q, 0.0, gc.kp, gc.kd, gc.ff, gripper=self.g_motor_on)
         except BusError as e:
             self._fault(str(e))
             return
@@ -1062,20 +1040,7 @@ class ArmNode:
                 self._apply_gripper(*g_args)
         return out
 
-    @staticmethod
-    def _check_gripper(gap_mm: Optional[float] = None, max_force_n: Optional[float] = None):
-        """Validated (gap m or None, max force N or None). Raises ValueError before anything changes."""
-        f = None
-        if max_force_n is not None:
-            f = float(max_force_n)
-            if not (math.isfinite(f) and 0.0 <= f <= C.HARD_MAX_FORCE):
-                raise ValueError(f"max_force_n must be within 0..{C.HARD_MAX_FORCE:g} N")
-        gap = None
-        if gap_mm is not None:
-            gap = float(gap_mm) / 1000.0
-            if not (math.isfinite(gap) and 0.0 <= gap <= C.GAP_MAX + 1e-9):
-                raise ValueError(f"gap_mm must be within 0..{C.GAP_MAX * 1000:.1f}")
-        return gap, f
+    _check_gripper = staticmethod(check_gripper)
 
     def _apply_gripper(self, gap: Optional[float], max_force: Optional[float]) -> None:
         """Call under _lock. A gap makes the gripper hold it (from the next tick); the force limit
