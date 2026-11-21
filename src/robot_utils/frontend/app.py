@@ -447,7 +447,14 @@ def create_app(
             return JSONResponse({"detail": f"node {name} is not running ({where} does not answer: "
                                            f"{type(e).__name__})"}, status_code=502)
         out_headers = {k: v for k, v in r.headers.items() if k.lower() in PROXY_RESPONSE_HEADERS}
-        return StreamingResponse(r.aiter_bytes(), status_code=r.status_code, headers=out_headers,
+
+        async def body():
+            try:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+            except httpx.HTTPError:     # the node closed mid-stream (stopped or restarted): end the response
+                pass
+        return StreamingResponse(body(), status_code=r.status_code, headers=out_headers,
                                  background=BackgroundTask(r.aclose))
 
     return app

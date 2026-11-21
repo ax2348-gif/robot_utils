@@ -1,0 +1,25 @@
+# The sim stack's node registry (python -m robot_utils.nodes.sim.stack; docs/sim.md "The sim stack"): the
+# landing page (python -m robot_utils.frontend --config <this file>) with every node attached to the MuJoCo sim
+# world instead of hardware. Same instance names as on the robot (frontend/nodes.yaml), so pages, clients and
+# node-to-node links work unchanged. Format: frontend/nodes.yaml. Development machines, erid or Docker only.
+#
+# The stack launcher starts (in this order) the instances listed in its --nodes (default: description, sim, arm,
+# swerve, camera, wrist_camera, power, estimator, pose_servo); the rest have a Start button on the landing page.
+
+nodes:
+  # the robot model (GET /model*); its own data dir, so a sim never touches a real robot's calibrations
+  - {name: description, kind: description, start: {module: robot_utils.nodes.description,
+                                                   args: [--data-dir, ~/.local/share/robot_utils/sim/description]}}
+  # the world: model from the description node above, physics, rendered cameras, the backends' sockets
+  - {name: sim, kind: sim, start: {module: robot_utils.nodes.sim}}
+  - {name: arm, kind: arm, start: {module: robot_utils.nodes.arm, args: [--sim, world]}}
+  - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve, args: [--sim, world]}}
+  # the head camera's IMU is simulated (accelerometer + gyro from the head camera's link); the wrist camera has none
+  - {name: camera, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [--sim, world]}}
+  - {name: wrist_camera, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [--sim, world, --no-imu]}}
+  - {name: power, kind: power, start: {module: robot_utils.nodes.power, args: [--fake]}}
+  - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
+  - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
+  - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d, args: [--allow-nominal]}}
+  - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface,
+                                                           args: [--no-require-imu]}}
