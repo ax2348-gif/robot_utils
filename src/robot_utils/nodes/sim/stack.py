@@ -147,9 +147,10 @@ def main(argv=None) -> int:
                 stopping["flag"] = True
         if not stopping["flag"]:
             shown = "localhost" if a.host in ("127.0.0.1", "0.0.0.0", "::") else a.host
+            url = (os.environ.get("ROBOT_STACK_URL") or f"http://{shown}:{a.port}/").rstrip("/")   # behind a proxy
             log(f"up: {', '.join(started)}")
-            log(f"landing page  http://{shown}:{a.port}/")
-            log(f"sim world     http://{shown}:{a.port}/nodes/sim/")
+            log(f"landing page  {url}/")
+            log(f"sim world     {url}/nodes/sim/")
             log(f"sockets       {sock_dir}")
             log("Ctrl-C stops everything")
         while not stopping["flag"] and front.poll() is None:

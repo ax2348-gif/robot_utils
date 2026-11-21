@@ -248,6 +248,9 @@ class Cameras:
         w, h = int(p["width"]), int(p["height"])
         r = self._renderer(w, h, stream == "depth")
         r.update_scene(rd, camera=f"{c.name}_{stream}")
+        rc = self.world.cfg.get("render") or {}
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = bool(rc.get("shadows", True))
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = bool(rc.get("reflections", True))
         img = r.render()
         if stream == "color":
             from ..orbbec.encode import encode_jpeg

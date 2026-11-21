@@ -1,0 +1,7 @@
+# Sim config for software OpenGL (the Docker image's OSMesa default; ROBOT_SIM_CONFIG in docker-compose.yml), merged
+# over default_sim.yaml. Measured on a MacBook's Docker (arm64, llvmpipe), full model, one 640x480 colour frame:
+# 540 ms with shadows, 170 ms without; the simple model (capsule arm) 40 ms without. Physics is unaffected (rtf 1.0).
+render:
+  shadows: false
+  reflections: false
+# model: {variant: simple}       # uncomment for ~4x faster camera images (the arm drawn and colliding as capsules)

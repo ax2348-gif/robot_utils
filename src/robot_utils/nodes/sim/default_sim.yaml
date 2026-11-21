@@ -58,6 +58,12 @@ cameras:
     depth_range: [0.07, 5.0]
     jpeg_quality: 80
 
+# Camera rendering. Shadows cost most with software OpenGL (OSMesa / llvmpipe in Docker: full model 540 -> 170 ms
+# per 640x480 frame without them); keep them on a GPU.
+render:
+  shadows: true
+  reflections: true
+
 # Objects in the scene at start / reset (POST /scene/objects adds more): box (size: full x, y, z) or cylinder
 # (radius, length along z); mass kg; pose xyz + yaw (or rpy).
 scene:
