@@ -110,8 +110,9 @@ From a review of `nodes/arm` against this draft; each needs a decision or a fix 
   so a client would see silence instead of `state=fault`. Send right after `bus.read()` (saves several ms vs after
   `bus.send`); non-blocking, errors counted (it runs on the SCHED_FIFO thread).
 - **Timestamps:** `t_tick` is the tick start, before a pipelined read whose output-encoder replies were requested
-  about one tick earlier (motor-side feedback is newer). `t_basis`/`stream_lat` inherit that bias; add `t_meas` (the
-  request time the replies answer) before training anything on these timings.
+  about one tick earlier (motor-side feedback is newer). `t_basis`/`stream_lat` inherit that bias. The row now has
+  `t_meas` (the request time the output-encoder replies answer) and `t_meas_mot` (the motor feedback's arrival):
+  carry them in the state packet and use them, not `t_tick`, before training anything on these timings.
 - **Output vs motor side:** goals are output-encoder space, `q_cmd` is seeded from the motor side; a static per-joint
   offset is visible to a policy closing its loop on `q`.
 - **Sim:** `SimBus` reads synchronously with zero delay; a pipelined fake bus is needed for realistic fast-path tests.
