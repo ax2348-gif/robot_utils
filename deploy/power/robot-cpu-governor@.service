@@ -1,0 +1,7 @@
+[Unit]
+Description=Set the CPU frequency governor to %i (robot_utils power node)
+Documentation=file:///home/botcore/robot_utils/docs/power.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/robot-cpu-governor %i

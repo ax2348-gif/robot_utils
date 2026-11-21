@@ -1,0 +1,14 @@
+#!/bin/sh
+# Set the CPU frequency governor of every cpufreq policy (robot_utils power node; run as root by
+# robot-cpu-governor@<governor>.service). Refuses a governor the kernel does not list for every policy.
+set -eu
+g="${1:?usage: robot-cpu-governor <governor>}"
+case "$g" in *[!a-z]*|"") echo "robot-cpu-governor: bad name '$g'" >&2; exit 2 ;; esac
+for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    grep -qw -- "$g" "$p/scaling_available_governors" || {
+        echo "robot-cpu-governor: '$g' not available on $p ($(cat "$p/scaling_available_governors"))" >&2; exit 2; }
+done
+for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    echo "$g" > "$p/scaling_governor"
+done
+echo "robot-cpu-governor: $g"
