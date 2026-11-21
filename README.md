@@ -124,6 +124,21 @@ which has a similar number but lacks the fast non-blocking shaft-encoder reads.
 
 `rebot_ctl` must stay editable: it reads `config/` and `urdf/` relative to its repo.
 
+## Tests
+
+On a development machine, in the `robot_utils_test` conda env (robot_utils installed editable;
+no hardware needed, every node has a sim or fake mode):
+
+```bash
+conda activate robot_utils_test
+python -m pytest -q tests                 # whole suite, ~6 min
+python -m pytest -q tests/test_arm_node.py
+```
+
+`pyproject.toml` sets `testpaths = ["tests"]`, so a bare `pytest` from the repo root runs the
+same suite and never collects the submodules' scripts. Lint config (`[tool.ruff]`) is there too:
+fix what you touch, no mass reformatting.
+
 ## Updating
 
 - **Submodules:** `git submodule update --remote`, test, commit the new pointers here.

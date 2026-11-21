@@ -44,4 +44,25 @@ where = ["src"]
 "robot_utils.frontend" = ["nodes.yaml", "page.html", "tools/*.html", "themes/*.css"]
 "robot_utils.nodes.description" = ["default_description.yaml"]
 "robot_utils.nodes.agent_nav" = ["guide.md"]
+"robot_utils.nodes.agent_interface" = ["guide.md"]
 "robot_utils.nodes.common" = ["fonts/*"]
+
+[tool.pytest.ini_options]
+# only our tests: a bare `pytest` from the repo root would otherwise collect the submodules' scripts
+# (rebot_ctl/tools/gravity_calibration/auto_float_test.py crashes collection)
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["motorbridge_2ec", "rebot_ctl", "rev_ctl"]
+
+[tool.ruff.lint]
+# Conservative: pyflakes, pycodestyle errors/warnings, import order. The codebase is not
+# mass-reformatted to this; fix what you touch.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # long lines: one-line endpoint decorators, docstrings and HTML/JS strings run long on purpose
+    "E702",   # `a; b` on one line (~500 places, src and tests)
+    "E731",   # small lambdas bound to names (~35)
+    "E741",   # `l`, `I` as names in maths
+]
