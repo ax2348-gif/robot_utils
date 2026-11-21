@@ -294,7 +294,8 @@ from the description node; the shipped default if it is unreachable, and `source
 | gripper | gap, gap sent (after the force limit), goal, τ_est, force, τ_ff, force limit active, status |
 | layers | servo {...}, chunk {...} |
 | gains | profile name (full gains on `/gains`, they change only on a switch) |
-| measurement times | `t_meas`, `t_meas_mot` (appended last; below) |
+| measurement times | `t_meas`, `t_meas_mot` (appended; below) |
+| joint channel | `stream_seq`, `stream_age`, `stream_lat` (appended last; "Internal joint channel") |
 
 **When the data was measured.** `t_tick` is the tick's start, taken before its read, and the bus is
 pipelined: a tick collects the replies to requests sent at the end of the previous tick's read. So a
@@ -307,6 +308,73 @@ motorbridge without the feedback's age). Both are on `t_tick`'s clock. Latency c
 these, not `t_tick`. `read_age` only says whether this tick's read completed (0) or an earlier reading
 was kept (its age), not how old the data is. The simulated bus samples at the read, so both equal the
 sample time there (no pipeline delay).
+
+## Internal joint channel (robot-internal; not the public API)
+
+> **Internal interface.** For on-robot controllers only (the whole-body controller now; an on-Pi policy or a radio
+> relay later). It is not part of the public API and must not appear in an agent guide or a public page: outside
+> clients drive the arm through the pose-level API or the WBC, never through joints. Design:
+> [plans/fast_path_v1.md](plans/fast_path_v1.md) ("Local only"); contract: [plans/wbc_v1.md](plans/wbc_v1.md)
+> ("Interfaces for the first build", 1).
+
+**Transport.** One Unix datagram socket, `<runtime dir>/robot/<name>.joint.sock` (`arm.joint.sock`), owner-only
+(0600, in the 0700 runtime directory): only processes of the robot user on the Pi reach it. No UDP, no HTTP route,
+nothing through nginx or OpenAPI. Code: `nodes/common/fastpath.py` (packets, control messages, a small `Client`),
+`nodes/arm/joint_channel.py` (socket and receiver thread), `nodes/arm/stream.py` (session and the `stream` source).
+The client binds its own socket (the node sends there) and sends from it.
+
+**Session.** `{"type": "hello", "token": <arm lease token>, "client": "wbc"}` → `{"type": "welcome", "session": u32,
+"stale_ms": 30, "limits": {lo, hi, joint_vel, joint_acc, max_lead, limit_tol, gap_max}, "rate_hz": 100}` or
+`{"type": "refused", "reason"}` (no or wrong token, e-stop latched, not connected yet). One session; a new hello
+replaces it (the old client gets a bye). `{"type": "bye"}` from the client closes it. The node closes it with
+`{"type": "bye", "reason"}` on lease end, e-stop, `POST /disable` and shutdown. A fault, a chock or a stow leave it
+open: the client keeps getting state packets (state `fault` / `disabled` / `off`), its goals are dropped until the arm
+is enabled again. Every datagram of the session (from its address, with a newer `seq`) renews the lease
+(`Lease.renew_holder`), so the client need not renew over HTTP.
+
+**Commands** (`RUC1`, 88 bytes, `<4sBBHIIdd6f6fff`): magic, version 1, mode (0 keep-alive, 1 joint goal), flags (0),
+session, seq, t_send, t_basis (the `t_tick` of the state packet the goal was computed from, or NaN), q (6, rad, output
+side), qd (6, rad/s feedforward), gap (m; NaN = unchanged), reserved. `seq` strictly increases per session over
+keep-alives and goals; older or equal is dropped.
+
+- **Checked in the receiver** (dropped and counted by reason, never an event per datagram): finite q / qd / gap;
+  q within the joint limits + 0.5°; gap within 0..49.6 mm; to engage, the arm within its limits (the engage
+  check); every joint within `max_lead` (20°) of the measured pose. **Gated at write time**: enabled, motors on, no
+  e-stop; a goal arriving while disabled never engages later.
+- **A goal is (q, qd) from the tick that first uses it**: until the next goal it moves on at qd (with qd = 0 it is q,
+  literally). Every goal goes through the command step (joint speed and acceleration limits, joint limits) as track
+  and planned motions do; a non-finite goal reaching it is held instead (`nonfinite_goals`, any source). The
+  feedforward changes by at most `joint_acc` per second and is capped at `joint_vel`.
+- **Stale** (no fresh goal for `stale_ms`; keep-alives do not refresh a goal): the command ramps to rest at the soft
+  joint acceleration from its current velocity and holds there (no instant brake); the feedforward decays at the same
+  rate; the STALE flag is set. The next fresh goal resumes.
+- **Preemption.** A goal replaces track, HTTP track replaces the stream (newest wins). **A planned motion (servo,
+  pose, home, stow, chunk) is never preempted by the stream:** starting one pauses the session (`paused`, the PAUSED
+  flag); goals are dropped while it executes or settles; the first goal after it ended resumes (so a client must
+  recompute its goal from the state packets: a stale goal far from the arm is refused by the lead bound).
+  `POST /cancel` and `/float` drop the stream's goal like track's; e-stop and disable close the session.
+- Jam detection is report-only for the stream, as for track.
+
+**State** (`RUS1`, 136 bytes, `<4sBBHIIdIBB2x6f6f6f6fff`), sent every control-loop iteration while the session is
+open, right after the bus read (also on fault and connecting iterations, with the latest reading): magic, version,
+reserved (0), flags (1 servoing, 2 stale, 4 jam, 8 limited, 16 paused), session, tick (loop iterations since the node
+started), t_tick, seq of the goal in force (0: none), source (index into the row's `source` list; `stream` = 8),
+state (index), q (output encoders), qd, tau (motor feedback), q_cmd (NaN when not servoing), gap (m), read_age.
+Non-blocking: a full or vanished client socket counts a `send_errors`, never delays the tick. As in the row,
+`t_tick` is before a pipelined read: `q` answers requests sent about one tick earlier (see "When the data was
+measured"; `t_meas` / `t_meas_mot` are in the row, not in the packet).
+
+**Observability.** Row columns `stream_seq`, `stream_age` (s since the goal in force arrived) and `stream_lat`
+(`t_tick` − the goal's `t_basis`: the client's loop latency; about one tick for a client that answers each state
+packet), appended last. `/state` `joint_channel`: socket, config (`stale_ms`, `max_lead_deg`, `limit_tol_deg`), the
+session (id, client, lease, address, seq, paused, stale, counts: goals, keep-alives, stale, sent, send errors;
+dropped by reason), the goal in force, datagrams without a session by reason, `nonfinite_goals`. Config:
+`~/.config/robot_utils/arm.yaml` `joint_channel: {stale_ms: 30, max_lead_deg: 20}`.
+
+**Measured (sim, in-process, `tests/test_sim_integration.py`):** a client paced by the state packets at 100 Hz on
+the world's pipelined arm: `stream_lat` p50 ≈ 9 ms, p99 ≈ 12 ms (one tick); state packet delivery to the client
+p50 ≈ 0.7 ms; the command follows the goal with no lag of its own; the measured pose trails the command by ~5 ticks
+(the world arm's servo plus the pipelined read).
 
 ## Simulation
 

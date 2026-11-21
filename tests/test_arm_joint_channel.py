@@ -454,7 +454,7 @@ def test_stale_ramps_to_a_hold_then_resumes(rig):
     assert vs[0] == pytest.approx(0.8, abs=1e-4)              # the goal moves on at its qd until stale_ms
     dec = -np.diff(vs)
     assert np.all(dec <= acc * DT + 1e-9)                     # then no instant brake: at most joint_acc
-    assert vs[-1] == 0.0 and n.stream.ramp_v is not None and n.stream_session.stale
+    assert vs[-1] == 0.0 and n.stream.ramp_v is not None and n.state_dict()["joint_channel"]["session"]["stale"]
     assert n.stream_session.counts["stale"] == 1
     assert rig.ch.states()[-1].flags & F.STATE_STALE
     assert abs(n.qd_ff[0]) < 1e-12                            # the feedforward decayed too
@@ -462,7 +462,7 @@ def test_stale_ramps_to_a_hold_then_resumes(rig):
     rig.step(10)
     assert np.allclose(n.q_cmd, hold)                         # holding
     stream_to(rig, hold + np.radians([2, 0, 0, 0, 0, 0]), 1.0)   # fresh again: resumes
-    assert not n.stream_session.stale and n.stream.ramp_v is None
+    assert not n.state_dict()["joint_channel"]["session"]["stale"] and n.stream.ramp_v is None
     assert np.allclose(rig.sim.q[0], hold[0] + math.radians(2), atol=2e-3)
     assert not rig.ch.states()[-1].flags & F.STATE_STALE
 

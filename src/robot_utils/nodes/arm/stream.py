@@ -44,6 +44,7 @@ from ..common import fastpath as F
 from ..common.lease import LeaseError
 from . import config as C
 from .config import N
+from .telemetry import SOURCES, STATES
 
 STALE_MS = 30.0                      # ms without a fresh goal before the ramp to a hold (3 ticks)
 MAX_LEAD = math.radians(20.0)        # rad a goal may lead the measured pose, any joint (track's TRACK_MAX_JUMP)
@@ -87,17 +88,16 @@ class StreamSession:
     seq: int = 0                              # newest accepted seq (keep-alives and goals)
     t_last: Optional[float] = None            # newest accepted datagram
     paused: bool = False
-    stale: bool = False
     counts: dict = field(default_factory=lambda: {"goals": 0, "keepalives": 0, "stale": 0, "sent": 0,
                                                   "send_errors": 0})
     dropped: dict = field(default_factory=dict)
     noted: dict = field(default_factory=dict)  # reason -> [time of the last event, drops since]
 
-    def public(self, now: float) -> dict:
+    def public(self, now: float, stale: bool) -> dict:
         return {"id": self.id, "client": self.client, "lease_id": self.lease_id, "address": self.addr,
                 "age": round(now - self.opened, 3), "seq": self.seq,
                 "last_age": None if self.t_last is None else round(now - self.t_last, 4),
-                "paused": self.paused, "stale": self.stale, "counts": dict(self.counts),
+                "paused": self.paused, "stale": stale, "counts": dict(self.counts),
                 "dropped": dict(self.dropped)}
 
 
@@ -307,8 +307,6 @@ class JointStream:
         dv = acc * self.dt
         if now - g.t <= self.stream_cfg.stale_ms * 1e-3:
             g.ramp_v = None
-            if s is not None:
-                s.stale = False
             if g.t_apply is None:
                 g.t_apply = now
             # (q, qd) is a constant-velocity goal from the tick that first used it: until the next goal (or
@@ -319,7 +317,6 @@ class JointStream:
             if g.ramp_v is None:                    # just went stale: ramp down from the command's own velocity
                 g.ramp_v = self.v_cmd.copy()
                 if s is not None:
-                    s.stale = True
                     s.counts["stale"] += 1
             else:
                 g.ramp_v = np.sign(g.ramp_v) * np.maximum(np.abs(g.ramp_v) - dv, 0.0)
@@ -339,13 +336,12 @@ class JointStream:
                 servo = self.servo
                 q_cmd = self.q_cmd.tolist() if (servo and self.q_cmd is not None) else nan6
                 g = self.stream
-                flags = ((F.STATE_SERVOING if servo else 0) | (F.STATE_STALE if s.stale else 0)
+                flags = ((F.STATE_SERVOING if servo else 0) | (F.STATE_STALE if (g is not None and g.ramp_v is not None) else 0)
                          | (F.STATE_JAM if self.jam_active is not None else 0)
                          | (F.STATE_LIMITED if (self._limited and servo) else 0)
                          | (F.STATE_PAUSED if s.paused else 0))
                 seq = g.seq if g is not None else 0
                 src = self._source_name()
-            from .telemetry import SOURCES, STATES
             if r is None:
                 q = qd = tau = nan6
                 gap = math.nan
@@ -375,7 +371,7 @@ class JointStream:
         now = self.clock()
         with self._lock:
             s, g = self.stream_session, self.stream
-            sess = None if s is None else s.public(now)
+            sess = None if s is None else s.public(now, stale=g is not None and g.ramp_v is not None)
             goal = None if g is None else {"seq": g.seq, "age": round(now - g.t, 4) if math.isfinite(g.t) else None,
                                            "ramping": g.ramp_v is not None}
         return {"socket": self.joint_socket, "listening": self.joint_channel is not None,
