@@ -1268,6 +1268,10 @@ class ArmNode:
             self.track = None
             self.hold_q = None
             self.motion = Motion(traj)
+            if traj.kind == "chunk" and traj.gap is not None:
+                # a chunk's gripper samples act only while the gripper holds: engage it now that the chunk is in
+                # force (not before planning: a refused chunk must not move it), keeping the force limit in force
+                self._apply_gripper(float(traj.gap[0]), self.gripper.max_force)
             out = self.motion.public(now)
         self.events.add(f"{traj.kind} {traj.id}: {traj.duration:.2f} s" + (f" to {traj.name}" if traj.name else ""))
         return out
@@ -1349,8 +1353,6 @@ class ArmNode:
             raise ValueError("t0 must be finite")
         with self._lock:
             q_now = self._arm_start()
-            if gaps_mm is not None:
-                self._apply_gripper(gaps_mm[0] / 1000.0, None)
         now = self.clock()
         traj = self._plan("chunk", q_now, poses, None if gaps_mm is None else [g / 1000 for g in gaps_mm],
                           t0=now if t0 is None else float(t0), dt=dt, now=now, blend_s=blend_s,

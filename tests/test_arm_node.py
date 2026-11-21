@@ -343,6 +343,28 @@ def test_chunk_follows_samples_and_skips_past(rig):
     assert e.value.extra.get("code") == "chunk_stale" and e.value.status == 422
 
 
+def test_a_chunk_keeps_the_force_limit_and_a_refused_chunk_never_moves_the_gripper(rig):
+    """A chunk with gaps_mm used to reset the force limit to the default (50 N) and command the gripper before the
+    plan existed, so a refused chunk had already moved it (code review 2026-11-21)."""
+    n = ready(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=30.0, max_force_n=5.0)          # a fragile object
+    rig.keep(1.0)
+    T = rig.tcp()
+    poses = []
+    for i in range(20):
+        P = pin.SE3(T)
+        P.translation = T.translation + np.array([0.0, 0.0005 * i, 0.0])
+        poses.append(P)
+    with pytest.raises(RequestError) as e:                         # refused: over before it was planned
+        n.chunk(rig.tok, poses, dt=0.02, t0=rig.clock.t - 5, gaps_mm=[10.0] * 20)
+    assert e.value.status == 422
+    assert abs(n.gripper.goal - 0.030) < 1e-9 and n.gripper.max_force == 5.0     # untouched
+    n.chunk(rig.tok, poses, dt=0.02, gaps_mm=[20.0] * 20, blend_s=0.05)
+    assert n.gripper.max_force == 5.0                               # the limit in force is kept
+    rig.keep(1.0)
+    assert abs(n.gripper.goal - 0.020) < 1e-9
+
+
 def test_gripper_gap_and_force_limit(rig):
     n = ready(rig).node
     n.gripper_cmd(rig.tok, gap_mm=30.0)
