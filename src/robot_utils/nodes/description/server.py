@@ -18,6 +18,7 @@ from .store import TYPES
 
 TAGS = [
     {"name": "description", "description": "Frames and transforms of the robot."},
+    {"name": "model", "description": "The robot model: one URDF assembled from components (read-only, no lease)."},
     {"name": "calibration", "description": "Calibration routines (jobs), their records and the active ones."},
     {"name": "control", "description": "E-stop and abort (the yaw routine drives the base)."},
     {"name": "state", "description": "Status, clock sync, events."},
@@ -539,6 +540,109 @@ class ActiveMap(RootModel[dict[str, dict[Literal["ground", "yaw"], str]]]):
     with no active record is absent; a camera with none may map to {}."""
 
 
+class ModelPose(BaseModel):
+    """A pose in the parent link (p_parent = R p_child + t)."""
+    xyz: list[float] = Field(description="m, t.")
+    rpy: list[float] = Field(description="rad, R as fixed-axis X, Y, Z (URDF).")
+
+
+class ModelComponent(BaseModel):
+    """One component of the model (description YAML `components:`)."""
+    name: str = Field(description="Component name; its links and joints are prefixed with it.")
+    source: Literal["urdf", "procedural"] = Field(description="`urdf` (a file with meshes) or `procedural` "
+                                                              "(generated from dimensions).")
+    type: Optional[str] = Field(description="Procedural type: box | cylinder | capsule | sphere | swerve_base | "
+                                            "camera; null for a URDF component.")
+    file: Optional[str] = Field(description="URDF file as `<package>:<path>`; null for a procedural component.")
+    root_link: str = Field(description="The component's root link (hangs from `parent` at `mount`).")
+    parent: Optional[str] = Field(description="Parent link; null for the root component (base_link).")
+    variant: Literal["full", "simple"] = Field(description="Variant used: full (meshes) or simple (a bounding "
+                                                           "capsule per link; procedural parts are the same).")
+    links: list[str] = Field(description="Links of the component.")
+    joints: list[str] = Field(description="Its movable joints.")
+    mass: float = Field(description="kg, total mass of its links.")
+    mount_from: str = Field(description="Where the mount pose comes from: `root`, `explicit`, `frame <name>` (a "
+                                        "description frame) or `camera <name>: ...` (nominal, or refined by the "
+                                        "active calibrations).")
+    doc: Optional[str] = Field(description="What it is (description YAML).")
+    mount: Optional[ModelPose] = Field(None, description="Pose of root_link in parent; absent for the root.")
+
+
+class ModelFrame(BaseModel):
+    """A link of the model and how it hangs from its parent (at zero joint position)."""
+    parent: Optional[str] = Field(description="Parent link; null for the root.")
+    joint: Optional[str] = Field(description="The joint to the parent; null for the root.")
+    type: Optional[str] = Field(description="URDF joint type (fixed, revolute, continuous, prismatic); null for "
+                                            "the root.")
+    component: str = Field(description="Component the link belongs to.")
+    mass: float = Field(description="kg.")
+    xyz: Optional[list[float]] = Field(None, description="m, the joint origin in the parent; absent for the root.")
+    rpy: Optional[list[float]] = Field(None, description="rad, the joint origin's rotation (URDF rpy); absent for "
+                                                         "the root.")
+    axis: Optional[list[float]] = Field(None, description="Joint axis in the link frame; absent for fixed joints.")
+
+
+class ModelJoint(BaseModel):
+    """A movable joint (URDF limits as given; null when the URDF has none)."""
+    name: str = Field(description="Joint name.")
+    type: str = Field(description="revolute | continuous | prismatic.")
+    parent: str = Field(description="Parent link.")
+    child: str = Field(description="Child link.")
+    component: str = Field(description="Component it belongs to (`base` for the planar base joints).")
+    axis: Optional[list[float]] = Field(description="Axis in the child link frame.")
+    lower: Optional[float] = Field(description="rad or m, lower limit.")
+    upper: Optional[float] = Field(description="rad or m, upper limit.")
+    velocity: Optional[float] = Field(description="rad/s or m/s, velocity limit.")
+    effort: Optional[float] = Field(description="N m or N, effort limit.")
+    mimic: Optional[str] = Field(description="The joint this one mimics (URDF mimic); null if none.")
+
+
+class ModelOptionsOut(BaseModel):
+    """The assembly options used."""
+    variant: str = Field(description="full | simple, then per-component overrides (`simple,arm=full`).")
+    base: Literal["fixed", "planar", "swerve"] = Field(description="fixed to the world; planar x / y / yaw joints "
+                                                                   "(root `odom`); swerve: the modules' steer and "
+                                                                   "wheel joints movable (base_link floats in a "
+                                                                   "simulator).")
+    mounts: Literal["nominal", "calibrated"] = Field(description="Camera mounts: nominal, or refined by the "
+                                                                 "active calibrations.")
+    mesh_uri: Literal["package", "http", "relative", "file"] = Field(description="How mesh files are referenced.")
+
+
+class ModelUnits(BaseModel):
+    length: str = Field(description="`m`.")
+    angle: str = Field(description="`rad`.")
+    mass: str = Field(description="`kg`.")
+    inertia: str = Field(description="`kg m^2`.")
+
+
+class ModelConventions(BaseModel):
+    base_link: str = Field(description="What base_link is.")
+    transform: str = Field(description="What a frame's pose means.")
+    names: str = Field(description="How links are named.")
+
+
+class ModelOut(BaseModel):
+    """The robot model (GET /model): what /model/urdf assembles with the same options."""
+    model_version: str = Field(description="Hash of the description YAML, the active calibrations, the camera "
+                                           "nodes' factory frames and every component file; changes when any does "
+                                           "(e.g. a calibration is activated). Not affected by the options.")
+    root: str = Field(description="Root link of the URDF: base_link, or odom with base=planar.")
+    base_link: str = Field(description="The link `frames_in_base` is relative to (base_link).")
+    options: ModelOptionsOut
+    mass: float = Field(description="kg, total.")
+    components: list[ModelComponent] = Field(description="Components in assembly order (parents first).")
+    frames: dict[str, ModelFrame] = Field(description="Every link by name, each with its parent and joint.")
+    frames_in_base: dict[str, list[list[float]]] = Field(description="4×4 pose of each link in base_link at zero "
+                                                                     "joint positions (p_base = T p_link), row-major.")
+    joints: list[ModelJoint] = Field(description="Movable joints, in URDF order.")
+    description_frames: dict[str, str] = Field(description="Description frame (GET /description) -> the model "
+                                                           "link at the same pose (base -> base_link, "
+                                                           "camera/depth_optical -> camera_depth_optical, ...).")
+    units: ModelUnits
+    conventions: ModelConventions
+
+
 class CameraLink(BaseModel):
     reachable: bool = Field(description="The last poll of its camera node (every 5 s) succeeded.")
     error: Optional[str] = Field(description="The last poll's error; null if fine.")
@@ -581,6 +685,9 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
             "The robot's frames (base, cameras and their internal frames) and their calibration.\n\n"
             "**Frames**: `GET /description` (all frames, each with its parent; camera poses composed from the "
             "nominal pose and the active calibrations), `GET /transform?from=&to=`.\n\n"
+            "**Model**: `GET /model` (components, frame tree, joints, model_version), `GET /model/urdf` "
+            "(`variant=full|simple`, `base=fixed|planar|swerve`, `mounts=nominal|calibrated`, "
+            "`mesh_uri=package|http|relative|file`), `GET /model/meshes/{component}/{path}`, `GET /model/bundle.zip`.\n\n"
             "**Calibration** (jobs; one at a time): `POST /calibrate/ground` (depth plane fit: roll, pitch, height; "
             "never moves), `POST /calibrate/yaw` (**drives the base** back and forth along given vectors: yaw; needs "
             "`confirm: true`, the swerve lease free; aborts on yaw rate/heading drift). Progress in `GET /jobs/{id}` "
@@ -627,6 +734,67 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
             return node.transform(frm, to)
         except (KeyError, ValueError) as e:
             raise bad(e)
+
+    # -- robot model -----------------------------------------------------------------------------
+
+    def model_opts(request: Request, variant: str, base: str, mounts: str, mesh_uri: str):
+        from .model import ModelError, Options
+        try:
+            return Options.parse(variant, base, mounts, mesh_uri, http_base=str(request.base_url))
+        except ModelError as e:
+            raise bad(e)
+
+    _q = {"variant": Query("full", description="full | simple, optionally per component: `simple,arm=full`."),
+          "base": Query("fixed", description="fixed | planar | swerve."),
+          "mounts": Query("calibrated", description="Camera mounts: nominal | calibrated."),
+          "mesh_uri": Query("package", description="package (`package://<component>/<path>`) | http (this node's "
+                                                   "/model/meshes route) | relative (`meshes/<component>/<path>`) | "
+                                                   "file (absolute paths on the robot).")}
+
+    async def _model_call(fn, *a):
+        from .model import ModelError
+        try:
+            return await asyncio.to_thread(fn, *a)
+        except ModelError as e:
+            raise bad(e)
+
+    @app.get("/model", response_model=ModelOut, response_model_exclude_unset=True, tags=["model"],
+             summary="The robot model: components, frame tree, joints, model_version")
+    async def model(request: Request, variant: str = _q["variant"], base: str = _q["base"],
+                    mounts: str = _q["mounts"], mesh_uri: str = _q["mesh_uri"]):
+        return await _model_call(node.model, model_opts(request, variant, base, mounts, mesh_uri))
+
+    @app.get("/model/urdf", tags=["model"], response_class=Response,
+             summary="The assembled URDF (one robot, root base_link)",
+             responses={200: {"content": {"application/xml": {}}, "description": "URDF text; the "
+                                                                                "`X-Model-Version` header has the "
+                                                                                "model_version."}})
+    async def model_urdf(request: Request, variant: str = _q["variant"], base: str = _q["base"],
+                         mounts: str = _q["mounts"], mesh_uri: str = _q["mesh_uri"]):
+        text, v = await _model_call(node.model_urdf, model_opts(request, variant, base, mounts, mesh_uri))
+        return Response(text, media_type="application/xml", headers={"X-Model-Version": v, "Cache-Control": "no-store"})
+
+    @app.get("/model/meshes/{component}/{path:path}", tags=["model"], response_class=Response,
+             summary="A mesh file of the model",
+             responses={200: {"content": {"application/octet-stream": {}}, "description": "The file as stored "
+                                                                                         "(STL, ...)."}})
+    async def model_mesh(component: str, path: str):
+        try:
+            p = await _model_call(node.model_mesh, component, path)
+        except KeyError as e:
+            raise bad(e, 404)
+        return FileResponse(p, media_type="application/octet-stream", headers={"Cache-Control": "public, max-age=3600"})
+
+    @app.get("/model/bundle.zip", tags=["model"], response_class=Response,
+             summary="URDF + meshes + model.json, for offline use (cache by model_version)",
+             responses={200: {"content": {"application/zip": {}}, "description": "robot.urdf (meshes as "
+                                                                               "meshes/<component>/<path>), the "
+                                                                               "meshes it uses, model.json."}})
+    async def model_bundle(request: Request, variant: str = _q["variant"], base: str = _q["base"],
+                           mounts: str = _q["mounts"]):
+        data, v = await _model_call(node.model_bundle, model_opts(request, variant, base, mounts, "relative"))
+        return Response(data, media_type="application/zip",
+                        headers={"X-Model-Version": v, "Content-Disposition": f'attachment; filename="robot-{v}.zip"'})
 
     @app.post("/cameras/{name}/nominal", response_model=CameraOut, response_model_exclude_unset=True,
               tags=["description"], summary="Set a camera's measured/nominal pose in base")

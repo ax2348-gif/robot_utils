@@ -120,6 +120,45 @@ with the ground calibration's.
 actuated) aborts a running job and forwards an e-stop to the swerve node. It latches; new yaw runs
 are refused until `POST /estop/clear` (this node's; the swerve node's e-stop is cleared there).
 
+## Robot model
+
+One URDF of the whole robot, assembled from the `components:` of the description YAML
+(`default_description.yaml`; `model.py`). Read-only, no lease. Clients (the sim, visualisers, planners,
+erid) take the geometry from here instead of keeping their own.
+
+| component | source | what |
+|---|---|---|
+| `base` | procedural `swerve_base` | root `base_link` (= the `base` frame): the chassis (frame tubes and top rails as two boxes) and four modules, each a steer joint `base_<M>_steer` (vertical, at the module) and a wheel joint `base_<M>_wheel_joint` (axle, y when pointing forward). Dimensions in the YAML; a test asserts they equal `swerve/constants.py` |
+| `arm` | `urdf` | `rebot_ctl:urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf` (the file the arm node's kinematics load; a test checks), prefixed `arm_`, mounted at the `arm` frame |
+| `camera` | procedural `camera` | the head camera: a box body, `camera_depth_optical` at its composed pose (`{camera: camera}`), `camera_color_optical`, `camera_imu` from its camera node's factory frames (a default when unreachable) |
+| `wrist_camera` | procedural `camera` | on `arm_end_link`, at an **estimated** pose (not measured yet) |
+
+A component hangs from a `parent` link at a `mount`: explicit `xyz`/`rpy`, `{frame: <description frame>}` or
+`{camera: <camera>}` (nominal refined by the active calibrations, or nominal with `mounts=nominal`). Procedural
+types: `box` (`size`), `cylinder` / `capsule` (`radius`, `length`, along z), `sphere`, `swerve_base`, `camera`;
+mass from `mass` or `density` x volume, inertia from the primitive (checked against MuJoCo's). Masses of the base
+and cameras are estimates (marked in the YAML).
+
+Options (query parameters of every `/model*` route):
+
+- `variant=full|simple`, per component overridable (`simple,arm=full`). `simple`: each URDF link's geometry is one
+  capsule bounding its collision meshes (principal axis, then the shortest segment that keeps every vertex inside),
+  written as a cylinder plus two spheres (URDF has no capsule); masses and inertias stay the full model's.
+- `base=fixed|planar|swerve`: modules rigid; a root `odom` with `base_x`, `base_y` (prismatic) and `base_yaw`
+  joints; or the steer and wheel joints movable (a simulator adds the floating joint: URDF has none).
+- `mounts=nominal|calibrated` (default calibrated).
+- `mesh_uri=package|http|relative|file`: `package://<component>/<path>`, this node's
+  `/model/meshes/<component>/<path>` (remote clients need nothing installed), `meshes/<component>/<path>`, or
+  absolute paths on the robot.
+
+Routes: `GET /model` (components, the frame tree with each link's parent joint and pose, `frames_in_base` at
+zero joint positions, the movable joints with their limits, `description_frames`: description frame -> link, and
+`model_version`), `GET /model/urdf` (header `X-Model-Version`), `GET /model/meshes/{component}/{path}`,
+`GET /model/bundle.zip` (robot.urdf with relative mesh paths, the meshes it uses, model.json).
+`model_version` hashes the YAML, the active calibrations, the camera nodes' factory frames and every component
+file; it changes when a calibration is activated, not with the options. `/description` and `/transform` agree
+with the model at zero joint positions (tested for every frame both have).
+
 ## API replies
 
 Every JSON reply has a typed, described schema in `/docs` (`/openapi.json`). The ones that are not obvious:

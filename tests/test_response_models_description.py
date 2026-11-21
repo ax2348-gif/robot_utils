@@ -19,7 +19,8 @@ from robot_utils.nodes.common.locks import LockStore
 from robot_utils.nodes.description.node import DescriptionNode
 from robot_utils.nodes.description.server import create_app
 
-NON_JSON = {"/events", "/cameras/{name}/depth.jpg", "/jobs/{jid}/raw.npz", "/calibrations/{kind}/{serial}/{cid}/raw.npz"}
+NON_JSON = {"/events", "/cameras/{name}/depth.jpg", "/jobs/{jid}/raw.npz", "/calibrations/{kind}/{serial}/{cid}/raw.npz",
+            "/model/urdf", "/model/meshes/{component}/{path:path}", "/model/bundle.zip"}
 
 
 def wait_for(predicate, timeout=5.0):
@@ -175,6 +176,9 @@ def test_every_json_endpoint_is_typed_and_lossless(api, tmp_locks_dir):
     assert d["cameras"]["camera"]["from"] == {"nominal": True} and d["cameras"]["camera"]["intrinsics"]
     call("GET", "/transform")
     call("GET", "/transform", params={"from": "camera/color_optical", "to": "base"})
+    m = call("GET", "/model")
+    assert m["description_frames"]["camera/color_optical"] == "camera_color_optical"
+    assert call("GET", "/model", params={"variant": "simple", "base": "planar"})["root"] == "odom"
     cam = call("POST", "/cameras/camera/nominal", route="/cameras/{name}/nominal",
                json={"xyz": [0.1, 0.0, 0.4], "rpy": [-1.5707963, 0, -1.5707963]})
     assert cam["nominal"]["rpy"][1] == 0.0                              # the body model made it a float
@@ -273,10 +277,12 @@ def test_openapi_documents_shapes_and_media_types(tmp_path):
     ok = {(m.upper(), p): op["responses"]["200"] for p, ops in spec["paths"].items() for m, op in ops.items()}
     assert set(ok[("GET", "/events")]["content"]) == {"text/event-stream"}
     assert set(ok[("GET", "/cameras/{name}/depth.jpg")]["content"]) == {"image/jpeg"}
-    for p in ("/jobs/{jid}/raw.npz", "/calibrations/{kind}/{serial}/{cid}/raw.npz"):
+    for p in ("/jobs/{jid}/raw.npz", "/calibrations/{kind}/{serial}/{cid}/raw.npz", "/model/meshes/{component}/{path}"):
         assert set(ok[("GET", p)]["content"]) == {"application/octet-stream"}
+    assert set(ok[("GET", "/model/urdf")]["content"]) == {"application/xml"}
+    assert set(ok[("GET", "/model/bundle.zip")]["content"]) == {"application/zip"}
     for (m, p), resp in ok.items():
-        if p not in NON_JSON:
+        if p not in NON_JSON and p != "/model/meshes/{component}/{path}":
             schema = resp["content"]["application/json"]["schema"]
             assert "$ref" in json.dumps(schema) or "additionalProperties" in schema, (m, p)
     schemas = spec["components"]["schemas"]

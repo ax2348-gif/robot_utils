@@ -226,6 +226,42 @@ class DescriptionNode:
     def transform(self, a: str, b: str) -> dict:
         return describe_T(FrameTree(self.frames()).T(a, b))
 
+    # -- robot model (model.py) ------------------------------------------------------------------
+
+    def model_builder(self):
+        from .model import ModelBuilder
+        return ModelBuilder(self.store.description(), self.frames(), self.store.active())
+
+    def model(self, opts) -> dict:
+        """GET /model: the assembled model's components, frame tree and joints, and its version."""
+        from .model import model_public
+        b = self.model_builder()
+        return model_public(b.build(opts), b.version())
+
+    def model_urdf(self, opts) -> tuple[str, str]:
+        """(URDF text, model_version)."""
+        b = self.model_builder()
+        return b.build(opts).urdf, b.version()
+
+    def model_mesh(self, component: str, path: str):
+        """The file of a mesh the full model uses (KeyError if it uses no such mesh)."""
+        from .model import Options
+        a = self.model_builder().build(Options(mesh_uri="relative"))
+        p = a.meshes.get((component, path))
+        if p is None:
+            raise KeyError(f"the model has no mesh {component}/{path}")
+        return p
+
+    def model_bundle(self, opts) -> tuple[bytes, str]:
+        """(zip: robot.urdf with relative mesh paths + meshes + model.json, model_version)."""
+        from dataclasses import replace
+
+        from .model import bundle, model_public
+        b = self.model_builder()
+        a = b.build(replace(opts, mesh_uri="relative"))
+        v = b.version()
+        return bundle(a, v, model_public(a, v)), v
+
     def set_nominal(self, name: str, xyz: list, rpy: list) -> dict:
         if name not in (self.store.description().get("cameras") or {}):
             raise KeyError(f"unknown camera {name!r}")

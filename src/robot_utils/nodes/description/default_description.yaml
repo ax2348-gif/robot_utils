@@ -31,3 +31,60 @@ cameras:
     nominal:
       xyz: [0.0, 0.0, 0.5]                    # measure (tape)
       rpy: [-1.5707963, 0.0, -1.5707963]      # optical axis forward, image up = base up
+
+# The robot model (GET /model, /model/urdf; docs/description_node.md "Robot model"): components, each hanging from
+# a `parent` link at a `mount` pose ({frame: <description frame>}, {camera: <camera>} = its pose composed above,
+# or explicit xyz / rpy). The component without a parent is the root, base_link = the `base` frame. Links and
+# joints are prefixed with the component's name. Masses marked "estimate" are not measured.
+name: robot
+components:
+  base:
+    source: procedural
+    type: swerve_base
+    frame: base
+    doc: chassis and the four MAXSwerve modules (steer + wheel joints, movable with base=swerve)
+    # The dimensions the swerve node keeps in swerve/constants.py (a test asserts they agree):
+    frame_size: 0.4318                  # 17 in square frame
+    frame_z: [0.06985, 0.12065]         # 2x1 frame tubes, 2.75 .. 4.75 in above the floor
+    top_rail_z: [0.19685, 0.22225]      # 1x1 top rails, 7.75 .. 8.75 in (the top surface)
+    wheel_diameter: 0.0762              # 3 in
+    wheel_width: 0.0381                 # 1.5 in (MAXSwerve wheel)
+    module_size: 0.100584               # 3.96 in square module at each corner
+    modules:                            # wheel (steer axis) positions: 17/2 - 1.98 in from the centre
+      FL: [0.165608, 0.165608]
+      FR: [0.165608, -0.165608]
+      RR: [-0.165608, -0.165608]
+      RL: [-0.165608, 0.165608]
+    chassis_mass: 9.0                   # kg, estimate (frame, battery, electronics)
+    module_mass: 0.9                    # kg, estimate (housing, both motors)
+    wheel_mass: 0.15                    # kg, estimate
+    steer_effort: 45.0                  # N m at the module: NEO 550 stall 0.97 N m x 46.42:1 (MAXSwerve steering)
+    steer_velocity: 12.566              # rad/s: pose_servo's STEER_RATE_MAX (4 pi)
+    wheel_effort: 18.3                  # N m at the wheel: NEO Vortex stall 3.6 N m x 5.08:1
+    wheel_velocity: 78.74               # rad/s: pose_servo's WHEEL_SPEED_MAX (3 m/s) / wheel radius
+  arm:
+    source: urdf
+    # the URDF the arm node's kinematics load (rebot_ctl's hardware config; a test asserts it is the same file)
+    file: rebot_ctl:urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf
+    prefix: arm_
+    parent: base_link
+    mount: {frame: arm}
+    frame: arm
+    doc: the reBot arm (DM motors), mounted turned 90 deg (front -y); simple = one bounding capsule per link
+  camera:
+    source: procedural
+    type: camera
+    parent: base_link
+    mount: {camera: camera}             # nominal pose refined by the active calibrations (mounts=nominal: nominal)
+    size: [0.124, 0.029, 0.026]         # Gemini 336L body, m (x along the baseline, y down, z out of the lens)
+    mass: 0.3                           # kg, estimate
+    doc: head camera (Gemini 336L); its internal frames come from its camera node when reachable
+  wrist_camera:
+    source: procedural
+    type: camera
+    parent: arm_end_link
+    # estimate: no measured pose yet. Behind the fingertips, above the jaws, looking out along end_link x
+    mount: {xyz: [-0.09, 0.0, 0.045], rpy: [-1.5707963, 0.0, -1.5707963]}
+    size: [0.09, 0.025, 0.025]          # estimate
+    mass: 0.08                          # kg, estimate
+    doc: wrist camera (Gemini 305); mount pose not measured yet
