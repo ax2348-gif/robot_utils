@@ -46,7 +46,7 @@ class CoverSource:
         out = []
         streams = [n for n, on in (settings.streams or {}).items() if on]
         for n in streams:
-            if n == "color":
+            if n in ("color", "color_right"):
                 w, h, fps = profile_size(settings.color_profile, (1280, 720, 10))
             else:
                 w, h, fps = profile_size(settings.stereo_mode, (848, 480, 10))
@@ -68,8 +68,8 @@ class CoverSource:
     def _frame(self, stream: str, w: int, h: int, text: str, now: float) -> Frame:
         common = dict(t_capture=now, t_sensor=now, t_device_us=int(now * 1e6), index=self._index,
                       t_owner=now, covered=True)
-        if stream == "color":
-            return Frame(stream="color", fmt="MJPG", w=w, h=h, data=self._color(w, h, text, now), **common)
+        if stream in ("color", "color_right"):
+            return Frame(stream=stream, fmt="MJPG", w=w, h=h, data=self._color(w, h, text, now), **common)
         if stream == "depth":
             return Frame(stream="depth", fmt="Y16", w=w, h=h, data=self._depth(w, h, now), depth_scale=1.0, **common)
         return Frame(stream=stream, fmt="Y8", w=w, h=h, data=self._ir(w, h, now).ravel(), **common)

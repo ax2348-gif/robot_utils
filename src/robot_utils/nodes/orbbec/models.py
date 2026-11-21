@@ -8,12 +8,20 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-StreamName = Literal["color", "depth", "ir_left", "ir_right"]
-STREAM_NAMES: tuple[str, ...] = ("color", "depth", "ir_left", "ir_right")
-STREAM_LABELS = {"color": "Color", "depth": "Depth", "ir_left": "Left IR", "ir_right": "Right IR"}
+StreamName = Literal["color", "depth", "ir_left", "ir_right", "color_right"]
+STREAM_NAMES: tuple[str, ...] = ("color", "depth", "ir_left", "ir_right", "color_right")
+STREAM_LABELS = {"color": "Color", "depth": "Depth", "ir_left": "Left IR", "ir_right": "Right IR",
+                 "color_right": "Right color"}
 STEREO = ("depth", "ir_left", "ir_right")    # share one resolution/fps on the device
+# camera_mode: what the device delivers. depth: color + depth + the gray stereo pair (every device).
+# dual_color: both stereo sensors in colour, `color` = left, `color_right` = right, no depth (devices with a
+# "Dual Color Streams" preset, e.g. the Gemini 305, whose colour camera is its left stereo sensor).
+CameraMode = Literal["depth", "dual_color"]
+CAMERA_MODES: tuple[str, ...] = ("depth", "dual_color")
+MODE_STREAMS = {"depth": ("color", "depth", "ir_left", "ir_right"), "dual_color": ("color", "color_right")}
+MODE_DEFAULT_STREAMS = {"depth": ("color", "depth"), "dual_color": ("color", "color_right")}
 # Changing any of these restarts the video pipeline.
-PIPELINE_KEYS = ("streams", "color_profile", "stereo_mode", "align", "frame_sync", "depth_filter")
+PIPELINE_KEYS = ("camera_mode", "streams", "color_profile", "stereo_mode", "align", "frame_sync", "depth_filter")
 DepthFilter = Literal["hardware", "software", "both", "off", "device"]
 IMU_RESTART_KEYS = ("enabled", "sample_rate", "accel_range", "gyro_range")   # filter changes apply live
 
@@ -80,11 +88,21 @@ class ImuSettings(_Strict):
 
 class Settings(_Strict):
     """The node's complete, global configuration (one pipeline shared by all clients)."""
+    camera_mode: CameraMode = Field(
+        "depth", description="depth: color, depth and the gray stereo pair. dual_color (only if `GET /catalog` → "
+        "`modes` has it): both stereo sensors in colour, `color` = left, `color_right` = right, no depth or gray "
+        "pair. Change it on its own: the device switches preset, the catalog changes (new `catalog_id`) and the "
+        "mode's streams start (color+color_right, or color+depth).")
     streams: dict[StreamName, bool] = Field(
-        default_factory=lambda: {"color": True, "depth": True, "ir_left": False, "ir_right": False},
+        default_factory=lambda: {"color": True, "depth": True, "ir_left": False, "ir_right": False,
+                                 "color_right": False},
         description="Which video streams the camera runs.")
     color_profile: Optional[str] = Field(None, description="Key from `GET /catalog` → `color`, "
-                                                           "e.g. `1280x720@10 MJPG`. null = device default.")
+                                                           "e.g. `1280x720@10 MJPG`. null = the device default (as "
+                                                           "MJPG when the device offers it at that size and rate). "
+                                                           "In dual_color, `color_right` runs at the same size and "
+                                                           "rate, in MJPG if the right sensor offers it, else "
+                                                           "uncompressed.")
     stereo_mode: Optional[str] = Field(None, description="Depth/IR mode from `GET /catalog` → `stereo`, "
                                                          "e.g. `848x480@10` (depth and both IRs share it).")
     align: bool = Field(False, description="Align depth to color (SDK software D2C). Aligned depth has the "
@@ -144,6 +162,7 @@ class ImuCalibrateRequest(_Strict):
 
 class SettingsPatch(_Strict):
     """Partial update: only the given fields change. Unknown keys are rejected."""
+    camera_mode: Optional[CameraMode] = Field(None, description="Only with display/imu changes, if any.")
     streams: Optional[dict[StreamName, bool]] = Field(None, description="Only the listed streams change.")
     color_profile: Optional[str] = None
     stereo_mode: Optional[str] = None
@@ -188,11 +207,15 @@ class ImuCatalog(BaseModel):
 
 
 class Catalog(BaseModel):
-    """What the connected device offers (empty while no camera is connected)."""
-    available: list[StreamName] = Field([], description="Video streams the device has.")
+    """What the connected device offers in its current camera mode (empty while no camera is connected)."""
+    modes: list[CameraMode] = Field(["depth"], description="Camera modes the device supports.")
+    mode: CameraMode = Field("depth", description="The mode this catalog describes.")
+    available: list[StreamName] = Field([], description="Video streams the device has in this mode.")
     color: list[ProfileOption] = Field([], description="Color profiles (MJPG first-class; uncompressed "
                                                        "formats deliver nothing on USB 2).")
     stereo: list[ProfileOption] = Field([], description="Depth/IR modes common to depth, left IR and right IR.")
+    color_right: list[ProfileOption] = Field([], description="Right colour sensor profiles (dual_color); it runs "
+                                             "at the size and rate of `color_profile`.")
     imu: ImuCatalog = Field(default_factory=ImuCatalog)
     colormaps: dict[str, list[str]] = Field({}, description="Colormap name -> a few #rrggbb stops (for a legend).")
     catalog_id: int = Field(0, description="Changes when the device is (re)opened.")
@@ -203,15 +226,36 @@ def usb2_link(connection: str) -> bool:
     return connection.replace(" ", "").upper().startswith("USB2")
 
 
+def default_color_profile(cat: Catalog) -> Optional[str]:
+    """The colour profile to use when none is chosen: the device default, but as MJPG. Some devices (the
+    Gemini 305) default to an uncompressed format, which costs USB bandwidth and a JPEG encode per frame for
+    every viewer and delivers nothing on USB 2; MJPG is passed through as captured. So: the device default if it
+    is MJPG, else the MJPG profile with the same size and rate, else the MJPG at that rate closest in size, else
+    the device default."""
+    if not cat.color:
+        return None
+    dflt = next((p for p in cat.color if p.default), cat.color[0])
+    if dflt.format == "MJPG":
+        return dflt.key
+    mjpg = [p for p in cat.color if p.format == "MJPG"]
+    same = next((p for p in mjpg if (p.width, p.height, p.fps) == (dflt.width, dflt.height, dflt.fps)), None)
+    if same is not None:
+        return same.key
+    at_rate = [p for p in mjpg if p.fps == dflt.fps]
+    return min(at_rate, key=lambda p: abs(p.width * p.height - dflt.width * dflt.height)).key if at_rate else dflt.key
+
+
 def fix_settings(s: Settings, cat: Catalog) -> Settings:
     """Make settings valid for the connected device: unknown profiles become the device default,
     unavailable streams are switched off."""
     d = s.model_dump()
+    if d["camera_mode"] not in cat.modes or d["camera_mode"] != cat.mode:
+        d["camera_mode"] = cat.mode
     for n in STREAM_NAMES:
         d["streams"][n] = bool(d["streams"].get(n)) and n in cat.available
     color = {p.key for p in cat.color}
     if d["color_profile"] not in color:
-        d["color_profile"] = next((p.key for p in cat.color if p.default), cat.color[0].key if cat.color else None)
+        d["color_profile"] = default_color_profile(cat)
     stereo = {p.key for p in cat.stereo}
     if d["stereo_mode"] not in stereo:
         d["stereo_mode"] = next((p.key for p in cat.stereo if p.default), cat.stereo[0].key if cat.stereo else None)
@@ -235,6 +279,17 @@ def apply_patch(cur: Settings, patch: SettingsPatch, cat: Catalog) -> tuple[Sett
     d = cur.model_dump()
     p = patch.model_dump(exclude_unset=True)
     connected = bool(cat.available)
+    mode = p.pop("camera_mode", None)
+    if mode is not None and mode != cur.camera_mode:
+        if mode not in cat.modes:
+            raise SettingsError(f"camera mode {mode!r} is not available" + (f"; one of {cat.modes}" if connected
+                                                                             else " (camera not connected)"))
+        if set(p) - {"display", "imu"}:
+            raise SettingsError("change camera_mode on its own (with display/imu at most): the device's catalog "
+                                "changes with it; set streams and profiles afterwards")
+        d["camera_mode"] = mode
+        d["streams"] = {n: n in MODE_DEFAULT_STREAMS[mode] for n in STREAM_NAMES}
+        d["align"] = d["align"] and mode == "depth"
     for n, on in (p.pop("streams", None) or {}).items():
         if on and n not in cat.available:
             raise SettingsError(f"stream {n!r} is not available" + ("" if connected else " (camera not connected)"))
@@ -285,7 +340,10 @@ def apply_patch(cur: Settings, patch: SettingsPatch, cat: Catalog) -> tuple[Sett
 
 def describe(s: Settings) -> str:
     parts = []
-    if s.streams.get("color"):
+    if s.camera_mode == "dual_color":
+        sides = [x for x, n in (("left", "color"), ("right", "color_right")) if s.streams.get(n)]
+        parts.append(f"{'+'.join(sides)} color {s.color_profile}" if sides else "dual color, no streams")
+    elif s.streams.get("color"):
         parts.append(f"color {s.color_profile}")
     stereo = [STREAM_LABELS[n].lower() for n in STEREO if s.streams.get(n)]
     if stereo:
@@ -442,6 +500,10 @@ class CameraCalibration(BaseModel):
                                               "absent if none.")
     depth_to_color: Optional[Extrinsic] = Field(None, description="Maps a depth-frame point into the color frame; "
                                                 "absent unless both depth and color profiles are known.")
+    color_right: Optional[CameraIntrinsics] = Field(None, description="Intrinsics of the right colour sensor "
+                                                    "(dual_color); absent otherwise.")
+    color_to_color_right: Optional[Extrinsic] = Field(None, description="Maps a left-colour point into the right "
+                                                      "colour frame (dual_color; the stereo baseline).")
     aligned_depth: Optional[bool] = Field(None, description="Depth is aligned to color (depth pixels use the "
                                           "color intrinsics).")
     imu: Optional[CalibrationImu] = None

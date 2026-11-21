@@ -212,6 +212,9 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         c = child(cal.get("depth_to_color"), invert=True)
         if c:
             frames["color_optical"] = {"parent": "depth_optical", **c}
+            r = child(cal.get("color_to_color_right"), invert=True)
+            if r:
+                frames["color_right_optical"] = {"parent": "color_optical", **r}
         imu = child((cal.get("imu") or {}).get("accel_to_depth"), invert=False)
         if imu:
             frames["imu"] = {"parent": "depth_optical", **imu}
@@ -221,7 +224,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
             "conventions": {"optical": "x right, y down, z out of the lens", "units": "m",
                             "transform": "p_parent = rotation @ p_child + translation"},
             "frames": frames,
-            "intrinsics": {k: cal[k] for k in ("depth", "color") if k in cal},
+            "intrinsics": {k: cal[k] for k in ("depth", "color", "color_right") if k in cal},
             "aligned_depth": bool(cal.get("aligned_depth")),
             "settings_version": cal.get("settings_version"),
         }
@@ -327,7 +330,7 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                               "description": "Records `[u32 BE header length][JSON header][payload]` "
                                              "(see the API description / docs)."}, 400: {"model": ErrorResponse}})
     async def stream(
-            streams: str = Query("color,depth", description="Comma-separated `color, depth, ir_left, ir_right`; "
+            streams: str = Query("color,depth", description="Comma-separated `color, depth, ir_left, ir_right, color_right` (dual_color mode: color = left); "
                                  "a `:jpeg` / `:raw` suffix overrides `mode` per stream, e.g. `color,depth:raw`.",
                                  examples=["color,depth", "depth:raw,color", "color,depth,ir_left,ir_right"]),
             mode: Literal["jpeg", "raw"] = Query("jpeg", description="`jpeg`: monitoring (depth colormapped, IR "

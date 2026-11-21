@@ -194,7 +194,8 @@ class Owner:
             for n in STREAM_NAMES:
                 w, h, fmt = self.shape[n]
                 tc = self.last_capture[n]
-                streams[n] = {"label": STREAM_LABELS[n], "available": n in self.catalog.available,
+                label = "Left color" if n == "color" and self.catalog.mode == "dual_color" else STREAM_LABELS[n]
+                streams[n] = {"label": label, "available": n in self.catalog.available,
                               "enabled": bool(s.streams.get(n)), "fps": round(self.rates[n].rate(now), 2),
                               "width": w, "height": h, "format": fmt, "seq": self.seq[n],
                               "age_ms": round((now - tc) * 1000, 1) if tc is not None else None}
@@ -235,17 +236,15 @@ class Owner:
 
     def _open(self):
         try:
-            info, cat = self.backend.open()
+            info, cat = self.backend.open(self.settings.camera_mode)
         except NoDevice as e:
             with self.lock:
                 if self.state != "no device":
                     self._event(f"{e or 'no camera found'}; waiting for it to be plugged in", error=True)
                 self.state = "no device"
             raise
-        cat.colormaps = colormap_stops()
         with self.lock:
-            cat.catalog_id = self.catalog.catalog_id + 1
-            self.catalog = cat
+            self._set_catalog(cat)
             self.info = info
             self._set_settings(fix_settings(self.settings, cat))
             want = self.settings
@@ -256,6 +255,38 @@ class Owner:
                         "USB 3 cable", error=True)
         self._start_video(want, prev=None)
         self._start_imu(want)
+
+    def _set_catalog(self, cat: Catalog):
+        """(lock held) Install a new device catalog."""
+        cat.colormaps = colormap_stops()
+        cat.catalog_id = self.catalog.catalog_id + 1
+        self.catalog = cat
+
+    def _switch_mode(self, new: Settings, prev: Settings) -> tuple[Settings, float]:
+        """Owner thread: change the camera mode (device preset), then start ``new``'s streams and wait for their
+        frames. On any failure, go back to ``prev``'s mode and settings and raise SettingsError."""
+        try:
+            cat = self.backend.set_mode(new.camera_mode)
+            if not cat.available:
+                raise RuntimeError("the device lists no video streams in this mode")
+            with self.lock:
+                self._set_catalog(cat)
+                new = fix_settings(new, cat)
+            self._event(f"camera mode {new.camera_mode}")
+            t = self._start_video(new, prev=None, verify=True)
+            self._start_imu(new)        # the device was reopened
+            return new, t
+        except Exception as e:
+            if self.stopping.is_set():
+                raise
+            msg = f"could not switch to camera mode {new.camera_mode}: {e}; back to {prev.camera_mode}"
+            self._event(msg, error=True)
+            cat = self.backend.set_mode(prev.camera_mode)     # failure here -> camera error -> reconnect loop
+            with self.lock:
+                self._set_catalog(cat)
+            self._start_video(prev, prev=None)
+            self._start_imu(prev)
+            raise SettingsError(msg) from None
 
     def _teardown(self):
         try:
@@ -497,11 +528,12 @@ class Owner:
         except Exception as e:
             self._imu_error(f"could not start: {e}")
 
-    def _start_video(self, new: Settings, prev: Optional[Settings]) -> float:
-        """(Re)start the video pipeline. For a change (prev given), wait until every enabled
+    def _start_video(self, new: Settings, prev: Optional[Settings], verify: Optional[bool] = None) -> float:
+        """(Re)start the video pipeline. For a change (prev given, or verify), wait until every enabled
         stream delivered a frame; if the device refuses the config or a stream stays silent
-        (e.g. uncompressed color on USB 2), restore prev and raise SettingsError.
+        (e.g. uncompressed color on USB 2), restore prev and raise SettingsError (no prev: re-raise).
         Returns the server monotonic time the new pipeline was started."""
+        verify = prev is not None if verify is None else verify
         self.hub.drop_frames()
         if self.covered or self.covers():
             # covered: keep the new settings (the procedural frames follow them) but capture nothing
@@ -516,7 +548,7 @@ class Owner:
             t_started = self.video_started = time.monotonic()
             self._silent.clear()
             self.last_frame_t = t_started + self.startup_s - STALL_S
-            if prev is not None and self.backend.running:
+            if verify and self.backend.running:
                 want = {n for n, on in new.streams.items() if on}
                 seen: set = set()
                 while seen != want and time.monotonic() - t_started < self.startup_s and not self.stopping.is_set():
@@ -580,7 +612,9 @@ class Owner:
                 new, restart, restart_imu = apply_patch(self.settings, arg, self.catalog)
                 prev = self.settings
             t_applied = None
-            if restart and self.backend.is_open:
+            if new.camera_mode != prev.camera_mode and self.backend.is_open:
+                new, t_applied = self._switch_mode(new, prev)   # raises SettingsError after going back
+            elif restart and self.backend.is_open:
                 t_applied = self._start_video(new, prev)   # raises SettingsError after restoring prev
             with self.lock:
                 self._set_settings(new)

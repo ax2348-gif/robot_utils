@@ -176,6 +176,21 @@ def test_the_node_starts_at_the_device_colour_default():
     assert fix_settings(Settings(), cat).color_profile == "1280x720@10 MJPG"      # the device's own default
 
 
+def test_an_uncompressed_device_default_starts_as_mjpg():
+    """The Gemini 305 defaults to uncompressed colour: start at the same size and rate in MJPG instead."""
+    P = lambda k, d=False: ProfileOption(key=k, width=int(k.split("x")[0]), height=int(k.split("x")[1].split("@")[0]),
+                                         fps=int(k.split("@")[1].split()[0]), format=k.split()[1], default=d)
+    cat = _cat()
+    cat.color = [P("1280x720@30 MJPG"), P("640x480@30 RGB", True), P("640x480@15 MJPG"), P("640x480@30 MJPG")]
+    assert fix_settings(Settings(), cat).color_profile == "640x480@30 MJPG"              # same size and rate
+    cat.color = [P("1280x720@30 MJPG"), P("848x480@30 MJPG"), P("640x480@30 YUYV", True), P("640x480@15 MJPG")]
+    assert fix_settings(Settings(), cat).color_profile == "848x480@30 MJPG"              # closest size at that rate
+    cat.color = [P("640x480@30 YUYV", True), P("640x480@15 MJPG")]
+    assert fix_settings(Settings(), cat).color_profile == "640x480@30 YUYV"              # no MJPG at that rate
+    cat.color = [P("640x480@30 RGB", True), P("640x480@30 MJPG")]
+    assert fix_settings(Settings(color_profile="640x480@30 RGB"), cat).color_profile == "640x480@30 RGB"   # chosen
+
+
 def test_usb2_link():
     from robot_utils.nodes.orbbec.models import usb2_link
     assert usb2_link("USB2.1") and usb2_link("USB2.0") and usb2_link("usb 2.0")
@@ -436,3 +451,216 @@ def test_depth_filter_setting_patch_and_device_properties():
     assert "software" in b._apply_depth_filter("hardware") and b.dev.set == {SOFT_FILTER: True}
     b = backend({HW_FILTER, SOFT_FILTER})
     assert b._apply_depth_filter("device") == "device defaults" and b.dev.set == {}
+
+
+# -- camera modes: dual colour (Gemini 305) -----------------------------------------------------
+
+def test_camera_mode_patch_rules():
+    from robot_utils.nodes.orbbec.models import SettingsError, SettingsPatch, apply_patch, fix_settings
+    cat = _cat()
+    cat.modes = ["depth", "dual_color"]
+    cur = fix_settings(Settings(align=True), cat)
+    new, restart, _ = apply_patch(cur, SettingsPatch(camera_mode="dual_color"), cat)
+    assert restart and new.camera_mode == "dual_color" and new.align is False
+    assert {n for n, on in new.streams.items() if on} == {"color", "color_right"}      # the mode's own streams
+    back, _, _ = apply_patch(new, SettingsPatch(camera_mode="depth"), cat)
+    assert {n for n, on in back.streams.items() if on} == {"color", "depth"}
+    with pytest.raises(SettingsError, match="on its own"):
+        apply_patch(cur, SettingsPatch(camera_mode="dual_color", streams={"color": True}), cat)
+    ok, _, _ = apply_patch(cur, SettingsPatch(camera_mode="dual_color", display={"colormap": "jet"}), cat)
+    assert ok.display.colormap == "jet"
+    cat.modes = ["depth"]
+    with pytest.raises(SettingsError, match="not available"):
+        apply_patch(cur, SettingsPatch(camera_mode="dual_color"), cat)
+    # a device without the mode (or opened in another one) puts the settings in the catalog's mode
+    assert fix_settings(Settings(camera_mode="dual_color"), cat).camera_mode == "depth"
+
+
+def _owner(backend):
+    from robot_utils.nodes.orbbec.hub import Hub
+    from robot_utils.nodes.orbbec.owner import Owner
+    hub = Hub()
+    seen = []
+    orig = hub.publish_frames
+    hub.publish_frames = lambda frames: (seen.extend(frames), orig(frames))
+    o = Owner(backend, hub, Settings(), startup_s=1.5, calibration_file=None)
+    o.start()
+    deadline = time.time() + 5
+    while o.state != "streaming" and time.time() < deadline:
+        time.sleep(0.02)
+    return o, seen
+
+
+def test_owner_switches_to_dual_color_and_back():
+    from robot_utils.nodes.orbbec.fake_backend import FakeBackend
+    from robot_utils.nodes.orbbec.models import SettingsPatch
+    b = FakeBackend(dual=True)
+    o, seen = _owner(b)
+    try:
+        assert o.catalog.modes == ["depth", "dual_color"] and o.catalog.mode == "depth"
+        old_cat = o.catalog.catalog_id
+        r = o.request_settings(SettingsPatch(camera_mode="dual_color")).result(timeout=10)
+        s = r["settings"]
+        assert r["restarted"] and s.camera_mode == "dual_color" and b.mode == "dual_color"
+        assert {n for n, on in s.streams.items() if on} == {"color", "color_right"}
+        assert o.catalog.mode == "dual_color" and o.catalog.catalog_id > old_cat and "depth" not in o.catalog.available
+        frames = [f for f in seen if f.t_publish >= r["t_applied"]]
+        assert {"color", "color_right"} <= {f.stream for f in frames}
+        right = next(f for f in frames if f.stream == "color_right")
+        assert right.fmt == "YUYV" and (right.w, right.h) == (1280, 720)         # the left's size and rate
+        st = o.status()["streams"]
+        assert st["color"]["label"] == "Left color" and st["color_right"]["available"] and not st["depth"]["available"]
+        cal = o.calibration
+        assert "color_right" in cal and cal["color_to_color_right"]["translation_mm"][0] == -18.0
+        from robot_utils.nodes.orbbec.encode import encode_frame
+        from robot_utils.nodes.orbbec.models import DisplaySettings
+        if pytest.importorskip("cv2"):
+            jpeg, extra = encode_frame(right, "jpeg", DisplaySettings())
+            assert bytes(jpeg)[:2] == b"\xff\xd8" and extra["encoding"] == "jpeg"
+        raw, extra = encode_frame(right, "raw", DisplaySettings())
+        assert extra["format"] == "YUYV" and len(raw) == 1280 * 720 * 2
+        r = o.request_settings(SettingsPatch(camera_mode="depth")).result(timeout=10)
+        assert r["settings"].camera_mode == "depth" and b.mode == "depth" and o.catalog.mode == "depth"
+        assert {n for n, on in r["settings"].streams.items() if on} == {"color", "depth"}
+    finally:
+        o.close()
+
+
+def test_owner_goes_back_when_dual_color_does_not_start():
+    from robot_utils.nodes.orbbec.fake_backend import FakeBackend
+    from robot_utils.nodes.orbbec.models import SettingsError, SettingsPatch
+    b = FakeBackend(dual=True)
+    start = b.start
+
+    def refuse_dual(s):
+        if s.camera_mode == "dual_color":
+            raise RuntimeError("USB bandwidth")
+        start(s)
+    b.start = refuse_dual
+    o, _ = _owner(b)
+    try:
+        with pytest.raises(SettingsError, match="could not switch to camera mode dual_color.*back to depth"):
+            o.request_settings(SettingsPatch(camera_mode="dual_color")).result(timeout=10)
+        assert b.mode == "depth" and o.catalog.mode == "depth" and o.settings.camera_mode == "depth"
+        deadline = time.time() + 5
+        while o.state != "streaming" and time.time() < deadline:
+            time.sleep(0.02)
+        assert o.state == "streaming"
+    finally:
+        o.close()
+
+
+def test_sdk_backend_modes_presets_and_right_profile(monkeypatch):
+    """The SDK side against a stub: the dual mode exists only with the preset; every open puts the device in the
+    mode's preset (Default first, for the depth -> color extrinsic) and each preset load reopens the SDK (it caches a
+    device's sensor set per Context); the right sensor runs at the left's size and rate, MJPG if it has it, else
+    the native uncompressed format."""
+    from robot_utils.nodes.orbbec import sdk_backend as sb
+    monkeypatch.setattr(sb, "PRESET_GRACE_S", 0.0)
+
+    class T:   # sensor type enum
+        COLOR_SENSOR, DEPTH_SENSOR, LEFT_IR_SENSOR, RIGHT_IR_SENSOR = "C", "D", "IL", "IR"
+        LEFT_COLOR_SENSOR, RIGHT_COLOR_SENSOR = "LC", "RC"
+
+    class Camera:        # the physical device: its preset survives SDK reopens
+        def __init__(self, dual, lag=0):
+            self.dual, self.loaded, self.lag, self.pending = dual, [], lag, None
+
+    class Dev:           # an SDK device handle: its sensor set is fixed when first queried
+        def __init__(self, cam):
+            self.cam, self._sensors = cam, None
+        def load_preset(self, name):
+            self.cam.loaded.append(name)
+            self.cam.pending = (name == sb.DUAL_PRESET, self.cam.lag)
+        def get_sensor_list(self):
+            if self._sensors is None:
+                p = self.cam.pending
+                if p is not None:
+                    if p[1] > 0:
+                        self.cam.pending = (p[0], p[1] - 1)       # the device has not switched yet
+                    else:
+                        self.cam.dual, self.cam.pending = p[0], None
+                self._sensors = ["LC", "RC"] if self.cam.dual else ["C", "D", "IL", "IR"]
+            t = self._sensors
+            return type("SL", (), {"get_count": lambda s: len(t), "get_type_by_index": lambda s, j: t[j]})()
+        def get_available_preset_list(self):
+            names = [sb.DEFAULT_PRESET, sb.DUAL_PRESET]
+            return type("PL", (), {"get_count": lambda s: 2, "get_name_by_index": lambda s, k: names[k]})()
+        def get_device_info(self):
+            return type("I", (), {"get_serial_number": lambda s: "SN", "get_name": lambda s: "Gemini 305",
+                                  "get_firmware_version": lambda s: "1", "get_connection_type": lambda s: "USB2.1"})()
+
+    def backend(cam):
+        b = sb.SdkBackend.__new__(sb.SdkBackend)
+        b.ob = type("OB", (), {"OBSensorType": T})
+        b.serial, b._depth_to_color, b.global_ts, b.reopens = None, None, False, 0
+        b._imu_thread, b.running = None, False
+        b.mode_streams = {"depth": {"color": ("C", 0)}, "dual_color": {"color": ("LC", 4), "color_right": ("RC", 5)}}
+
+        def acquire():
+            b.dev, b.pipe = Dev(cam), "pipe"
+            b.reopens += 1
+        b._acquire = acquire
+        b._cache_depth_to_color = lambda: setattr(b, "_depth_to_color", {"translation_mm": [0, 0, 0]})
+        b._catalog = lambda: b.mode
+        return b
+
+    cam = Camera(dual=False)
+    b = backend(cam)
+    info, mode = b.open("depth")
+    assert b.modes == ["depth", "dual_color"] and mode == "depth" and cam.loaded == [sb.DEFAULT_PRESET]
+    assert b._depth_to_color is not None and info.name == "Gemini 305"
+    assert b.set_mode("dual_color") == "dual_color" and cam.loaded[-2:] == [sb.DEFAULT_PRESET, sb.DUAL_PRESET]
+    assert b.streams == b.mode_streams["dual_color"] and cam.dual
+    assert b.set_mode("depth") == "depth" and not cam.dual and b.streams == b.mode_streams["depth"]
+    # a camera left in dual colour by an earlier run: opened for depth, it comes back to Default
+    cam2 = Camera(dual=True)
+    assert backend(cam2).open("depth")[1] == "depth" and not cam2.dual
+    # the sensor set follows a few reopens late: _load_preset keeps reopening until it does
+    cam3 = Camera(dual=False, lag=2)
+    b3 = backend(cam3)
+    b3.dev = Dev(cam3)
+    b3._load_preset(sb.DUAL_PRESET, dual=True, timeout_s=2)
+    assert cam3.dual and b3.reopens == 3
+    # a device that ignores the preset: give up after the timeout
+    b3.dev.load_preset = lambda name: None
+    b3._acquire = lambda: setattr(b3, "dev", Dev(cam3))
+    with pytest.raises(RuntimeError, match="did not switch its sensors"):
+        b3._load_preset(sb.DEFAULT_PRESET, dual=False, timeout_s=0.05)
+    # no dual preset (a Gemini 336L): depth only, no preset is ever loaded
+    cam4 = Camera(dual=False)
+    b4 = backend(cam4)
+    b4._presets = lambda: [sb.DEFAULT_PRESET]
+    assert b4.open("dual_color")[1] == "depth" and b4.modes == ["depth"] and cam4.loaded == []
+    # the right sensor's profile for a left profile
+    b._color = {"848x480@15 MJPG": (848, 480, 15, "MJPG"), "848x480@15 YUYV": (848, 480, 15, "YUYV")}
+    b._profiles = {("color_right", (848, 480, 15, "YUYV")): "right-yuyv",
+                   ("color_right", (848, 480, 15, "RGB")): "right-rgb"}
+    pick = lambda key: b._profile("color_right", Settings(color_profile=key))   # noqa: E731
+    assert pick("848x480@15 MJPG") == "right-yuyv"     # no MJPG on the right: native YUYV, not the SDK's RGB
+    b._profiles[("color_right", (848, 480, 15, "MJPG"))] = "right-mjpg"
+    assert pick("848x480@15 MJPG") == "right-mjpg" and pick("848x480@15 YUYV") == "right-yuyv"
+    b._color["1280x800@10 MJPG"] = (1280, 800, 10, "MJPG")
+    with pytest.raises(ValueError, match="right colour sensor has no 1280x800@10"):
+        pick("1280x800@10 MJPG")
+
+
+def test_owner_refuses_a_mode_with_no_streams():
+    from robot_utils.nodes.orbbec.fake_backend import FakeBackend
+    from robot_utils.nodes.orbbec.models import SettingsError, SettingsPatch
+    b = FakeBackend(dual=True)
+    cat = b._catalog
+
+    def empty_in_dual():
+        c = cat()
+        if b.mode == "dual_color":
+            c.available = []
+        return c
+    b._catalog = empty_in_dual
+    o, _ = _owner(b)
+    try:
+        with pytest.raises(SettingsError, match="no video streams"):
+            o.request_settings(SettingsPatch(camera_mode="dual_color")).result(timeout=10)
+        assert b.mode == "depth" and o.settings.camera_mode == "depth"
+    finally:
+        o.close()

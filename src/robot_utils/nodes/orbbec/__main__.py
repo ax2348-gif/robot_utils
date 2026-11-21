@@ -9,13 +9,17 @@ from ..common.serve import add_serve_args, serve
 
 
 def main(argv=None):
-    from .models import STREAM_NAMES, Settings, ImuSettings
+    from .models import CAMERA_MODES, MODE_DEFAULT_STREAMS, STREAM_NAMES, Settings, ImuSettings
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.orbbec",
                                 description="HTTP node for the Orbbec depth camera (docs/orbbec_node.md).")
     p.add_argument("--serial", default=None,
                    help="open only the camera with this serial number (default: the first one the SDK lists, "
                         "which is arbitrary with several cameras attached)")
-    p.add_argument("--streams", default="color,depth", help="video streams on at start: " + ",".join(STREAM_NAMES))
+    p.add_argument("--camera-mode", default="depth", choices=list(CAMERA_MODES),
+                   help="depth (default): color + depth + the gray stereo pair; dual_color: both stereo sensors in "
+                        "colour (color = left, color_right = right), no depth, on devices that offer it (Gemini 305)")
+    p.add_argument("--streams", default=None, help="video streams on at start: " + ",".join(STREAM_NAMES)
+                   + " (default: the camera mode's, color,depth or color,color_right)")
     p.add_argument("--no-imu", action="store_true", help="start with the IMU off")
     p.add_argument("--depth-filter", default="hardware", choices=["hardware", "software", "both", "off", "device"],
                    help="depth noise filter set on the device at start (default hardware: the camera's own, no host "
@@ -30,7 +34,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
-    streams = [s for s in a.streams.split(",") if s]
+    streams = [s for s in a.streams.split(",") if s] if a.streams is not None else list(MODE_DEFAULT_STREAMS[a.camera_mode])
     bad = set(streams) - set(STREAM_NAMES)
     if bad:
         p.error(f"unknown stream(s) {', '.join(sorted(bad))}")
@@ -40,12 +44,12 @@ def main(argv=None):
     from .server import create_app
     if a.fake:
         from .fake_backend import FakeBackend
-        backend = FakeBackend()
+        backend = FakeBackend(dual=True)
     else:
         from .sdk_backend import SdkBackend
         backend = SdkBackend(serial=a.serial)
-    settings = Settings(streams={n: n in streams for n in STREAM_NAMES}, imu=ImuSettings(enabled=not a.no_imu),
-                        depth_filter=a.depth_filter)
+    settings = Settings(camera_mode=a.camera_mode, streams={n: n in streams for n in STREAM_NAMES},
+                        imu=ImuSettings(enabled=not a.no_imu), depth_filter=a.depth_filter)
     hub = Hub()
     from .owner import IMU_CALIBRATION_FILE
     cal_file = a.imu_calibration_file or (None if a.fake else IMU_CALIBRATION_FILE)

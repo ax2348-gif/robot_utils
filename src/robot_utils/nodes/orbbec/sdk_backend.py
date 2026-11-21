@@ -21,6 +21,7 @@ Verified on a Gemini 336L, pyorbbecsdk2 2.1.3 (libOrbbecSDK 2.10.6), Pi 5 USB 2.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 import time
@@ -41,6 +42,13 @@ HW_FILTER = "OB_PROP_HW_NOISE_REMOVE_FILTER_ENABLE_BOOL"   # the camera's own
 COLOR_FORMATS = ["MJPG", "RGB", "BGR", "RGBA", "BGRA", "Y8", "YUYV", "UYVY"]
 STEREO_FORMATS = {"depth": ["Y16"], "ir_left": ["Y8", "Y16"], "ir_right": ["Y8", "Y16"]}
 BYTES_PER_PIXEL = {"Y8": 1, "Y16": 2, "RGB": 3, "BGR": 3, "RGBA": 4, "BGRA": 4, "YUYV": 2, "UYVY": 2}
+COLOR_STREAMS = ("color", "color_right")
+# Device presets behind the camera modes. Verified on a Gemini 305 (fw 1.0.70, USB 2.1): "Dual Color Streams" leaves
+# only LEFT_COLOR + RIGHT_COLOR sensors (left: YUY2 + MJPEG natively, right: YUY2 only), no depth; "Default" brings
+# back color (= the left sensor) + depth + the gray pair.
+DUAL_PRESET, DEFAULT_PRESET = "Dual Color Streams", "Default"
+PRESET_SETTLE_S = 5.0     # wait at most this long for the sensor set to follow a preset
+PRESET_GRACE_S = 0.5      # after loading a preset, before reopening the SDK on the device
 
 # Device controls shown when the device reports them read/write: (group, property id, label)
 CONTROLS = [
@@ -94,13 +102,24 @@ class SdkBackend:
         self._profiles = {}
         self._color, self._stereo = {}, {}
         self._imu_profiles = {}
+        self._color_right = {}
+        self.mode, self.modes = "depth", ["depth"]
+        self._opened_serial: Optional[str] = None
+        self._depth_to_color = None   # factory depth -> color extrinsic, kept for dual colour (no depth sensor there)
         self._active: Optional[Settings] = None
         self._imu_thread: Optional[threading.Thread] = None
         self._imu_stop = threading.Event()
-        self.streams = {"color": (ob.OBSensorType.COLOR_SENSOR, ob.OBFrameType.COLOR_FRAME),
-                        "depth": (ob.OBSensorType.DEPTH_SENSOR, ob.OBFrameType.DEPTH_FRAME),
-                        "ir_left": (ob.OBSensorType.LEFT_IR_SENSOR, ob.OBFrameType.LEFT_IR_FRAME),
-                        "ir_right": (ob.OBSensorType.RIGHT_IR_SENSOR, ob.OBFrameType.RIGHT_IR_FRAME)}
+        self.mode_streams = {
+            "depth": {"color": (ob.OBSensorType.COLOR_SENSOR, ob.OBFrameType.COLOR_FRAME),
+                      "depth": (ob.OBSensorType.DEPTH_SENSOR, ob.OBFrameType.DEPTH_FRAME),
+                      "ir_left": (ob.OBSensorType.LEFT_IR_SENSOR, ob.OBFrameType.LEFT_IR_FRAME),
+                      "ir_right": (ob.OBSensorType.RIGHT_IR_SENSOR, ob.OBFrameType.RIGHT_IR_FRAME)}}
+        if all(hasattr(ob.OBSensorType, n) for n in ("LEFT_COLOR_SENSOR", "RIGHT_COLOR_SENSOR")) and \
+                all(hasattr(ob.OBFrameType, n) for n in ("LEFT_COLOR_FRAME", "RIGHT_COLOR_FRAME")):
+            self.mode_streams["dual_color"] = {
+                "color": (ob.OBSensorType.LEFT_COLOR_SENSOR, ob.OBFrameType.LEFT_COLOR_FRAME),
+                "color_right": (ob.OBSensorType.RIGHT_COLOR_SENSOR, ob.OBFrameType.RIGHT_COLOR_FRAME)}
+        self.streams = self.mode_streams["depth"]
 
     @property
     def is_open(self):
@@ -108,21 +127,23 @@ class SdkBackend:
 
     # -- open / catalog ----------------------------------------------------------------------
 
-    def open(self):
+    def _acquire(self):
+        """Context (kept), the device (by serial), global timestamps, a pipeline."""
         ob = self.ob
         if self.ctx is None:
             self.ctx = ob.Context()     # keep it referenced: devices hold a pointer into it
         devices = self.ctx.query_devices()
         n = devices.get_count()
-        if self.serial is None:
+        serial = self.serial or self._opened_serial
+        if serial is None:
             if n == 0:
                 raise NoDevice()
             self.dev = devices.get_device_by_index(0)
         else:
             found = [devices.get_device_serial_number_by_index(i) for i in range(n)]
-            if self.serial not in found:
-                raise NoDevice(f"no camera with serial {self.serial} (connected: {', '.join(found) or 'none'})")
-            self.dev = devices.get_device_by_serial_number(self.serial)
+            if serial not in found:
+                raise NoDevice(f"no camera with serial {serial} (connected: {', '.join(found) or 'none'})")
+            self.dev = devices.get_device_by_serial_number(serial)
         self.global_ts = False
         try:
             if self.dev.is_global_timestamp_supported():
@@ -131,13 +152,99 @@ class SdkBackend:
         except Exception as e:
             log.info("global timestamp not available: %s", e)
         self.pipe = ob.Pipeline(self.dev)
+
+    def open(self, mode: str = "depth"):
+        """Open the device in ``mode`` (falls back to depth if the device has no such mode). A device with the dual
+        colour preset is put in the preset of the mode at every open (Default for depth, so a camera left in dual
+        colour by an earlier run comes back; this also replaces any other preset chosen outside the node)."""
+        self._opened_serial = None
+        self._acquire()
+        self._opened_serial = self.dev.get_device_info().get_serial_number()
+        presets = self._presets()
+        self.modes = ["depth"] + (["dual_color"] if DUAL_PRESET in presets and "dual_color" in self.mode_streams
+                                  else [])
+        mode = mode if mode in self.modes else "depth"
+        if "dual_color" in self.modes:
+            self._load_preset(DEFAULT_PRESET, dual=False)
+            self._cache_depth_to_color()       # dual colour has no depth sensor: keep the mounting extrinsic
+            if mode == "dual_color":
+                self._load_preset(DUAL_PRESET, dual=True)
+        self.mode = mode
+        self.streams = self.mode_streams[mode]
         i = self.dev.get_device_info()
         info = DeviceInfo(name=i.get_name(), serial=i.get_serial_number(), firmware=i.get_firmware_version(),
                           connection=_try(i.get_connection_type, ""), global_timestamp=self.global_ts)
         return info, self._catalog()
 
+    def _presets(self) -> list[str]:
+        lst = _try(self.dev.get_available_preset_list, None)
+        if lst is None:
+            return []
+        out = []
+        for k in range(_try(lst.get_count, 0)):
+            name = _try(lambda: lst.get_name_by_index(k), None)
+            if name is None:
+                name = _try(lambda: lst[k], None)
+            if name:
+                out.append(str(name))
+        return out
+
+    def _in_dual_preset(self) -> bool:
+        sl = self.dev.get_sensor_list()
+        types = {sl.get_type_by_index(j) for j in range(sl.get_count())}
+        return self.ob.OBSensorType.LEFT_COLOR_SENSOR in types if "dual_color" in self.mode_streams else False
+
+    @staticmethod
+    def _ext(a, b) -> dict:
+        e = a.get_extrinsic_to(b)
+        return {"rotation": np.asarray(e.rot, dtype=float).reshape(3, 3).round(6).tolist(),
+                "translation_mm": np.asarray(e.transform, dtype=float).reshape(3).round(4).tolist()}
+
+    def _cache_depth_to_color(self):
+        """In the depth preset: remember the factory depth -> color extrinsic (default profiles)."""
+        ob = self.ob
+        try:
+            d = self.pipe.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR).get_default_video_stream_profile()
+            c = self.pipe.get_stream_profile_list(ob.OBSensorType.COLOR_SENSOR).get_default_video_stream_profile()
+            self._depth_to_color = self._ext(d, c)
+        except Exception as e:  # noqa: BLE001 - informational
+            log.info("depth -> color extrinsic not available: %s", e)
+
+    def _refresh(self):
+        """Drop the pipeline, device and SDK context and open them again. The SDK keeps a device's sensor set from
+        its first query for the life of the Context (verified on a Gemini 305: after a preset load, the same device
+        and a device re-fetched from the same Context still list the old sensors), so every preset load ends here."""
+        self.pipe = self.dev = self.align = None
+        self.ctx = None
+        gc.collect()
+        self._acquire()
+
+    def _load_preset(self, preset: str, dual: bool, timeout_s: float = PRESET_SETTLE_S):
+        """Load a preset, reopen the SDK on the device, and wait until it lists the preset's sensors."""
+        self.dev.load_preset(preset)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            time.sleep(PRESET_GRACE_S)
+            self._refresh()
+            if self._in_dual_preset() == dual:
+                log.info("loaded the %r preset", preset)
+                return
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"the device did not switch its sensors within {timeout_s:.0f} s of loading "
+                                   f"the {preset!r} preset")
+
+    def set_mode(self, mode: str) -> Catalog:
+        """Switch the camera mode: video and IMU stopped, the device reopened in the mode's preset. Returns the new
+        catalog."""
+        if mode not in self.modes:
+            raise ValueError(f"this device has no {mode!r} mode")
+        self.imu_stop()
+        self.stop()
+        return self.open(mode)[1]
+
     def _catalog(self) -> Catalog:
-        profiles, color, stereo_sets, available, defaults = {}, {}, [], [], {}
+        profiles, stereo_sets, available, defaults = {}, [], [], {}
+        colors = {n: {} for n in COLOR_STREAMS}
         for name, (sensor, _) in self.streams.items():
             try:
                 plist = self.pipe.get_stream_profile_list(sensor)
@@ -152,8 +259,8 @@ class SdkBackend:
                 p = plist.get_stream_profile_by_index(i).as_video_stream_profile()
                 k = (p.get_width(), p.get_height(), p.get_fps(), p.get_format().name)
                 profiles[(name, k)] = p
-                if name == "color" and k[3] in COLOR_FORMATS:
-                    color[f"{k[0]}x{k[1]}@{k[2]} {k[3]}"] = (k, k == dkey)
+                if name in COLOR_STREAMS and k[3] in COLOR_FORMATS:
+                    colors[name][f"{k[0]}x{k[1]}@{k[2]} {k[3]}"] = (k, k == dkey)
                 elif name in STEREO and k[3] in STEREO_FORMATS[name]:
                     key = f"{k[0]}x{k[1]}@{k[2]}"
                     modes[key] = (k[:3], modes.get(key, (None, False))[1] or k == dkey)
@@ -170,12 +277,18 @@ class SdkBackend:
 
         self._profiles = profiles
         self._defaults = defaults
+        color = colors["color"]
         self._color = {k: v[0] for k, v in color.items()}
+        self._color_right = {k: v[0] for k, v in colors["color_right"].items()}
         self._stereo = {k: v[0] for k, v in stereo.items()}
+
+        def opts(d):
+            return [ProfileOption(key=k, width=v[0][0], height=v[0][1], fps=v[0][2], format=v[0][3], default=v[1])
+                    for k, v in sorted(d.items(), key=order)]
         cat = Catalog(
+            modes=list(self.modes), mode=self.mode,
             available=available,
-            color=[ProfileOption(key=k, width=v[0][0], height=v[0][1], fps=v[0][2], format=v[0][3], default=v[1])
-                   for k, v in sorted(color.items(), key=order)],
+            color=opts(color), color_right=opts(colors["color_right"]),
             stereo=[ProfileOption(key=k, width=v[0][0], height=v[0][1], fps=v[0][2], default=v[1])
                     for k, v in sorted(stereo.items(), key=order)],
             imu=self._imu_catalog())
@@ -242,6 +355,15 @@ class SdkBackend:
     def _profile(self, name, s: Settings):
         if name == "color":
             return self._profiles[("color", self._color[s.color_profile])]
+        if name == "color_right":
+            w, h, fps, fmt = self._color[s.color_profile]
+            # the left's format, else MJPG, else the native uncompressed YUYV/UYVY (RGB etc. are SDK conversions
+            # of those on the host CPU, and larger), else anything
+            for f in [fmt, "MJPG", "YUYV", "UYVY"] + COLOR_FORMATS:
+                p = self._profiles.get(("color_right", (w, h, fps, f)))
+                if p is not None:
+                    return p
+            raise ValueError(f"the right colour sensor has no {w}x{h}@{fps} profile")
         w, h, fps = self._stereo[s.stereo_mode]
         for fmt in STEREO_FORMATS[name]:
             p = self._profiles.get((name, (w, h, fps, fmt)))
@@ -254,7 +376,9 @@ class SdkBackend:
         extrinsic (pinhole: fx, fy, cx, cy in pixels of that profile's width x height)."""
         out = {}
         prof = {}
-        for name in ("depth", "color"):
+        for name in ("depth", "color", "color_right"):
+            if name not in self.streams:
+                continue
             try:
                 p = self._profile(name, s).as_video_stream_profile()
             except Exception:
@@ -270,10 +394,11 @@ class SdkBackend:
             except Exception:
                 pass
             out[name] = d
-        if "depth" in prof and "color" in prof:
-            e = prof["depth"].get_extrinsic_to(prof["color"])
-            out["depth_to_color"] = {"rotation": np.asarray(e.rot, dtype=float).reshape(3, 3).round(6).tolist(),
-                                     "translation_mm": np.asarray(e.transform, dtype=float).reshape(3).round(4).tolist()}
+        for a, b in (("depth", "color"), ("color", "color_right")):
+            if a in prof and b in prof:
+                out[f"{a}_to_{b}"] = self._ext(prof[a], prof[b])
+        if "depth_to_color" not in out and self.mode == "dual_color" and self._depth_to_color is not None:
+            out["depth_to_color"] = self._depth_to_color      # the mounting frame stays depth_optical
         return out
 
     # -- video -------------------------------------------------------------------------------

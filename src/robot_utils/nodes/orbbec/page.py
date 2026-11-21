@@ -54,11 +54,12 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 <section class="box" data-panel="streams" data-role="control"><h2>Streams</h2><div id="streams"></div>
 <div class="small">Settings are global: every client sees the same camera.</div></section>
 <section class="box" data-panel="profiles" data-role="config"><h2>Profiles</h2>
+<label class="row" id="moderow"><span class="k">Camera mode</span><select id="camera_mode"><option value="depth">depth</option><option value="dual_color">dual colour (no depth)</option></select></label>
 <label class="row"><span class="k">Color</span><select id="color_profile"></select></label>
-<label class="row"><span class="k">Depth / IR</span><select id="stereo_mode"></select></label>
-<label class="row"><span class="k">Align depth to color</span><input type="checkbox" id="align"></label>
+<label class="row depthonly"><span class="k">Depth / IR</span><select id="stereo_mode"></select></label>
+<label class="row depthonly"><span class="k">Align depth to color</span><input type="checkbox" id="align"></label>
 <label class="row"><span class="k">Frame sync</span><input type="checkbox" id="frame_sync"></label>
-<div class="small">Depth and IR share one mode. Aligned depth has the color resolution. Frame sync pairs color+depth (adds latency).</div></section>
+<div class="small" id="profnote"></div></section>
 <section class="box" data-panel="depth-display" data-role="config"><h2>Depth display</h2>
 <label class="row"><span class="k">Colormap</span><select id="colormap"></select></label>
 <div class="bar" id="cmapbar"></div>
@@ -83,7 +84,7 @@ input[type=color]{width:40px;height:22px;border:none;background:none;padding:0}
 <script src="common/ui.js"></script>
 <script>
 "use strict";
-const $=s=>document.querySelector(s), ORDER=["color","depth","ir_left","ir_right"];
+const $=s=>document.querySelector(s), ORDER=["color","color_right","depth","ir_left","ir_right"];
 let S=null, CAT=null, catId=null, setVer=-1, tiles={};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)), dec=new TextDecoder();
 function el(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==="class")e.className=v;else if(k.startsWith("on"))e[k]=v;else e.setAttribute(k,v)}for(const c of kids)e.append(c);return e}
@@ -107,8 +108,17 @@ const serverNow=()=>performance.now()/1000+OFF;
 
 function buildControls(){
   const st=$("#streams");st.innerHTML="";
+  const multi=(CAT.modes||[]).length>1, dual=CAT.mode==="dual_color";
+  $("#moderow").style.display=multi?"":"none";
+  for(const o of $("#camera_mode").options)o.disabled=!(CAT.modes||["depth"]).includes(o.value);
+  $("#camera_mode").onchange=e=>post({camera_mode:e.target.value});
+  for(const e of document.querySelectorAll(".depthonly"))e.style.display=dual?"none":"";
+  $("#profnote").textContent=dual?"Both stereo sensors in colour: left = the color profile, right at the same size and rate "+
+    "(MJPG if the right sensor offers it, else uncompressed). No depth in this mode. Frame sync pairs left+right.":
+    "Depth and IR share one mode. Aligned depth has the color resolution. Frame sync pairs color+depth (adds latency).";
   for(const n of ORDER){
     const ok=CAT.available.includes(n);
+    if(!ok&&(multi||n==="color_right"))continue;     // the other camera mode's streams
     const cb=el("input",{type:"checkbox",id:"s_"+n});cb.disabled=!ok;
     cb.onchange=()=>post({streams:{[n]:cb.checked}});
     st.append(el("label",{class:"row"},el("span",{class:"k"},S.streams[n].label+(ok?"":" (n/a)")),el("span",{class:"small",id:"fps_"+n}),cb))}
@@ -131,7 +141,7 @@ function grad(name){const c=CAT.colormaps[name]||[];return "linear-gradient(to r
 function syncControls(){
   const s=S.settings,d=s.display;
   for(const n of ORDER){const cb=$("#s_"+n);if(cb)cb.checked=!!s.streams[n]}
-  for(const id of ["color_profile","stereo_mode"]){const e=$("#"+id);if(document.activeElement!==e&&s[id]!=null)e.value=s[id]}
+  for(const id of ["camera_mode","color_profile","stereo_mode"]){const e=$("#"+id);if(document.activeElement!==e&&s[id]!=null)e.value=s[id]}
   for(const id of ["colormap","range_mode","invalid_color","pct_lo","pct_hi","min_mm","max_mm","jpeg_quality"]){
     const e=$("#"+id);if(e&&document.activeElement!==e&&d[id]!=null)e.value=d[id]}
   $("#align").checked=s.align;$("#frame_sync").checked=s.frame_sync;$("#invert").checked=d.invert;
@@ -158,7 +168,7 @@ function makeTile(n){
   const img=el("img",{alt:n}),ro=el("div",{class:"ro"}),nof=el("div",{class:"nof"},"waiting for frames..."),pin=el("div",{class:"pin"});pin.style.display="none";
   const st=el("span",{class:"st"}),links=el("span",{});
   links.append(el("a",{href:"snapshot/"+n+"?format=jpg",target:"_blank",title:"current frame as JPEG"},"jpg"));
-  if(n!=="color"){links.append(" ",el("a",{href:"snapshot/"+n+"?format=png",target:"_blank",title:"lossless 16-bit (depth: mm x depth_scale) PNG"},"png"))}
+  if(!n.startsWith("color")){links.append(" ",el("a",{href:"snapshot/"+n+"?format=png",target:"_blank",title:"lossless 16-bit (depth: mm x depth_scale) PNG"},"png"))}
   links.append(" ",el("a",{href:"mjpeg/"+n,target:"_blank",title:"MJPEG stream of this sensor alone"},"mjpeg"));
   const wrap=el("div",{class:"wrap"},img,nof,pin,ro);
   const t={n,img,ro,nof,pin,st,url:null,frames:[],lat:[],meta:null,busy:false,pinxy:null};

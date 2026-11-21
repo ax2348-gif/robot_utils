@@ -4,6 +4,8 @@ Same interface as SdkBackend. Color is a moving gradient encoded to JPEG (like t
 MJPG), depth a moving uint16 ramp, IR a gray pattern, IMU a slow sine plus gravity. The
 ``1920x1080@30 MJPG`` color profile is listed but refused at start, to exercise the
 restore-on-reject path; ``640x480@30 RGB`` starts but delivers no color frames (like the real camera on USB 2).
+With ``dual=True`` it also has the dual_color mode (like a Gemini 305): ``color`` = left, ``color_right`` = right,
+the right side uncompressed YUYV only, no depth or IR.
 """
 from __future__ import annotations
 
@@ -24,13 +26,17 @@ COLOR = [("1920x1080@30 MJPG", 1920, 1080, 30, False), ("1280x720@10 MJPG", 1280
          ("640x480@30 MJPG", 640, 480, 30, False), ("640x480@30 RGB", 640, 480, 30, False)]
 STEREO = [("848x480@10", 848, 480, 10, True), ("640x400@30", 640, 400, 30, False),
           ("480x270@60", 480, 270, 60, False)]
+COLOR_RIGHT = [("1280x720@10 YUYV", 1280, 720, 10, True), ("640x480@30 YUYV", 640, 480, 30, False)]
 REJECT = {"1920x1080@30 MJPG"}     # refused at start
 SILENT = {"640x480@30 RGB"}        # starts but never delivers (like uncompressed color on USB 2)
 
 
 class FakeBackend:
-    def __init__(self, present: bool = True):
+    def __init__(self, present: bool = True, dual: bool = False):
         self.present = present
+        self.modes = ["depth", "dual_color"] if dual else ["depth"]
+        self.mode = "depth"
+        self.mode_switches = 0
         self.is_open = False
         self.running = False
         self._s: Optional[Settings] = None
@@ -41,25 +47,43 @@ class FakeBackend:
         self._imu_stop = threading.Event()
         self._jpeg_cache = {}
 
-    def open(self):
+    def open(self, mode: str = "depth"):
         if not self.present:
             raise NoDevice()
         self.is_open = True
-        cat = Catalog(
-            available=["color", "depth", "ir_left", "ir_right"],
-            color=[ProfileOption(key=k, width=w, height=h, fps=f, format=k.split()[1], default=d)
-                   for k, w, h, f, d in COLOR],
-            stereo=[ProfileOption(key=k, width=w, height=h, fps=f, default=d) for k, w, h, f, d in STEREO],
+        self.mode = mode if mode in self.modes else "depth"
+        return DeviceInfo(name="Fake Gemini", serial="FAKE0001", firmware="0.0", connection="none",
+                          global_timestamp=True), self._catalog()
+
+    def _catalog(self) -> Catalog:
+        opt = lambda rows: [ProfileOption(key=k, width=w, height=h, fps=f, format=k.split()[1], default=d)  # noqa: E731
+                            for k, w, h, f, d in rows]
+        dual = self.mode == "dual_color"
+        return Catalog(
+            modes=list(self.modes), mode=self.mode,
+            available=["color", "color_right"] if dual else ["color", "depth", "ir_left", "ir_right"],
+            color=opt(COLOR), color_right=opt(COLOR_RIGHT) if dual else [],
+            stereo=[] if dual else [ProfileOption(key=k, width=w, height=h, fps=f, default=d)
+                                    for k, w, h, f, d in STEREO],
             imu=ImuCatalog(available=True, sample_rates=["50Hz", "100Hz", "200Hz", "500Hz", "1kHz"],
                            default_rate="1kHz", accel_ranges=["4g"], gyro_ranges=["1000dps"]))
-        return DeviceInfo(name="Fake Gemini", serial="FAKE0001", firmware="0.0", connection="none",
-                          global_timestamp=True), cat
+
+    def set_mode(self, mode: str) -> Catalog:
+        if mode not in self.modes:
+            raise ValueError(f"this device has no {mode!r} mode")
+        self.stop()
+        self.mode = mode
+        self.mode_switches += 1
+        return self._catalog()
 
     def start(self, s: Settings):
         self.stop()
         self._s = s
         if s.streams.get("color") and s.color_profile in REJECT:
             raise RuntimeError("fake device refuses this profile")
+        if s.streams.get("color_right") and not any(r[1:4] == self._fps("color") for r in COLOR_RIGHT) \
+                and self.mode == "dual_color":
+            raise RuntimeError("the right colour sensor has no profile at this size and rate")
         names = [n for n, on in s.streams.items() if on
                  and not (n == "color" and s.color_profile in SILENT)]
         now = time.monotonic()
@@ -78,11 +102,16 @@ class FakeBackend:
             out[name] = {"fx": f, "fy": f, "cx": w / 2.0, "cy": h / 2.0, "width": w, "height": h}
         out["depth_to_color"] = {"rotation": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],   # floats, as the SDK
                                  "translation_mm": [-25.0, 0.0, 0.0]}
+        if self.mode == "dual_color":
+            out.pop("depth", None)
+            out["color_right"] = dict(out["color"])
+            out["color_to_color_right"] = {"rotation": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                                           "translation_mm": [-18.0, 0.0, 0.0]}
         return out
 
     def _fps(self, n):
-        key = self._s.color_profile if n == "color" else self._s.stereo_mode
-        rows = COLOR if n == "color" else STEREO
+        key = self._s.color_profile if n in ("color", "color_right") else self._s.stereo_mode
+        rows = COLOR if n in ("color", "color_right") else STEREO
         return next(r for r in rows if r[0] == key)[1:4]
 
     def stop(self):
@@ -123,6 +152,8 @@ class FakeBackend:
                 if len(self._jpeg_cache) > 64:
                     self._jpeg_cache.clear()
             fr = Frame(n, "MJPG", w, h, data, 0.0, None, 0, 0)
+        elif n == "color_right":
+            fr = Frame(n, "YUYV", w, h, np.full(w * h * 2, 128, np.uint8), 0.0, None, 0, 0)
         elif n == "depth":
             x = np.arange(w, dtype=np.uint16)[None, :]
             d = (500 + (x * 4 + phase * 8) % 3000).astype(np.uint16)
