@@ -4,9 +4,9 @@
 # rate; the Pi servos the arm in place + holds the base (70 s window) while pi_mlp_bench paces the 0.2M, 1M, 2M and
 # 13M MLPs at 100 Hz (14 s each, numpy, one thread). Compare the arm's rate/overruns with the C2 baseline
 # (100 Hz, 0 overruns, 33% CPU). Afterwards the pin is re-applied and every node but power stopped.
-# Usage: run_mlp_loaded.sh OUT [GATE_V]
+# Usage: run_mlp_loaded.sh OUT [GATE_V] [MAX_PARAMS] [SECONDS_EACH]   (defaults: all MLPs, 14 s each)
 set -u
-OUT=${1:?}; GATE=${2:-3.60}; mkdir -p "$OUT"
+OUT=${1:?}; GATE=${2:-3.60}; MAXP=${3:-100000000}; EACH=${4:-14}; mkdir -p "$OUT"
 ER="cd ~/robot_core_test && ROBOT_NODES=http://192.168.8.209/nodes"
 pw() { ssh -o ConnectTimeout=10 botcore 'curl -s --unix-socket /run/user/$(id -u)/robot/power.sock http://x/state' |
        python3 -c "import json,sys;d=json.load(sys.stdin);u=d['sources'][0];print(min(u['cells_v']),u['power_w'],d['state'])"; }
@@ -29,7 +29,7 @@ ssh erid "$ER HEAD_STREAMS=color WRIST_STREAMS=color ~/miniconda3/bin/python too
 sleep 6
 ssh botcore "cd ~/profiling; ~/robot_utils/.venv/bin/python pi_arm_factor.py mlp_loaded 70 track hold" > "$OUT/pi.txt" 2>&1 & A=$!
 sleep 4
-ssh botcore "cd ~/profiling; ~/robot_utils/.venv/bin/python pi_mlp_bench.py paced 14" > "$OUT/mlp.txt" 2>&1
+ssh botcore "cd ~/profiling; MLP_MAX_PARAMS=$MAXP ~/robot_utils/.venv/bin/python pi_mlp_bench.py paced $EACH" > "$OUT/mlp.txt" 2>&1
 wait $A; wait $C
 scp -q erid:/tmp/consumer_mlp.json "$OUT/consumer.json"
 echo "$(date +%T) after: $(pw)" | tee -a "$OUT/power.txt"

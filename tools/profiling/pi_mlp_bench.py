@@ -19,6 +19,7 @@ import torch  # noqa: E402
 torch.set_num_threads(1)
 MODE = sys.argv[1] if len(sys.argv) > 1 else "burst"
 SEC = float(sys.argv[2]) if len(sys.argv) > 2 else 20.0
+MAX_PARAMS = int(os.environ.get("MLP_MAX_PARAMS", "100000000"))   # paced: skip networks above this
 MLPS = {"tiny 32-64-32-8": [32, 64, 32, 8],
         "50k 64-256-128-12": [64, 256, 128, 12],
         "200k 64-512-256-128-12": [64, 512, 256, 128, 12],
@@ -100,7 +101,7 @@ def main():
                 r["numpy"] = burst(np_fwd)
                 r["torch"] = burst(lambda: m(x))
             else:
-                if r["params"] < 150_000:
+                if r["params"] < 150_000 or r["params"] > MAX_PARAMS:
                     continue
                 r["numpy_100hz"] = paced(np_fwd, SEC)
             out[name] = r
