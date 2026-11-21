@@ -195,7 +195,7 @@ def test_goal_engages_and_tracks(rig):
     assert row["source"] == SOURCES.index("stream") and row["stream_seq"] == rig.seq
     assert row["stream_age"] == pytest.approx(DT, abs=1e-9)
     s = rig.ch.states()[-1]
-    assert s.flags & F.STATE_SERVOING and s.source == SOURCES.index("stream") and s.seq == rig.seq
+    assert s.flags & F.STATE_SERVOING and s.source == SOURCES.index("stream") and s.seq == rig.seq - 1   # applied by the previous tick
     assert np.allclose(s.q_cmd, goal, atol=1e-3)
     st = rig.node.state_dict()
     assert st["source"] == "stream" and st["joint_channel"]["goal"]["seq"] == rig.seq

@@ -358,13 +358,13 @@ keep-alives and goals; older or equal is dropped.
 **State** (`RUS1`, 136 bytes, `<4sBBHIIdIBB2x6f6f6f6fff`), sent every control-loop iteration while the session is
 open, right after the bus read (also on fault and connecting iterations, with the latest reading): magic, version,
 reserved (0), flags (1 servoing, 2 stale, 4 jam, 8 limited, 16 paused), session, tick (loop iterations since the node
-started), t_tick, seq of the goal in force (0: none), source (index into the row's `source` list; `stream` = 8),
+started), t_tick, seq of the goal the previous control tick applied (0: none), source (index into the row's `source` list; `stream` = 8),
 state (index), q (output encoders), qd, tau (motor feedback), q_cmd (NaN when not servoing), gap (m), read_age.
 Non-blocking: a full or vanished client socket counts a `send_errors`, never delays the tick. As in the row,
 `t_tick` is before a pipelined read: `q` answers requests sent about one tick earlier (see "When the data was
 measured"; `t_meas` / `t_meas_mot` are in the row, not in the packet).
 
-**Observability.** Row columns `stream_seq`, `stream_age` (s since the goal in force arrived) and `stream_lat`
+**Observability.** Row columns `stream_seq`, `stream_age` (s since the goal the tick applied arrived) and `stream_lat`
 (`t_tick` − the goal's `t_basis`: the client's loop latency; about one tick for a client that answers each state
 packet), appended last. `/state` `joint_channel`: socket, config (`stale_ms`, `max_lead_deg`, `limit_tol_deg`), the
 session (id, client, lease, address, seq, paused, stale, counts: goals, keep-alives, stale, sent, send errors;

@@ -119,6 +119,7 @@ class JointStream:
         self.stream_bad: dict = {}                  # datagrams without a session: reason -> count
         self.nonfinite_goals = 0                    # _command_step's backstop (any source)
         self._steps = 0                             # control-loop iterations (the state packet's tick)
+        self._stream_applied: Optional[tuple] = None  # (seq, t, t_basis) of the goal the last control tick used
 
     # -- transport ----------------------------------------------------------------------------------------
 
@@ -303,6 +304,7 @@ class JointStream:
     def _stream_target(self, now: float):
         """(goal, MIT velocity reference) of the stream slot; servoing, under _lock."""
         g, s = self.stream, self.stream_session
+        self._stream_applied = (g.seq, g.t, g.t_basis)
         acc = self.soft.joint_acc
         dv = acc * self.dt
         if now - g.t <= self.stream_cfg.stale_ms * 1e-3:
@@ -340,7 +342,8 @@ class JointStream:
                          | (F.STATE_JAM if self.jam_active is not None else 0)
                          | (F.STATE_LIMITED if (self._limited and servo) else 0)
                          | (F.STATE_PAUSED if s.paused else 0))
-                seq = g.seq if g is not None else 0
+                a = self._stream_applied
+                seq = a[0] if a is not None else 0  # the goal the last tick applied (a newer one may wait)
                 src = self._source_name()
             if r is None:
                 q = qd = tau = nan6
@@ -359,11 +362,12 @@ class JointStream:
             s.counts["send_errors"] += 1
 
     def _stream_row(self, now: float) -> tuple:
-        """The row's stream_seq, stream_age, stream_lat (NaN without a stream goal)."""
-        g = self.stream
-        if g is None:
+        """The row's stream_seq, stream_age, stream_lat of the goal this tick applied (NaN if the stream did not
+        drive it). A goal that arrives during the tick, after the command step, counts from the next tick."""
+        a = self._stream_applied
+        if a is None:
             return math.nan, math.nan, math.nan
-        return float(g.seq), now - g.t, now - g.t_basis
+        return float(a[0]), now - a[1], now - a[2]
 
     # -- reads ----------------------------------------------------------------------------------------------
 

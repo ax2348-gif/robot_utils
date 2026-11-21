@@ -628,6 +628,7 @@ class ArmNode(JointStream):
         kin, p = self.kin, self.profile
         src = None
         with self._lock:
+            self._stream_applied = None              # set by _stream_target when the stream drives this tick
             if self._has_source() and self.enabled and not self.servo and not self.estop.active:
                 self._engage(r)
             if self.servo:
