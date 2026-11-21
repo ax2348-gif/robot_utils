@@ -5,6 +5,7 @@
 
 DEPTH: how the head camera's raw (non-MJPG) frames come: raw or zlib. Environment overrides:
   ROBOT_NODES      base URL (default the robot LAN mDNS name)
+  HEAD_STREAMS     the head camera's streams (default color,depth; e.g. color)
   WRIST_STREAMS    the wrist camera's streams (default color,depth; e.g. color, or color,color_right)
   WRIST_COMPRESS   raw or zlib for the wrist's raw frames (default: as DEPTH)
 
@@ -29,10 +30,11 @@ SEC = float(sys.argv[1]) if len(sys.argv) > 1 else 60
 DEPTH = sys.argv[2] if len(sys.argv) > 2 else "zlib"
 OUT = sys.argv[3] if len(sys.argv) > 3 else None
 CZ = "&compress=zlib" if DEPTH == "zlib" else ""
+HEAD_STREAMS = os.environ.get("HEAD_STREAMS", "color,depth")
 WRIST_STREAMS = os.environ.get("WRIST_STREAMS", "color,depth")
 WZ = "&compress=zlib" if os.environ.get("WRIST_COMPRESS", DEPTH) == "zlib" else ""
 STREAMS = {
-    "camera": f"camera/stream?streams=color,depth&mode=raw{CZ}",
+    "camera": f"camera/stream?streams={HEAD_STREAMS}&mode=raw{CZ}",
     "wrist_camera": f"wrist_camera/stream?streams={WRIST_STREAMS}&mode=raw{WZ}",
     "camera_imu": "camera/imu/stream?raw=true",
     "arm": "arm/stream", "swerve": "swerve/stream", "estimator": "estimator/stream", "pose_servo": "pose_servo/stream",
@@ -113,7 +115,7 @@ def main():
         time.sleep(1)
     stop.set()
     dt = time.monotonic() - t0
-    report = {"seconds": round(dt, 1), "depth": DEPTH, "host": HOST, "wrist_streams": WRIST_STREAMS,
+    report = {"seconds": round(dt, 1), "depth": DEPTH, "host": HOST, "head_streams": HEAD_STREAMS, "wrist_streams": WRIST_STREAMS,
               "wrist_compress": "zlib" if WZ else "raw", "streams": {}}
     total = 0
     for n, s in stats.items():
