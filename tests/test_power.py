@@ -301,15 +301,20 @@ def low_bus(mv=12900, charging=False):
     bus = FakeBus()
     bus.set_word(0x20, mv)
     bus.set_status(charging=charging, vbus=charging)
+    bus.set_word(0x22, 400 if charging else -800)     # net current: + into the pack
     return bus
 
 
 def test_low_voltage_off_by_default_and_persisted(tmp_path):
     lv = LowVoltage(tmp_path / "power.json", trigger=lambda mv: None)
-    assert lv.settings == {"enabled": False, "volts": 13.2, "hold_s": 10.0} and lv.first_run
+    assert lv.settings == {"enabled": False, "volts": 13.2, "hold_s": 10.0, "cell_volts": 3.15} and lv.first_run
     lv.update(True, 13.0, 15, False, None)
     again = LowVoltage(tmp_path / "power.json", trigger=lambda mv: None)
-    assert again.settings == {"enabled": True, "volts": 13.0, "hold_s": 15.0} and not again.first_run
+    assert again.settings == {"enabled": True, "volts": 13.0, "hold_s": 15.0, "cell_volts": 3.15} and not again.first_run
+    lv.update(True, 13.0, 15, False, None, cell_volts=3.2)
+    assert LowVoltage(tmp_path / "power.json", trigger=lambda mv: None).settings["cell_volts"] == 3.2
+    with pytest.raises(RequestError):
+        lv.update(True, 13.0, 15, False, None, cell_volts=2.0)
     for v, h in ((10.9, None), (16.1, None), (13.0, 2), (13.0, 500)):
         with pytest.raises(RequestError) as e:
             lv.update(True, v, h, False, None)
@@ -325,7 +330,7 @@ def test_low_voltage_triggers_after_hold_not_when_charging_or_stale(tmp_path):
     lv.update(True, 13.2, 10, True, None)
     lv.check(0, low, False)
     lv.check(9.9, low, False)
-    assert not fired and "pack low" in lv.status(9.9)
+    assert not fired and "low (pack 12.90 V below 13.20 V" in lv.status(9.9)
     lv.check(10, low, False)
     assert fired == [12900]
     lv.check(20, low, True)
@@ -664,3 +669,45 @@ def test_page_has_power_flow_chart_and_anomaly_spans():
     assert 'id="ch-cell"' in PAGE and 'id="ch-spread"' in PAGE
     assert "spansOf(" in PAGE and 'marks: ["drain"]' in PAGE and "cell_low" in PAGE and "--caution" in PAGE
     assert 'id="flow"' in PAGE and "draining_on_input" in PAGE and "renderConds" in PAGE
+
+
+def test_low_voltage_acts_on_net_drain_not_the_charging_bit(tmp_path):
+    """The undersized-input case (2026-11-20): the charger bit says charging while the pack drains. That must
+    trigger (pack or weakest cell low); a net-charging pack never does, even below the thresholds."""
+    fired = []
+    lv = LowVoltage(None, trigger=fired.append)
+    lv.update(True, 13.2, 10, True, None)
+    cells = [3420, 3240, 3050, 3640]
+    draining_on_input = {"pack_mv": 13350, "charging": True, "percent": 45, "current_ma": -225,
+                         "cells_mv": cells, "vbus_present": True}
+    assert lv.would_trigger(draining_on_input) == "cell"            # pack 13.35 V is above 13.2; cell 3 is not
+    lv.check(0, draining_on_input, False)
+    lv.check(10, draining_on_input, False)
+    assert fired == [13350]
+    assert "cell 3 at 3.05 V below 3.15 V" in lv.reason and "although the charger reports charging" in lv.reason
+    pack_low = dict(draining_on_input, pack_mv=13100, cells_mv=[3300, 3270, 3260, 3270])
+    assert lv.would_trigger(pack_low) == "pack"
+    charging = dict(draining_on_input, pack_mv=12900, current_ma=+190)  # net into the pack: never
+    assert lv.would_trigger(charging) is None
+    fired.clear()
+    lv2 = LowVoltage(None, trigger=fired.append)
+    lv2.update(True, 13.2, 10, True, None)
+    for t in range(0, 60, 5):
+        lv2.check(t, charging, False)
+    assert fired == [] and lv2.status(60) == "armed"
+
+
+def test_node_low_voltage_fires_while_charger_bit_set(tmp_path):
+    node, bus, clock, rec = make_node(tmp_path)
+    bus.set_status(charging=True, vbus=True)
+    bus.set_word(0x22, -225)                           # net draining
+    for i, mv in enumerate([3420, 3240, 3050, 3640]):
+        bus.set_word(0x30 + 2 * i, mv)
+    node.set_low_voltage(True, 13.2, 10, True, "tester", "local")
+    for _ in range(12):
+        node.step(clock.t)
+        clock.t += 1
+    sd = node.state()["shutdown"]
+    assert sd["pending"] and sd["source"] == "low_voltage" and "cell 3" in sd["reason"]
+    lv = node.state()["low_voltage"]
+    assert lv["min_cell_v"] == 3.05 and lv["cell_volts"] == 3.15

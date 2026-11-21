@@ -41,7 +41,9 @@ class LowVoltageIn(BaseModel):
     enabled: bool
     volts: float = Field(description="Pack threshold, V (11-16; 13.2 = 3.3 V per cell).")
     hold_s: Optional[float] = Field(None, description="Seconds the pack must stay low (5-120).")
-    confirm: bool = Field(False, description="Needed to enable while the pack is already below the threshold.")
+    cell_volts: Optional[float] = Field(None, description="Weakest-cell threshold, V (2.9-3.6; default 3.15, above "
+                                                          "the UPS's own cutoff). null = keep the current value.")
+    confirm: bool = Field(False, description="Needed to enable while the pack is already low and draining.")
     by: str = ""
 
 
@@ -118,17 +120,25 @@ class PowerSource(BaseModel):
 
 class LowVoltageOut(BaseModel):
     """Low-voltage auto-shutdown settings and status (lowvolt.py)."""
-    enabled: bool = Field(description="Shut down when the pack stays low while not charging.")
+    enabled: bool = Field(description="Shut down when the pack stays low while net draining (whatever the charger's "
+                                      "'charging' bit says).")
     volts: Number = Field(description="V, pack threshold.")
-    hold_s: Number = Field(description="s the pack must stay below the threshold.")
-    status: str = Field(description="off | armed | no data: not acting | pack low: shutdown in N s unless it "
+    hold_s: Number = Field(description="s the pack (or weakest cell) must stay below its threshold.")
+    cell_volts: Number = Field(description="V, weakest-cell threshold (a weak cell reaches the UPS cutoff first).")
+    status: str = Field(description="off | armed | no data: not acting | low (<why>): shutdown in N s unless it "
                                     "recovers | triggered: shutdown scheduled | shutdown cancelled; re-arms in N s "
                                     "if still low.")
-    low: bool = Field(description="Enabled, and the last reading is below the threshold and not charging.")
+    low: bool = Field(description="Enabled, and the last reading is draining with the pack or its weakest cell "
+                                  "below its threshold.")
+    reason: Optional[str] = Field(None, description="Why it is low (or last triggered), e.g. 'cell 3 at 3.12 V "
+                                                    "below 3.15 V, draining 0.21 A although the charger reports "
+                                                    "charging'; null when not low.")
     pack_v: Optional[float] = Field(description="V, the last pack reading the check saw; null if none (no fresh, "
                                                 "valid reading).")
+    min_cell_v: Optional[float] = Field(None, description="V, the weakest cell in the last reading.")
     range_v: list[float] = Field(description="V, [min, max] allowed for `volts`.")
     range_hold_s: list[float] = Field(description="s, [min, max] allowed for `hold_s`.")
+    range_cell_v: list[float] = Field(description="V, [min, max] allowed for `cell_volts`.")
     first_run: bool = Field(description="No settings saved yet (off by default until the cutover, docs/power.md).")
     source: str = Field(description="The source checked (`ups`).")
 
@@ -361,10 +371,11 @@ def create_app(node: PowerNode, start: bool = True, identify: Optional[Callable[
               summary="Change the low-voltage auto-shutdown settings")
     async def post_low_voltage(request: Request, body: LowVoltageIn):
         """Off by default until the old ups-dashboard service is retired (docs/power.md, Cutover).
-        Enabling while the pack is already below the threshold and not charging needs `confirm: true`."""
+        Enabling while the pack is already low (pack or weakest cell below its threshold) and draining needs
+        `confirm: true`."""
         client, _, _ = await who(request)
         return node.set_low_voltage(body.enabled, body.volts, body.hold_s, body.confirm,
-                                    (body.by or "?").strip()[:80], client)
+                                    (body.by or "?").strip()[:80], client, body.cell_volts)
 
     @app.get("/log", response_model=AuditLogOut, response_model_exclude_unset=True, tags=["state"],
              summary="Audit log: shutdown requests, cancellations, outcomes, settings")

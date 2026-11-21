@@ -205,10 +205,18 @@ refuses unless you pass `--yes`.
 
 ## Low-voltage shutdown
 
-The node schedules a shutdown through the same path as a manual one when all of these hold:
+The node schedules a shutdown through the same path as a manual one when all of these hold for
+`hold_s` seconds:
 - the feature is enabled;
-- the UPS pack stays below `volts` for `hold_s` seconds;
-- the pack is not charging.
+- the pack is **net draining** (current below -20 mA), whatever the charger's "charging" bit says;
+- the pack is below `volts`, **or** its weakest cell is below `cell_volts`.
+
+Why net current and the weakest cell (2026-11-20): an undersized input (5 V at its 3 A limit) left the
+charger reporting "charging" while the pack drained about 2 W for hours. One weak cell then reached the
+UPS's own cutoff (about 3.05 V under load) while the pack still read 13.32 V, above `volts`. The UPS cut
+the Pi's power with no shutdown. The old rule (pack below `volts` and not charging) could not fire in
+either case. A net-charging pack never triggers, so a Pi that boots with its nodes off and charges cannot
+shut down again in a loop.
 
 The countdown is 10 s, so you can cancel it.
 
@@ -219,9 +227,11 @@ Missing, stale or invalid readings never trigger it. A wrong chip ID counts as i
 I2C failure is not a low battery.
 
 Settings live in `~/.config/robot_utils/power.json`: `enabled`, `volts` (11 to 16 V; 13.2 V is
-3.3 V per cell), and `hold_s` (5 to 120 s, default 10). Change them on the page or with
-`POST /low_voltage`. Enabling it while the pack is already below the threshold and not charging
-needs `confirm: true`.
+3.3 V per cell), `cell_volts` (2.9 to 3.6 V, default 3.15: above the observed cutoff, with a few minutes'
+margin at the drain seen that day), and `hold_s` (5 to 120 s, default 10). Change them on the page or with
+`POST /low_voltage` (`cell_volts` is optional there). Enabling it while the pack is already low and
+draining needs `confirm: true`. `GET /low_voltage` (and `/state`) also give `reason` (why it is low, e.g.
+"cell 3 at 3.12 V below 3.15 V, draining 0.21 A although the charger reports charging") and `min_cell_v`.
 
 The defaults are those of the old service, except for two changes:
 - **It is off on first run.** The old dashboard is still doing the same job.

@@ -186,8 +186,8 @@ class PowerNode:
             low = self.low.low_since is not None and self.low.triggered_at is None
             if low and not self._was_low:
                 st = self.low.settings
-                self._note(f"pack {bat['pack_mv'] / 1000:.2f} V below {st['volts']:.2f} V and not charging: "
-                                f"low-voltage shutdown in {st['hold_s']:.0f} s unless it recovers", "warn")
+                self._note(f"low voltage ({self.low.reason}): low-voltage shutdown in {st['hold_s']:.0f} s "
+                           "unless it recovers", "warn")
             self._was_low = low
             if now - self._last_hist >= HISTORY_S:
                 self._last_hist = now
@@ -204,23 +204,23 @@ class PowerNode:
         st = self.low.settings
         try:
             self.shutdown.request(confirm=CONFIRM, by="low-voltage monitor", client="power node", source="low_voltage",
-                                  reason=f"low voltage: pack {pack_mv / 1000:.2f} V below {st['volts']:.2f} V for "
-                                         f"{st['hold_s']:.0f} s while not charging", delay_s=DELAY_MIN_S)
+                                  reason=f"low voltage: {self.low.reason} for {st['hold_s']:.0f} s",
+                                  delay_s=DELAY_MIN_S)
         except RequestError as e:
             log.warning("low-voltage shutdown not scheduled: %s", e)
 
     # -- web side ------------------------------------------------------------------------------
 
     def set_low_voltage(self, enabled: bool, volts: float, hold_s: Optional[float], confirm: bool,
-                        by: str, client: str) -> dict:
+                        by: str, client: str, cell_volts: Optional[float] = None) -> dict:
         now = self.clock()
         ups = self.ups
         bat = ups.battery() if ups is not None and ups.fresh(now) else None
         before = dict(self.low.settings)
-        out = self.low.update(enabled, volts, hold_s, confirm, bat)
+        out = self.low.update(enabled, volts, hold_s, confirm, bat, cell_volts)
         after = self.low.settings
-        msg = (f"low-voltage shutdown {'ON' if after['enabled'] else 'off'} at {after['volts']:.2f} V, "
-               f"hold {after['hold_s']:.0f} s, by {by} [{client}]")
+        msg = (f"low-voltage shutdown {'ON' if after['enabled'] else 'off'} at pack {after['volts']:.2f} V / "
+               f"cell {after['cell_volts']:.2f} V, hold {after['hold_s']:.0f} s, by {by} [{client}]")
         log.warning(msg)
         self.audit.write("low_voltage", by=by, client=client, before=before, after=after)
         self.events.add(msg, "warn" if after["enabled"] != before["enabled"] else "info")

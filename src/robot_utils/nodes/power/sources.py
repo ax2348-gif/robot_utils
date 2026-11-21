@@ -135,7 +135,9 @@ class UpsSource(Source):
     def battery(self) -> Optional[dict]:
         if self.data is None:
             return None
-        return {"pack_mv": self.data["pack_mv"], "charging": self.data["charging"], "percent": self.data["percent"]}
+        d = self.data
+        return {"pack_mv": d["pack_mv"], "charging": d["charging"], "percent": d["percent"],
+                "current_ma": d["current_ma"], "cells_mv": list(d["cells_mv"]), "vbus_present": d["vbus_present"]}
 
     @staticmethod
     def readings(d: dict) -> dict:
