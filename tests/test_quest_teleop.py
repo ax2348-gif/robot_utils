@@ -206,9 +206,8 @@ def ee_of(cmd):
 
 
 def held(cmd):
-    """The released arm: the WBC holds its commanded joints (no pose)."""
-    e = ee_of(cmd)
-    return e.get("hold") is True and "pos" not in e and "frame" not in e
+    """The released arm: a live base-attached target (it rides with the platform)."""
+    return ee_of(cmd)["frame"] == "base"
 
 
 def test_released_holds_then_engages_at_the_command_without_a_jump():
@@ -221,8 +220,11 @@ def test_released_holds_then_engages_at_the_command_without_a_jump():
     np.testing.assert_allclose(F.matrix_from_quat(ee_of(c)["quat"]), rig.rob.ee_r, atol=1e-5)
     c = rig.run(REACH)
     np.testing.assert_allclose(ee_of(c)["pos"], rig.rob.ee_p + F.rot_z(0.3) @ [0.10, 0, 0.05], atol=1e-5)
-    c = rig.run(IDLE)                                          # release: hold
+    # the WBC stopped the arm short of the target; release: hold its command at release, in the base frame
+    rig.rob.ee_p = rig.rob.ee_p + [0.03, 0.0, 0.0]
+    c = rig.run(IDLE)
     assert held(c) and rig.core.status.state == "released"
+    np.testing.assert_allclose(rig.rob.base.to_world(ee_of(c)["pos"], np.eye(3))[0], rig.rob.ee_p, atol=1e-9)
     assert c["est_reset"] == 0
 
 
@@ -342,15 +344,23 @@ def test_engagement_needs_fresh_robot_state_and_survives_no_estimator_reset():
     assert rig.core.status.state == "needs_release" and "estimator" in rig.core.status.reason
 
 
-def test_no_robot_state_yet_still_holds():
+def test_released_hold_is_constant_in_the_base_frame_and_starts_from_the_command():
+    rig = Rig()
+    c = rig.run(IDLE)
+    rel = rig.rob.base.to_local(rig.rob.ee_p, rig.rob.ee_r)
+    np.testing.assert_allclose(ee_of(c)["pos"], rel[0], atol=1e-9)
+    rig.rob.base_x += 0.5                                      # the base drives: the hold rides with it
+    np.testing.assert_allclose(ee_of(rig.run(IDLE))["pos"], rel[0], atol=1e-9)
+
+
+def test_no_robot_state_yet_sends_keep_alives():
     rig = Rig()
     rig.rob = None
     for _ in range(3):
         rig.t += 0.01
         d = rig.hs.frame(IDLE, rig.t)
         rig.core.on_frame(d, rig.gate.check(Frame(d, rig.t, 1)), None, rig.t)
-    c = rig.core.command(rig.t, True, None)
-    assert held(c) and "est_reset" not in c
+    assert rig.core.command(rig.t, True, None) == "alive"
 
 
 # -- base and gripper -----------------------------------------------------------------------------
@@ -466,7 +476,7 @@ def test_release_and_reengage_never_moves_the_robot(motion, stick_while_released
         s_ = stick(moved, (0.7, -0.9), 0.6) if stick_while_released else moved
         rig.frame(s_)
         c = rig.cmd()
-        assert held(c)                                          # the arm holds its joints: it rides with the base
+        assert held(c)                                          # base-attached: the arm rides with the base
         assert c["base"]["mode"] == ("commanded" if stick_while_released else "locked")
         if stick_while_released:
             rig.rob.base_x += 0.004                             # the base moves under the stick, the arm with it

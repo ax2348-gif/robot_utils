@@ -24,9 +24,10 @@ since the last discontinuity (start, reconnect, session or revision change, gap,
 missing robot state at capture). A reconnect mid-engagement therefore waits for a release and a new engagement;
 an existing nonzero delta is never applied to a newly captured anchor.
 
-Released (or never engaged): ``"ees": {"arm": {"hold": true}}``: the WBC holds the arm's commanded joints, so the
-arm rides with the base when the sticks drive it (DEMO.md: release holds arm joints). Not a ``frame: "base"`` pose
-target: the WBC converts those to the world once, at their timestamp, which would pin the EE in the room.
+Released (or never engaged): a ``frame: "base"`` target = the **commanded EE pose at release** (``arm_cmd_*`` in
+the base frame at that moment; at start, the current command). The WBC re-evaluates base targets against the live
+base pose every tick, so the arm rides with the platform when the sticks drive it (DEMO.md: release holds arm
+joints), also while datagrams pause. Not the last target: the WBC may have been limiting the arm short of it.
 
 Base (the sticks are the intent's ``base_velocity``: left stick forward/left m/s, right stick X yaw rad/s, 18 %
 dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
@@ -169,7 +170,7 @@ class TeleopCore:
 
     ``on_frame(frame, verdict, robot)`` updates the engagement state for every accepted frame, in order.
     ``command(now, input_fresh, robot)`` returns the ``ees``/``base`` body of the next target datagram, the string
-    or None: stop sending.
+    ``"alive"`` when input is fine but no robot state has arrived yet (nothing to hold), or None: stop sending.
     """
 
     def __init__(self, cfg: Config = Config()):
@@ -179,6 +180,8 @@ class TeleopCore:
         self.last_target: Optional[tuple] = None  # world
         self.frame: Optional[dict] = None         # newest valid frame
         self.valid = False
+        self.hold_base: Optional[tuple] = None    # (p, R) in the base frame
+        self.last_robot: Optional[RobotState] = None
         self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
         self.hint: Optional[dict] = None          # the newest base hint target sent (status)
         self._last_ns: Optional[int] = None
@@ -195,12 +198,18 @@ class TeleopCore:
             self.status.reason = reason
 
     def _release_to_hold(self, robot: Optional[RobotState]) -> None:
-        """End the engagement: the arm holds (``hold: true``) from the next datagram on."""
+        """End the engagement: hold the commanded EE at this moment, in the base frame (no robot row yet: the next
+        row's)."""
+        robot = robot or self.last_robot
+        if self.eng is not None:
+            self.hold_base = robot.base.to_local(robot.ee_p, robot.ee_r) if robot is not None else None
         self.eng = None
 
     def on_frame(self, frame: dict, verdict, robot: Optional[RobotState], now: float) -> None:
         if not verdict.accept:
             return
+        if robot is not None:
+            self.last_robot = robot
         self._engagement(frame, verdict, robot, now)
         if self.valid and self.frame is not None:
             self._sticks(frame, robot)
@@ -304,7 +313,12 @@ class TeleopCore:
             self.last_target = (p, r)
             reset = self.eng.est_reset            # the estimator epoch the anchor was captured in
         else:
-            ee = {"hold": True}
+            if self.hold_base is None:
+                if robot is None:
+                    return "alive"
+                self.hold_base = robot.base.to_local(robot.ee_p, robot.ee_r)
+            p, r = self.hold_base
+            ee = {"frame": "base", "pos": _l(p), "quat": _l(F.quat_from_matrix(r))}
             reset = robot.est_reset if robot is not None else None
         intent = self.frame["control_intent"]
         ih = intent["hands"].get(cfg.hand) or {}
