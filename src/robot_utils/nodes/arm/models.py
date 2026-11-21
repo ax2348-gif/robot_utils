@@ -572,6 +572,22 @@ class JamState(BaseModel):
     recent: list[JamEvent] = Field(description="The last 20 jams, oldest first.")
 
 
+class FeedbackRefresh(BaseModel):
+    """Feedback refreshes (a request for a motor's feedback frame, sent with each tick's read requests). A
+    Damiao motor answers every MIT frame with a feedback frame too, so a motor sent one needs no refresh: only
+    motors sent none since the last read are refreshed (motors off, the gripper in damping, the first read after
+    connecting or enabling), and a motor whose last two MIT frames went unanswered (a fallback). Counts since the
+    node started."""
+    skip: Optional[bool] = Field(description="Refreshes are skipped for motors sent an MIT frame; false: every "
+                                             "motor every tick (a motorbridge that does not report the feedback's "
+                                             "age); null before connecting.")
+    fallbacks: int = Field(description="Refreshes standing in for unanswered MIT frames (or replies to them more "
+                                       "than about two ticks late): 0 on firmware that answers them (the first on "
+                                       "each connection is also a warning event).")
+    fallbacks_by_motor: dict[str, int] = Field(description="`fallbacks` per motor name (`joint1`..`gripper`).")
+    refreshes: int = Field(description="Refresh frames sent, every reason.")
+
+
 class ReplyLatency(BaseModel):
     """From a tick's read requests to the last motor's reply. The next tick collects them about one tick
     (10 ms) later: a reply slower than that is waited for one more tick and counts as missed only if it
@@ -627,6 +643,10 @@ class ArmStateOut(BaseModel):
     reply_latency: Optional[ReplyLatency] = Field(description="How long the motors take to answer a tick's requests, "
                                                               "over the last 500 complete reads; null on a simulated "
                                                               "arm or with fewer than 50.")
+    feedback_refresh: FeedbackRefresh = Field(description="Which motors' feedback frames are requested each tick "
+                                                         "(motors sent an MIT frame get theirs as its reply), and "
+                                                         "how often a request had to stand in for unanswered MIT "
+                                                         "frames.")
     realtime: RealtimeOut = Field(description="How the control loop's thread is scheduled. Without real time, other "
                                               "work on the computer can hold the loop past the motors' 100 ms watchdog.")
     clients: int = Field(description="Open stream / event subscriptions.")

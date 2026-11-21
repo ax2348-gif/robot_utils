@@ -1076,3 +1076,35 @@ def test_setup_steps_refuse_with_motors_on():
         b._guard_setup("gripper check")
     b.on = set()
     b._guard_setup("gripper check")                    # all off: allowed
+
+
+def test_feedback_refresh_skipped_while_servoing_counted_in_state(rig):
+    n = engaged(rig).node
+    fr = n.feedback_refresh()
+    assert fr["skip"] is True and fr["fallbacks"] == 0 and fr["refreshes"] > 0   # (motors off before enable)
+    rig.keep(0.5)
+    assert n.feedback_refresh()["refreshes"] == fr["refreshes"]   # every motor gets an MIT frame: none
+    n.disable(rig.tok)                                            # the gripper goes into damping
+    rig.step(2)
+    r0 = n.feedback_refresh()["refreshes"]
+    rig.step(10)
+    assert n.feedback_refresh()["refreshes"] == r0 + 10           # the gripper alone, every tick
+    assert n.feedback_refresh()["fallbacks"] == 0
+    assert not [e for e in n.events.list() if "fallback" in e["msg"]]
+
+
+def test_feedback_refresh_fallback_warns_once_and_counts_survive_a_reconnect(rig):
+    n = engaged(rig).node
+    rig.sim.unanswered = {"joint2"}                               # its MIT frames get no feedback frame
+    rig.keep(0.3)
+    fr = n.feedback_refresh()
+    assert set(fr["fallbacks_by_motor"]) == {"joint2"} and fr["fallbacks"] >= 5
+    warns = [e for e in n.events.list() if "fallback" in e["msg"]]
+    assert len(warns) == 1 and warns[0]["level"] == "warn" and "joint2" in warns[0]["msg"]
+    assert n.state == "servoing"                                  # control unchanged
+    n._reconnect = True
+    rig.step(3)
+    assert len(rig.sims) == 2                                     # a new bus: its counts start at 0
+    after = n.feedback_refresh()
+    assert after["fallbacks_by_motor"]["joint2"] == fr["fallbacks_by_motor"]["joint2"]
+    assert after["refreshes"] >= fr["refreshes"]

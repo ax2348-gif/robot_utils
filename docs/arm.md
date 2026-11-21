@@ -87,7 +87,15 @@ before it. The bus also times each tick's replies (requests to the last reply): 
 tick (a reply later than one tick is waited for one more; only one missing after two ticks counts as
 missed, and the waiting tick reuses the latest complete reading). The first 300 complete reads after
 connecting are reported as one event (motors off then, so lighter than in use), and a margin under
-1 ms is a warning event, at most one a minute. On 2026-11-13 a full-resolution look in
+1 ms is a warning event, at most one a minute. Each tick's requests are two per motor while the
+motors are on: the output encoder (xout, read every tick: the planetary gears' backlash makes it the
+true joint position) and the MIT frame, which a Damiao motor answers with its feedback frame. A
+separate feedback request is sent only to a motor that got no MIT frame the tick before (motors
+off, the gripper in damping, the first read after connecting or enabling), or as a fallback when
+neither of its last two MIT frames was answered (about two ticks without feedback): `/state`
+`feedback_refresh` counts both (`fallbacks` stays 0 on firmware that answers MIT frames; the first
+on a connection is a warning event). A motorbridge without the feedback's age (`get_state_with_age`)
+requests every motor's feedback every tick, as before (logged once). On 2026-11-13 a full-resolution look in
 agent_interface (1280x720 colour) stretched the replies until gaps passed 50 ms and the arm faulted;
 see docs/realtime.md. A late tick is reported (an event, the
 `late_ticks` count), not a fault: the motors' own 100 ms watchdog protects them, and if it trips

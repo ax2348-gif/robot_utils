@@ -6,18 +6,25 @@ replaced by 0 (``RebotArm.get_state`` would). Positions come from the output enc
 register 81) for proprioception; the motor-side feedback position, velocity and torque come from
 the feedback frames (the motor's own MIT loop runs on those).
 
+Feedback frames come from two requests: a refresh (``request_feedback``, CAN id 0x7FF) and every MIT
+frame, which a Damiao motor also answers with a feedback frame (motorbridge caches both in the same
+place). A motor sent an MIT frame needs no refresh: ``FeedbackRefresh`` decides per motor and tick.
+
 Damiao status codes (feedback ERR field): 0 disabled, 1 enabled, 8 over-voltage, 9 under-voltage,
 0xA over-current, 0xB MOS over-temperature, 0xC rotor over-temperature, 0xD communication lost
 (CAN watchdog), 0xE overload. 8 and above is a fault.
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 N = 6
 FAULT_CODES = {8: "over-voltage", 9: "under-voltage", 0xA: "over-current", 0xB: "MOS over-temperature",
@@ -53,6 +60,82 @@ FIRST_READ_WAIT_S = 0.05   # s the first read after connecting waits for its rep
 REPLY_WAIT_TICKS = 1       # extra ticks a read's requests may stay in flight before missing replies count
 
 
+class FeedbackRefresh:
+    """Which motors get a feedback refresh (``request_feedback``) with a read's requests.
+
+    A Damiao motor answers every MIT frame with a feedback frame, cached where a refresh's reply
+    is: a motor sent an MIT frame since the last read already has its next feedback on the way, and
+    a refresh would only double the frames (each also paced on the bus). With the xout read, that
+    leaves two request/reply pairs per motor per tick instead of three. So a motor is refreshed
+    only when
+      * it was sent no MIT frame since the last read (motors off, the gripper in damping, the first
+        read after connecting or enabling): planned;
+      * or its latest feedback frame arrived before the first MIT frame of the read window before
+        that, i.e. neither of its last two MIT frames has been answered (one reply a tick late is
+        ordinary, as for the register reads): a fallback, counted per motor in ``fallbacks``. The
+        feedback is then about two ticks old (measured from the frames actually sent, so a late
+        tick does not count as staleness); refreshed, it is at most about three ticks old when
+        used. On firmware that answers MIT frames the count stays at 0; counts mean MIT frames go
+        unanswered (or their replies come more than about two ticks late) and the feedback would
+        otherwise go stale.
+    "Sent" is what ``send`` asked for: rebot_ctl drops an MIT frame whose write fails silently
+    (``except CallError: pass``), so a dropped frame looks sent; it is no reply either, so the
+    fallback covers it. The check needs no frame order: motorbridge stamps the cached feedback when
+    it processes a frame, and its two bus drainers (the background poller and
+    ``poll_feedback_once``) can process an older frame after a newer one (the cached state is then
+    one frame older than its stamp), but the stamp is always the latest processing time, so a stamp
+    before the MIT frame means no feedback frame at all was processed since.
+    ``skip`` False (a motorbridge that does not report the feedback's age): every motor every read.
+
+    The bus calls ``mit_sent`` from ``send``, ``forget`` when it switches motors off, ``rotate``
+    at the start of every read and ``plan`` when it sends a read's requests (not on a read whose
+    replies are still due: nothing is sent then). One thread (the node's control thread) calls
+    all of them; the counts are read from others (ints and a dict of ints)."""
+
+    def __init__(self, names, skip: bool):
+        self.names = list(names)
+        self.skip = skip
+        self.fallbacks: dict = {}      # motor -> fallback refreshes, for this bus's life
+        self.refreshes = 0             # refresh frames sent, every reason
+        # MIT frames, as (t, set of motors) with t when the first of them was sent, or None:
+        self._sent: Optional[tuple] = None     # since the last read
+        self._win: Optional[tuple] = None      # between the last two reads
+        self._prev: Optional[tuple] = None     # between the two reads before
+
+    def mit_sent(self, t: float, names) -> None:
+        if self._sent is None:
+            self._sent = (t, set(names))
+        else:
+            self._sent[1].update(names)
+
+    def forget(self, names) -> None:
+        """These motors were switched off: the MIT frames they were sent are no promise of more."""
+        if self._sent is not None:
+            self._sent[1].difference_update(names)
+
+    def rotate(self) -> Optional[tuple]:
+        """A read starts: returns the MIT frames sent since the last one ((t, names) or None)."""
+        self._prev, self._win, self._sent = self._win, self._sent, None
+        return self._win
+
+    def plan(self, arrived: dict) -> list:
+        """The motors to refresh now. ``arrived``: motor -> when its latest feedback arrived
+        (monotonic s; None or absent: none yet)."""
+        if not self.skip:
+            out = list(self.names)
+        else:
+            win, prev = self._win, self._prev
+            out = []
+            for n in self.names:
+                if win is None or n not in win[1]:
+                    out.append(n)                                  # no MIT frame since the last read
+                elif prev is not None and n in prev[1] and (arrived.get(n) is None or arrived[n] < prev[0]):
+                    out.append(n)                                  # its MIT frames go unanswered
+                    self.fallbacks[n] = self.fallbacks.get(n, 0) + 1
+        self.refreshes += len(out)
+        return out
+
+
 @dataclass
 class Reading:
     t: float
@@ -82,6 +165,9 @@ class ArmBus:
     # measurement, e.g. a missed reply or a simulated bus). The next read collects them about one tick
     # later; a reply slower than that is waited for one more tick (REPLY_WAIT_TICKS), then counts as missed.
     reply_latency: Optional[float] = None
+    # Which motors get a feedback refresh each read, and how often a refresh had to stand in for
+    # unanswered MIT frames (None: not known yet, before connecting).
+    refresh: Optional[FeedbackRefresh] = None
 
     def connect(self) -> None: ...
     def check_gripper(self) -> float: ...
@@ -98,9 +184,14 @@ class HardwareBus(ArmBus):
     """The real arm through rebot_ctl (``RebotArm``; hardware yaml = the gain profile file, which
     also names the serial bridge)."""
 
-    def __init__(self, hw_yaml: str, channel: Optional[str] = None):
-        from reBotArm_control_py.actuator import RebotArm
-        self.arm = RebotArm(hw_yaml, channel=channel)
+    _warned_no_state_age = False   # logged once per process
+
+    def __init__(self, hw_yaml: str, channel: Optional[str] = None, arm=None):
+        """``arm``: a ready RebotArm (tests); else one is built from ``hw_yaml``."""
+        if arm is None:
+            from reBotArm_control_py.actuator import RebotArm
+            arm = RebotArm(hw_yaml, channel=channel)
+        self.arm = arm
         self.setpoint_limits = dict(self.arm.setpoint_limits)
         self.names = [j.name for j in self.arm._all_joints]
         self.on: set = set()          # groups whose motors are on
@@ -125,6 +216,24 @@ class HardwareBus(ArmBus):
         except Exception:
             self.close()
             raise
+        self.refresh = FeedbackRefresh(self.names, skip=self._state_age_supported())
+
+    def _state_age_supported(self) -> bool:
+        """Whether motorbridge reports the feedback's age (Motor.get_state_with_age). Without it
+        a missing MIT reply could not be told from a current state, so every read refreshes every
+        motor, as before."""
+        from motorbridge import CallError
+        try:
+            for n in self.names:
+                self.arm._motor_map[n].get_state_with_age()
+            return True
+        except (AttributeError, CallError) as e:
+            if not HardwareBus._warned_no_state_age:
+                HardwareBus._warned_no_state_age = True
+                log.warning("motorbridge without the feedback's age (get_state_with_age: %s): every read "
+                            "refreshes every motor's feedback; upgrade motorbridge to skip refreshes "
+                            "for motors sent an MIT frame", e)
+            return False
 
     def _guard_setup(self, what: str) -> None:
         """Setup steps (mode switches, the gripper check) block for a while: callers put the motors
@@ -165,6 +274,10 @@ class HardwareBus(ArmBus):
             g.enable()
             self.on.add(g.name)
 
+    def _forget(self, names) -> None:
+        if self.refresh is not None:
+            self.refresh.forget(names)
+
     def gripper_motor(self, on: bool) -> None:
         """The gripper motor alone on (gainless until commanded) or off (damping)."""
         g = self.arm.gripper
@@ -178,6 +291,7 @@ class HardwareBus(ArmBus):
             g.enable()
             self.on.add(g.name)
         else:
+            self._forget(g.joint_names)
             g.disable()
             self.on.discard(g.name)
 
@@ -188,6 +302,7 @@ class HardwareBus(ArmBus):
         self.arm.arm._q_last[:] = np.asarray(q, float)
 
     def disable(self) -> None:
+        self._forget(self.names)
         self.arm.disable_all()
         self.on.clear()
 
@@ -195,16 +310,32 @@ class HardwareBus(ArmBus):
         from motorbridge import CallError
         from reBotArm_control_py.actuator import rebotarm as rb
         mm, cm = self.arm._motor_map, self.arm._ctrl_map
+        refresh = self.refresh
+        if refresh is None:                          # connect() not run (tests): refresh every read
+            refresh = self.refresh = FeedbackRefresh(self.names, skip=False)
+        refresh.rotate()
 
-        arrived: dict = {}
+        arrived: dict = {}       # motor -> when its xout reply arrived (reply_latency)
+        fed: dict = {}           # motor -> when its latest feedback frame arrived (refresh plan)
 
         def request():
             self._t_req = time.monotonic()
             if not rb._request_xout(mm, self.names):
                 raise BusError("motorbridge without non-blocking register reads: upgrade it")
-            for n in self.names:
+            for n in refresh.plan(fed):
                 mm[n].request_feedback()
             self._requested = True
+
+        def states() -> list:
+            if not refresh.skip:
+                return [mm[n].get_state() for n in self.names]
+            out, now = [], time.monotonic()
+            for n in self.names:
+                got = mm[n].get_state_with_age()             # (state, age s, seq) or None
+                out.append(None if got is None else got[0])
+                if got is not None:
+                    fed[n] = now - float(got[1])
+            return out
 
         def collect() -> dict:
             for c in cm.values():
@@ -228,7 +359,7 @@ class HardwareBus(ArmBus):
             else:                                    # the replies to the requests in flight
                 t_req = self._t_req
                 xout = collect()
-            sts = [mm[n].get_state() for n in self.names]
+            sts = states()
             missing = [n for n in self.names if n not in xout] + [n for n, s in zip(self.names, sts) if s is None]
             if missing and self._waited < REPLY_WAIT_TICKS:
                 self._waited += 1                    # slow, not lost: leave the requests in flight
@@ -252,12 +383,15 @@ class HardwareBus(ArmBus):
                        float(xout["gripper"]), float(g.pos), float(g.vel), float(g.torq))
 
     def send(self, q, qd, kp, kd, tau, g_q, g_qd, g_kp, g_kd, g_tau, gripper: bool = True) -> None:
+        t = time.monotonic()  # before the first frame: no reply to these can have arrived earlier
         self.arm.arm.send_mit(q, vel=qd, kp=kp, kd=kd, tau=tau)
         groups = [self.arm.arm]
         if gripper:          # a gripper in damping (motor off) gets no frames
             self.arm.gripper.send_mit(np.array([g_q]), vel=np.array([g_qd]), kp=np.array([g_kp]),
                                       kd=np.array([g_kd]), tau=np.array([g_tau]))
             groups.append(self.arm.gripper)
+        if self.refresh is not None:
+            self.refresh.mit_sent(t, [n for g in groups for n in g.joint_names])
         refused = [n for g in groups for n, r in zip(g.joint_names, g._q_refused) if r]
         if refused:   # the node keeps its command inside the limits, so this is a bug: stop
             raise BusError(f"the driver refused setpoints for {', '.join(refused)}")
@@ -334,7 +468,13 @@ class SimBus(ArmBus):
         self.drop_reads = 0                          # tests: this many reads miss joint4's reply
         self.late_reads = 0                          # tests: this many reads find joint6's reply still due
         self.fault_code = 0                          # tests: a motor fault on joint1
+        self.unanswered: set = set()                 # tests: motors whose MIT frames get no feedback frame
         self.setpoint_limits = dict(limits or {})
+        # the feedback frames, modelled for the refresh plan only (``_feedback``): MIT frames and
+        # the refreshes sent with a read are answered by the next read
+        self.refresh = FeedbackRefresh(self.names, skip=True)
+        self._fed: dict = {}                         # motor -> when its latest feedback frame arrived
+        self._refreshing: tuple = (None, [])         # (when, motors) refreshed with the last read
 
     def connect(self) -> None:
         self.connected = True
@@ -354,12 +494,15 @@ class SimBus(ArmBus):
         self._q_last = np.full(N, np.nan)
 
     def gripper_motor(self, on: bool) -> None:
+        if not on:
+            self.refresh.forget(["gripper"])
         self.g_enabled = on
 
     def seed(self, q) -> None:
         self._q_last = np.asarray(q, float).copy()
 
     def disable(self) -> None:
+        self.refresh.forget(self.names)
         self.enabled = False
         self.g_enabled = False
         self.cmd = None
@@ -413,7 +556,24 @@ class SimBus(ArmBus):
         if self.g_q < self.G_OPEN:
             self.g_q, self.g_qd = self.G_OPEN, max(self.g_qd, 0.0)
 
+    def _feedback(self) -> None:
+        """The feedback frames a read finds, for the refresh plan (the reading itself is exact):
+        the replies to the refreshes sent with the last read's requests, and to the MIT frames
+        sent since (``unanswered`` motors' MIT frames get none)."""
+        win = self.refresh.rotate()
+        t_ref, refreshed = self._refreshing
+        self._refreshing = (None, [])
+        for n in refreshed:
+            self._fed[n] = t_ref
+        if win is not None:
+            for n in win[1] - self.unanswered:
+                self._fed[n] = max(win[0], self._fed.get(n, -math.inf))
+
     def read(self) -> Reading:
+        self._feedback()
+        if self.fail_reads or self.drop_reads > 0 or self.late_reads <= 0:
+            # the real bus sends the next requests (and refreshes) unless the replies are still due
+            self._refreshing = (self.clock(), self.refresh.plan(self._fed))
         if self.fail_reads:
             raise ReadMiss(["joint3"], "sim: no reply within 5 ms from joint3")
         if self.drop_reads > 0:
@@ -450,6 +610,7 @@ class SimBus(ArmBus):
         if not np.all(ok):
             raise BusError(f"the driver refused setpoints for {', '.join(n for n, k in zip(names, ok) if not k)}")
         self._q_last = np.where(checked, q, last)
+        self.refresh.mit_sent(self.clock(), names + (["gripper"] if gripper else []))
         if self.enabled:
             self.cmd = (np.array(q, float), np.array(qd, float), np.array(kp, float), np.array(kd, float),
                         np.array(tau, float))

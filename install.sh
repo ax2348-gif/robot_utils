@@ -132,6 +132,7 @@ from motorbridge.core import Motor
 
 assert "+2ec" in motorbridge.__version__, f"motorbridge {motorbridge.__version__} is not the 2ec fork"
 assert hasattr(Motor, "get_cached_register_f32"), "motorbridge lacks the fork's non-blocking reads"
+assert hasattr(Motor, "get_state_with_age"), "motorbridge lacks the fork's feedback age (the arm then refreshes every tick)"
 for name in ("robot-utils", "sparkcan", "rebotarm-control-py", "motorbridge", "lerobot", "torch", "pyorbbecsdk2"):
     print(f"  {name:20} {md.version(name)}")
 print(f"  motorbridge ABI      {motorbridge.abi_version()}")

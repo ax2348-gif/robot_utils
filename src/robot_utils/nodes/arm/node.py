@@ -274,6 +274,8 @@ class ArmNode:
         self._lat_n = 0
         self._lat_reported = False
         self._lat_warn_t = -math.inf
+        self._refresh_done: dict = {"fallbacks_by_motor": {}, "refreshes": 0}   # closed buses' counts
+        self._fallback_reported = False     # this connection's first feedback-refresh fallback
         self._stale_warned = False          # this gap has been counted
         self._stale_gaps = 0                # gaps over STALE_WARN not yet reported
         self._stale_warn_t = -math.inf
@@ -327,6 +329,15 @@ class ArmNode:
 
     def _close_bus(self) -> None:
         """Best effort, step by step: a failing disable must never keep the serial port open."""
+        try:                                # bookkeeping only: it must never stand between close and disable
+            fr = getattr(self.bus, "refresh", None)
+            if fr is not None:              # keep its counts: /state counts since the node started
+                done = self._refresh_done
+                for m, c in fr.fallbacks.items():
+                    done["fallbacks_by_motor"][m] = done["fallbacks_by_motor"].get(m, 0) + c
+                done["refreshes"] += fr.refreshes
+        except Exception as e:  # noqa: BLE001
+            log.warning("keeping the feedback-refresh counts: %s", e)
         if self.bus is not None:
             for step in (self.bus.disable, self.bus.close):
                 try:
@@ -383,6 +394,7 @@ class ArmNode:
             self._base, self.error = "uninitialized", None
             self._lat.clear()
             self._lat_reported = False      # report the new connection's reply latency
+            self._fallback_reported = False
             self._last_t = None             # the tick clock starts afresh (no bogus "late" tick)
             self._fresh_t = None
             self.events.add("connected (watchdog and joint readings checked); enable runs the gripper check")
@@ -411,6 +423,7 @@ class ArmNode:
             self.reading, self._fresh_t, self.read_age = r, now, 0.0
             self._stale_warned = False
             self._note_latency(now)
+            self._note_fallbacks()
         except ReadMiss as e:
             if not isinstance(e, ReadLate):          # a late reply (still in flight, one tick) is not a miss
                 self.read_misses += 1
@@ -500,6 +513,36 @@ class ArmNode:
                             f"{st['n']} complete reads: {st['margin_ms']:.1f} ms margin to the {DT * 1e3:.0f} ms tick; "
                             "later replies are waited for one more tick (missed after two), and with the motors on "
                             f"{STALE_ON * 1e3:.0f} ms without a complete reading faults", "warn")
+
+    def _note_fallbacks(self) -> None:
+        """Control thread: the first time on a connection that a motor's feedback had to be refreshed
+        because its MIT frames went unanswered, say so (counted in /state feedback_refresh)."""
+        try:            # reporting only: it must never cost the tick (the e-stop and motors-off handling follow)
+            self._report_fallbacks()
+        except Exception as e:  # noqa: BLE001
+            log.warning("feedback-refresh report: %s", e)
+
+    def _report_fallbacks(self) -> None:
+        fr = getattr(self.bus, "refresh", None)
+        if self._fallback_reported or fr is None or not fr.fallbacks:
+            return
+        self._fallback_reported = True
+        self.events.add(f"feedback refresh fallback: no feedback frame answered the last two MIT frames to "
+                        f"{', '.join(fr.fallbacks)}; their feedback is refreshed instead (counted in /state "
+                        "feedback_refresh; on firmware that answers MIT frames this never happens)", "warn")
+
+    def feedback_refresh(self) -> dict:
+        """Feedback refreshes since the node started (this connection's and closed ones')."""
+        done = self._refresh_done
+        by = dict(done["fallbacks_by_motor"])
+        fr = getattr(self.bus, "refresh", None)
+        refreshes = done["refreshes"]
+        if fr is not None:
+            for m, c in list(fr.fallbacks.items()):
+                by[m] = by.get(m, 0) + c
+            refreshes += fr.refreshes
+        return {"skip": None if fr is None else fr.skip, "fallbacks": sum(by.values()),
+                "fallbacks_by_motor": by, "refreshes": refreshes}
 
     def latency_stats(self) -> Optional[dict]:
         """Reply latency over the last LATENCY_WINDOW complete reads (ms), or None with too few."""
@@ -1640,6 +1683,7 @@ class ArmNode:
             "loop_hz": None if rate is None else round(rate, 1), "overruns": self.overruns,
             "late_ticks": self.late_ticks, "read_misses": self.read_misses, "read_misses_by_motor": dict(self.misses_by_motor),
             "reply_latency": self.latency_stats(),
+            "feedback_refresh": self.feedback_refresh(),
             "realtime": dict(self.realtime),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],
