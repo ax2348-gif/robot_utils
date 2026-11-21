@@ -76,7 +76,8 @@ class GoalIn(BaseModel):
     alpha: Optional[float] = Field(None, description="rad/s², <= max_alpha")
     jerk: Optional[float] = Field(None, description="m/s³, <= max_jerk")
     ang_jerk: Optional[float] = Field(None, description="rad/s³, <= max_ang_jerk")
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+    # NaN / inf are refused (422): a NaN heading passes every range check and turned the base at the omega cap
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, json_schema_extra={"examples": [
         {"x": 0.5}, {"x": 0.3, "y": 0.2, "theta": 1.5708, "speed": 0.15},
         {"frame": "global", "x": 0, "y": 0, "theta": 0, "mode": "independent", "on_reach": "hold"}]})
 

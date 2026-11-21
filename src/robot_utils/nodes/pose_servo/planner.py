@@ -503,7 +503,16 @@ class Servo:
             m = g.motion
             assert pose is not None
             vdx, vdy, wd = self._plan(g, pose, d)
-            if self._stalled(g, d):
+            if not all(math.isfinite(v) for v in (*pose, g.x, g.y, g.theta, vdx, vdy, wd)):
+                # backstop: a non-finite goal or pose must never become a command (min() / copysign() turned a
+                # NaN heading error into the full omega cap)
+                self.stop("non-finite goal or pose", "aborted")
+                g, m = None, Motion.from_caps(caps)
+                vdx = vdy = wd = 0.0
+                if self.braking is None:
+                    d.status = "idle"
+                    return None, d
+            elif self._stalled(g, d):
                 self.stop(f"no progress for {g.motion.stall_s:g} s (error {d.err_pos:.3f} m, "
                           f"{d.err_theta:+.3f} rad): the base is not following", "stalled")
                 g, m = None, Motion.from_caps(caps)

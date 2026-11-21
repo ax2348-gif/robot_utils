@@ -306,3 +306,30 @@ def test_fuzz_sticky_base():
         assert s.run(120), i
         assert s.servo.result["result"] == "reached", (i, caps, s.servo.result)
         assert_clean(s)
+
+
+def test_a_non_finite_goal_or_pose_aborts_instead_of_turning_at_the_cap():
+    """A NaN heading passed every range check and min() / copysign() made it the full omega cap (code review,
+    2026-11-21). The planner now aborts and brakes within the limits; nothing non-finite reaches a command."""
+    sim = Sim()
+    sim.goal(0.0, 0.0, math.nan)
+    d = sim.step()
+    assert sim.servo.goal is None and sim.servo.result["result"] == "aborted"
+    assert all(n is None or n.is_zero() for _, _, n in sim.log), "a command was sent"
+    # mid-motion: brakes within the caps, never turns toward a NaN
+    sim = Sim()
+    sim.goal(0.3, 0.0, 0.0)
+    for _ in range(25):
+        sim.step()
+    assert not sim.servo.cmd.is_zero()
+    sim.goal(0.3, 0.0, math.nan)
+    sim.run(5.0)
+    assert sim.servo.result["result"] == "aborted" and sim.servo.cmd.is_zero()
+    assert all(n is None or abs(n.w) < 1e-9 for _, _, n in sim.log[25:]), "it turned"
+    assert_clean(sim)
+    # a NaN pose (estimator) does the same
+    sim = Sim()
+    sim.goal(0.2, 0.0, 0.0)
+    sim.th = math.nan
+    sim.step()
+    assert sim.servo.goal is None and sim.servo.result["result"] == "aborted"

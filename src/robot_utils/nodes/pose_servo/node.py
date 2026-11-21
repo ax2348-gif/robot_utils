@@ -41,6 +41,8 @@ log = logging.getLogger("pose_servo")
 
 PERIOD = 0.02            # s, control period (50 Hz)
 EST_STALE_S = 0.20       # estimator stream older than this -> motion aborted
+EST_POSE_STALE_S = 0.30  # the pose itself (its t) older than this -> aborted: a backlogged stream can deliver old
+                         # poses at full rate (normal age ~30-50 ms, worst seen ~120 ms under load)
 IMU_LOST_S = 0.20        # require_imu: no IMU-fused pose for this long -> aborted
 JUMP_POS = 0.15          # m between consecutive poses -> "pose jump" -> aborted
 JUMP_THETA = 0.30        # rad
@@ -272,6 +274,10 @@ class PoseServoNode:
             return "no estimator pose yet"
         if now - e.rx > EST_STALE_S:
             return f"estimator stream stale ({now - e.rx:.2f} s)"
+        if not all(math.isfinite(e.row.get(k, math.nan)) for k in ("x", "y", "theta", "t")):
+            return "estimator pose is not finite"
+        if now - e.row["t"] > EST_POSE_STALE_S:
+            return f"estimator pose is {now - e.row['t']:.2f} s old (stream backlogged?)"
         if e.row.get("odom_ok", 1.0) != 1.0:
             return "estimator has no wheel odometry"
         if self.config.require_imu and (e.last_imu is None or now - e.last_imu > IMU_LOST_S):
@@ -583,6 +589,10 @@ class PoseServoNode:
         return self.get_config()
 
     def set_goal(self, frame: str, x: float, y: float, theta: float, overrides: dict) -> dict:
+        bad = [k for k, v in {"x": x, "y": y, "theta": theta, **overrides}.items()
+               if v is not None and isinstance(v, (int, float)) and not math.isfinite(v)]
+        if bad:
+            raise ValueError(f"{', '.join(bad)} must be finite numbers")
         with self.lock:
             if not self.enabled:
                 raise RequestError(409, "not enabled (POST /enable)")

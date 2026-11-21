@@ -192,6 +192,9 @@ def test_requires_imu_by_default_and_rejects_bad_goals(stack):
     r = post(url, "/goal", {"x": 0.1, "speed": 0.5})
     assert r.status_code == 422 and "max_speed" in r.json()["detail"]
     assert post(url, "/goal", {"x": 0.1, "bogus": 1}).status_code == 422
+    for raw in (b'{"theta": NaN}', b'{"x": Infinity}', b'{"x": 0.1, "speed": NaN}'):      # non-finite: refused
+        r = httpx.post(url + "/goal", content=raw, headers={"Content-Type": "application/json"}, timeout=5)
+        assert r.status_code == 422, raw
     assert post(url, "/config", {"max_speed": 2.5}).status_code == 422
     # global: shortest turn (theta = current + 2 pi - 0.1 is a -0.1 rad turn)
     th = state(stack)["latest"]["theta"]
@@ -308,3 +311,20 @@ def test_static_friction_options(stack):
     assert wait_result(stack)["result"] == "reached"
     with NodeClient(stack["url"]) as c:
         assert "boost" in c.get("/fields")["fields"]
+
+
+def test_estimator_health_judges_the_pose_age_not_only_arrival():
+    """A backlogged stream delivers old poses at full rate: arrival-based staleness stayed ok while the loop closed
+    on old poses (code review 2026-11-21). A non-finite pose is refused too."""
+    from robot_utils.nodes.pose_servo.node import EST_POSE_STALE_S
+    n = PoseServoNode(None, None)
+    import dataclasses
+    n.config = dataclasses.replace(n.config, require_imu=False)
+    now = 1000.0
+    n.est.rx = now                                                   # it just arrived ...
+    n.est.row = {"x": 0.0, "y": 0.0, "theta": 0.0, "t": now - 0.05, "odom_ok": 1.0}
+    assert n.estimator_health(now) is None
+    n.est.row["t"] = now - EST_POSE_STALE_S - 0.1                     # ... but the pose is old
+    assert "old" in n.estimator_health(now)
+    n.est.row["t"], n.est.row["theta"] = now - 0.05, math.nan
+    assert "not finite" in n.estimator_health(now)
