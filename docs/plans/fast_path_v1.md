@@ -1,6 +1,7 @@
 # Arm fast path, v1: draft
 
-Status (2026-11-21): draft for discussion. Nothing built.
+Status (2026-11-21): decided (see "Local only" below); being built as the arm's internal joint channel, first
+client the WBC (`wbc_v1.md`).
 
 ## Goal
 
@@ -12,6 +13,25 @@ transport carried them.
 
 Out of scope for v1: the base (same pattern later), torque-level commands, replacing `/chunk` (policies at 20–30 Hz
 keep using timestamped chunks over HTTP).
+
+## Local only (decided 2026-11-21; supersedes the transport and session parts below)
+
+The arm's joint-space input is a **low-level, robot-internal interface**. The principle that the public API does not
+expose joint (qpos) control to the outside world stays pinned, and holds structurally:
+
+- **Transport: a Unix datagram socket only**, in the robot's runtime directory, owner-only permissions. **No UDP, no
+  HTTP route** (nothing through nginx or any page, nothing in OpenAPI or the agent guide). Only processes on the Pi
+  running as the robot user can reach it.
+- **Session over the same socket:** a hello message carrying the arm lease token opens it (holding the lease is
+  necessary, being on the robot is too); no `/fast/open` HTTP endpoints. Bye, lease end, e-stop, disable or node
+  shutdown close it.
+- **Clients are internal components:** the WBC now, an on-Pi system 0 later, a future radio relay (a deliberately
+  installed local process). Documented in the developer docs as an internal interface, not the public API.
+- **The fast path for outside clients is one level up, at the WBC:** end-effector targets, hints and chunks in the
+  world frame, over datagrams from the Mac or erid. External clients drive the robot through the WBC or the existing
+  pose-level arm API, never through joints.
+- **Clean inside the arm node:** a generic joint-space source with the review's constraints (below), plus one small
+  transport module. The packet layouts below stay; the "UDP on the robot LAN" and HTTP session parts do not apply.
 
 ## Decisions already made
 

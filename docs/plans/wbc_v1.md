@@ -178,3 +178,43 @@ frame; the base pose and estimator reset id used; the target/chunk id and `seq` 
 3. Sim scenarios: reach while driving, chunk replacement, base lag, fence, stale inputs, faults; metrics shared with
    a later MPC.
 4. Teleop through the WBC (Quest), then a policy; supervised robot test.
+
+## Interfaces for the first build (frozen 2026-11-21: whole-body Quest teleop validated in the sim)
+
+Four pieces are built in parallel against these contracts; change them only together.
+
+**1. Arm joint channel (internal, see `fast_path_v1.md` "Local only").** A Unix datagram socket
+`<runtime>/robot/arm.joint.sock` (owner-only). Control datagrams are small JSON: `{"type": "hello", "token": <arm lease
+token>, "client": "wbc"}` → reply `{"type": "welcome", "session": u32, "stale_ms": 30, "limits": {...}}` or
+`{"type": "refused", "reason": ...}`; `{"type": "bye"}`. Commands are the 88-byte `RUC1` struct; state is the 136-byte
+`RUS1` struct, sent every tick to the client's bound socket address while the session is open (including fault). The
+arm node renews its lease on every valid command (`Lease.renew_holder()`), so the WBC need not renew over HTTP.
+
+**2. WBC node (`nodes/wbc`, a normal node: unix socket behind nginx at `/nodes/wbc/`, page, `/meta`, `/state`,
+`/events`, `/stream`).** HTTP: `POST /lease` (+ renew/release, `common/lease`), `POST /enable` (acquires the arm and
+swerve leases together, opens the arm joint channel; refuses with the reason if any part fails), `POST /disable`,
+`POST /estop` (+ fan-out), `GET/POST /hints` (the hint structure above), `GET/POST /fence` (later), `POST /session`
+(→ `{"session": u32, "udp_port": int, "unix_socket": path}`). One end effector for now: `"arm"` (link and TCP from the
+model; names come from the model so a second arm adds a key).
+
+**3. WBC target datagrams (the external fast path).** UDP on the robot LAN address (the Mac's loopback in the sim) and
+a Unix datagram socket; JSON v0 (binary later if a measurement asks):
+- reactive: `{"type": "target", "session": u32, "seq": u32, "t": null | <Pi monotonic s>, "ees": {"arm": {"frame":
+  "world" | "base", "pos": [x, y, z], "quat": [x, y, z, w], "twist": [vx, vy, vz, wx, wy, wz] (optional), "gripper":
+  0..1 (optional)}}, "base": {<hint overrides, same keys as /hints base>} (optional)}`; `t: null` = now.
+- chunk: `{"type": "chunk", "session", "seq", "ees": {"arm": {"frame", "t": [...], "pos": [[...]], "quat": [[...]],
+  "twist": [[...]] (optional), "gripper": [...] (optional)}}}`.
+- keep-alive: `{"type": "alive", "session", "seq"}`. Older `seq` dropped; unknown session dropped (counted).
+
+**4. WBC stream (rows, the arm's convention, append-only).** `t_tick`, `seq` in force, `state`, `base_mode`, `solve_ms`,
+`status`; the base pose used (`base_x`, `base_y`, `base_yaw`, world) and `est_reset`; the base twist commanded
+(`base_vx`, `base_vy`, `base_w`); per end effector `<ee>_` + `cmd_x..cmd_qw` (commanded pose, world), `meas_x..meas_qw`
+(measured, world, from the arm's `q` at `t_meas` and the estimator pose), `twist_vx..twist_wz` (commanded), `gripper`;
+input ages `arm_age`, `est_age`, `target_age`.
+
+**5. Quest client (`tools/quest_teleop/`, runs on the Mac or erid).** Reads the headset's `teleop.quest_state.v1`
+stream directly (port 9391), implements the body-frozen scheme (per engagement: the operator frame from head position
+and gravity-aligned yaw, the measured EE anchor from the WBC stream's `arm_meas_*`, targets in the world frame), maps
+the head's yaw to the base `heading` hint (optionally its displacement to a soft base `pose` hint), opens a WBC session
+and sends target datagrams at the stream rate; on stale or invalid input it stops sending (the WBC holds, then stops
+the base). The triggers drive the gripper.
