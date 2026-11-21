@@ -28,7 +28,7 @@ FSYNC_S = 5.0
 KEEP_DAYS = 30
 PREFIX = "ups-"
 
-DRAIN_MA = -50          # on input and below this (net out of the pack) -> draining
+DRAIN_MA = -20          # on input and below this (net out of the pack) -> draining (= sources.DRAIN_A)
 DRAIN_HOLD_S = 10.0
 CELL_LOW_V, CELL_OK_V = 3.30, 3.40
 SPREAD_V, SPREAD_OK_V = 0.20, 0.15

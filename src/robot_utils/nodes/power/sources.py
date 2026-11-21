@@ -29,7 +29,10 @@ from .ups import UpsHat
 
 STALE_S = 5.0                 # a reading older than this is stale
 DISCHARGE_MA = -20            # below this the pack is discharging (noise around 0 is "idle")
-DRAIN_A = -0.05              # on input and net below this out of the pack -> draining on input (powerlog.DRAIN_MA)
+# THE drain threshold, used everywhere (charge state, draining on input, the low-voltage trigger, the power-loss
+# estimate, the history's anomaly spans): net pack current below this = draining. The readings are steady to about
+# +-5 mA; a slow drain of -0.03 A (-0.4 W) is real and must not read as "not draining".
+DRAIN_A = DISCHARGE_MA / 1000   # -0.02 A
 # one row per HISTORY_S; the power-flow and cell columns are appended so older readers keep their indices
 HISTORY_FIELDS = ["t", "wall", "percent", "pack_v", "current_a", "input_present", "charging",
                   "input_w", "battery_w", "load_w", "cell_min_v", "cell_spread_v"]

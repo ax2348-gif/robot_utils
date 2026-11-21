@@ -38,7 +38,7 @@ from typing import Optional
 
 CELL_CUTOFF_V = 3.05      # the UPS cut power when cell 3 read 3.05 V under ~0.22 A load (2026-11-20, one event)
 N_CELLS = 4
-DRAIN_A = -0.05           # a minute with median net current below this is draining (sources.DRAIN_A)
+from .sources import DRAIN_A   # noqa: E402  (-0.02 A: one threshold for the whole node)
 BUCKET_S = 60.0
 WINDOW_S = 30 * 60.0      # trailing draining segment used for the trend
 MIN_SPAN_S = 10 * 60.0    # less than this of it: "estimating"
@@ -150,8 +150,12 @@ class PowerLoss:
             return out
         last = bs[-1]
         out.update(current_a=round(last["a"], 3), on_input=last["input"])
+        watts = last["a"] * last["pack"]
+        flow = f"{'+' if watts >= 0 else '-'}{abs(watts):.2f} W"
         if last["a"] >= DRAIN_A:
-            out.update(status="not_draining", text="not draining" + (" (charging)" if last["a"] > -DRAIN_A else ""))
+            out.update(status="not_draining",
+                       text=(f"charging {flow}" if last["a"] > -DRAIN_A else f"steady: net {last['a']:+.3f} A ({flow})")
+                       + ": no power loss expected")
             return out
         # the trailing draining run with the same input state: one odd minute (a spike) is skipped, two end it,
         # as does a gap in the readings
@@ -169,8 +173,8 @@ class PowerLoss:
         span = seg[-1]["wall"] - seg[0]["wall"]
         out["window_min"] = _mins(span)
         if span < MIN_SPAN_S or len(seg) < 5:
-            out.update(status="estimating", text=f"draining; estimating power loss ({_dur(span)} of "
-                                                 f"{_dur(MIN_SPAN_S)} of history)")
+            out.update(status="estimating", text=f"draining {abs(watts):.2f} W; estimating power loss ({_dur(span)} of "
+                                                 f"{_dur(MIN_SPAN_S)} of draining history so far)")
             return out
         cell = min(range(len(last["cells"])), key=lambda i: last["cells"][i])
         xs = [b["wall"] - wall_now for b in seg]
@@ -183,7 +187,8 @@ class PowerLoss:
         v_now, p_now = min(v_now, last["cells"][cell] + 0.02), min(p_now, last["pack"] + 0.08)
         out.update(cell=cell + 1, cell_v=round(last["cells"][cell], 3), slope_mv_min=round(-b_cell * 60000, 2))
         if -b_cell < MIN_SLOPE_V_S:
-            out.update(status="not_draining", text=f"draining {abs(last['a']):.2f} A but cell {cell + 1} isn't falling")
+            out.update(status="estimating", text=f"draining {abs(watts):.2f} W, too slowly to project yet (cell {cell + 1} "
+                                                 f"falling < {MIN_SLOPE_V_S * 60000:.1f} mV/min): power loss is hours away")
             return out
 
         def times(lam: float) -> dict:

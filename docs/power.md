@@ -140,7 +140,11 @@ A source with a battery adds the **common battery fields**. Each is `null` when 
 
 The UPS also reports `input` (USB-C V / A / W), `charger_state`, `links` (fuel gauge and charger
 I2C), `firmware`, `control` (auto power-on, watchdog), `power_off_pending` (0x01 reads 0x55) and
-`draining_on_input`: input present but the pack net discharging (current below -0.05 A) in this reading, while
+One drain threshold, -0.02 A (`sources.DRAIN_A`), is used throughout the node: charge state, draining on input,
+the low-voltage trigger, the power-loss estimate and the chart spans. Readings are steady to about ±5 mA; a real
+drain of -0.03 A (-0.4 W, seen 2026-11-20) must not read as "not draining".
+
+`draining_on_input`: input present but the pack net discharging (current below -0.02 A) in this reading, while
 `charging` (the charger bit) can still be true. It has no hold; `conditions` has the held span.
 
 The net battery power is `power_w` (+ charging, - draining). The load is not measured: input `input.w` -
@@ -164,7 +168,7 @@ one observed cutoff. The gauge's percent and time to empty can't see it.
 **Method** (`powerloss.py`):
 1. Every 1 Hz reading goes into a 35 min ring (refilled from the disk log at startup; `--fake` back-fills it from
    the simulated curve). Readings are reduced to per-minute medians, which drops load spikes.
-2. Only the trailing run of draining minutes (median net current below -0.05 A) with the same input state as now
+2. Only the trailing run of draining minutes (median net current below -0.02 A) with the same input state as now
    is used, up to 30 min. One odd minute is skipped; two, a gap of more than 3 min or a change of input end it.
 3. A least-squares line through the weakest cell's medians gives its slope at the middle of the window.
 4. The knee: a cell falls faster as it nears empty (cell 3 fell 0.4 mV/min on the plateau, 3.5 at 3.65 V, 9 at
@@ -211,8 +215,9 @@ input goes) and the node shows it there too, not the gauge's `time_to_empty_min`
 a 4800 mAh capacity the pack no longer has (it gave about 2.5 Ah from full before cell 3 cut out).
 
 Fields (null when not applicable):
-- `status`: `draining` (an estimate), `not_draining` (net current at or above -0.05 A, or the weakest cell isn't
-  falling), `estimating` (draining, but under 10 min of it), `no_data` (no reading in the last 2 min),
+- `status`: `draining` (an estimate), `not_draining` (net current at or above -0.02 A: "charging +x W" or
+  "steady: net ±x A"), `estimating` (draining, but under 10 min of it, or so slowly that the weakest cell isn't
+  visibly falling yet; the text gives the drain in W), `no_data` (no reading in the last 2 min),
   `shutdown_pending` (a shutdown is scheduled: it comes first; `event: "shutdown"`, `in_min` its countdown).
 - `in_min`: minutes until the Pi goes down: the end of a clean auto-shutdown's countdown (power-off then takes
   ~30 s), or the UPS cutoff. `at`: the same as epoch seconds. `range_min`: `[short, long]`.
@@ -376,7 +381,7 @@ The node also writes a journal line (and a page event) when one of these starts 
 | Condition | Starts | Ends |
 |---|---|---|
 | input lost | input not present | present again |
-| draining on input | input present, current below -50 mA for 10 s | current >= 0 for 10 s |
+| draining on input | input present, current below -20 mA for 10 s | current >= 0 for 10 s |
 | low cell | any cell below 3.30 V for 5 s | all above 3.40 V |
 | unbalanced | cells more than 0.20 V apart for 5 s | within 0.15 V |
 
@@ -404,7 +409,7 @@ log at startup). `fields` (append-only, so readers that index the first seven ke
 | `cell_min_v`, `cell_spread_v` | V, the lowest cell and max - min |
 
 Rows restored from the log compute `input_w` as `input_v x input_a` (the log has no input W column). A value a
-row lacks is `null`. `limits` gives the thresholds the page marks spans with: `{drain_a: -0.05, cell_low_v: 3.30,
+row lacks is `null`. `limits` gives the thresholds the page marks spans with: `{drain_a: -0.02, cell_low_v: 3.30,
 spread_v: 0.20}` (the watch's, without its holds).
 
 ## Page
@@ -425,7 +430,7 @@ spread_v: 0.20}` (the watch's, without its holds).
     drains and the lowest cell is within 0.5 V of the limit the estimate runs to, that limit is a second line,
     labelled `UPS cutoff 3.05 V · ≈ 34 min` or `auto-shutdown 3.15 V · ≈ 33 min`.
   - Charge, pack voltage and current, as before.
-  - **Anomaly spans** from the history rows: draining on input (input present, current below -0.05 A) on the power
+  - **Anomaly spans** from the history rows: draining on input (input present, current below -0.02 A) on the power
     flow, charge, voltage and current charts; a low cell on the cells chart; a spread above 0.20 V on the spread
     chart. Each is a thin hatched caution strip at the top of the chart with dotted edges; on the power-flow chart
     it is labelled with the pack's mean power in it (`draining on input: pack −1.6 W, input 14.6 W`, shortened to

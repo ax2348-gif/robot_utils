@@ -583,7 +583,7 @@ def test_history_has_power_flow_and_cell_columns(tmp_path):
     assert h["fields"] == ["t", "wall", "percent", "pack_v", "current_a", "input_present", "charging",
                            "input_w", "battery_w", "load_w", "cell_min_v", "cell_spread_v"]
     assert len(h["units"]) == len(h["fields"]) and "derived" in h["units"][9]
-    assert h["limits"] == {"drain_a": -0.05, "cell_low_v": 3.30, "spread_v": 0.20}
+    assert h["limits"] == {"drain_a": -0.02, "cell_low_v": 3.30, "spread_v": 0.20}
     row = dict(zip(h["fields"], h["rows"][0]))
     # the captured reading: input 18.17 W, pack 15.587 V x +0.512 A, cells 3.920 3.874 3.877 3.916
     assert row["input_w"] == 18.17 and row["battery_w"] == 7.98 and row["load_w"] == pytest.approx(10.19)
@@ -739,7 +739,10 @@ def test_power_loss_not_draining_and_too_little_history():
     assert pl.estimate(W0)["status"] == "no_data"
     pl.extend(ramp(20, 3.6, 0, amps=+0.2))                      # charging
     e = pl.estimate(W0 + 20 * 60)
-    assert e["status"] == "not_draining" and e["in_min"] is None and e["text"] == "not draining (charging)"
+    assert e["status"] == "not_draining" and e["in_min"] is None and e["text"].startswith("charging +")
+    pl = PowerLoss()
+    pl.extend(ramp(20, 3.6, 0, amps=-0.005))                     # noise around zero
+    assert pl.estimate(W0 + 20 * 60)["text"].startswith("steady: net -0.005 A")
     pl = PowerLoss()
     pl.extend(ramp(5, 3.6, 3.0))                                # draining, 5 min of it
     e = pl.estimate(W0 + 5 * 60, LV_ON)
@@ -858,3 +861,18 @@ def test_node_state_has_power_loss_and_the_tile_says_it(tmp_path):
 def test_page_shows_power_loss():
     from robot_utils.nodes.power.page import PAGE
     assert 'id="loss"' in PAGE and "renderLoss(" in PAGE and "power_loss" in PAGE and "lim.loss_v" in PAGE
+
+
+def test_power_loss_slow_drain_is_never_not_draining():
+    """2026-11-20 21:30: a steady -0.03 A (-0.4 W) drain on input read 'not draining' under a -0.05 A threshold
+    while the page showed the pack at -0.5 W. One -0.02 A threshold everywhere; a drain too slow to project says so."""
+    from robot_utils.nodes.power import sources
+    assert pl_mod.DRAIN_A == sources.DRAIN_A == -0.02
+    pl = PowerLoss()
+    pl.extend(ramp(20, 3.60, 0.0, amps=-0.03))                   # draining, cell not (yet) visibly falling
+    e = pl.estimate(W0 + 20 * 60, LV_ON)
+    assert e["status"] == "estimating" and "draining 0." in e["text"] and "too slowly to project" in e["text"]
+    pl = PowerLoss()
+    pl.extend(ramp(20, 3.50, 1.0, amps=-0.03))                   # the same drain, cell 3 falling 1 mV/min
+    e = pl.estimate(W0 + 20 * 60, LV_ON)
+    assert e["status"] == "draining" and e["in_min"] is not None
