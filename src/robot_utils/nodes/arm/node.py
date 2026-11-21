@@ -29,7 +29,6 @@ requests → one MIT frame per motor (servo, float or released) → telemetry ro
 """
 from __future__ import annotations
 
-import base64
 import logging
 import math
 import threading
@@ -51,8 +50,8 @@ from . import config as C
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
+from . import queries as Q
 from .planner import Planner
-from .render import VIEW_DEFAULTS
 from .telemetry import COL, FIELD_DOC, JAC_UNITS, PHASES, UNITS  # noqa: F401  (re-exported: server, models, tests)
 from .telemetry import FIELDS, JAC_FIELDS, SOURCES, STATES, row_dict, tick_row
 from .telemetry import tracking as tracking_of_row
@@ -248,6 +247,7 @@ class ArmNode:
         self._over_since = np.full(N, np.nan)     # per joint: when its residual went over its band (NaN = under)
         self._jam_fired_cmd: Optional[int] = None # with refire off: the command it fired for (fires once per command)
         self._cmd_count = 0                       # every new command / motion (refire off: one jam per command)
+        self._aib: Optional[dict] = None           # arm_in_base's cache (queries.arm_in_base)
 
     # -- state ---------------------------------------------------------------------------------------
 
@@ -1331,68 +1331,32 @@ class ArmNode:
     # reads -----------------------------------------------------------------------------------------
 
     def _need_kin(self) -> ArmKinematics:
-        if self.kin is None:
-            raise RequestError(503, "the arm has not connected yet (no model)")
-        return self.kin
+        return Q.need_kin(self.kin)
+
+    def _servo_cmd(self) -> Optional[np.ndarray]:
+        """A copy of the command while servoing, else None (IK seeds)."""
+        with self._lock:
+            return self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
 
     def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
                  render: Optional[dict] = None) -> dict:
         """IK seed only (never taken as where the arm is): "command" = the command while servoing,
         else the measured pose; "measured" = the measured pose. With ``render`` (view options,
         render.VIEW_DEFAULTS) the answer also carries ``image``: a PNG data URL of the query."""
-        if render is not None:
-            out, png = self.ik_image(pose, seed, max_rot_deg, render)
-            return {**out, "image": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
-                    "view": {**VIEW_DEFAULTS, **{k: v for k, v in render.items() if v is not None}}}
-        kin = self._need_kin()
-        r = self.reading
-        with self._lock:
-            q_cmd = self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
-        if seed == "measured" or q_cmd is None:
-            if r is None:
-                raise RequestError(503, "no reading yet")
-            q0 = r.q
-        else:
-            q0 = q_cmd
-        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
-        out = Planner.run("ik", kin, pose, np.asarray(q0, float).copy(), rot_tol=rot_tol)   # in the planner process
-        return out.public()
+        return Q.ik_check(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, render)
 
     def ik_image(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
                  view: Optional[dict] = None) -> tuple[dict, bytes]:
         """The IK check and its picture (render.py), both in the planner process: (IK answer, PNG).
         Shows the measured arm (and gripper gap), so it needs a reading. No lease; nothing moves."""
-        kin = self._need_kin()
-        r = self.reading
-        if r is None:
-            raise RequestError(503, "no reading yet")
-        with self._lock:
-            q_cmd = self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
-        q0 = r.q if (seed == "measured" or q_cmd is None) else q_cmd
-        gap = C.rad_to_gap(r.g_q) if math.isfinite(r.g_q) else 0.0
-        rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
-        out, png = Planner.run("ik_render", kin, pose, np.asarray(q0, float).copy(), np.asarray(r.q, float).copy(),
-                               min(max(gap, 0.0), C.GAP_MAX), dict(view or {}), rot_tol=rot_tol)
-        return out.public(), png
+        return Q.ik_image(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, view)
 
     def kinematics(self, q, frame: str = "arm") -> dict:
-        frame = "arm" if frame == "base" else frame      # "base": the old name of the arm frame
-        kin = self._need_kin()
-        q = np.asarray(q, float)
-        if q.shape != (N,) or not np.all(np.isfinite(q)):
-            raise ValueError(f"a configuration is {N} finite joint angles (rad)")
-        T = kin.fk(q)
-        J = kin.jacobian(q, frame)
-        return {"q": q.tolist(), "within_limits": kin.within_limits(q), "tcp": pose_public(T),
-                "frame": frame, "jacobian": J.round(9).tolist(), **kin.manipulability(J)}
+        return Q.kinematics(self.kin, q, frame)
 
     def kinematics_batch(self, qs: list, frame: str = "arm") -> list:
         """Lookups at many configurations, in the planner process (no lease; nothing moves)."""
-        kin = self._need_kin()
-        arr = np.asarray(qs, float)
-        if arr.ndim != 2 or arr.shape[1] != N or not np.all(np.isfinite(arr)):
-            raise ValueError(f"each configuration is {N} finite joint angles (rad)")
-        return Planner.run("kinematics", kin, [list(map(float, q)) for q in arr], frame="arm" if frame == "base" else frame)
+        return Q.kinematics_batch(self.kin, qs, frame)
 
     def kinematics_now(self, frame: str = "arm", which: str = "measured") -> dict:
         """which "command": the command, only while servoing (409 otherwise)."""
@@ -1415,115 +1379,18 @@ class ArmNode:
     def arm_in_base(self) -> dict:
         """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
         ``arm`` frame (cached 10 s); its shipped default if that node is unreachable. Says which."""
-        now = time.monotonic()
-        c = getattr(self, "_aib", None)
-        if c and now - c["t"] < 10.0:
-            return c["v"]
-        try:
-            from ..common.client import NodeClient
-            with NodeClient(self.description_node, timeout=1.5) as cl:
-                d = cl.get("/transform", **{"from": "base", "to": "arm"})
-            T, src = np.asarray(d["matrix"], float), f"description node ({self.description_node!r}): frame 'arm'"
-        except Exception as e:
-            import yaml
-            from importlib import resources
-            from ..description.frames import frame_T
-            f = yaml.safe_load(resources.files("robot_utils.nodes.description").joinpath("default_description.yaml").read_text())
-            T = frame_T(f["frames"]["arm"])
-            src = f"shipped default (description node unreachable: {type(e).__name__})"
-        v = {"T": T, "source": src}
-        self._aib = {"t": now, "v": v}
+        v, self._aib = Q.arm_in_base(self.description_node, self._aib)
         return v
 
     def geometry(self, q=None, pose: Optional[pin.SE3] = None, seed: str = "measured", max_rot_deg: Optional[float] = None,
                  gap_mm: Optional[float] = None) -> dict:
         """Gripper and finger geometry, and every box of the arm, as numbers in both the arm and the robot
         base frame: at the measured configuration, at ``q``, or at the IK solution of a TCP ``pose``."""
-        from ..swerve.constants import FRAME
-        from .body import GRASP_DEPTH, JAW_HEIGHT_ROOT, JAW_HEIGHT_TIP, JAW_LENGTH, JAW_THICKNESS, body
-        kin = self._need_kin()
-        r = self.reading
-        ik = None
-        if pose is not None:
-            ik = self.ik_check(pose, seed, max_rot_deg)
-            qv, which = np.asarray(ik["q"], float), "ik"
-        elif q is not None:
-            qv, which = np.asarray(q, float), "q"
-            if qv.shape != (N,) or not np.all(np.isfinite(qv)):
-                raise ValueError(f"a configuration is {N} finite joint angles (rad)")
-        else:
-            if r is None:
-                raise RequestError(503, "no reading yet")
-            qv, which = np.asarray(r.q, float), "measured"
-        if gap_mm is not None:
-            gap, gap_src = float(gap_mm) / 1000, "given"
-        elif r is not None and math.isfinite(r.g_q):
-            gap, gap_src = C.rad_to_gap(r.g_q), "measured"
-        else:
-            gap, gap_src = 0.0, "unknown (no reading): 0"
-        F = [T.homogeneous for T in kin.frames(qv)]
-        B = body(F, gap)
-        aib = self.arm_in_base()
-        Tb = aib["T"]
-        rnd = lambda v: [round(float(x), 5) for x in v]
-        pt = lambda p: {"arm": rnd(p), "base": rnd(Tb[:3, :3] @ p + Tb[:3, 3])}
-        vec = lambda v: {"arm": rnd(v), "base": rnd(Tb[:3, :3] @ v)}
-        pose2 = lambda T: {"arm": pose_public(pin.SE3(T)), "base": pose_public(pin.SE3(Tb @ T))}
-        jaws = {k: {"tip": pt(j["tip"]), "inner_face_center": pt(j["inner_face_center"]),
-                    "inner_face_root": pt(j["inner_face_root"]), "outer_face_tip": pt(j["outer_face_tip"]),
-                    "inward": vec(j["inward"])} for k, j in B["jaws"].items()}
-        boxes, allc, grip = [], [], []
-        for name, link, corners, bp in B["boxes"]:
-            cb = corners @ Tb[:3, :3].T + Tb[:3, 3]
-            allc.append(cb)
-            if link in ("end", "finger"):
-                grip.append(cb)
-            boxes.append({"name": name, "link": link, "center": pt(bp["center"]), "size_m": rnd(bp["size"]),
-                          "axes_base": [rnd(Tb[:3, :3] @ bp["axes"][:, k]) for k in range(3)]})
-        allc, grip = np.vstack(allc), np.vstack(grip)
-        h = FRAME / 2
-        ext = lambda P: {"min": rnd(P.min(0)), "max": rnd(P.max(0))}
-        past = {"front": allc[:, 0].max() - h, "rear": -h - allc[:, 0].min(), "left": allc[:, 1].max() - h,
-                "right": -h - allc[:, 1].min()}
-        return {
-            "which": which, "q": rnd(qv), "within_limits": kin.within_limits(qv), "ik": ik,
-            "gap_mm": round(B["gap"] * 1000, 2), "gap_source": gap_src,
-            "frames": {
-                "arm_in_base": {"matrix": [rnd(row) for row in Tb], "xyz": rnd(Tb[:3, 3]), "source": aib["source"]},
-                "note": "Every point is given in both frames: p_base = R p_arm + t (arm_in_base). The arm frame is "
-                        "the arm's URDF base_link: the underside of its mount plate on joint 1's axis, axes parallel to "
-                        "the robot base. Motion commands (/servo, /track, /chunk, /ik) take TCP poses in the arm frame.",
-            },
-            "tcp": {**pose2(B["tcp"]), "offset_in_end_link": kin.tcp_offset,
-                    "note": "the point motion commands target, near the wrist (tcp_offset behind the fingertips)"},
-            "fingertips": {"left": pt(B["jaws"]["left"]["tip"]), "right": pt(B["jaws"]["right"]["tip"]),
-                           "center": pose2(B["end_link"]),
-                           "note": "left/right: each jaw's tip on its inner (gripping) face, mid height; center: end_link, "
-                                   "midway between them. end_link's x axis is the approach direction (out between the "
-                                   "jaws), y the jaw travel (left jaw at +y), z the jaws' height"},
-            "axes": {"approach": vec(B["approach"]), "jaw_travel": vec(B["jaw_axis"]), "up": vec(B["up"])},
-            "jaws": jaws,
-            "jaw_shape_m": {"grasp_depth": round(GRASP_DEPTH, 4), "length": round(JAW_LENGTH, 4),
-                            "thickness": round(JAW_THICKNESS, 4), "height_root": JAW_HEIGHT_ROOT, "height_tip": JAW_HEIGHT_TIP,
-                            "note": "approximate (from the meshes). Each jaw is a prong from its tip back along -approach "
-                                    "to inner_face_root, where the jaw carriage begins: grasp_depth is how far an object "
-                                    "can sit between the jaws, measured from the tips. The inner faces grip; each jaw is "
-                                    "`thickness` thick outward from its inner face and tapers in height from root to tip"},
-            "extent_base": {"arm": ext(allc), "gripper": ext(grip),
-                            "past_footprint_m": {k: round(float(v), 4) for k, v in past.items()},
-                            "note": f"axis-aligned bounds of every box in the robot base frame; past_footprint_m: how far "
-                                    f"the arm reaches beyond each side of the {FRAME:.4f} m square frame (negative: inside)"},
-            "boxes": boxes,
-        }
+        return Q.geometry(self.kin, self.reading, self.ik_check, self.arm_in_base, q, pose, seed, max_rot_deg, gap_mm)
 
     def links(self, q=None) -> list:
         """The joint frames, end_link and tcp at ``q`` (default measured), for drawing."""
-        kin = self._need_kin()
-        if q is None:
-            if self.reading is None:
-                raise RequestError(503, "no reading yet")
-            q = self.reading.q
-        return [pose_public(T) for T in kin.frames(q)]
+        return Q.links(self.kin, self.reading, q)
 
     def gripper_state(self) -> dict:
         r, g = self.reading, self.gripper
