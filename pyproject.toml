@@ -36,6 +36,8 @@ dev = ["playwright>=1.40"]
 # the power node's UPS HAT on I2C (robot_utils.nodes.power); optional: the node reports the HAT as
 # unavailable without it, and --fake never needs it
 power = ["smbus2>=0.4"]
+# the MuJoCo sim world (robot_utils.nodes.sim, docs/plans/sim_v1.md); development machines and erid, never the robot
+sim = ["mujoco>=3.2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
