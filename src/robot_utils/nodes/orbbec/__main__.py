@@ -1,5 +1,7 @@
-"""python -m robot_utils.nodes.orbbec [--name camera] [--serial SN] [--streams color,depth] [--fake] [--port 8101]
+"""python -m robot_utils.nodes.orbbec [--name camera] [--serial SN] [--streams color,depth] [--fake | --sim world[=NAME|DIR]] [--port 8101]
 
+``--sim world`` takes the images from the MuJoCo sim world (the sim node ``sim``; ``world=NAME`` another instance,
+``world=DIR`` its socket directory; ``--sim-camera`` picks the world's camera, default the instance name; docs/sim.md).
 Serves on the unix socket <runtime dir>/robot/<name>.sock, i.e. http://<robot>/nodes/<name>/
 through the robot's port-80 proxy; --port adds a TCP port for debugging (docs/nodes.md)."""
 import argparse
@@ -25,6 +27,9 @@ def main(argv=None):
                    help="depth noise filter set on the device at start (default hardware: the camera's own, no host "
                         "CPU; software: the SDK's, on the host; device: leave as is)")
     p.add_argument("--fake", action="store_true", help="synthetic camera (no SDK / hardware needed)")
+    p.add_argument("--sim", default=None, metavar="world[=NAME|DIR]",
+                   help="images rendered by the sim world (docs/sim.md); no SDK / hardware needed")
+    p.add_argument("--sim-camera", default=None, help="with --sim: the world's camera (default: --name)")
     p.add_argument("--imu-calibration-file", default=None,
                    help="where IMU calibrations are kept, per camera serial (default "
                         "~/.config/robot_utils/orbbec_imu.json; none with --fake); 'none' disables")
@@ -42,7 +47,15 @@ def main(argv=None):
     from .hub import Hub
     from .owner import Owner
     from .server import create_app
-    if a.fake:
+    if a.sim:
+        from ..sim.backends import world_socket
+        from ..sim.backends.camera import WorldCameraBackend
+        cam = a.sim_camera or a.name
+        try:
+            backend = WorldCameraBackend(camera=cam, socket_path=world_socket(a.sim, f"camera-{cam}"))
+        except ValueError as e:
+            p.error(str(e))
+    elif a.fake:
         from .fake_backend import FakeBackend
         backend = FakeBackend(dual=True)
     else:
@@ -52,7 +65,7 @@ def main(argv=None):
                         imu=ImuSettings(enabled=not a.no_imu), depth_filter=a.depth_filter)
     hub = Hub()
     from .owner import IMU_CALIBRATION_FILE
-    cal_file = a.imu_calibration_file or (None if a.fake else IMU_CALIBRATION_FILE)
+    cal_file = a.imu_calibration_file or (None if a.fake or a.sim else IMU_CALIBRATION_FILE)
     if cal_file and cal_file.lower() == "none":
         cal_file = None
     app = create_app(Owner(backend, hub, settings, calibration_file=cal_file), hub, encode_workers=a.encode_workers)

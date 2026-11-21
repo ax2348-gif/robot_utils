@@ -8,6 +8,7 @@ http://<robot>/nodes/<name>/; --port is for debugging.
 """
 import argparse
 import logging
+import os
 
 from ..common.serve import add_serve_args, serve
 from .store import DEFAULT_DATA_DIR
@@ -25,6 +26,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from .node import DescriptionNode
     from .server import create_app
+    a.data_dir = os.path.expanduser(a.data_dir)
     node = DescriptionNode(a.data_dir, None if a.swerve.lower() == "none" else a.swerve)
     serve(create_app(node), a, banner=f"description node {a.name!r} (data {a.data_dir}, swerve {a.swerve})")
 
