@@ -205,6 +205,15 @@ a Unix datagram socket; JSON v0 (binary later if a measurement asks):
 - chunk: `{"type": "chunk", "session", "seq", "ees": {"arm": {"frame", "t": [...], "pos": [[...]], "quat": [[...]],
   "twist": [[...]] (optional), "gripper": [...] (optional)}}}`.
 - keep-alive: `{"type": "alive", "session", "seq"}`. Older `seq` dropped; unknown session dropped (counted).
+- hold (added 2026-11-21): `"ees": {"<ee>": {"hold": true}}` removes that EE's task: the WBC holds the arm's commanded
+  joints, so the arm rides with the base. A released teleop clutch sends this. (`frame: "base"` targets keep their
+  meaning: converted to world once at their timestamp, then fixed in the world.)
+- `est_reset` (optional, added 2026-11-21): the estimator reset id the world-frame targets were computed against;
+  mismatching datagrams are dropped, and world targets are aborted across a reset.
+- No self-motion: with every EE target satisfied (or held) and no base motion requested, the command stays constant;
+  secondary objectives (posture, manipulability, heading) only break ties while a task moves. Teleop relies on this
+  for "the robot never moves when the clutch is released and re-engaged" (the client anchors to `arm_cmd_*` and the
+  current base pose; the stick offset restarts at every engagement).
 
 **4. WBC stream (rows, the arm's convention, append-only).** `t_tick`, `seq` in force, `state`, `base_mode`, `solve_ms`,
 `status`; the base pose used (`base_x`, `base_y`, `base_yaw`, world) and `est_reset`; the base twist commanded
