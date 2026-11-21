@@ -1,7 +1,10 @@
 # Robot model and simulation, v1: draft
 
-Status (2026-11-21): design settled with the owner (see "Decided" below); nothing built. Step 4 of the pre-fast-path plan; the fast path
-(`fast_path_v1.md`) is built and tested against it first.
+Status (2026-11-21): design settled with the owner (see "Decided" below). Built (v1, kinematic fidelity): Part A, the
+model in the description node (`GET /model*`, docs/description_node.md "Robot model"), and Part B, the sim node with
+the hybrid base, the kinematic arm, rendered cameras and the three backends (docs/sim.md), tested with the real nodes
+in-process. Not yet: dynamic fidelity, the nodes' `--sim world` flags, docker compose (docs/sim.md "Not done yet").
+Step 4 of the pre-fast-path plan; the fast path (`fast_path_v1.md`) is built and tested against it first.
 
 ## Goal
 
