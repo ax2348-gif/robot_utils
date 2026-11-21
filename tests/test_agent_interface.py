@@ -728,3 +728,42 @@ def test_view_returns_the_cameras_latest_frame_as_is(tmp_path):
         for s, t in (srv, cam):
             s.should_exit = True
             t.join(10)
+
+
+def test_estop_reaches_the_swerve_and_the_arm_with_pose_servo_down(stack):
+    """pose_servo down used to make the e-stop fail (503) before the arm was even tried (code review 2026-11-21).
+    Every target is now e-stopped independently: the swerve directly, the arm as before, and the reply says so."""
+    st = stack
+    st["nav"].targets["pose_servo"] = "http://127.0.0.1:9"          # nothing listens: pose_servo is down
+    r = post(st, "/estop", {"reason": "test"}, human=True)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["forwarded"] is True and out["swerve_direct"] is True and "pose_servo" in out["error"]
+    assert out["arm"]["latched"] is True
+    sw = httpx.get(st["swerve"] + "/state", timeout=5).json()
+    assert sw["estop"]["latched"] is True
+
+
+def test_a_hung_reflex_stops_the_base_instead_of_failing_open(stack):
+    """A reflex check that hangs (a stalled frame fetch) or keeps failing used to let the base drive on unguarded
+    (code review 2026-11-21). The status watcher now stops the base once no reflex check completed for
+    REFLEX_STALE_S while moving."""
+    from robot_utils.nodes.agent_interface.node import REFLEX_STALE_S
+    st = stack
+    post(st, "/session", {"agent": "T"})
+    post(st, "/enable", {"caps": {"max_distance": 2.0}})
+    post(st, "/look")
+    nav = st["nav"]
+    hang = threading.Event()
+
+    def stalled_tick():                   # perception stalls: the check never completes
+        hang.wait(10)
+    nav._reflex_tick = stalled_tick
+    t0 = time.monotonic()
+    g = post(st, "/goal", {"x": 1.0, "speed": 0.1, "comment": "the reflex is blind"}).json()
+    res = get(st, f"/goals/{g['goal_id']}/wait", timeout=20).json()
+    hang.set()
+    assert res["result"]["result"] == "stopped", res
+    assert time.monotonic() - t0 < REFLEX_STALE_S + 4
+    assert nav.reflex["failsafe_stops"] == 1
+    assert get(st, "/state").json()["pose_world"][0] < 0.5                 # stopped well short of the goal

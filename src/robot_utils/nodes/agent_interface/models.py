@@ -594,9 +594,15 @@ class ServoStop(Reply):
 
 
 class ServoEStop(Reply):
-    """pose_servo's POST /estop reply, passed through (pose_servo disables itself either way)."""
-    forwarded: bool = Field(description="The e-stop reached the swerve (it latches there).")
-    error: Optional[str] = Field(None, description="Why forwarding failed.")
+    """The e-stop of every target: pose_servo's POST /estop reply passed through (pose_servo disables itself either
+    way), the swerve directly when that did not reach it, and the arm (``arm``). Never an error: each target's
+    outcome is reported."""
+    forwarded: bool = Field(description="The e-stop reached the swerve (it latches there), through pose_servo or, if "
+                                         "that failed, directly.")
+    error: Optional[str] = Field(None, description="Why pose_servo did not forward it (down, or its forward failed).")
+    swerve_direct: Optional[bool] = Field(None, description="True: pose_servo did not reach the swerve, so the swerve "
+                                                            "was e-stopped directly.")
+    swerve_error: Optional[str] = Field(None, description="Why the direct swerve e-stop failed too.")
     model_config = ConfigDict(extra="allow")
 
 
@@ -712,6 +718,9 @@ class Reflex(BaseModel):
     stops: int = Field(description="Stops so far.")
     margin: float = Field(description="m: the margin of the current goal (default 0.12).")
     tick_errors: int = Field(description="Checks that failed (no frame, ...): the reflex did not look that time.")
+    failsafe_stops: int = Field(0, description="Fail-safe stops: the base was moving with the reflex armed but no reflex "
+                                               "check completed for 1 s (stalled perception, repeated errors) or the "
+                                               "pose_servo status was unknown, so the base was stopped.")
 
 
 class GoalBrief(BaseModel):

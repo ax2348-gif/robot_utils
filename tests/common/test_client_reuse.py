@@ -59,6 +59,7 @@ def test_watch_keeps_its_pose_servo_client(monkeypatch):
     nav.stop_ev, nav.targets, nav.goals = stop, {"pose_servo": "http://ps"}, {}
     nav.enabled_by, nav.enabled_at, nav.lock, nav._ps_status = None, 0.0, threading.Lock(), None
     nav._anomaly_check = lambda st: None
+    nav.reflex, nav._reflex_ok_t, nav._ps_moving_last, nav._failsafe_episode = {"armed": False}, 0.0, False, False
     nav._watch()
     assert len(polls) == 6
     assert len(made) == 2                                     # one client, replaced once after the failed poll

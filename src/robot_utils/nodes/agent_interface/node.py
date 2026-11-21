@@ -50,6 +50,8 @@ CAMERAS = {"camera": "camera", "wrist_camera": "wrist_camera"}   # POST /view: n
 KEEP_LOG = 1000              # dialogue turns kept in memory (all are in the session's log.jsonl)
 POSE_HISTORY_S = 30.0
 REFLEX_HZ = 6.0
+REFLEX_STALE_S = 1.0     # armed and moving, but no completed reflex check for this long: stop the base (fail safe)
+STATUS_FAILS_STOP = 3    # consecutive failed pose_servo polls while the base was last seen moving: stop it
 REFLEX_POINTS = 25           # obstacle points ahead needed to trigger the reflex
 REFLEX_LATENCY = 0.35        # s: depth age + reaction, added to the braking distance
 REFLEX_MARGIN = 0.12         # m: default gap left in front of what stops the reflex (beyond braking + latency)
@@ -157,7 +159,10 @@ class AgentNav:
         self.enabled_at = 0.0                   # monotonic s when our last /enable returned (watcher ignores older polls)
         self.caps: Optional[dict] = None
         self.reflex = {"force": True, "armed": False, "last": None, "blind": None, "stops": 0,
-                       "margin": REFLEX_MARGIN, "tick_errors": 0}
+                       "margin": REFLEX_MARGIN, "tick_errors": 0, "failsafe_stops": 0}
+        self._reflex_ok_t = 0.0          # monotonic: the last completed reflex check (or the start of the motion)
+        self._ps_moving_last = False     # the last successful pose_servo poll said moving / braking
+        self._failsafe_episode = False   # a fail-safe stop was sent for the current motion
         self.alignment = {"force": False, "deadzone_m": ALIGN_DEADZONE_M, "hysteresis_deg": ALIGN_HYSTERESIS_DEG,
                           "last": None}
         self.arm = {"token": None, "lease_id": None, "heartbeat": 1.0, "enabled": False, "jams_seen": None,
@@ -497,7 +502,21 @@ class AgentNav:
         return out
 
     def estop(self, actor: str, reason: str = "", comment: str = "") -> dict:
-        out = self._call("pose_servo", "POST", "/estop", {"reason": f"agent ({actor}): {reason}", "source": actor})
+        """Every target is e-stopped independently: one that is down or fails must not keep the e-stop from the
+        others (pose_servo being down used to skip the arm). The base: through pose_servo (it forwards to the swerve
+        and disables itself); if that did not reach the swerve, the swerve directly."""
+        try:
+            out = self._call("pose_servo", "POST", "/estop", {"reason": f"agent ({actor}): {reason}", "source": actor},
+                             timeout=2)
+        except RequestError as e:
+            out = {"forwarded": False, "error": str(e)}
+        if not out.get("forwarded"):
+            try:
+                self._call("swerve", "POST", "/estop", {"reason": f"agent_interface ({actor}): {reason}",
+                                                        "source": actor}, timeout=1)
+                out = {**out, "forwarded": True, "swerve_direct": True}
+            except RequestError as e:
+                out = {**out, "swerve_error": str(e)}
         with self.lock:
             self.enabled_by = None
             if actor == "human":
@@ -1141,6 +1160,7 @@ class AgentNav:
                     c.close()
                     c = None
             self._ps_status = st
+            self._failsafe_check(st)
             if st is None:
                 continue
             g = st.get("goal") or {}
@@ -1174,6 +1194,40 @@ class AgentNav:
         if c is not None:
             c.close()
 
+    def _failsafe_check(self, st) -> None:
+        """Watcher thread, every poll: the reflex must not fail open. While the base is moving (or was, when the
+        poll fails) with the reflex armed, stop it when the reflex has not completed a check for REFLEX_STALE_S
+        (hung frame fetch, repeated errors) or when STATUS_FAILS_STOP polls in a row failed (status unknown)."""
+        now = time.monotonic()
+        if st is not None:
+            self._status_fails = 0
+            was = self._ps_moving_last
+            self._ps_moving_last = st.get("status") in ("moving", "braking")
+            if not self._ps_moving_last:
+                self._failsafe_episode = False
+            elif not was:                 # a motion starts: count from now, not from the last motion's last check
+                self._reflex_ok_t = max(self._reflex_ok_t, now)
+        else:
+            self._status_fails = getattr(self, "_status_fails", 0) + 1
+        if not (self.reflex["armed"] and self._ps_moving_last) or self._failsafe_episode:
+            return
+        why = None
+        if st is None and self._status_fails >= STATUS_FAILS_STOP:
+            why = f"pose_servo status unknown ({self._status_fails} polls failed)"
+        elif st is not None and now - self._reflex_ok_t > REFLEX_STALE_S:
+            why = f"no completed reflex check for {now - self._reflex_ok_t:.1f} s"
+        if why is None:
+            return
+        self._failsafe_episode = True
+        self.reflex["failsafe_stops"] += 1
+        try:
+            self._call("pose_servo", "POST", "/stop", {}, timeout=1)
+            sent = "stopped the base"
+        except Exception as e:  # noqa: BLE001 - reported
+            sent = f"could not stop the base: {e}"
+        self._robot_turn(f"Reflex fail-safe: {why}; {sent}. The goal has ended; a new goal continues.",
+                         level="warn", source="reflex")
+
     # -- the stop reflex (the only automatic action: it can only stop) ------------------------------------
 
     def _reflex_loop(self):
@@ -1184,11 +1238,14 @@ class AgentNav:
                 prev = None
                 continue
             now = time.monotonic()
+            if prev is None:              # a motion starts: the fail-safe counts from here
+                self._reflex_ok_t = now
             if prev is not None:      # the real interval between checks (sleep + the last check's own time)
                 self._reflex_tick_s = max(1.0 / REFLEX_HZ, 0.7 * self._reflex_tick_s + 0.3 * (now - prev))
             prev = now
             try:
                 self._reflex_tick()
+                self._reflex_ok_t = time.monotonic()
             except Exception as e:
                 self.reflex["last"] = f"error: {type(e).__name__}: {e}"
                 self.reflex["tick_errors"] += 1
