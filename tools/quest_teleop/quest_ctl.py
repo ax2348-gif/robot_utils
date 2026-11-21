@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Headset-side control for the Quest teleop: ``up``, ``down``, ``status`` (also as ``quest_up`` / ``quest_down`` /
+``quest_status``). Mac or erid; stdlib only. Automates only the headset, not the teleop workflow.
+
+    quest_up [--scheme body-frozen|standard] [--demo] [--restart] [--wait 30]
+    quest_down
+    quest_status
+
+The Quest runs an SSH server (the quest-dev-runtime APK); ``~/.ssh/config`` has ``Host quest`` (``--ssh-host``).
+Commands go through quest_env's own script, ``sh "$QUEST_ENV_ROOT/quest" ...`` (what ``q`` does in an interactive
+shell; profile.sh defines ``q`` only for interactive shells, so it is not used over SSH). The root comes from
+``~/.config/quest-env/root`` as in profile.sh, else ``~/workspace/quest_env``.
+
+``up``:
+1. SSH reachability (``BatchMode``, short timeout): a clear message if the headset is asleep or offline.
+2. ``git fetch`` then compare with the upstream; ``quest pull`` only if behind. ``pull`` fast-forwards only and
+   refuses a dirty tree: a dirty tree is reported and left alone, never forced.
+3. Telemetry, headless: ``quest run --no-viewer --scheme=<scheme>`` (``-s`` too with ``--demo``, which renders the
+   headset's own kinematic demo). The scheme works without ``-s``: the script writes ``off body-frozen`` to
+   ``~/.config/quest-env/demo-mode`` and native reads the second word into ``operatorIntent_.bodyFrozen``
+   regardless of the demo. ``run`` restarts the XR process, so it is skipped when the stream already answers, the
+   mode file matches and nothing was pulled (``--restart`` forces it).
+4. Waits until port 9391 answers with ``teleop.quest_state.v1`` frames, then prints the status.
+
+``down``: ``quest stop``. ``status``: ``quest status``, the mode file, the stream's liveness and the battery.
+Nothing destructive is ever run on the headset (read-only queries, ``fetch``, ``pull --ff-only`` via the script,
+``run``, ``stop``).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+STREAM_PORT = 9391
+SCHEMA = "teleop.quest_state.v1"
+ROOT = 'R=$(cat "$HOME/.config/quest-env/root" 2>/dev/null || echo "$HOME/workspace/quest_env"); '
+MODE_FILE = '"$HOME/.config/quest-env/demo-mode"'
+UNREACHABLE = ("the headset does not answer SSH ({detail}). Is it asleep, off, or off the network, or is the "
+               "quest-dev-runtime SSH server not running? Wake it (put it on / press power) and retry.")
+
+
+@dataclass
+class Result:
+    rc: int
+    out: str = ""
+    err: str = ""
+
+
+class SshRunner:
+    """Runs one shell command on the headset: ``ssh -o BatchMode=yes -o ConnectTimeout=N <host> <command>``."""
+
+    def __init__(self, host: str = "quest", connect_timeout: int = 5):
+        self.host = host
+        self.connect_timeout = connect_timeout
+
+    def __call__(self, command: str, timeout: float = 60.0) -> Result:
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.connect_timeout}", self.host, command]
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return Result(124, "", f"timed out after {timeout:.0f} s")
+        except FileNotFoundError:
+            return Result(127, "", "ssh not found")
+        return Result(p.returncode, p.stdout, p.stderr)
+
+
+def ssh_hostname(host: str) -> str:
+    """The address ``ssh <host>`` connects to (``ssh -G``, local only), for the stream probe."""
+    try:
+        out = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return host
+    for line in out.splitlines():
+        k, _, v = line.partition(" ")
+        if k == "hostname" and v:
+            return v.strip()
+    return host
+
+
+# -- the stream -----------------------------------------------------------------------------------
+
+@dataclass
+class StreamInfo:
+    live: bool
+    frames: int = 0
+    rate_hz: float = 0.0
+    session_id: Optional[str] = None
+    focused: Optional[bool] = None
+    xr_state: Optional[str] = None
+    scheme: Optional[str] = None
+    error: str = ""
+
+    def describe(self) -> str:
+        if not self.live:
+            return f"stream: not answering ({self.error or 'no frames'})"
+        return (f"stream: live, {self.rate_hz:.0f} Hz, session {self.session_id}, "
+                f"{'focused' if self.focused else 'NOT focused'} ({self.xr_state}), scheme {self.scheme}")
+
+
+def probe_stream(host: str, port: int = STREAM_PORT, seconds: float = 1.0) -> StreamInfo:
+    """Read the stream for ``seconds``: frame rate (our clock), session, focus, the intent's scheme."""
+    try:
+        sock = socket.create_connection((host, port), timeout=2)
+    except OSError as e:
+        return StreamInfo(False, error=f"{type(e).__name__}: {e}")
+    n, first, last, t_first, t_last = 0, None, None, None, None
+    deadline = time.monotonic() + seconds
+    try:
+        sock.settimeout(0.5)
+        f = sock.makefile("rb")
+        while time.monotonic() < deadline:
+            try:
+                line = f.readline()
+            except OSError:
+                break
+            if not line:
+                break
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict) or d.get("schema") != SCHEMA:
+                continue
+            t = time.monotonic()
+            n += 1
+            first = first or d
+            t_first = t_first or t
+            last, t_last = d, t
+    finally:
+        sock.close()
+    if n == 0:
+        return StreamInfo(False, error="connected, no frames")
+    rate = (n - 1) / (t_last - t_first) if n > 1 and t_last > t_first else 0.0
+    intent = last.get("control_intent") or {}
+    return StreamInfo(True, n, rate, last.get("session_id"), last.get("input_focused"), last.get("xr_session_state"),
+                      intent.get("scheme"))
+
+
+# -- commands -------------------------------------------------------------------------------------
+
+class QuestCtl:
+    def __init__(self, run: Callable[..., Result], stream_host: str, *, port: int = STREAM_PORT,
+                 probe: Callable[..., StreamInfo] = probe_stream, log: Callable[[str], None] = print,
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
+        self.run, self.stream_host, self.port = run, stream_host, port
+        self.probe, self.log, self.sleep, self.clock = probe, log, sleep, clock
+
+    def q(self, args: str, timeout: float = 60.0) -> Result:
+        return self.run(ROOT + f'sh "$R/quest" {args}', timeout)
+
+    def reachable(self) -> bool:
+        r = self.run("echo quest-ok", 15)
+        if r.rc == 0 and "quest-ok" in r.out:
+            return True
+        self.log(UNREACHABLE.format(detail=(r.err.strip().splitlines() or [f"exit {r.rc}"])[-1]))
+        return False
+
+    def repo_state(self) -> Optional[tuple[int, int]]:
+        """(commits behind upstream, dirty files) after a fetch; None if it could not be determined."""
+        r = self.run(ROOT + 'git -C "$R" fetch --quiet && '
+                     'echo "behind=$(git -C "$R" rev-list --count HEAD..@{u})" && '
+                     'echo "dirty=$(git -C "$R" status --porcelain | wc -l)"', 90)
+        vals = {}
+        for line in r.out.splitlines():
+            k, _, v = line.strip().partition("=")
+            if k in ("behind", "dirty") and v.strip().isdigit():
+                vals[k] = int(v)
+        if r.rc != 0 or len(vals) != 2:
+            self.log(f"could not check for updates (exit {r.rc}): {(r.err.strip() or r.out.strip())[-200:]}")
+            return None
+        return vals["behind"], vals["dirty"]
+
+    def mode(self) -> str:
+        r = self.run(f"cat {MODE_FILE} 2>/dev/null", 15)
+        return " ".join(r.out.split()) if r.rc == 0 else ""
+
+    def battery(self) -> str:
+        r = self.run("cat /sys/class/power_supply/battery/capacity 2>/dev/null || "
+                     "dumpsys battery 2>/dev/null | grep -m1 'level:'", 15)
+        digits = "".join(ch for ch in r.out if ch.isdigit())
+        return f"{digits}%" if r.rc == 0 and digits else "unknown"
+
+    def wait_stream(self, wait: float) -> StreamInfo:
+        deadline = self.clock() + wait
+        info = self.probe(self.stream_host, self.port, 1.0)
+        while not info.live and self.clock() < deadline:
+            self.sleep(0.5)
+            info = self.probe(self.stream_host, self.port, 1.0)
+        return info
+
+    def up(self, scheme: str = "body-frozen", demo: bool = False, restart: bool = False, wait: float = 30.0) -> int:
+        if not self.reachable():
+            return 2
+        pulled = False
+        state = self.repo_state()
+        if state is not None:
+            behind, dirty = state
+            if behind and dirty:
+                self.log(f"headset clone is {behind} commit(s) behind but has {dirty} local change(s): not pulling "
+                         "(quest pull refuses a dirty tree; resolve it on the headset). Using the current version.")
+            elif behind:
+                self.log(f"headset clone is {behind} commit(s) behind: quest pull")
+                r = self.q("pull", 180)
+                if r.rc != 0:
+                    self.log(f"quest pull failed (exit {r.rc}): {(r.err.strip() or r.out.strip())[-300:]}")
+                    return 3
+                pulled = True
+            else:
+                self.log("headset clone is up to date" + (f" ({dirty} local change(s))" if dirty else ""))
+        want = f"{'live' if demo else 'off'}{' body-frozen' if scheme == 'body-frozen' else ''}"
+        current = self.mode()
+        live = self.probe(self.stream_host, self.port, 1.0)
+        if live.live and current == want and not pulled and not restart:
+            self.log(f"telemetry already running ({want}); not restarting")
+        else:
+            why = ("--restart" if restart else "updated" if pulled else
+                   "stream not answering" if not live.live else f"mode {current or 'unset'!r} -> {want!r}")
+            args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "")
+            self.log(f"starting telemetry: quest {args} ({why})")
+            r = self.q(args, 120)
+            if r.rc != 0:
+                self.log(f"quest run failed (exit {r.rc}): {(r.err.strip() or r.out.strip())[-300:]}")
+                return 4
+        info = self.wait_stream(wait)
+        if not info.live:
+            self.log(f"port {self.port} on {self.stream_host} did not answer within {wait:.0f} s: {info.error}. "
+                     "The XR app may need the headset on the head (focus) or `q focus` on the headset.")
+            return 5
+        self.log(info.describe())
+        if info.scheme and info.scheme != scheme:
+            self.log(f"warning: the stream reports scheme {info.scheme!r}, wanted {scheme!r}")
+        self.log(f"battery: {self.battery()}")
+        return 0
+
+    def down(self) -> int:
+        if not self.reachable():
+            return 2
+        r = self.q("stop", 60)
+        self.log((r.out.strip() or r.err.strip() or "stopped") if r.rc == 0 else f"quest stop failed (exit {r.rc}): "
+                 f"{(r.err.strip() or r.out.strip())[-300:]}")
+        return 0 if r.rc == 0 else 4
+
+    def status(self) -> int:
+        if not self.reachable():
+            return 2
+        r = self.q("status", 30)
+        self.log("native: " + (r.out.strip() or r.err.strip() or f"exit {r.rc}"))
+        self.log(f"mode file: {self.mode() or 'unset'}")
+        self.log(self.probe(self.stream_host, self.port, 1.0).describe())
+        self.log(f"battery: {self.battery()}")
+        return 0
+
+
+def main(argv=None, prog: Optional[str] = None) -> int:
+    prog = prog or Path(sys.argv[0]).name
+    implied = {"quest_up": "up", "quest_down": "down", "quest_status": "status"}.get(prog)
+    ap = argparse.ArgumentParser(prog=prog, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    if implied is None:
+        ap.add_argument("command", choices=("up", "down", "status"))
+    ap.add_argument("--ssh-host", default="quest", help="ssh config host of the headset (default %(default)s)")
+    ap.add_argument("--stream-host", default=None, help="stream address (default: the ssh host's HostName)")
+    ap.add_argument("--port", type=int, default=STREAM_PORT)
+    ap.add_argument("--scheme", choices=("body-frozen", "standard"), default="body-frozen")
+    ap.add_argument("--demo", action="store_true", help="also the headset's own kinematic demo (-s)")
+    ap.add_argument("--restart", action="store_true", help="restart telemetry even if it is already running")
+    ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for the stream")
+    args = ap.parse_args(argv)
+    command = implied or args.command
+    ctl = QuestCtl(SshRunner(args.ssh_host), args.stream_host or ssh_hostname(args.ssh_host), port=args.port,
+                   log=lambda s: print(s, flush=True))
+    if command == "up":
+        return ctl.up(args.scheme, args.demo, args.restart, args.wait)
+    return ctl.down() if command == "down" else ctl.status()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

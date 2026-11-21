@@ -1,0 +1,3 @@
+#!/bin/sh
+# Headset-side control (quest_ctl.py status): see quest_ctl.py and README.md.
+exec python3 "$(dirname "$0")/quest_ctl.py" status "$@"
