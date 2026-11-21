@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
+import time
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..common.server import Event, add_base_routes, add_page_routes, node_meta, setup_app, sse
-from . import __version__
+from . import __version__, viz
 from .node import SimNode
 from .world import SimError
 
@@ -20,6 +23,9 @@ TAGS = [
     {"name": "physics", "description": "**Privileged, sim-only** controls (never exposed by a hardware node): "
                                        "apply a wrench, teleport the base."},
     {"name": "cameras", "description": "Rendered camera images (previews; the camera nodes stream them)."},
+    {"name": "view", "description": "The 3D view's data: the world's geometry, body poses (~30 Hz stream)."},
+    {"name": "markers", "description": "Frames, points, lines and labels any client posts to be drawn in the 3D "
+                                       "view (e.g. the WBC's end-effector targets and commanded poses)."},
     {"name": "state", "description": "Status, clock sync, events."},
 ]
 
@@ -76,6 +82,34 @@ class TeleportIn(_In):
     xyz: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="m, base_link in the world.")
     yaw: Optional[float] = Field(None, description="rad.")
     rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="rad (instead of yaw).")
+
+
+class MarkerIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(description="Unique name (letters, digits, _ . : / -); posting it again replaces it.")
+    kind: Literal["frame", "point", "line", "text"] = Field(
+        "frame", description="frame: axes at pos + quat; point: a dot at pos; line: a polyline through points; "
+                             "text: a label at pos.")
+    frame: str = Field("world", description="Coordinates are in: `world`, `base` (base_link) or a model body / "
+                                            "object name (e.g. `arm_end_link`).")
+    pos: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="m (frame, point, text).")
+    quat: Optional[list[float]] = Field(None, min_length=4, max_length=4,
+                                        description="Orientation [x, y, z, w] (frame); identity if absent.")
+    points: Optional[list[list[float]]] = Field(None, description="m, [[x, y, z], ...] (line).")
+    color: Optional[str] = Field(None, max_length=40, description="CSS colour, e.g. `#e0a030`; default: the "
+                                                                  "theme's signal colour.")
+    size: Optional[float] = Field(None, gt=0, le=5, description="m: axis length (frame, default 0.1), dot "
+                                                                "diameter (point, default 0.02).")
+    label: Optional[str] = Field(None, max_length=80, description="Text drawn next to it (the text of `text`).")
+    ttl: Optional[float] = Field(None, gt=0, le=86400, description="s: removed unless posted again within this "
+                                                                   "(a live target: post at 10 Hz with ttl 0.5).")
+
+
+class MarkersIn(_In):
+    markers: list[MarkerIn] = Field(description="Markers to add or replace (by name).")
+    source: Optional[str] = Field(None, max_length=40, description="Who posts them (e.g. `wbc`), for "
+                                                                    "`DELETE /markers?source=` and `replace`.")
+    replace: bool = Field(False, description="Remove this source's other markers first.")
 
 
 # -- replies --------------------------------------------------------------------------------------------
@@ -178,6 +212,82 @@ class SavedScene(BaseModel):
     name: str = Field(description="Scene name.")
     path: str = Field(description="File it was written to.")
     objects: list[dict] = Field(description="The objects as saved (ObjectIn fields).")
+
+
+class Marker(MarkerIn):
+    model_config = ConfigDict(extra="forbid")
+    source: Optional[str] = Field(None, description="Who posted it.")
+
+
+class MarkersOut(BaseModel):
+    markers: list[Marker] = Field(description="Every live marker.")
+
+
+class MarkersPut(BaseModel):
+    names: list[str] = Field(description="The markers just posted.")
+    count: int = Field(description="Live markers in all.")
+
+
+class MarkersRemoved(BaseModel):
+    removed: int = Field(description="Markers removed.")
+
+
+class VizBody(BaseModel):
+    name: str = Field(description="Body name (an object's without its `obj_` prefix).")
+    body: str = Field(description="The model body's name.")
+    kind: Literal["world", "robot", "object"] = Field(description="What it belongs to.")
+    parent: int = Field(description="Parent body index.")
+
+
+class VizGeom(BaseModel):
+    body: int = Field(description="Body index.")
+    type: Literal["box", "sphere", "capsule", "cylinder", "ellipsoid", "mesh"] = Field(
+        description="MuJoCo geom type; sizes as MuJoCo's (half extents, radius + half length along z).")
+    size: list[float] = Field(description="m, MuJoCo geom_size.")
+    pos: list[float] = Field(description="m, in the body.")
+    quat: list[float] = Field(description="w, x, y, z in the body.")
+    rgba: list[float] = Field(description="Colour 0..1.")
+    visual: bool = Field(description="A visual geom (no contacts).")
+    mesh: Optional[int] = Field(None, description="Index into meshes (type mesh).")
+
+
+class VizMesh(BaseModel):
+    name: str = Field(description="Mesh name.")
+    nvert: int = Field(description="Vertices (float32 x, y, z).")
+    nface: int = Field(description="Triangles.")
+    vert_offset: int = Field(description="Byte offset of the vertices in /viz/meshes.bin.")
+    face_offset: int = Field(description="Byte offset of the triangle indices.")
+    index: Literal["u16", "u32"] = Field(description="Index type (little endian).")
+
+
+class VizModel(BaseModel):
+    generation: int = Field(description="Bumps when the model recompiles (objects added / removed): fetch again.")
+    model_version: Optional[str] = Field(description="The description node's model_version.")
+    cell: float = Field(description="m, mesh simplification cell (0 = as compiled).")
+    bodies: list[VizBody] = Field(description="Bodies by index (pose stream order).")
+    geoms: list[VizGeom] = Field(description="Drawable geoms.")
+    meshes: list[VizMesh] = Field(description="Meshes in /viz/meshes.bin.")
+    blob_bytes: int = Field(description="Size of /viz/meshes.bin.")
+    base_body: str = Field(description="The robot's base body.")
+
+
+class VizBase(BaseModel):
+    xyz: list[float] = Field(description="m, base_link in the world.")
+    yaw: float = Field(description="rad.")
+    twist: list[float] = Field(description="vx, vy (m/s, base frame), omega (rad/s).")
+
+
+class VizFrame(BaseModel):
+    t: float = Field(description="s, sim clock.")
+    generation: int = Field(description="Model generation the poses index (refetch /viz/model when it changes).")
+    running: bool = Field(description="Real-time mode.")
+    rtf: float = Field(description="Target real-time factor.")
+    rtf_measured: float = Field(description="Achieved real-time factor.")
+    pos: list[float] = Field(description="m, every body's world position, 3 per body.")
+    quat: list[float] = Field(description="Every body's world orientation, 4 per body (w, x, y, z).")
+    base: VizBase
+    markers_version: int = Field(description="Bumps when markers change.")
+    markers: Optional[list[Marker]] = Field(None, description="Every live marker (in the stream: only when changed).")
 
 
 class WrenchOut(BaseModel):
@@ -330,5 +440,73 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
     async def camera_jpeg(name: str, stream: Literal["color", "depth"]):
         data = await call(node.cameras.snapshot_jpeg, name, stream)
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    # -- 3D view -------------------------------------------------------------------------------------
+
+    @app.get("/viz/model", response_model=VizModel, response_model_exclude_unset=True, tags=["view"],
+             summary="The world's drawable geometry (bodies, geoms, mesh index)")
+    async def viz_model(cell: float = Query(viz.DEFAULT_CELL, ge=0, le=0.05,
+                                            description="m, mesh simplification (0: as compiled)")):
+        info, _ = await asyncio.to_thread(viz.model, node.world, cell)
+        return info
+
+    @app.get("/viz/meshes.bin", tags=["view"], response_class=Response,
+             summary="The meshes of /viz/model (float32 vertices, uint16/uint32 triangles)",
+             responses={200: {"content": {"application/octet-stream": {}}, "description": "Mesh blob."}})
+    async def viz_meshes(request: Request, cell: float = Query(viz.DEFAULT_CELL, ge=0, le=0.05),
+                         generation: Optional[int] = Query(None, description="409 if the model has moved on")):
+        info, blob = await asyncio.to_thread(viz.model, node.world, cell)
+        if generation is not None and generation != info["generation"]:
+            raise HTTPException(409, f"model generation is {info['generation']}; fetch /viz/model again")
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            gz = getattr(node, "_mesh_gz", None)
+            if gz is None or gz[0] is not blob:
+                gz = (blob, await asyncio.to_thread(gzip.compress, blob, 6))
+                node._mesh_gz = gz
+            return Response(gz[1], media_type="application/octet-stream",
+                            headers={"Content-Encoding": "gzip", "Cache-Control": "no-cache"})
+        return Response(blob, media_type="application/octet-stream", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/viz/frame", response_model=VizFrame, response_model_exclude_unset=True, tags=["view"],
+             summary="Every body's pose now, the clock, the markers")
+    async def viz_frame():
+        return node.viz_frame()
+
+    @app.get("/viz/stream", tags=["view"], response_class=StreamingResponse,
+             summary="Server-Sent Events: /viz/frame at `hz` (markers only when they change)",
+             responses={200: {"content": {"text/event-stream": {}}, "description": "Each `data:` line is a frame."}})
+    async def viz_stream(hz: float = Query(30.0, ge=1, le=60, description="Frames per second")):
+        async def gen():
+            have = None
+            period = 1.0 / hz
+            while True:
+                t0 = time.monotonic()
+                f = node.viz_frame(have)
+                have = f["markers_version"]
+                yield f"data: {json.dumps(f, separators=(',', ':'))}\n\n"
+                await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+    # -- markers -------------------------------------------------------------------------------------
+
+    @app.get("/markers", response_model=MarkersOut, response_model_exclude_unset=True, tags=["markers"],
+             summary="Every live marker")
+    async def markers():
+        return {"markers": node.markers.list()}
+
+    @app.post("/markers", response_model=MarkersPut, tags=["markers"],
+              summary="Add or replace markers (frames, points, lines, labels) in the 3D view")
+    async def post_markers(body: MarkersIn):
+        mks = [m.model_dump(exclude_none=True) for m in body.markers]
+        return await call(node.put_markers, mks, body.source, body.replace)
+
+    @app.delete("/markers", response_model=MarkersRemoved, tags=["markers"],
+                summary="Remove every marker, or one source's (`?source=`)")
+    async def clear_markers(source: Optional[str] = Query(None, description="Only this source's markers")):
+        return {"removed": node.markers.remove(source=source)}
+
+    @app.delete("/markers/{name:path}", response_model=MarkersRemoved, tags=["markers"], summary="Remove a marker")
+    async def delete_marker(name: str):
+        return {"removed": await call(node.markers.remove, name)}
 
     return app

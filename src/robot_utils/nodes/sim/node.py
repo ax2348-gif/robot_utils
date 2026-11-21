@@ -17,6 +17,7 @@ import yaml
 from ..common.hub import RowHub
 from ..common.server import EventLog
 from .protocol import IpcServer, backend_socket
+from . import viz
 from .render import Cameras
 from .world import SimError, World, unzip_bundle
 
@@ -61,6 +62,7 @@ class SimNode:
         self.events = EventLog(on_add=self.hub.state_changed)
         self.servers: dict = {}
         self.t_start = time.monotonic()
+        self.markers = viz.Markers()
 
     # -- lifecycle ---------------------------------------------------------------------------------
 
@@ -115,6 +117,9 @@ class SimNode:
         if op == "frames":
             metas, data = self.cameras.frames(cam, h.get("after") or {}, float(h.get("wait", 0.05)))
             return {"frames": metas}, data
+        if op == "imu":
+            rows = self.world.imu_samples(cam, int(h.get("after") or 0), min(1.0, float(h.get("wait", 0.05))))
+            return {"samples": rows}
         raise SimError(f"unknown camera op {op!r}")
 
     # -- scene files -----------------------------------------------------------------------------------
@@ -141,6 +146,27 @@ class SimNode:
                 objects = (yaml.safe_load(f) or {}).get("objects") or []
         out = self.world.load_scene(objects)
         self.events.add(f"scene loaded{f' {name!r}' if name else ''}: {len(objects)} objects")
+        return out
+
+    # -- 3D view -----------------------------------------------------------------------------------------
+
+    def frames(self) -> set:
+        """Names a marker's frame may be: model bodies and scene objects (besides world / base)."""
+        with self.world.lock:
+            m = self.world.m
+            return {m.body(i).name for i in range(m.nbody)} | set(self.world.objects)
+
+    def put_markers(self, markers: list, source: Optional[str] = None, replace: bool = False) -> dict:
+        names = self.markers.put(markers, self.frames(), source, replace)
+        return {"names": names, "count": len(self.markers.list())}
+
+    def viz_frame(self, markers_version: Optional[int] = None) -> dict:
+        """Body poses now; the markers too unless the caller already has this version of them."""
+        out = viz.frame(self.world)
+        mk = self.markers.list()
+        out["markers_version"] = self.markers.version
+        if markers_version != self.markers.version:
+            out["markers"] = mk
         return out
 
     # -- state -------------------------------------------------------------------------------------------
