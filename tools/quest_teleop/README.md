@@ -29,7 +29,7 @@ engagement (tested directly: `test_release_and_reengage_never_moves_the_robot`).
 
 | Input | Released (no engagement) | Engaged |
 | --- | --- | --- |
-| Grip (`--hand`) | engage: the arm follows the controller (body-frozen) | release: the arm holds and rides with the base |
+| Grip (`--hand`) | engage: the arm follows the controller (body-frozen) | release: the arm rides with the base |
 | Trigger (`--hand`) | gripper 0 open – 1 closed | the same (independent of the clutch) |
 | Left stick | base forward/left, directly (`commanded`) | adds to the base hint's offset (robot frame) |
 | Right stick X | base yaw, directly | adds to the hint's heading offset |
@@ -56,9 +56,12 @@ On each engagement of the arm's hand, seen from its start:
   `F`'s origin cancels (`target.p = ee.p + R_F dp`), so the platform frame and DEMO's shoulder frame give the same
   target.
 
-Released or not yet engaged, the arm holds the **commanded EE at release** (at start: the current command) as a
-`frame: "base"` target. The WBC re-evaluates base targets against the live base pose every tick, so the arm rides
-with the platform under the sticks, also while datagrams pause.
+Released or not yet engaged, the arm rides with the platform. The WBC takes world targets only, so the client
+computes the riding target: at release it stores the **commanded EE at release** relative to the base (`arm_cmd_*`
+and the base pose of the same stream row; at start, the current command); every frame it sends the world target =
+the current base pose ∘ that relative pose, with `twist` = the base's rigid-body velocity at the EE (from the
+stream's commanded base twist `base_vx, base_vy` read as base-frame components and `base_w`), which cancels the
+~20 ms lag.
 
 ## The base
 
@@ -80,7 +83,8 @@ and session (older or repeated frames are dropped; native restarts it per sessio
 discontinuity; `input_focused` and `action_sync_result == 0`, else the frame is invalid. Per control step: no valid
 frame for 200 ms on our clock = **stale**.
 
-- Stale, unfocused, or the arm hand's intent `valid=false`: **stop sending**. The WBC holds, then stops the base.
+- Stale, unfocused, or the arm hand's intent `valid=false`: **stop sending**. The WBC holds the last world pose;
+  the stick velocity's ttl and the WBC's staleness stop the base.
 - Any discontinuity, invalid frame, staleness, an engagement id change we did not see released, an estimator reset
   (`est_reset` changes in the WBC stream) or a refused capture ends the engagement and **requires a release**: an
   engagement counts only if this client saw the hand released (valid, not engaged) since. So attaching or
@@ -102,12 +106,13 @@ target was computed against (an engagement's own for world targets):
 
 | State | `ees.arm` | `base` |
 | --- | --- | --- |
-| released / waiting for a release | `frame: base`, the command at release | stick velocity (`commanded`) or `locked` |
+| released / waiting for a release | `frame: world`, base pose ∘ the command at release, + `twist` | stick velocity (`commanded`) or `locked` |
 | engaged | `frame: world`, the body-frozen target | `hint`: pose + heading |
 | input fine, no WBC row yet | — | `{"type": "alive"}` instead |
 | stale / unfocused / hand invalid | nothing sent | |
 
-`gripper` is in every target while the hand is valid. The full `base` state goes in every datagram.
+All targets are `frame: "world"`. `gripper` is in every target while the hand is valid. The full `base` state goes
+in every datagram.
 
 ## Headset control: `quest_up`, `quest_down`, `quest_status`
 
@@ -144,7 +149,7 @@ PYTHONPATH=$PWD/src python -m pytest tests/test_quest_teleop.py tests/test_quest
 `test_quest_teleop.py` (pure): the C mapping, gravity-aligned yaw, zero jump at engagement, operator travel alone,
 equal operator/platform travel, platform motion, rotations, agreement with the native body-frozen delta; the
 consumer rules (stale, unfocused, session, revision, out of order, reconnect, start mid-engagement, robot state,
-estimator reset); the commanded anchor and the hold; released sticks, the engaged hint (head, sticks, both), the
+estimator reset); the commanded anchor; released targets riding with a stick-driven base (pose and twist); released sticks, the engaged hint (head, sticks, both), the
 offset restart, the release/re-engage rule across operator motions, `est_reset`, gripper.
 `test_quest_teleop_e2e.py`: the client against the fake headset and a fake WBC peer (`tests/quest_teleop_fakes.py`:
 HTTP, a rows stream, UDP) through engagement, stick, release, a network outage and a reconnect (about 5 s).

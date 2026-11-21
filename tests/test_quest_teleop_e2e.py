@@ -48,7 +48,9 @@ def phases(msgs):
     """Consecutive datagrams grouped by (EE frame, base mode)."""
     out = []
     for t, m in msgs:
-        key = (m["ees"]["arm"]["frame"], m["base"]["mode"])
+        e = m["ees"]["arm"]
+        assert e["frame"] == "world"                             # the WBC takes world targets only
+        key = ("ride" if "twist" in e else "follow", m["base"]["mode"])
         if not out or out[-1][0] != key:
             out.append([key, []])
         out[-1][1].append((t, m))
@@ -100,11 +102,11 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
 
     ph = phases(msgs)
     keys = [k for k, _ in ph]
-    assert keys == [("base", "locked"),          # released: hold
-                    ("world", "hint"),           # engaged: body-frozen targets, base hint (the stick adds to it)
-                    ("base", "locked"),          # released; the outage (silence); re-grip unseen: hold
-                    ("world", "hint"),           # release + new engagement
-                    ("base", "locked")], keys    # reconnect mid-engagement: hold until a new engagement
+    assert keys == [("ride", "locked"),          # released: hold
+                    ("follow", "hint"),           # engaged: body-frozen targets, base hint (the stick adds to it)
+                    ("ride", "locked"),          # released; the outage (silence); re-grip unseen: hold
+                    ("follow", "hint"),           # release + new engagement
+                    ("ride", "locked")], keys    # reconnect mid-engagement: hold until a new engagement
     assert all(m["est_reset"] == 0 for _, m in msgs)
 
     ee_p = np.array([1.52, 2.1, 0.8])            # the COMMANDED EE (the measured one is 2 cm behind)

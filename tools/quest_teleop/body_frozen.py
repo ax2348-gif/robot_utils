@@ -24,10 +24,13 @@ since the last discontinuity (start, reconnect, session or revision change, gap,
 missing robot state at capture). A reconnect mid-engagement therefore waits for a release and a new engagement;
 an existing nonzero delta is never applied to a newly captured anchor.
 
-Released (or never engaged): a ``frame: "base"`` target = the **commanded EE pose at release** (``arm_cmd_*`` in
-the base frame at that moment; at start, the current command). The WBC re-evaluates base targets against the live
-base pose every tick, so the arm rides with the platform when the sticks drive it (DEMO.md: release holds arm
-joints), also while datagrams pause. Not the last target: the WBC may have been limiting the arm short of it.
+Released (or never engaged): the arm rides with the platform (DEMO.md: release holds arm joints). The WBC takes
+world targets only, so the client computes the riding target: at release it stores the **commanded EE pose at
+release** relative to the base (``arm_cmd_*`` and the base pose of the same stream row; at start, the current
+command), and every frame sends ``world target = current base pose ∘ that relative pose`` with a twist feedforward =
+the base's rigid-body velocity at the EE (from the stream's commanded base twist ``base_vx, base_vy, base_w``, read
+as base-frame components), which cancels the ~20 ms lag. Not the last target: the WBC may have been limiting the arm
+short of it.
 
 Base (the sticks are the intent's ``base_velocity``: left stick forward/left m/s, right stick X yaw rad/s, 18 %
 dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
@@ -66,6 +69,7 @@ class RobotState:
     base_yaw: float
     est_reset: float = 0.0
     ee_source: str = "cmd"        # "cmd" | "meas"
+    base_twist: tuple = (0.0, 0.0, 0.0)   # commanded base twist (vx, vy in the base frame, w)
 
     @staticmethod
     def _pose(row: dict, prefix: str):
@@ -90,7 +94,16 @@ class RobotState:
             return None
         if pose is None or not all(math.isfinite(v) for v in (bx, by, byaw)):
             return None
-        return cls(t_recv, pose[0], pose[1], bx, by, byaw, float(row.get("est_reset", 0.0)), source)
+        tw = tuple(float(row.get(k, 0.0)) for k in ("base_vx", "base_vy", "base_w"))
+        tw = tw if all(math.isfinite(v) for v in tw) else (0.0, 0.0, 0.0)
+        return cls(t_recv, pose[0], pose[1], bx, by, byaw, float(row.get("est_reset", 0.0)), source, tw)
+
+    def twist_at(self, p_world) -> list:
+        """The base's rigid-body velocity at a world point: ``[vx, vy, vz, wx, wy, wz]``, world frame."""
+        vx, vy, w = self.base_twist
+        v = F.rot_z(self.base_yaw)[:2, :2] @ [vx, vy]
+        rx, ry = p_world[0] - self.base_x, p_world[1] - self.base_y
+        return [float(v[0] - w * ry), float(v[1] + w * rx), 0.0, 0.0, 0.0, float(w)]
 
     @property
     def base(self) -> F.PlanarFrame:
@@ -180,7 +193,7 @@ class TeleopCore:
         self.last_target: Optional[tuple] = None  # world
         self.frame: Optional[dict] = None         # newest valid frame
         self.valid = False
-        self.hold_base: Optional[tuple] = None    # (p, R) in the base frame
+        self.hold_base: Optional[tuple] = None    # released: the command at release relative to the base
         self.last_robot: Optional[RobotState] = None
         self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
         self.hint: Optional[dict] = None          # the newest base hint target sent (status)
@@ -313,13 +326,13 @@ class TeleopCore:
             self.last_target = (p, r)
             reset = self.eng.est_reset            # the estimator epoch the anchor was captured in
         else:
+            if robot is None:
+                return "alive"
             if self.hold_base is None:
-                if robot is None:
-                    return "alive"
                 self.hold_base = robot.base.to_local(robot.ee_p, robot.ee_r)
-            p, r = self.hold_base
-            ee = {"frame": "base", "pos": _l(p), "quat": _l(F.quat_from_matrix(r))}
-            reset = robot.est_reset if robot is not None else None
+            p, r = robot.base.to_world(*self.hold_base)    # rides with the platform
+            ee = {"frame": "world", "pos": _l(p), "quat": _l(F.quat_from_matrix(r)), "twist": robot.twist_at(p)}
+            reset = robot.est_reset
         intent = self.frame["control_intent"]
         ih = intent["hands"].get(cfg.hand) or {}
         if cfg.gripper and ih.get("valid") and _finite(ih.get("gripper")):

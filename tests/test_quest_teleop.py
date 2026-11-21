@@ -206,8 +206,9 @@ def ee_of(cmd):
 
 
 def held(cmd):
-    """The released arm: a live base-attached target (it rides with the platform)."""
-    return ee_of(cmd)["frame"] == "base"
+    """The released arm: a world target riding with the base (only these carry the base's twist feedforward)."""
+    e = ee_of(cmd)
+    return e["frame"] == "world" and "twist" in e
 
 
 def test_released_holds_then_engages_at_the_command_without_a_jump():
@@ -224,7 +225,8 @@ def test_released_holds_then_engages_at_the_command_without_a_jump():
     rig.rob.ee_p = rig.rob.ee_p + [0.03, 0.0, 0.0]
     c = rig.run(IDLE)
     assert held(c) and rig.core.status.state == "released"
-    np.testing.assert_allclose(rig.rob.base.to_world(ee_of(c)["pos"], np.eye(3))[0], rig.rob.ee_p, atol=1e-9)
+    np.testing.assert_allclose(ee_of(c)["pos"], rig.rob.ee_p, atol=1e-9)
+    np.testing.assert_allclose(F.matrix_from_quat(ee_of(c)["quat"]), rig.rob.ee_r, atol=1e-9)
     assert c["est_reset"] == 0
 
 
@@ -344,13 +346,32 @@ def test_engagement_needs_fresh_robot_state_and_survives_no_estimator_reset():
     assert rig.core.status.state == "needs_release" and "estimator" in rig.core.status.reason
 
 
-def test_released_hold_is_constant_in_the_base_frame_and_starts_from_the_command():
+def test_released_targets_ride_with_the_base_driven_by_the_stick():
+    """Released while the base drives under the stick: the world targets follow the base (the pose relative to the
+    base stays the command at release) and carry the base's rigid-body velocity at the EE as feedforward."""
     rig = Rig()
     c = rig.run(IDLE)
-    rel = rig.rob.base.to_local(rig.rob.ee_p, rig.rob.ee_r)
-    np.testing.assert_allclose(ee_of(c)["pos"], rel[0], atol=1e-9)
-    rig.rob.base_x += 0.5                                      # the base drives: the hold rides with it
-    np.testing.assert_allclose(ee_of(rig.run(IDLE))["pos"], rel[0], atol=1e-9)
+    rel0 = rig.rob.base.to_local(rig.rob.ee_p, rig.rob.ee_r)
+    ee_cmd0 = rig.rob.ee_p.copy()
+    vx, vy, w = 0.3, -0.1, 0.5
+    rig.rob.base_twist = (vx, vy, w)
+    for k in range(50):
+        rig.frame(stick(IDLE, (0.3, 0.6), -0.5))
+        rig.rob.base_x += 0.003                                  # the base moves (and the WBC's command with it)
+        rig.rob.base_y += 0.001
+        rig.rob.base_yaw += 0.005
+        rig.rob.ee_p = rig.rob.ee_p + [0.003, 0.001, 0.0]        # never used while released
+        c = rig.cmd()
+        assert held(c) and c["base"]["mode"] == "commanded"
+        e = ee_of(c)
+        rel = rig.rob.base.to_local(np.array(e["pos"]), F.matrix_from_quat(e["quat"]))
+        np.testing.assert_allclose(rel[0], rel0[0], atol=1e-9)
+        np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+        # feedforward: v_base (world) + w x r, about z
+        r = np.array(e["pos"]) - [rig.rob.base_x, rig.rob.base_y, 0]
+        v = F.rot_z(rig.rob.base_yaw)[:2, :2] @ [vx, vy]
+        np.testing.assert_allclose(e["twist"], [v[0] - w * r[1], v[1] + w * r[0], 0, 0, 0, w], atol=1e-9)
+    assert not np.allclose(ee_of(c)["pos"], ee_cmd0)              # it moved through the world with the base
 
 
 def test_no_robot_state_yet_sends_keep_alives():
