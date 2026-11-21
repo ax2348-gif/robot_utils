@@ -7,7 +7,10 @@ Read-only (admin stays on SSH). Runs as threads inside the landing page:
   totals for the last hour.
 - **Identity**: Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48) are unforgeable over the
   tailnet; ``tailscale whois`` maps them to the device and its owner (cached 10 min). LAN
-  addresses are reported as they are.
+  addresses are reported as they are. Remote people who come through a remote-access proxy
+  (``remote_proxies`` in nodes.yaml; deploy/erid/) are logged under their own Tailscale address with
+  the identity that proxy resolved (nginx keeps these fields only from those addresses); the
+  proxy's own address shows as the proxy in live connections.
 - **Live peers**: every 2 s, ``ss`` on port 80 gives each client's open connections, send rate
   and send-queue backlog. This shows streams while they are open: nginx logs a request only when
   it ends.
@@ -31,6 +34,7 @@ import time
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import unquote
 
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))) / "robot_utils" / "nginx"
 RETENTION_DAYS = 7
@@ -82,19 +86,46 @@ def parse_whois(text: str) -> Optional[dict]:
             "tags": node.get("Tags") or None}
 
 
-class Identities:
-    """IP -> identity (Tailscale whois for tailnet addresses; LAN / other: the address itself)."""
+def _unquote(v) -> str:
+    return unquote(str(v or "")).strip()
 
-    def __init__(self, runner: Runner = run, clock=time.monotonic):
+
+class Identities:
+    """IP -> identity: what a remote-access proxy forwarded for it, else Tailscale whois for tailnet
+    addresses; a proxy's own address is labelled as the proxy; LAN / other: the address itself."""
+
+    def __init__(self, runner: Runner = run, clock=time.monotonic, proxies=()):
         self.runner, self.clock = runner, clock
+        self.proxies = frozenset(proxies)
         self._cache: dict[str, tuple[float, dict]] = {}
+        self._learned: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
 
+    def learn(self, e: dict) -> None:
+        """Take the identity a remote-access proxy forwarded with a logged request (nginx fills ``via`` and
+        the ``fwd_*`` fields only for requests from a trusted proxy)."""
+        via = e.get("via")
+        user, name, device = (_unquote(e.get(k)) for k in ("fwd_user", "fwd_name", "fwd_device"))
+        if not via or via not in self.proxies or not (user or name):
+            return
+        ip = e["ip"]
+        ident = {"ip": ip, "kind": "tailscale", "device": device or None, "os": None, "user": user or None,
+                 "name": name or None, "tags": None, "via": via,
+                 "label": f"{user or name} · {device or ip} (via {via})"}
+        with self._lock:
+            self._learned[ip] = (self.clock() + WHOIS_TTL, ident)
+
     def get(self, ip: str) -> dict:
+        now = self.clock()
+        with self._lock:
+            hit = self._learned.get(ip)
+        if hit and now < hit[0]:
+            return hit[1]
+        if ip in self.proxies:
+            return {"ip": ip, "kind": "proxy", "label": f"{ip} (remote-access proxy: its clients are listed by name)"}
         if not is_tailscale(ip):
             kind = "local" if ip in ("127.0.0.1", "::1", "unix:") else "lan"
             return {"ip": ip, "kind": kind, "label": ip}
-        now = self.clock()
         with self._lock:
             hit = self._cache.get(ip)
         if hit and now < hit[0]:
@@ -133,8 +164,9 @@ def parse_line(line: str) -> Optional[dict]:
 class LogTail:
     """Follows access.log across rotation; keeps recent entries and 1 h per-client totals."""
 
-    def __init__(self, path: Path, warm_bytes: int = 2_000_000):
+    def __init__(self, path: Path, warm_bytes: int = 2_000_000, on_entries=None):
         self.path = path
+        self.on_entries = on_entries
         self.recent: deque = deque(maxlen=RECENT)
         self._ino = None
         self._pos = 0
@@ -167,6 +199,9 @@ class LogTail:
             nl = chunk.find(b"\n")
             chunk = chunk[nl + 1:]
         entries = [e for e in (parse_line(l) for l in chunk.decode("utf-8", "replace").splitlines()) if e]
+        if self.on_entries is not None:
+            for e in entries:
+                self.on_entries(e)
         with self.lock:
             self.recent.extend(entries)
         return len(entries)
@@ -286,10 +321,10 @@ def _first_ts(path: Path, default: float) -> float:
 
 class Observer:
     def __init__(self, state_dir: Path = STATE_DIR, runner: Runner = run, netdev=read_netdev,
-                 targets=("1.1.1.1",), port: int = 80):
+                 targets=("1.1.1.1",), port: int = 80, remote_proxies=()):
         self.state_dir, self.runner, self.netdev, self.port = state_dir, runner, netdev, port
-        self.tail = LogTail(state_dir / "access.log")
-        self.ids = Identities(runner)
+        self.ids = Identities(runner, proxies=remote_proxies)
+        self.tail = LogTail(state_dir / "access.log", on_entries=self.ids.learn)
         self.targets = targets
         self.lock = threading.Lock()
         self.peers: dict[str, dict] = {}        # ip -> {conns, bps, queue}
@@ -435,10 +470,11 @@ class Observer:
 # terminal report (admin over SSH)
 # ----------------------------------------------------------------------------------------------
 
-def report(state_dir: Path, hours: float, top: int, ids: Optional[Identities] = None, now: Optional[float] = None) -> str:
+def report(state_dir: Path, hours: float, top: int, ids: Optional[Identities] = None, now: Optional[float] = None,
+           remote_proxies=()) -> str:
     now = time.time() if now is None else now
     since = now - hours * 3600
-    ids = ids or Identities()
+    ids = ids or Identities(proxies=remote_proxies)
     files = sorted(state_dir.glob("access-*.log")) + [state_dir / "access.log"]
     per = defaultdict(lambda: {"requests": 0, "bytes": 0, "errors": 0, "dur": 0.0, "nodes": Counter(),
                                "paths": Counter(), "first": None, "last": None})
@@ -451,6 +487,7 @@ def report(state_dir: Path, hours: float, top: int, ids: Optional[Identities] = 
                 e = parse_line(line)
                 if not e or e["ts"] < since:
                     continue
+                ids.learn(e)
                 n += 1
                 s = per[e["ip"]]
                 s["requests"] += 1
@@ -482,7 +519,8 @@ def main(argv=None) -> int:
     ap.add_argument("--state-dir", type=Path, default=STATE_DIR)
     a = ap.parse_args(argv)
     if a.command == "report":
-        print(report(a.state_dir, a.hours, a.top))
+        from .config import load_remote_proxies
+        print(report(a.state_dir, a.hours, a.top, remote_proxies=load_remote_proxies()))
     else:
         for act in rotate(a.state_dir) or ["nothing to rotate"]:
             print(act)

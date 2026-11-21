@@ -18,6 +18,13 @@
 #   host:    with port, for a node on another machine (reached through the frontend's proxy)
 #
 # Override with: python -m robot_utils.frontend --config /path/to/nodes.yaml
+
+# Remote-access proxies (deploy/erid/): remote people reach the robot through erid's Tailscale, so the robot
+# itself sends only plain LAN traffic. The robot believes the client address and Tailscale identity they
+# forward only from these addresses. Changing this needs the port-80 proxy config rewritten (install.sh).
+remote_proxies:
+  - 192.168.8.123   # erid on the robot Wi-Fi
+
 nodes:
   # camera: the head Gemini 336L. wrist_camera: the Gemini 305 on the arm's wrist (no IMU). Each is pinned
   # by serial: with two cameras attached the SDK's device order is arbitrary.

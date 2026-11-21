@@ -48,3 +48,26 @@ def test_nginx_accepts_it(tmp_path, tmp_sock_dir):
     r = subprocess.run([nginx_binary(), "-p", str(state), "-e", str(state / "error.log"), "-c", str(path), "-t"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_remote_proxies_trust_forwarded_client_and_identity_only_from_them(tmp_path):
+    conf = render(sockets=tmp_path, state_dir=tmp_path, remote_proxies=("192.168.8.123",))
+    assert "set_real_ip_from 192.168.8.123;" in conf and "real_ip_header X-Forwarded-For;" in conf
+    assert "real_ip_recursive on" not in conf          # only the proxy's own last hop is believed
+    assert '"192.168.8.123" "192.168.8.123";' in conf
+    for k in ("user", "name", "device"):
+        assert f'map "$robot_via|$http_x_robot_{k}" $robot_fwd_{k} {{' in conf
+        assert f'"fwd_{k}":"$robot_fwd_{k}"' in conf
+    assert '"~^[^|]+\\|(?<v>.+)$" $v;' in conf
+    plain = render(sockets=tmp_path, state_dir=tmp_path)
+    assert "set_real_ip_from" not in plain and '"via":"$robot_via"' in plain   # no proxies: fields stay empty
+
+
+@pytest.mark.skipif(not nginx_binary(), reason="no nginx binary (set NGINX_BIN=/path/to/nginx)")
+def test_nginx_accepts_it_with_remote_proxies(tmp_path, tmp_sock_dir):
+    state = tmp_path / "state"
+    path = write(tmp_path / "conf", state, port=18081, sockets=Path(tmp_sock_dir) / "robot",
+                 remote_proxies=("192.168.8.123", "fd7a:115c:a1e0::1"))
+    r = subprocess.run([nginx_binary(), "-p", str(state), "-e", str(state / "error.log"), "-c", str(path), "-t"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

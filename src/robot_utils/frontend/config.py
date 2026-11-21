@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import asdict, dataclass
 from importlib import resources
@@ -111,8 +112,7 @@ def _parse_start(raw: object, where: str) -> StartRecipe | None:
     return StartRecipe(module, tuple(args))
 
 
-def load_config(path: str | Path | None = None) -> list[NodeEntry]:
-    """Read the registry from ``path``, or the packaged default ``nodes.yaml``."""
+def _load_yaml(path: str | Path | None) -> tuple[object, str]:
     if path is None:
         ref = resources.files(__package__).joinpath(DEFAULT_CONFIG)
         text, source = ref.read_text(encoding="utf-8"), f"(packaged) {DEFAULT_CONFIG}"
@@ -124,7 +124,34 @@ def load_config(path: str | Path | None = None) -> list[NodeEntry]:
             raise ConfigError(f"cannot read {p}: {e.strerror or e}") from e
         source = str(p)
     try:
-        data = yaml.safe_load(text)
+        return yaml.safe_load(text), source
     except yaml.YAMLError as e:
         raise ConfigError(f"{source}: invalid YAML: {e}") from e
+
+
+def load_config(path: str | Path | None = None) -> list[NodeEntry]:
+    """Read the registry from ``path``, or the packaged default ``nodes.yaml``."""
+    data, source = _load_yaml(path)
     return parse_config(data, source)
+
+
+def parse_remote_proxies(data: object, source: str = "<config>") -> tuple[str, ...]:
+    """``remote_proxies:``: addresses of remote-access proxies (deploy/erid/) whose forwarded client address and
+    Tailscale identity the robot trusts. Literal IP addresses only."""
+    raw = data.get("remote_proxies") if isinstance(data, dict) else None
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(f"{source}: 'remote_proxies' must be a list of IP addresses")
+    out = []
+    for ip in raw:
+        try:
+            out.append(str(ipaddress.ip_address(str(ip))))
+        except ValueError:
+            raise ConfigError(f"{source}: remote_proxies: {ip!r} is not an IP address") from None
+    return tuple(out)
+
+
+def load_remote_proxies(path: str | Path | None = None) -> tuple[str, ...]:
+    data, source = _load_yaml(path)
+    return parse_remote_proxies(data, source)

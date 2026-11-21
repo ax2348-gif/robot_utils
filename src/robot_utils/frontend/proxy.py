@@ -28,7 +28,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from typing import Sequence
+
 from ..nodes.common.serve import socket_dir
+from .config import load_remote_proxies
 
 NAME_RE = "[A-Za-z0-9_.-]+"   # = serve.NAME
 
@@ -46,8 +49,26 @@ proxy_send_timeout 1d;
 """
 
 
-def render(*, sockets: Path, state_dir: Path, port: int = 80) -> str:
-    """nginx.conf text. ``sockets``: the directory of the instances' unix sockets."""
+def remote_proxy_block(remote_proxies: Sequence[str]) -> str:
+    """Requests relayed by a remote-access proxy (erid: deploy/erid/): the real client is the address that
+    proxy appended last to X-Forwarded-For (it becomes $remote_addr; with real_ip_recursive off, nothing a
+    client sends itself is believed), and its X-Robot-User / -Name / -Device identity headers are logged.
+    Both only for requests whose TCP peer is one of ``remote_proxies``."""
+    lines = [f"set_real_ip_from {ip};" for ip in remote_proxies]
+    if lines:
+        lines.append("real_ip_header X-Forwarded-For;")
+    lines.append("map $realip_remote_addr $robot_via {")
+    lines += [f'    "{ip}" "{ip}";' for ip in remote_proxies]
+    lines += ['    default "";', "}"]
+    for k in ("user", "name", "device"):
+        lines += [f'map "$robot_via|$http_x_robot_{k}" $robot_fwd_{k} {{',
+                  f'    "~^[^|]+\\|(?<v>.+)$" $v;', '    default "";', "}"]
+    return "\n".join(lines) + "\n"
+
+
+def render(*, sockets: Path, state_dir: Path, port: int = 80, remote_proxies: Sequence[str] = ()) -> str:
+    """nginx.conf text. ``sockets``: the directory of the instances' unix sockets. ``remote_proxies``:
+    addresses of remote-access proxies whose forwarded client and identity are trusted."""
     sock = lambda name: f"{sockets}/{name}.sock"   # noqa: E731
     tmp = state_dir / "tmp"
     return f"""\
@@ -62,7 +83,7 @@ events {{
 }}
 
 http {{
-    # the node a request is for (empty for the landing page)
+{_indent(remote_proxy_block(remote_proxies), 4)}    # the node a request is for (empty for the landing page)
     map $uri $robot_node {{
         ~^/nodes/(?<n>{NAME_RE}) $n;
         default "";
@@ -70,7 +91,9 @@ http {{
     log_format robot_json escape=json
         '{{"t":"$time_iso8601","ts":$msec,"ip":"$remote_addr","method":"$request_method",'
         '"uri":"$request_uri","status":$status,"bytes":$bytes_sent,"req_bytes":$request_length,'
-        '"dur":$request_time,"node":"$robot_node","ua":"$http_user_agent","conn":$connection}}';
+        '"dur":$request_time,"node":"$robot_node","ua":"$http_user_agent","conn":$connection,'
+        '"via":"$robot_via","fwd_user":"$robot_fwd_user","fwd_name":"$robot_fwd_name",'
+        '"fwd_device":"$robot_fwd_device"}}';
     # skip successful status polls (pages poll /state etc. every second): who is connected and what they
     # pull is already visible live; streams, pages, every POST and every error stay in the log
     map "$request_method:$status:$uri" $robot_log {{
@@ -124,12 +147,14 @@ def _indent(text: str, n: int) -> str:
     return "".join(" " * n + line + "\n" for line in text.splitlines())
 
 
-def write(conf_dir: Path, state_dir: Path, port: int = 80, sockets: Path | None = None) -> Path:
+def write(conf_dir: Path, state_dir: Path, port: int = 80, sockets: Path | None = None,
+          remote_proxies: Sequence[str] = ()) -> Path:
     conf_dir.mkdir(parents=True, exist_ok=True)
     for sub in ("body", "proxy", "fastcgi", "uwsgi", "scgi"):
         (state_dir / "tmp" / sub).mkdir(parents=True, exist_ok=True)
     path = conf_dir / "nginx.conf"
-    path.write_text(render(sockets=sockets or socket_dir(), state_dir=state_dir, port=port))
+    path.write_text(render(sockets=sockets or socket_dir(), state_dir=state_dir, port=port,
+                           remote_proxies=remote_proxies))
     return path
 
 
@@ -140,8 +165,9 @@ def main(argv=None) -> int:
     ap.add_argument("--state-dir", type=Path, default=Path("~/.local/state/robot_utils/nginx").expanduser())
     ap.add_argument("--port", type=int, default=80)
     ap.add_argument("--sockets", type=Path, default=None, help="socket directory (default: the nodes')")
+    ap.add_argument("--config", help="node registry YAML whose remote_proxies are trusted (default: the packaged nodes.yaml)")
     args = ap.parse_args(argv)
-    print(write(args.conf_dir, args.state_dir, args.port, args.sockets))
+    print(write(args.conf_dir, args.state_dir, args.port, args.sockets, load_remote_proxies(args.config)))
     return 0
 
 

@@ -357,3 +357,14 @@ def test_packaged_config_covers_description_for_estop():
     nodes = {n.name: n for n in load_config()}
     d = nodes["description"]
     assert d.enabled and d.node_kind == "description" and d.start.module == "robot_utils.nodes.description"
+
+
+def test_remote_proxies_config():
+    from robot_utils.frontend.config import ConfigError, load_remote_proxies, parse_remote_proxies
+    assert parse_remote_proxies({"nodes": []}) == ()
+    assert parse_remote_proxies({"remote_proxies": ["192.168.8.123", "fd7a:115c:a1e0::1"]}) == \
+        ("192.168.8.123", "fd7a:115c:a1e0::1")
+    for bad in ({"remote_proxies": "192.168.8.123"}, {"remote_proxies": ["erid.local"]}):
+        with pytest.raises(ConfigError):
+            parse_remote_proxies(bad)
+    assert "192.168.8.123" in load_remote_proxies()          # the packaged nodes.yaml trusts erid

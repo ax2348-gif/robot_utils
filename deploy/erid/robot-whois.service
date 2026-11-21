@@ -1,0 +1,12 @@
+[Unit]
+Description=Tailscale identity for the robot remote-access proxy (nginx auth_request; 127.0.0.1:8098)
+After=network.target tailscaled.service
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/python3 /usr/local/lib/robot-remote/robot-whois.py 8098
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

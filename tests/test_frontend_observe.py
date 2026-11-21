@@ -197,3 +197,23 @@ def test_endpoints():
     assert b.json() == [{"limit": 1000, "ip": "1.2.3.4", "node": None}] and fo.started and fo.closed
     a, _ = asyncio.run(go(create_app([])))
     assert a.status_code == 503
+
+
+def test_identity_forwarded_by_a_remote_proxy(tmp_path):
+    erid = "192.168.8.123"
+    fwd = {"via": erid, "fwd_user": "averyxi42%40gmail.com", "fwd_name": "Avery%20Xi", "fwd_device": ""}
+    lines = [json.dumps({**json.loads(entry(time.time() - 5, ip="100.65.75.106")), **fwd}) + "\n",
+             # forged by a LAN client: nginx would leave via empty; and an unknown via is ignored too
+             json.dumps({**json.loads(entry(time.time() - 4, ip="100.71.119.7")),
+                         "via": "192.168.8.50", "fwd_user": "mallory"}) + "\n"]
+    (tmp_path / "access.log").write_text("".join(lines))
+    ob = O.Observer(tmp_path, runner=FakeRunner({"tailscale": None}), netdev=lambda: {}, remote_proxies=(erid,))
+    ob.tail.poll()
+    me = ob.ids.get("100.65.75.106")
+    assert me["user"] == "averyxi42@gmail.com" and me["name"] == "Avery Xi" and me["via"] == erid
+    assert me["label"] == "averyxi42@gmail.com · 100.65.75.106 (via 192.168.8.123)"
+    assert "mallory" not in ob.ids.get("100.71.119.7")["label"]          # whois (here: unknown), not the forgery
+    assert ob.ids.get(erid)["kind"] == "proxy"                           # erid's own live connections
+    assert ob.ids.get("192.168.8.50")["kind"] == "lan"
+    assert "averyxi42@gmail.com" in O.report(tmp_path, 1, 5, remote_proxies=(erid,),
+                                             ids=O.Identities(FakeRunner({"tailscale": None}), proxies=(erid,)))

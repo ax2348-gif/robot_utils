@@ -13,7 +13,7 @@ import sys
 
 from ..nodes.common.serve import add_serve_args, serve
 from .app import create_app
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, load_remote_proxies
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         nodes = load_config(args.config)
+        remote_proxies = load_remote_proxies(args.config)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     observer = None
     if not args.no_observe:
         from .observe import Observer
-        observer = Observer()
+        observer = Observer(remote_proxies=remote_proxies)
     serve(create_app(nodes, observer=observer), args,
           banner=f"robot frontend -> nodes: {', '.join(enabled) or 'none configured'}", public_path="/")
     return 0
