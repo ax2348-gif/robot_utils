@@ -1,15 +1,21 @@
 """The body-frozen scheme (quest_env DEMO.md, "Experimental walking scheme: body-frozen"), robot side, and the
 whole-body command derived from one headset frame. Pure: no sockets, the clock is passed in.
 
+The rule above all: **the robot never moves when the clutch is released and re-engaged**, however the operator
+moved in between. Hence the anchors are the WBC's *commanded* state, not the measured one, and every stick or head
+contribution restarts at zero on each engagement.
+
 Per engagement of the arm's hand:
 
 - **Operator frame**, captured from the raw head pose of the engaging frame: origin = head position, X = the
   gravity-aligned head yaw, Z = up (``frames.OperatorFrame``). The controller anchor and every later controller
   pose are expressed in it: ``dp = p - p0``, ``dR = R R0^T``.
 - **Robot frame**, captured from the WBC stream at the same moment: the upright platform frame (base x, y and
-  yaw, world) and the **measured** EE pose (``arm_meas_*``, world) expressed in it.
+  yaw, world) and the **commanded** EE pose (``arm_cmd_*``, world) expressed in it. DEMO.md says measured because a
+  remote consumer normally lacks the command; we have it, and anchoring to the measured pose would move the arm by
+  its sag/backlash error at engagement. (Measured ``arm_meas_*`` only if the row's command is not finite.)
 - **Target** = that frozen robot frame applied to ``(anchor.p + dp, dR anchor.R)``, in the world frame. At
-  engagement it is exactly the measured EE pose. Platform motion does not move it; operator travel does. The frame's
+  engagement it is exactly the current command. Platform motion does not move it; operator travel does. The frame's
   origin cancels (``target.p = ee.p + R_F dp``), so the platform frame and a shoulder frame with the same yaw give
   the same target.
 
@@ -18,14 +24,23 @@ since the last discontinuity (start, reconnect, session or revision change, gap,
 missing robot state at capture). A reconnect mid-engagement therefore waits for a release and a new engagement;
 an existing nonzero delta is never applied to a newly captured anchor.
 
-Released (or never engaged): the arm holds where it was in the **base** frame (the last target, or the measured EE
-at start), so a moving platform carries it (DEMO.md: release holds arm joints).
+Released (or never engaged): ``"ees": {"arm": {"hold": true}}``: the WBC holds the arm's commanded joints, so the
+arm rides with the base when the sticks drive it (DEMO.md: release holds arm joints). Not a ``frame: "base"`` pose
+target: the WBC converts those to the world once, at their timestamp, which would pin the EE in the room.
 
-Base: the left stick (the intent's ``base_velocity``: forward/left m/s, yaw rad/s, 18 % dead zone applied natively)
--> mode ``commanded`` with a ttl while it is deflected. Otherwise, while engaged, mode ``hint`` with a ``heading``
-target from the head's gravity-aligned yaw (relative to the engagement: base_yaw0 + (head_yaw - head_yaw0)) and,
-optionally, a soft ``pose`` target from the head's displacement in the engagement's operator frame. Released and no
-stick: ``locked``.
+Base (the sticks are the intent's ``base_velocity``: left stick forward/left m/s, right stick X yaw rad/s, 18 %
+dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
+
+- **Released** (the arm's hand not engaged): no hint; only the sticks move the base: mode ``commanded`` with
+  ``velocity`` in the base frame and a short ttl; sticks idle: ``locked`` (the base decelerates to a stop and holds).
+- **Engaged**: mode ``hint`` with a ``pose`` and a ``heading`` target = the base pose at engagement (from the stream)
+  + the head's motion since engagement (displacement and gravity-aligned yaw change, mapped through the frozen frames
+  as body-frozen does for the arm) + the stick **offset** ``(x, y, yaw)`` (world). The offset starts at zero on every
+  engagement and integrates the sticks: x/y along the robot base frame at integration time (stick forward = robot
+  forward), yaw from the right stick. Standing still and driving with the sticks, walking with the robot mirroring,
+  or both. Whatever the sticks achieved is in the base pose the next engagement captures.
+
+The gripper follows the trigger whenever the hand is valid, independent of the clutch.
 """
 from __future__ import annotations
 
@@ -37,34 +52,44 @@ import numpy as np
 
 from . import frames as F
 
-NATIVE_MAX_SPEED = 0.45   # native full-scale stick translation (m/s)
-NATIVE_MAX_OMEGA = 0.8    # native full-scale stick yaw (rad/s)
 
 
 @dataclass
 class RobotState:
     """The newest WBC stream row the client uses (world frame)."""
     t_recv: float                 # our clock
-    ee_p: np.ndarray              # measured EE position
-    ee_r: np.ndarray              # measured EE orientation
+    ee_p: np.ndarray              # the anchor EE position: commanded (measured if the command is not finite)
+    ee_r: np.ndarray              # the anchor EE orientation
     base_x: float
     base_y: float
     base_yaw: float
     est_reset: float = 0.0
+    ee_source: str = "cmd"        # "cmd" | "meas"
+
+    @staticmethod
+    def _pose(row: dict, prefix: str):
+        try:
+            p = np.array([row[f"{prefix}_{k}"] for k in ("x", "y", "z")], float)
+            q = np.array([row[f"{prefix}_q{k}"] for k in ("x", "y", "z", "w")], float)
+        except KeyError:
+            return None
+        if not (np.all(np.isfinite(p)) and np.all(np.isfinite(q)) and np.linalg.norm(q) > 0.5):
+            return None
+        return p, F.matrix_from_quat(q)
 
     @classmethod
     def from_row(cls, row: dict, t_recv: float, ee: str = "arm") -> Optional["RobotState"]:
+        source = "cmd"
+        pose = cls._pose(row, f"{ee}_cmd")
+        if pose is None:
+            source, pose = "meas", cls._pose(row, f"{ee}_meas")
         try:
-            p = np.array([row[f"{ee}_meas_{k}"] for k in ("x", "y", "z")], float)
-            q = np.array([row[f"{ee}_meas_q{k}"] for k in ("x", "y", "z", "w")], float)
             bx, by, byaw = (float(row[k]) for k in ("base_x", "base_y", "base_yaw"))
         except KeyError:
             return None
-        reset = float(row.get("est_reset", 0.0))
-        if not (np.all(np.isfinite(p)) and np.all(np.isfinite(q)) and np.linalg.norm(q) > 0.5
-                and all(math.isfinite(v) for v in (bx, by, byaw))):
+        if pose is None or not all(math.isfinite(v) for v in (bx, by, byaw)):
             return None
-        return cls(t_recv, p, F.matrix_from_quat(q), bx, by, byaw, reset)
+        return cls(t_recv, pose[0], pose[1], bx, by, byaw, float(row.get("est_reset", 0.0)), source)
 
     @property
     def base(self) -> F.PlanarFrame:
@@ -82,7 +107,8 @@ class Engagement:
     head_yaw0: float
     head_p0: np.ndarray           # LOCAL
     target: Optional[tuple] = None   # newest world target
-    hint_base: Optional[F.PlanarFrame] = None   # platform frame the head hints refer to (re-referenced after the stick)
+    head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
+    head_dyaw: float = 0.0                                             # last head yaw change
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
@@ -106,15 +132,13 @@ class Config:
     hand: str = "right"
     ee: str = "arm"
     robot_stale_s: float = 0.3        # WBC stream row older than this: no new engagement
-    heading_hint: bool = True
-    pose_hint: bool = False
+    head_walk: bool = True            # head displacement and yaw drive the base hint while engaged
     heading_weight: float = 0.5
     heading_tol: float = 0.05
     pose_weight: float = 0.5
     pose_tol: float = 0.10
-    max_speed: float = 0.3            # stick full scale (m/s), scaled from native 0.45
-    max_omega: float = 0.8            # stick full scale (rad/s)
-    velocity_ttl: float = 0.3
+    velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
+    max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
 
 
@@ -145,41 +169,56 @@ class TeleopCore:
 
     ``on_frame(frame, verdict, robot)`` updates the engagement state for every accepted frame, in order.
     ``command(now, input_fresh, robot)`` returns the ``ees``/``base`` body of the next target datagram, the string
-    ``"alive"`` when input is fine but no robot state has arrived yet (nothing to hold), or None: stop sending.
+    or None: stop sending.
     """
 
     def __init__(self, cfg: Config = Config()):
         self.cfg = cfg
         self.eng: Optional[Engagement] = None
         self.needs_release = True
-        self.hold_base: Optional[tuple] = None    # (p, R) in the base frame
         self.last_target: Optional[tuple] = None  # world
         self.frame: Optional[dict] = None         # newest valid frame
         self.valid = False
-        self.stick_active = False
+        self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
+        self.hint: Optional[dict] = None          # the newest base hint target sent (status)
+        self._last_ns: Optional[int] = None
         self.status = Status()
 
     # -- engagement ------------------------------------------------------------------------------
 
     def drop(self, reason: str) -> None:
         """End the engagement (if any) and require a release before the next one."""
+        self._last_ns = None
         self._release_to_hold(None)
         self.needs_release = True
         if reason:
             self.status.reason = reason
 
     def _release_to_hold(self, robot: Optional[RobotState]) -> None:
-        if self.eng is not None and self.eng.target is not None:
-            base = robot.base if robot is not None else None
-            if base is not None:
-                self.hold_base = base.to_local(*self.eng.target)
-            else:
-                self.hold_base = None      # re-derived from the next robot row
+        """End the engagement: the arm holds (``hold: true``) from the next datagram on."""
         self.eng = None
 
     def on_frame(self, frame: dict, verdict, robot: Optional[RobotState], now: float) -> None:
         if not verdict.accept:
             return
+        self._engagement(frame, verdict, robot, now)
+        if self.valid and self.frame is not None:
+            self._sticks(frame, robot)
+
+    def _sticks(self, frame: dict, robot: Optional[RobotState]) -> None:
+        ns = frame.get("sample_time_ns")
+        dt = 0.0
+        if isinstance(ns, int) and self._last_ns is not None:
+            dt = min(max(0.0, (ns - self._last_ns) * 1e-9), self.cfg.max_dt)
+        self._last_ns = ns if isinstance(ns, int) else None
+        if self.eng is None or dt <= 0:
+            return
+        v = stick_velocity(frame["control_intent"])
+        yaw = robot.base_yaw if robot is not None else self.eng.robot.yaw
+        self.offset[:2] += F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt
+        self.offset[2] += v[2] * dt
+
+    def _engagement(self, frame: dict, verdict, robot: Optional[RobotState], now: float) -> None:
         if verdict.discontinuity:
             self.drop(verdict.reason)
         self.valid = verdict.valid
@@ -235,6 +274,7 @@ class TeleopCore:
             self.status.state = "needs_release"
             return
         eng.target = (robot.ee_p.copy(), robot.ee_r.copy())
+        self.offset = np.zeros(3)
         self.eng = eng
         self.status.engagements += 1
         self.status.state = "engaged"
@@ -262,54 +302,49 @@ class TeleopCore:
             p, r = self.eng.target
             ee = {"frame": "world", "pos": _l(p), "quat": _l(F.quat_from_matrix(r))}
             self.last_target = (p, r)
+            reset = self.eng.est_reset            # the estimator epoch the anchor was captured in
         else:
-            if self.hold_base is None:
-                if robot is None:
-                    return "alive"
-                self.hold_base = robot.base.to_local(robot.ee_p, robot.ee_r)
-            p, r = self.hold_base
-            ee = {"frame": "base", "pos": _l(p), "quat": _l(F.quat_from_matrix(r))}
+            ee = {"hold": True}
+            reset = robot.est_reset if robot is not None else None
         intent = self.frame["control_intent"]
         ih = intent["hands"].get(cfg.hand) or {}
         if cfg.gripper and ih.get("valid") and _finite(ih.get("gripper")):
             ee["gripper"] = min(1.0, max(0.0, float(ih["gripper"])))
-        return {"ees": {cfg.ee: ee}, "base": self._base(intent, robot)}
+        out = {"ees": {cfg.ee: ee}, "base": self._base(intent)}
+        if reset is not None:
+            out["est_reset"] = int(reset) if float(reset).is_integer() else reset
+        return out
 
-    def _base(self, intent: dict, robot: Optional[RobotState]) -> dict:
+    def _base(self, intent: dict) -> dict:
         cfg = self.cfg
-        v = intent.get("base_velocity") or [0, 0, 0]
-        v = [float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3]]
-        if any(abs(x) > 1e-9 for x in v):
-            self.stick_active = True
-            s = cfg.max_speed / NATIVE_MAX_SPEED
-            w = cfg.max_omega / NATIVE_MAX_OMEGA
-            return {"mode": "commanded", "velocity": {"vx": v[0] * s, "vy": v[1] * s, "omega": v[2] * w,
-                                                      "frame": "base", "ttl": cfg.velocity_ttl}}
-        if self.stick_active:
-            self.stick_active = False
-            # the stick moved the platform on purpose: re-reference the head hints so they do not undo it
-            if self.eng is not None and robot is not None:
-                head = head_pose(self.frame)
-                yaw = F.head_yaw(head[1]) if head is not None else None
-                if yaw is not None:
-                    self.eng.head_yaw0, self.eng.head_p0 = yaw, head[0].copy()
-                    self.eng.hint_base = robot.base
-        if self.eng is None or not (cfg.heading_hint or cfg.pose_hint):
-            return {"mode": "locked"} if self.eng is None else {"mode": "free"}
-        target = {}
-        head = head_pose(self.frame)
-        ref = self.eng.hint_base or self.eng.robot
-        if head is not None:
-            yaw = F.head_yaw(head[1])
-            if cfg.heading_hint and yaw is not None:
-                target["heading"] = {"yaw": F.wrap(ref.yaw + F.wrap(yaw - self.eng.head_yaw0)), "frame": "world",
-                                     "weight": cfg.heading_weight, "tol": cfg.heading_tol}
-            if cfg.pose_hint:
-                d = F.rot_z(-self.eng.head_yaw0) @ F.C @ (head[0] - self.eng.head_p0)
-                xy = ref.p[:2] + ref.r[:2, :2] @ d[:2]
-                target["pose"] = {"x": float(xy[0]), "y": float(xy[1]), "frame": "world",
-                                  "weight": cfg.pose_weight, "tol": cfg.pose_tol}
-        return {"mode": "hint", "target": target} if target else {"mode": "free"}
+        if self.eng is None:
+            self.hint = None
+            v = stick_velocity(intent)
+            if any(abs(x) > 1e-9 for x in v):
+                return {"mode": "commanded", "velocity": {"vx": v[0], "vy": v[1], "omega": v[2], "frame": "base",
+                                                          "ttl": cfg.velocity_ttl}}
+            return {"mode": "locked"}
+        eng = self.eng
+        if cfg.head_walk:
+            head = head_pose(self.frame)
+            yaw = F.head_yaw(head[1]) if head is not None else None
+            if yaw is not None:         # head lost: keep its last contribution
+                eng.head_d = F.rot_z(-eng.head_yaw0) @ F.C @ (head[0] - eng.head_p0)
+                eng.head_dyaw = F.wrap(yaw - eng.head_yaw0)
+        off = self.offset
+        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + off[:2]
+        hyaw = F.wrap(eng.robot.yaw + eng.head_dyaw + off[2])
+        target = {"pose": {"x": float(xy[0]), "y": float(xy[1]), "frame": "world",
+                           "weight": cfg.pose_weight, "tol": cfg.pose_tol},
+                  "heading": {"yaw": hyaw, "frame": "world", "weight": cfg.heading_weight, "tol": cfg.heading_tol}}
+        self.hint = target
+        return {"mode": "hint", "target": target}
+
+
+def stick_velocity(intent: dict) -> list:
+    """The intent's ``base_velocity`` (forward, left m/s; yaw rad/s), non-finite parts as 0."""
+    v = intent.get("base_velocity") or [0, 0, 0]
+    return [float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3]]
 
 
 def _finite(x) -> bool:

@@ -48,7 +48,8 @@ def phases(msgs):
     """Consecutive datagrams grouped by (EE frame, base mode)."""
     out = []
     for t, m in msgs:
-        key = (m["ees"]["arm"]["frame"], m["base"]["mode"])
+        e = m["ees"]["arm"]
+        key = ("hold" if e.get("hold") else e["frame"], m["base"]["mode"])
         if not out or out[-1][0] != key:
             out.append([key, []])
         out[-1][1].append((t, m))
@@ -100,15 +101,14 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
 
     ph = phases(msgs)
     keys = [k for k, _ in ph]
-    assert keys == [("base", "locked"),          # released: hold
-                    ("world", "hint"),           # engaged: body-frozen targets, heading hint
-                    ("world", "commanded"),      # left stick
-                    ("world", "hint"),
-                    ("base", "locked"),          # released; the outage (silence); re-grip unseen: hold
+    assert keys == [("hold", "locked"),          # released: hold
+                    ("world", "hint"),           # engaged: body-frozen targets, base hint (the stick adds to it)
+                    ("hold", "locked"),          # released; the outage (silence); re-grip unseen: hold
                     ("world", "hint"),           # release + new engagement
-                    ("base", "locked")], keys    # reconnect mid-engagement: hold until a new engagement
+                    ("hold", "locked")], keys    # reconnect mid-engagement: hold until a new engagement
+    assert all(m["est_reset"] == 0 for _, m in msgs)
 
-    ee_p = np.array([1.5, 2.1, 0.8])
+    ee_p = np.array([1.52, 2.1, 0.8])            # the COMMANDED EE (the measured one is 2 cm behind)
     ee_r = F.rot_z(0.4)
     base_yaw = 0.3
     # zero jump at engagement; the reach and the walk move the target through the world (the fake base is still)
@@ -118,12 +118,16 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     last = ph[1][1][-1][1]["ees"]["arm"]
     np.testing.assert_allclose(last["pos"], ee_p + F.rot_z(base_yaw) @ [0.6, 0.0, 0.05], atol=2e-3)
     assert last["gripper"] == pytest.approx(0.8, abs=0.01)
-    assert ph[1][1][-1][1]["base"]["target"]["heading"]["yaw"] == pytest.approx(base_yaw, abs=1e-6)
-    v = ph[2][1][0][1]["base"]["velocity"]
-    assert v["vx"] == pytest.approx(0.3) and v["ttl"] == 0.3
+    # the base hint: the base pose at engagement, then + the walk (0.5 m forward) + the stick offset (~0.3 s forward)
+    h0 = ph[1][1][0][1]["base"]["target"]
+    assert (h0["pose"]["x"], h0["pose"]["y"], h0["heading"]["yaw"]) == (1.0, 2.0, pytest.approx(base_yaw))
+    h1 = ph[1][1][-1][1]["base"]["target"]
+    forward = (np.array([h1["pose"]["x"], h1["pose"]["y"]]) - [1.0, 2.0]) @ [np.cos(base_yaw), np.sin(base_yaw)]
+    assert 0.5 + 0.08 < forward < 0.5 + 0.2
+    assert h1["heading"]["yaw"] == pytest.approx(base_yaw, abs=1e-6)
     # the outage: nothing sent for most of it
-    gaps = np.diff([t for t, _ in ph[4][1]])
+    gaps = np.diff([t for t, _ in ph[2][1]])
     assert gaps.max() > 0.3
-    # the new engagement starts again at the (measured) EE
-    np.testing.assert_allclose(ph[5][1][0][1]["ees"]["arm"]["pos"], ee_p, atol=1e-4)
+    # the new engagement starts again exactly at the command
+    np.testing.assert_allclose(ph[3][1][0][1]["ees"]["arm"]["pos"], ee_p, atol=1e-4)
     assert client.gate.counts["discontinuities"] >= 2          # the gap and the reconnect

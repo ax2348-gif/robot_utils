@@ -205,23 +205,25 @@ def ee_of(cmd):
     return cmd["ees"]["arm"]
 
 
-def test_released_holds_the_measured_ee_in_the_base_frame_then_engages_without_a_jump():
+def held(cmd):
+    """The released arm: the WBC holds its commanded joints (no pose)."""
+    e = ee_of(cmd)
+    return e.get("hold") is True and "pos" not in e and "frame" not in e
+
+
+def test_released_holds_then_engages_at_the_command_without_a_jump():
     rig = Rig()
     c = rig.run(IDLE)
-    assert ee_of(c)["frame"] == "base" and c["base"] == {"mode": "locked"}
-    rel = rig.rob.base.to_local(rig.rob.ee_p, rig.rob.ee_r)
-    np.testing.assert_allclose(ee_of(c)["pos"], rel[0])
+    assert held(c) and c["base"] == {"mode": "locked"}
     c = rig.run(GRIP)
     assert rig.core.status.state == "engaged" and ee_of(c)["frame"] == "world"
     np.testing.assert_allclose(ee_of(c)["pos"], rig.rob.ee_p, atol=1e-5)
     np.testing.assert_allclose(F.matrix_from_quat(ee_of(c)["quat"]), rig.rob.ee_r, atol=1e-5)
     c = rig.run(REACH)
     np.testing.assert_allclose(ee_of(c)["pos"], rig.rob.ee_p + F.rot_z(0.3) @ [0.10, 0, 0.05], atol=1e-5)
-    # release: hold the last target, now in the base frame
-    c = rig.run(IDLE)
-    assert ee_of(c)["frame"] == "base" and rig.core.status.state == "released"
-    np.testing.assert_allclose(rig.rob.base.to_world(ee_of(c)["pos"], np.eye(3))[0],
-                               rig.rob.ee_p + F.rot_z(0.3) @ [0.10, 0, 0.05], atol=1e-5)
+    c = rig.run(IDLE)                                          # release: hold
+    assert held(c) and rig.core.status.state == "released"
+    assert c["est_reset"] == 0
 
 
 def test_start_mid_engagement_waits_for_release_and_a_new_engagement():
@@ -229,7 +231,7 @@ def test_start_mid_engagement_waits_for_release_and_a_new_engagement():
     rig.frame(IDLE, deliver=False)                             # the headset engaged before we connected
     rig.frame(GRIP, deliver=False)
     c = rig.run(REACH)
-    assert rig.core.status.state == "needs_release" and ee_of(c)["frame"] == "base"
+    assert rig.core.status.state == "needs_release" and held(c)
     rig.run(IDLE)
     c = rig.run(GRIP)
     assert rig.core.status.state == "engaged"
@@ -248,7 +250,7 @@ def test_stale_input_stops_sending_and_requires_a_release():
     assert rig.cmd() is None                                   # > 200 ms: stop sending
     assert rig.core.status.state == "stale"
     c = rig.run(REACH)                                         # frames again, grip still held: hold, no engagement
-    assert rig.core.status.state == "needs_release" and ee_of(c)["frame"] == "base"
+    assert rig.core.status.state == "needs_release" and held(c)
     rig.run(IDLE)
     rig.run(GRIP)
     assert rig.core.status.state == "engaged"
@@ -260,7 +262,7 @@ def test_unfocused_or_invalid_hand_stops_sending():
     rig.run(GRIP)
     assert rig.run(replace(GRIP, focused=False)) is None
     c = rig.run(GRIP)                                          # native requires the release too
-    assert rig.core.eng is None and ee_of(c)["frame"] == "base"
+    assert rig.core.eng is None and held(c)
     rig.run(IDLE)
     rig.run(GRIP)
     d = rig.hs.frame(GRIP, rig.t)
@@ -284,11 +286,11 @@ def test_session_change_invalidates_the_engagement():
     rig.frame(None, data=d)
     assert rig.core.eng is None and "session" in rig.core.status.reason
     c = rig.run(REACH)                                         # still engaged in the intent: wait for a release
-    assert rig.core.status.state == "needs_release" and ee_of(c)["frame"] == "base"
+    assert rig.core.status.state == "needs_release" and held(c)
     rig.run(IDLE)
     rig.run(GRIP)
     c = rig.run(replace(REACH, session=2))                     # a real session change: native drops it as well
-    assert rig.core.eng is None and ee_of(c)["frame"] == "base"
+    assert rig.core.eng is None and held(c)
 
 
 def test_revision_change_invalidates_the_engagement():
@@ -318,7 +320,7 @@ def test_reconnect_mid_engagement_waits_for_a_new_engagement():
     rig.run(GRIP)
     rig.conn += 1
     c = rig.run(REACH)
-    assert rig.core.status.state == "needs_release" and ee_of(c)["frame"] == "base"
+    assert rig.core.status.state == "needs_release" and held(c)
     assert "reconnect" in rig.core.status.reason
 
 
@@ -340,69 +342,152 @@ def test_engagement_needs_fresh_robot_state_and_survives_no_estimator_reset():
     assert rig.core.status.state == "needs_release" and "estimator" in rig.core.status.reason
 
 
-def test_no_robot_state_yet_sends_keep_alives():
+def test_no_robot_state_yet_still_holds():
     rig = Rig()
     rig.rob = None
     for _ in range(3):
         rig.t += 0.01
         d = rig.hs.frame(IDLE, rig.t)
         rig.core.on_frame(d, rig.gate.check(Frame(d, rig.t, 1)), None, rig.t)
-    assert rig.core.command(rig.t, True, None) == "alive"
+    c = rig.core.command(rig.t, True, None)
+    assert held(c) and "est_reset" not in c
 
 
 # -- base and gripper -----------------------------------------------------------------------------
 
-def test_stick_commands_base_velocity_with_ttl_then_back_to_the_heading_hint():
-    rig = Rig(Config(max_speed=0.3, max_omega=0.8, velocity_ttl=0.3))
+def stick(state, left=(0.0, 0.0), right_x=0.0):
+    return replace(state, left=replace(state.left, stick=left), right=replace(state.right, stick=(right_x, 0.0)))
+
+
+def test_released_sticks_command_the_base_directly():
+    rig = Rig()
     rig.run(IDLE)
-    rig.run(GRIP)
-    c = rig.run(replace(GRIP, left=replace(GRIP.left, stick=(-1.0, 0.5)), right=replace(GRIP.right, stick=(0.5, 0))))
+    c = rig.run(stick(IDLE, (-1.0, 0.5), 0.5))
     v = c["base"]["velocity"]
-    assert c["base"]["mode"] == "commanded" and v["frame"] == "base" and v["ttl"] == 0.3
-    assert v["vx"] == pytest.approx(0.3 * 0.5) and v["vy"] == pytest.approx(0.3)
-    assert v["omega"] == pytest.approx(-0.8 * 0.5)
-    c = rig.run(replace(GRIP, left=replace(GRIP.left, stick=(0.1, 0.17))))      # inside the 18 % dead zone
-    assert c["base"]["mode"] == "hint"
-    assert set(c["base"]["target"]) == {"heading"}
+    assert c["base"]["mode"] == "commanded" and v["frame"] == "base" and v["ttl"] == 0.2
+    # the stream's own scaling: full scale 0.45 m/s and 0.8 rad/s
+    assert (v["vx"], v["vy"], v["omega"]) == (pytest.approx(0.45 * 0.5), pytest.approx(0.45), pytest.approx(-0.4))
+    assert rig.run(stick(IDLE, (0.1, 0.17)))["base"] == {"mode": "locked"}     # inside the 18 % dead zone
 
 
-def test_head_yaw_drives_the_heading_hint_relative_to_the_engagement():
-    rig = Rig(Config(heading_weight=0.5, heading_tol=0.05))
+def hint_of(c):
+    t = c["base"]["target"]
+    return np.array([t["pose"]["x"], t["pose"]["y"], t["heading"]["yaw"]])
+
+
+def test_engaged_hint_starts_at_the_base_pose_and_mirrors_the_head():
+    rig = Rig()
     rig.run(replace(IDLE, head_yaw=1.0))
     c = rig.run(replace(GRIP, head_yaw=1.0))
-    h = c["base"]["target"]["heading"]
-    assert h == {"yaw": pytest.approx(0.3), "frame": "world", "weight": 0.5, "tol": 0.05}
-    c = rig.run(replace(GRIP, head_yaw=1.0 + 0.4, head_pitch=0.5))
-    assert c["base"]["target"]["heading"]["yaw"] == pytest.approx(0.7)
-    c = rig.run(replace(GRIP, head_yaw=1.0 - 3.0))             # wraps
-    assert c["base"]["target"]["heading"]["yaw"] == pytest.approx(F.wrap(0.3 - 3.0))
-    rig2 = Rig(Config(heading_hint=False))
+    assert c["base"]["mode"] == "hint"
+    np.testing.assert_allclose(hint_of(c), [1.0, 2.0, 0.3], atol=1e-9)
+    h = c["base"]["target"]
+    assert (h["pose"]["frame"], h["heading"]["frame"]) == ("world", "world")
+    # one metre along the operator's engagement forward, head turned 0.4 and pitched: the platform's forward
+    fwd = (math.cos(1.0), math.sin(1.0), 0.0)
+    c = rig.run(replace(GRIP, head_pos=fwd, head_yaw=1.4, head_pitch=0.5))
+    np.testing.assert_allclose(hint_of(c), [1.0 + math.cos(0.3), 2.0 + math.sin(0.3), 0.7], atol=1e-9)
+    c = rig.run(replace(GRIP, head_pos=fwd, head_yaw=1.0 - 3.0))                 # yaw wraps
+    assert hint_of(c)[2] == pytest.approx(F.wrap(0.3 - 3.0))
+    rig2 = Rig(Config(head_walk=False))
     rig2.run(IDLE)
-    assert rig2.run(GRIP)["base"] == {"mode": "free"}
+    rig2.run(GRIP)
+    np.testing.assert_allclose(hint_of(rig2.run(replace(GRIP, head_pos=fwd, head_yaw=1.0))), [1.0, 2.0, 0.3])
 
 
-def test_pose_hint_follows_head_displacement_when_enabled():
-    rig = Rig(Config(pose_hint=True))
-    rig.run(replace(IDLE, head_yaw=0.5))
-    c = rig.run(replace(GRIP, head_yaw=0.5))
-    pose = c["base"]["target"]["pose"]
-    assert (pose["x"], pose["y"]) == (pytest.approx(1.0), pytest.approx(2.0))
-    # one metre along the operator's engagement forward -> one metre along the platform's forward at engagement
-    fwd = (math.cos(0.5), math.sin(0.5), 0.0)
-    c = rig.run(replace(GRIP, head_yaw=0.5, head_pos=fwd))
-    pose = c["base"]["target"]["pose"]
-    assert (pose["x"], pose["y"]) == (pytest.approx(1.0 + math.cos(0.3)), pytest.approx(2.0 + math.sin(0.3)))
-    assert "pose" not in Rig().run(GRIP)["base"].get("target", {})        # off by default
-
-
-def test_stick_rereferences_the_head_hints():
+def test_engaged_sticks_integrate_an_offset_in_the_robot_frame_while_standing_still():
     rig = Rig()
     rig.run(IDLE)
     rig.run(GRIP)
-    rig.run(replace(GRIP, left=replace(GRIP.left, stick=(0.0, 0.0)), right=replace(GRIP.right, stick=(1.0, 0))))
-    rig.rob.base_yaw = 1.2                                     # the stick turned the platform
-    c = rig.run(replace(GRIP, head_yaw=0.0))
-    assert c["base"]["target"]["heading"]["yaw"] == pytest.approx(1.2)
+    for _ in range(100):                                       # full forward for 1 s (frames every 10 ms)
+        rig.frame(stick(GRIP, (0.0, 1.0)))
+    c = rig.cmd()
+    assert c["base"]["mode"] == "hint"                         # engaged: never commanded
+    np.testing.assert_allclose(rig.core.offset, [0.45 * math.cos(0.3), 0.45 * math.sin(0.3), 0.0], atol=0.01)
+    rig.rob.base_yaw = 0.3 + math.pi / 2                       # the robot turned: stick forward = its new forward
+    for _ in range(100):
+        rig.frame(stick(GRIP, (0.0, 1.0), right_x=-1.0))
+    c = rig.cmd()
+    expected = [0.45 * (math.cos(0.3) - math.sin(0.3)), 0.45 * (math.sin(0.3) + math.cos(0.3)), 0.8]
+    np.testing.assert_allclose(rig.core.offset, expected, atol=0.02)
+    np.testing.assert_allclose(hint_of(c), np.array([1.0, 2.0, 0.3]) + rig.core.offset, atol=1e-9)
+    assert rig.core.hint == c["base"]["target"]                # exposed for the status line
+
+
+def test_walking_and_sticks_combine():
+    rig = Rig()
+    rig.run(IDLE)
+    rig.run(GRIP)
+    for k in range(1, 51):                                     # walk 0.5 m forward while pushing the stick left
+        rig.frame(stick(replace(GRIP, head_pos=(0.01 * k, 0.0, 0.0)), (-1.0, 0.0)))
+    c = rig.cmd()
+    walk_ = F.rot_z(0.3)[:2, :2] @ [0.5, 0.0]
+    np.testing.assert_allclose(hint_of(c)[:2], np.array([1.0, 2.0]) + walk_ + rig.core.offset[:2], atol=1e-9)
+    np.testing.assert_allclose(rig.core.offset[:2], F.rot_z(0.3)[:2, :2] @ [0.0, 0.45 * 0.5], atol=0.01)
+
+
+def test_offset_restarts_at_zero_on_every_engagement():
+    rig = Rig()
+    rig.run(IDLE)
+    rig.run(GRIP)
+    for _ in range(50):
+        rig.frame(stick(GRIP, (0.0, 1.0)))
+    assert np.linalg.norm(rig.core.offset) > 0.2
+    assert rig.run(IDLE)["base"] == {"mode": "locked"}          # release: the hint is dropped
+    assert rig.core.hint is None
+    rig.rob.base_x, rig.rob.base_y = 1.2, 2.1                   # the base got there meanwhile
+    c = rig.run(GRIP)
+    np.testing.assert_allclose(rig.core.offset, 0.0)
+    np.testing.assert_allclose(hint_of(c), [1.2, 2.1, 0.3], atol=1e-9)
+
+
+OPERATOR_MOTIONS = {
+    "walk": dict(head_pos=(1.5, 0.4, 0.0)),
+    "turn": dict(head_yaw=2.0),
+    "walk_turn_reach": dict(head_pos=(-0.6, 1.0, 0.1), head_yaw=-1.2, head_pitch=0.4),
+}
+
+
+@pytest.mark.parametrize("motion", sorted(OPERATOR_MOTIONS))
+@pytest.mark.parametrize("stick_while_released", [False, True])
+def test_release_and_reengage_never_moves_the_robot(motion, stick_while_released):
+    """The owner's rule: whatever the operator does between a release and the next engagement, the first datagram
+    after re-engaging commands exactly the current commanded EE pose and the current base pose and heading."""
+    rig = Rig()
+    rig.run(IDLE)
+    rig.run(GRIP)
+    for k in range(1, 31):                                      # an engagement with arm, head and stick motion
+        rig.frame(stick(replace(REACH, head_pos=(0.01 * k, 0, 0), head_yaw=0.01 * k), (0.3, 0.8), 0.4))
+    rig.run(IDLE)
+    # released: the operator moves arbitrarily, the hand too; maybe the sticks drive the base
+    moved = replace(IDLE, **OPERATOR_MOTIONS[motion],
+                    right=replace(IDLE.right, pos=(0.1, 0.5, 0.2), rpy=(0.5, -0.3, 1.0)))
+    for k in range(1, 41):
+        s_ = stick(moved, (0.7, -0.9), 0.6) if stick_while_released else moved
+        rig.frame(s_)
+        c = rig.cmd()
+        assert held(c)                                          # the arm holds its joints: it rides with the base
+        assert c["base"]["mode"] == ("commanded" if stick_while_released else "locked")
+        if stick_while_released:
+            rig.rob.base_x += 0.004                             # the base moves under the stick, the arm with it
+            rig.rob.base_yaw += 0.01
+            rig.rob.ee_p = rig.rob.ee_p + [0.004, 0.0, 0.0]
+    # the WBC's command and the base pose are wherever they ended up
+    rig.rob.ee_p = rig.rob.ee_p + [0.05, -0.02, 0.01]
+    rig.rob.ee_r = F.rot_axis((0, 1, 1), 0.3) @ rig.rob.ee_r
+    c = rig.run(replace(moved, right=replace(moved.right, grip=1.0)), n=1)
+    assert rig.core.status.state == "engaged"
+    e = ee_of(c)
+    assert e["frame"] == "world"
+    np.testing.assert_allclose(e["pos"], rig.rob.ee_p, atol=1e-12)
+    np.testing.assert_allclose(F.matrix_from_quat(e["quat"]), rig.rob.ee_r, atol=1e-12)
+    np.testing.assert_allclose(hint_of(c), [rig.rob.base_x, rig.rob.base_y, F.wrap(rig.rob.base_yaw)], atol=1e-12)
+
+
+def test_target_datagrams_carry_the_estimator_epoch():
+    rig = Rig(rob=robot(reset=3.0))
+    assert rig.run(IDLE)["est_reset"] == 3
+    assert rig.run(GRIP)["est_reset"] == 3
 
 
 def test_trigger_drives_the_gripper():
@@ -417,11 +502,16 @@ def test_trigger_drives_the_gripper():
 
 
 def test_robot_state_from_a_stream_row():
-    row = {"arm_meas_x": 1.0, "arm_meas_y": 2.0, "arm_meas_z": 0.5, "arm_meas_qx": 0.0, "arm_meas_qy": 0.0,
-           "arm_meas_qz": math.sin(0.25), "arm_meas_qw": math.cos(0.25), "base_x": 0.1, "base_y": 0.2,
-           "base_yaw": 0.3, "est_reset": 2.0}
+    meas = {"arm_meas_x": 1.0, "arm_meas_y": 2.0, "arm_meas_z": 0.5, "arm_meas_qx": 0.0, "arm_meas_qy": 0.0,
+            "arm_meas_qz": math.sin(0.25), "arm_meas_qw": math.cos(0.25)}
+    cmd = {k.replace("meas", "cmd"): v for k, v in meas.items()}
+    cmd["arm_cmd_x"] = 1.1
+    row = {**meas, **cmd, "base_x": 0.1, "base_y": 0.2, "base_yaw": 0.3, "est_reset": 2.0}
     s = RobotState.from_row(row, 5.0)
+    assert s.ee_source == "cmd" and s.ee_p[0] == 1.1                  # the command is the anchor
     np.testing.assert_allclose(s.ee_r, F.rot_z(0.5), atol=1e-12)
     assert (s.base_x, s.base_yaw, s.est_reset, s.t_recv) == (0.1, 0.3, 2.0, 5.0)
-    assert RobotState.from_row({**row, "arm_meas_x": float("nan")}, 5.0) is None
+    s = RobotState.from_row({**row, "arm_cmd_x": float("nan")}, 5.0)    # no command yet: measured
+    assert s.ee_source == "meas" and s.ee_p[0] == 1.0
+    assert RobotState.from_row({**row, "arm_cmd_x": float("nan"), "arm_meas_x": float("nan")}, 5.0) is None
     assert RobotState.from_row({k: v for k, v in row.items() if k != "base_yaw"}, 5.0) is None

@@ -102,15 +102,21 @@ def close_wbc(wbc: WbcClient, log: Callable[[str], None] = print) -> None:
             log(f"  {f.__name__}: {e}")
 
 
-def print_status(c: TeleopClient) -> None:
+def status_line(c: TeleopClient) -> str:
+    """Engagement state, sending, input ages, the stick offset (world x, y, yaw) and the base hint sent."""
     s = c.core.status
-    row, t = c.stream.latest()
+    _, t = c.stream.latest()
     age = f"{(c.clock() - t) * 1e3:4.0f}ms" if t is not None else "  none"
     quest = "ok" if c.gate.fresh(c.clock()) else "--"
-    line = (f"\r[{s.state:13}] {'SENDING' if c.sending else 'silent '} quest={quest}"
-            f" wbc_row={age} engagements={s.engagements} sent={c.wbc.sent.get('target', 0)}"
-            f" {s.reason[:40]:40}")
-    print(line, end="", flush=True)
+    o, h = c.core.offset, c.core.hint
+    hint = f"({h['pose']['x']:+.2f},{h['pose']['y']:+.2f},{h['heading']['yaw']:+.2f})" if h else "none"
+    return (f"[{s.state:13}] {'SENDING' if c.sending else 'silent '} quest={quest} wbc_row={age}"
+            f" eng={s.engagements} sent={c.wbc.sent.get('target', 0)}"
+            f" offset=({o[0]:+.2f},{o[1]:+.2f},{o[2]:+.2f}) hint={hint} {s.reason[:32]:32}")
+
+
+def print_status(c: TeleopClient) -> None:
+    print("\r" + status_line(c), end="", flush=True)
 
 
 def main(argv=None) -> int:
@@ -122,17 +128,13 @@ def main(argv=None) -> int:
     ap.add_argument("--udp-host", default=None, help="datagram destination host (default: the --wbc host)")
     ap.add_argument("--hand", choices=("left", "right"), default="right", help="the hand that drives the arm")
     ap.add_argument("--ee", default="arm", help="end-effector name in the WBC (default %(default)s)")
-    ap.add_argument("--no-heading-hint", action="store_true", help="do not map head yaw to the base heading")
-    ap.add_argument("--pose-hint", action="store_true",
-                    help="also map head displacement (since engagement) to a soft base pose hint")
-    ap.add_argument("--max-speed", type=float, default=0.3, help="stick full-scale base speed, m/s")
-    ap.add_argument("--max-omega", type=float, default=0.8, help="stick full-scale base yaw rate, rad/s")
+    ap.add_argument("--no-head-walk", action="store_true",
+                    help="engaged: the base hint follows only the stick offset, not the head's travel and yaw")
     ap.add_argument("--stale-ms", type=float, default=STALE_S * 1e3, help="headset freshness timeout")
     ap.add_argument("--no-gripper", action="store_true")
     args = ap.parse_args(argv)
 
-    cfg = Config(hand=args.hand, ee=args.ee, heading_hint=not args.no_heading_hint, pose_hint=args.pose_hint,
-                 max_speed=args.max_speed, max_omega=args.max_omega, gripper=not args.no_gripper)
+    cfg = Config(hand=args.hand, ee=args.ee, head_walk=not args.no_head_walk, gripper=not args.no_gripper)
     wbc = WbcClient(args.wbc, udp_host=args.udp_host)
     stream = WbcStream(args.wbc).start()
     reader = QuestReader(args.quest, args.quest_port).start()

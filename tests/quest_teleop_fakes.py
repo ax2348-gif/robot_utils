@@ -28,7 +28,9 @@ class FakeWbc:
         self.session = 4242
         self.row = {f: 0.0 for f in FIELDS}
         self.row.update(base_x=1.0, base_y=2.0, base_yaw=0.3, arm_meas_x=1.5, arm_meas_y=2.1, arm_meas_z=0.8,
-                        arm_meas_qz=math.sin(0.2), arm_meas_qw=math.cos(0.2))
+                        arm_meas_qz=math.sin(0.2), arm_meas_qw=math.cos(0.2),
+                        arm_cmd_x=1.52, arm_cmd_y=2.1, arm_cmd_z=0.8, arm_cmd_qz=math.sin(0.2),
+                        arm_cmd_qw=math.cos(0.2))
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind(("127.0.0.1", 0))
         self.udp.settimeout(0.2)

@@ -182,6 +182,7 @@ class HandState:
     trigger: float = 0.0
     stick: tuple = (0.0, 0.0)            # raw joystick (x right, y up)
     tracked: bool = True
+    click: bool = False                  # thumbstick click
 
 
 @dataclass
@@ -251,7 +252,7 @@ class Headset:
                 "pose": F.matrix16_from_pose(hi.p, hi.r) if hs.tracked else None,
                 "trigger": hs.trigger, "grip": hs.grip, "joystick": list(hs.stick),
                 "buttons": {"primary": name == "right" and s.align, "secondary": False, "thumb_rest": False,
-                            "stick": False}}
+                            "stick": hs.click}}
         self.seq += 1
         return frame
 
