@@ -58,6 +58,7 @@ from .jam import updated as jam_updated
 from .kin import ArmKinematics, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from .planner import Planner
+from .stream import JointStream, StreamConfig
 from .telemetry import COL, FIELD_DOC, JAC_UNITS, PHASES, UNITS  # noqa: F401  (re-exported: server, models, tests)
 from .telemetry import FIELDS, JAC_FIELDS, SOURCES, STATES, row_dict, tick_row
 from .telemetry import tracking as tracking_of_row
@@ -146,11 +147,15 @@ def finite(v):
     return v
 
 
-class ArmNode:
+class ArmNode(JointStream):
+    dt = DT
+
     def __init__(self, bus_factory: Callable[[], ArmBus], profile: str = C.DEFAULT_PROFILE,
                  settings: Optional[C.NodeSettings] = None, hub: Optional[RowHub] = None,
                  locks: Optional[LockStore] = None, clock: Callable[[], float] = time.monotonic,
-                 description_node: str = "description"):
+                 description_node: str = "description", joint_socket=None):
+        """``joint_socket``: path of the internal joint channel's socket (stream.py), started with the node; None:
+        no joint channel."""
         self.bus_factory = bus_factory
         self.description_node = description_node     # where the arm frame's pose in the robot base frame comes from
         self.clock = clock
@@ -219,6 +224,8 @@ class ArmNode:
         self.jam_detector = JamDetector()         # jam (its config), jam_active, jams, jam_count: properties below
         self._cmd_count = 0                       # every new command / motion (refire off: one jam per command)
         self._aib: Optional[dict] = None           # arm_in_base's cache (queries.arm_in_base)
+        st = self.settings
+        self._init_stream(joint_socket, StreamConfig(st.stream_stale_ms, st.stream_max_lead))
 
     # -- state ---------------------------------------------------------------------------------------
 
@@ -238,6 +245,7 @@ class ArmNode:
     # -- lifecycle -------------------------------------------------------------------------------
 
     def start(self) -> None:
+        self.start_joint_channel()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="arm-control", daemon=True)
         self._thread.start()
@@ -246,6 +254,7 @@ class ArmNode:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
+        self.stop_joint_channel()
         self._close_bus()
 
     def _close_bus(self) -> None:
@@ -286,16 +295,17 @@ class ArmNode:
 
     def step(self) -> None:
         """One iteration of the control thread: connect if needed, else one tick."""
+        self._steps += 1
         if self._reconnect:
             self._reconnect = False
             self._close_bus()
             self._base, self.initialized = "connecting", False
             self._connect_at = 0.0
-        if self._base == "connecting":
-            if self.clock() >= self._connect_at:
+        if self._base == "connecting" or self.bus is None:
+            now = self.clock()
+            self._stream_out(now, self.reading, math.inf if self._fresh_t is None else now - self._fresh_t)
+            if self._base == "connecting" and now >= self._connect_at:
                 self._connect()
-            return
-        if self.bus is None:
             return
         self.tick()
 
@@ -356,11 +366,14 @@ class ArmNode:
                 self._stale_warn(now, age, e.missing)
             if self.reading is None or age > limit:
                 self._fault(f"{e} (no complete reading for {age * 1e3:.0f} ms)")
+                self._stream_out(now, self.reading, age)
                 return
             r, stale, self.read_age = self.reading, True, age     # the latest complete reading, briefly
         except BusError as e:
             self._fault(str(e))
+            self._stream_out(now, self.reading, math.inf if self._fresh_t is None else now - self._fresh_t)
             return
+        self._stream_out(now, r, self.read_age)        # the joint channel's state: right after the read, every tick
         if self._base == "fault":
             self._publish(now, dt_tick, r)
             return
@@ -591,6 +604,11 @@ class ArmNode:
         limit (the step limit); increases of speed limited by the acceleration limit (slowing down
         never is: see clip_increase); never further outside the joint limits."""
         kin, s = self.kin, self.soft
+        if not np.all(np.isfinite(q_goal)):        # backstop: a NaN goal would make q_cmd NaN for good
+            self.nonfinite_goals += 1
+            if self.nonfinite_goals == 1 or self.nonfinite_goals % 1000 == 0:
+                self.events.add(f"non-finite goal ({self.nonfinite_goals} so far): holding the command", "error")
+            q_goal = self.q_cmd
         # the limits, widened to include q_cmd: a joint engaged just outside them is never pushed
         # further out
         lo, hi = np.minimum(kin.lo, self.q_cmd), np.maximum(kin.hi, self.q_cmd)
@@ -615,6 +633,8 @@ class ArmNode:
             if self.servo:
                 src, q_goal, vel_ref, gap_goal = self._source(now)
                 self._command_step(q_goal)
+                if not np.all(np.isfinite(vel_ref)):
+                    vel_ref = np.zeros(N)
                 self.qd_ff = scale_to(vel_ref, self.soft.joint_vel)
                 q_cmd, qd_ff = self.q_cmd.copy(), self.qd_ff.copy()
             else:
@@ -651,7 +671,8 @@ class ArmNode:
 
     def _has_source(self) -> bool:
         m = self.motion
-        return self.track is not None or (m is not None and m.phase in ("executing", "settling"))
+        return (self.track is not None or self.stream is not None
+                or (m is not None and m.phase in ("executing", "settling")))
 
     def _arm_engaged(self) -> bool:
         """Servoing, or a command accepted that the control loop engages on its next tick. Call under _lock.
@@ -662,7 +683,9 @@ class ArmNode:
     def _source(self, now: float):
         """(source, goal, MIT velocity reference, gripper gap goal or None); servoing, under _lock.
         Track: the goal is the IK of the pose, literally; a fresh twist (TWIST_TIMEOUT) gives the
-        velocity reference. Planned motions: the trajectory's position and velocity at ``now``."""
+        velocity reference. Planned motions: the trajectory's position and velocity at ``now``.
+        Stream: the joint goal, literally, with its rate-limited feedforward; stale, a ramp to a hold
+        (stream.py). Track and stream never coexist (each replaces the other)."""
         m = self.motion
         if m is not None and m.phase in ("executing", "settling"):
             q, qd, gap, done = m.traj.sample(now)
@@ -681,6 +704,10 @@ class ArmNode:
                 qd = self.kin.twist_to_qd(t.q_goal, t.twist, t.twist_frame)
             self._goal_pose = t.pose
             return "track", t.q_goal, qd, None
+        if self.stream is not None:                  # the internal joint channel (stream.py)
+            self._goal_pose = None
+            q, qd = self._stream_target(now)
+            return "stream", q, qd, None
         self._goal_pose = None
         return "hold", (self.q_cmd if self.hold_q is None else self.hold_q), np.zeros(N), None
 
@@ -744,8 +771,8 @@ class ArmNode:
 
     def _jam_check(self, now: float, r, src, tau_g) -> None:
         """Control thread, while servoing (jam.JamDetector judges). Planned motions and holds get the response: the
-        command is pulled to the reading (a motion ends `jammed`); track (a teleop stream overwrites the command
-        every tick) is report-only."""
+        command is pulled to the reading (a motion ends `jammed`); track and stream (a client overwrites the
+        command every tick) are report-only."""
         m = self.motion
         ev = self.jam_detector.check(now, r.qd, r.tau, tau_g, m is not None and m.phase == "executing", src,
                                      self._cmd_count)
@@ -763,7 +790,7 @@ class ArmNode:
             else:
                 self.events.add(what + ": holding where it is", "warn")
         else:
-            self.events.add(what + (" (track: report only)" if src == "track" else " (report only)"), "warn")
+            self.events.add(what + (f" ({src}: report only)" if src in ("track", "stream") else " (report only)"), "warn")
 
     def jam_state(self) -> dict:
         return finite({"config": self.jam.public(), "active": self.jam_active, "count": self.jam_count,
@@ -791,6 +818,7 @@ class ArmNode:
     def _drop_sources(self, why: str) -> None:
         """No arm source any more (call under _lock)."""
         self.track = None
+        self.stream = None
         if self.motion is not None:
             m = self.motion
             m.phase, m.reason = "aborted", why
@@ -813,6 +841,7 @@ class ArmNode:
             g_on = self.g_servo
             seq = tr.seq if tr else 0
             goal = self._goal_pose if servo else None
+            stream = self._stream_row(now)
         on = self.motors_on
         base = [now, self._tick, STATES.index(self.state), float(self.enabled), float(on),
                 float(servo), float(g_on), float(self.estop.active), float(info.lease_id if info else 0),
@@ -820,7 +849,7 @@ class ArmNode:
                 (now - tr.t) if tr and tr.twist is not None else nan, self.read_age, self.read_misses]
         row, J = tick_row(now, base, r, kin, self.profile, q_cmd, v_cmd, acc_lim,
                           self._g.get("tau_g") if on else None, goal, g, self._g, on and g_on, m,
-                          self.jam_active is not None)
+                          self.jam_active is not None, stream)
         self.hub.publish_rows(row[None], "tick")
         self.hub.publish_rows(np.concatenate([[now], J.reshape(-1)])[None], "jacobian")
 
@@ -830,7 +859,9 @@ class ArmNode:
         m = self.motion
         if m is not None and m.phase in ("executing", "settling"):
             return m.traj.kind
-        return "track" if self.track is not None else "hold"
+        if self.track is not None:
+            return "track"
+        return "stream" if self.stream is not None else "hold"
 
     # -- safety ------------------------------------------------------------------------------------
 
@@ -884,12 +915,14 @@ class ArmNode:
         self._base, self.error = "fault", msg
 
     def _lease_ended(self, reason: str) -> None:
+        self.close_stream_session(f"lease {reason}")
         self.soft = C.DEFAULT_SOFT.copy()
         self._disable(f"lease {reason}: disabled (the arm floats)")
         self.events.add(f"lease {reason}")
 
     def _estop_triggered(self, info: EStopInfo) -> None:
         self._off(f"E-STOP ({info.source}: {info.reason})")
+        self.close_stream_session("e-stop")
 
     def _stowed(self, why: str) -> None:
         self._off(why)
@@ -957,6 +990,7 @@ class ArmNode:
     def disable(self, token) -> dict:
         self.lease.renew(token)
         self._disable("disabled: the arm floats, the gripper is in damping")
+        self.close_stream_session("disabled")
         return {"enabled": False, "state": self.state}
 
     def float_arm(self, token) -> dict:
@@ -1035,6 +1069,7 @@ class ArmNode:
             if not self.enabled:
                 raise RequestError(409, "disabled while solving")
             self._preempt("track")
+            self.stream = None                      # HTTP track replaces the joint stream (and vice versa)
             self.hold_q = None
             self.track = Track(r.q, pose, twist, twist_frame, self.clock(), int(seq))
             if g_args is not None:
@@ -1099,6 +1134,9 @@ class ArmNode:
                 traj.shift(now - traj.t[0])
             self._preempt(by)
             self.track = None
+            self.stream = None
+            if self.stream_session is not None:    # a planned motion pauses the joint stream until it ends
+                self.stream_session.paused = True
             self.hold_q = None
             self.motion = Motion(traj)
             if traj.kind == "chunk" and traj.gap is not None:
@@ -1198,6 +1236,7 @@ class ArmNode:
         with self._lock:
             m = self.motion
             self.track = None
+            self.stream = None
             if self.servo:
                 self.hold_q = self.q_cmd.copy()
             if m is not None:
@@ -1390,6 +1429,7 @@ class ArmNode:
             "realtime": dict(self.realtime),
             "clients": self.hub.subscribers,
             "events": self.events.list()[-20:],
+            "joint_channel": self.stream_state(),
             "latest": latest,
             "server_mono": now,
         })

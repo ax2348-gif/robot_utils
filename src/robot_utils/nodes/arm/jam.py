@@ -105,7 +105,7 @@ class JamDetector:
         if not cfg.refire and self.fired_cmd == cmd:
             return None
         i = int(np.argmax(np.where(held >= cfg.hold_s, np.abs(res) / bands, 0.0)))
-        act = "report" if (cfg.response == "report" or src == "track") else "hold"
+        act = "report" if (cfg.response == "report" or src in ("track", "stream")) else "hold"
         jam = {"t": now, "wall": time.time(), "joint": i + 1, "residual_nm": round(float(res[i]), 3),
                "band_nm": float(bands[i]), "held_s": round(float(held[i]), 2), "response": act, "source": src,
                "residuals_nm": [round(float(v), 3) for v in res]}

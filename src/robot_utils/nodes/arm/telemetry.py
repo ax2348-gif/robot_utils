@@ -2,7 +2,8 @@
 JAC_FIELDS) and the pure functions that build a row and read one back.
 
 The row schema is append-only: recordings and pages read columns by name, but old recordings were
-written in this order, so a new column goes at the end (``_JAM``, then ``_MEAS``, were appended for that reason).
+written in this order, so a new column goes at the end (``_JAM``, ``_MEAS``, then ``_STREAM``, were appended for that reason); likewise
+a new SOURCES / STATES / PHASES name (the row holds its index).
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from .config import N
 from .kin import pose_error
 
 STATES = ["connecting", "uninitialized", "initializing", "off", "disabled", "floating", "servoing", "fault"]
-SOURCES = ["none", "hold", "track", "servo", "pose", "home", "stow", "chunk"]
+SOURCES = ["none", "hold", "track", "servo", "pose", "home", "stow", "chunk", "stream"]   # append only: an index
 PHASES = ["none", "executing", "settling", "reached", "not_reached", "done", "aborted", "preempted", "jammed"]
 JOINT_COLS = [("q", "rad"), ("q_mot", "rad"), ("qd", "rad/s"), ("tau", "Nm"), ("q_cmd", "rad"),
               ("qd_ff", "rad/s"), ("tau_g", "Nm"), ("e_mot", "rad"), ("tau_est", "Nm"), ("acc_lim", "bool"),
@@ -35,9 +36,10 @@ _GRIP = [("g_gap", "m"), ("g_gap_cmd", "m"), ("g_gap_goal", "m"), ("g_qd", "rad/
          ("g_status", "enum")]
 _MOTION = [("motion_id", "id"), ("phase", "enum"), ("progress", "")]
 _JAM = [("jam", "bool")]   # appended: existing columns keep their positions
-_MEAS = [("t_meas", "s"), ("t_meas_mot", "s")]   # appended last
+_MEAS = [("t_meas", "s"), ("t_meas_mot", "s")]   # appended
+_STREAM = [("stream_seq", "count"), ("stream_age", "s"), ("stream_lat", "s")]   # appended last
 _ALL = (_BASE + [(f"j{i}_{n}", u) for i in range(1, N + 1) for n, u in JOINT_COLS] + _TCP + _GRIP + _MOTION + _JAM
-        + _MEAS)
+        + _MEAS + _STREAM)
 FIELDS = [n for n, _ in _ALL]
 UNITS = [u for _, u in _ALL]
 COL = {n: i for i, n in enumerate(FIELDS)}
@@ -66,6 +68,9 @@ FIELD_DOC = {
     "read_age": "time since the reading this tick used was collected: 0 when this tick's read completed (its data is still older than t_tick: see t_meas, t_meas_mot); > 0 when replies were late (still awaited, one tick) or missed and the latest complete reading, from an earlier tick, was kept (fault beyond 50 ms with the motors on)",
     "t_meas": "when the requests whose replies gave this row's output encoders (q, g_gap) were sent, on t_tick's clock: the bus is pipelined, so about one tick before t_tick (two when replies were late and an earlier reading was kept); a lower bound of when q was measured. Simulated bus: the sample time (no pipeline delay; in real time it trails t_tick by the read's own duration). NaN: unknown",
     "t_meas_mot": "arrival of the motor feedback frames behind q_mot / qd / tau (answers to the previous tick's MIT frames, or a refresh), on t_tick's clock: the oldest across joints 1-6, so every joint's feedback is at least this new; usually newer than t_meas. Simulated bus: the sample time. NaN: unknown (a motorbridge without the feedback's age)",
+    "stream_seq": "internal joint channel (docs/arm.md): `seq` of the stream goal in force (NaN: none)",
+    "stream_age": "s since the stream goal in force arrived (past the channel's stale_ms the command ramps to a hold)",
+    "stream_lat": "t_tick minus the goal's t_basis (the t_tick of the state packet the client computed it from): the client's loop latency in ticks x 10 ms (NaN: none, or no t_basis). Inherits t_tick's bias (see t_meas)",
     "read_misses": "ticks with missed replies (none within two ticks) since the node started (per motor in /state)",
     "twist_age": "s since the track twist feedforward was written (NaN if none)",
     "g_gap / g_gap_cmd / g_gap_goal": "jaw gap measured / sent this tick (after the force limit) / goal (m)",
@@ -78,7 +83,7 @@ FIELD_DOC = {
 
 def tick_row(now: float, base: list, r, kin, profile, q_cmd: Optional[np.ndarray], v_cmd: np.ndarray,
              acc_lim: np.ndarray, tau_g, goal: Optional[pin.SE3], gripper, g_est: dict, g_live: bool,
-             motion, jam: bool) -> tuple[np.ndarray, np.ndarray]:
+             motion, jam: bool, stream: tuple = (math.nan, math.nan, math.nan)) -> tuple[np.ndarray, np.ndarray]:
     """One tick's telemetry row (FIELDS) and the TCP Jacobian at the measured pose (for the jacobian channel).
 
     ``base``: the _BASE columns' values, in order. ``r``: the reading. ``q_cmd``: the command while servoing
@@ -86,7 +91,7 @@ def tick_row(now: float, base: list, r, kin, profile, q_cmd: Optional[np.ndarray
     ``tau_g``: the gravity feedforward (None with the motors off). ``goal``: the source's goal pose.
     ``gripper``: the Gripper, ``g_est`` the force-limit estimates (``tau_est``, ``force``, ``demand``, ``ff``,
     ``limiting``), ``g_live``: the gripper holding with the motors on. ``motion``: the motion in force or
-    the last one (or None). ``jam``: a jam in force."""
+    the last one (or None). ``jam``: a jam in force. ``stream``: (stream_seq, stream_age, stream_lat)."""
     nan = math.nan
     row = np.full(len(FIELDS), nan)
     row[:len(_BASE)] = base
@@ -131,6 +136,7 @@ def tick_row(now: float, base: list, r, kin, profile, q_cmd: Optional[np.ndarray
         row[COL["phase"]] = 0
     row[COL["jam"]] = float(jam)
     row[COL["t_meas"]], row[COL["t_meas_mot"]] = r.t_meas, r.t_meas_mot
+    row[COL["stream_seq"]:COL["stream_seq"] + 3] = stream
     return row, J
 
 

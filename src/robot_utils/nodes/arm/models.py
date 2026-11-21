@@ -599,6 +599,55 @@ class ReplyLatency(BaseModel):
     margin_ms: float = Field(description="Tick period minus p99, ms: under 1 ms is reported as a warning event.")
 
 
+class JointChannelConfig(BaseModel):
+    stale_ms: float = Field(description="ms without a fresh goal before the command ramps to a hold.")
+    max_lead_deg: float = Field(description="Degrees a goal may lead the measured pose (any joint); further: dropped.")
+    limit_tol_deg: float = Field(description="Degrees a goal may lie outside the joint limits; further: dropped.")
+
+
+class JointChannelCounts(BaseModel):
+    goals: int = Field(description="Goals accepted.")
+    keepalives: int = Field(description="Keep-alives accepted.")
+    stale: int = Field(description="Times the stream went stale (a ramp to a hold began).")
+    sent: int = Field(description="State packets sent.")
+    send_errors: int = Field(description="State packets not sent (the client's queue full or its socket gone).")
+
+
+class JointChannelSession(BaseModel):
+    id: int = Field(description="Session id (in every packet).")
+    client: str = Field(description="The client's name from its hello.")
+    lease_id: int = Field(description="The arm lease the session belongs to (it renews it; it ends with it).")
+    address: str = Field(description="The client's bound socket path (state packets go there).")
+    age: float = Field(description="s since the session opened.")
+    seq: int = Field(description="Newest accepted seq.")
+    last_age: Optional[float] = Field(description="s since the newest accepted datagram; null if none yet.")
+    paused: bool = Field(description="A planned motion paused the stream: goals are dropped while it is in force; "
+                                     "the first goal after it ends resumes.")
+    stale: bool = Field(description="No fresh goal within stale_ms: ramping to / holding a hold.")
+    counts: JointChannelCounts
+    dropped: dict[str, int] = Field(description="Datagrams dropped, by reason (old, addr, not_enabled, paused, "
+                                                "nonfinite, limits, gap, no_reading, engage, lead, mode).")
+
+
+class JointChannelGoal(BaseModel):
+    seq: int = Field(description="seq of the stream goal in force.")
+    age: Optional[float] = Field(description="s since it arrived; null once its session closed.")
+    ramping: bool = Field(description="Stale: the command is ramping to (or holding) a hold.")
+
+
+class JointChannelOut(BaseModel):
+    """The arm's INTERNAL joint channel (docs/arm.md "Internal joint channel"): a robot-local Unix datagram socket
+    for on-robot controllers (the whole-body controller). Not part of the public API."""
+    socket: Optional[str] = Field(description="Its socket path; null: no joint channel in this node.")
+    listening: bool = Field(description="The socket is bound and its receiver runs.")
+    config: JointChannelConfig
+    session: Optional[JointChannelSession] = Field(description="The open session; null if none.")
+    goal: Optional[JointChannelGoal] = Field(description="The stream goal in force (source `stream`); null if none.")
+    bad_datagrams: dict[str, int] = Field(description="Datagrams without a session or malformed, by reason (session, "
+                                                      "size, magic, version, json, unbound, control).")
+    nonfinite_goals: int = Field(description="Non-finite goals the command step held instead (a backstop; any source).")
+
+
 class ArmStateOut(BaseModel):
     """GET /state (and every /events message). Non-finite numbers are null."""
     state: ArmState = Field(description=STATE_DOC)
@@ -651,6 +700,7 @@ class ArmStateOut(BaseModel):
                                               "work on the computer can hold the loop past the motors' 100 ms watchdog.")
     clients: int = Field(description="Open stream / event subscriptions.")
     events: list[Event] = Field(description="The last 20 events, oldest first.")
+    joint_channel: JointChannelOut
     latest: Optional[TickRow] = Field(description="The latest control tick; null before the first.")
     server_mono: float = Field(description="Server monotonic s when this was built.")
 
