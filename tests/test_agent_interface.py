@@ -327,6 +327,7 @@ def test_page_meta_and_refusals(stack):
     st = stack
     page = get(st, "/").text
     assert 'src="common/ui.js"' in page and 'api("/' not in page and "innerHTML = r" not in page
+    assert "if (pulling){ again = true; return; }" in page   # one /log pull in flight, never a pile-up
     meta = get(st, "/meta").json()
     assert meta["name"] == "agent_interface" and meta["guide"] == "guide.md"
     post(st, "/session", {"agent": "T"})

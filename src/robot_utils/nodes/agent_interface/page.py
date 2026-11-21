@@ -100,6 +100,7 @@ $("#zoom").onclick = () => $("#zoom").style.display = "none";
 function zoom(src){ $("#zoom img").src = src; $("#zoom").style.display = "flex"; }
 
 let session = null, last = 0, viewing = null, hideBefore = 0;
+let pulling = false, again = false, gen = 0;   // one /log request at a time; gen moves on when the view resets
 function fmtTime(w){ return w ? new Date(w * 1000).toLocaleString() : "–"; }
 function sessionInfo(){
   const s = session;
@@ -129,14 +130,14 @@ async function listSessions(){
   if (!rows.length) p.appendChild(el("div", "ru-muted", "no stored sessions")); else p.appendChild(t);
 }
 async function viewSession(sid){
-  const r = await RU.api("sessions/" + sid); viewing = r.session; resetDialogue();
+  const r = await RU.api("sessions/" + sid); viewing = r.session; gen++; resetDialogue();
   const b = $("#banner"); b.style.display = "block"; b.textContent = "";
   b.appendChild(el("span", "", `Viewing stored session ${sid} (${r.turns.length} turns, thumbnails only). `));
   const back = el("a", "", "Back to live"); back.href = "#"; back.onclick = e => { e.preventDefault(); backToLive(); }; b.appendChild(back);
   const keep = session; session = r.session; r.turns.forEach(t => renderTurn(t, true)); session = keep; sessionInfo();
   $("#sessions").style.display = "none";
 }
-function backToLive(){ viewing = null; $("#banner").style.display = "none"; resetDialogue(); last = 0; $("#sessions").style.display = "none"; sessionInfo(); pull(); }
+function backToLive(){ viewing = null; gen++; $("#banner").style.display = "none"; resetDialogue(); last = 0; $("#sessions").style.display = "none"; sessionInfo(); pull(); }
 function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function avatar(actor){
   const a = el("div", "av");
@@ -194,20 +195,25 @@ function renderTurn(t, stored){
 }
 async function pull(){
   if (viewing) return;
-  const r = await RU.api("log?since=" + last);
-  const sid = r.session ? r.session.id : null;
-  if ((session ? session.id : null) !== sid && sid){ session = r.session; resetDialogue(); }
-  else if (!sid) session = null;
-  sessionInfo();
-  const box = $("#dialogue"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  for (const t of r.turns){
-    if (t.n <= last) continue;
-    last = t.n;
-    // the live view shows the live session's turns (and, without a session, the unattached ones)
-    if (t.n <= hideBefore || (sid ? t.session !== sid : t.session)) continue;
-    renderTurn(t);
-  }
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  if (pulling){ again = true; return; }                   // one more pull after the one in flight, never a pile
+  pulling = true; again = false; const g = gen;
+  try {
+    const r = await RU.api("log?since=" + last);
+    if (g !== gen || viewing) return;                       // the view was reset while it was in flight: stale turns
+    const sid = r.session ? r.session.id : null;
+    if ((session ? session.id : null) !== sid && sid){ session = r.session; resetDialogue(); }
+    else if (!sid) session = null;
+    sessionInfo();
+    const box = $("#dialogue"), atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    for (const t of r.turns){
+      if (t.n <= last) continue;
+      last = t.n;
+      // the live view shows the live session's turns (and, without a session, the unattached ones)
+      if (t.n <= hideBefore || (sid ? t.session !== sid : t.session)) continue;
+      renderTurn(t);
+    }
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } finally { pulling = false; if (again) pull(); }
 }
 RU.api("state").then(s => { const p = $("#profile");
   for (const n of Object.keys(s.profiles)){ const o = el("option", "", n); o.value = n; p.appendChild(o); } p.value = s.profile;
