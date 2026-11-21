@@ -360,8 +360,10 @@ class FakeHeadsetServer:
 
 def play(server: FakeHeadsetServer, keyframes: list, rate: float = 72.0, *, loop: bool = False,
          headset: Optional[Headset] = None, stop: Optional[threading.Event] = None,
-         pause: Callable[[float], bool] = lambda t: False) -> Headset:
-    """Send the scenario in real time at ``rate``; ``pause(t)`` True skips sending (a stream outage)."""
+         pause: Callable[[float], bool] = lambda t: False,
+         on_tick: Optional[Callable[[float], None]] = None) -> Headset:
+    """Send the scenario in real time at ``rate``; ``pause(t)`` True withholds the frame (a network outage: the
+    headset itself sees no gap). ``on_tick(t)`` runs before each frame (tests: drop the clients, ...)."""
     hs = headset or Headset()
     stop = stop or threading.Event()
     end = keyframes[-1][0]
@@ -373,8 +375,11 @@ def play(server: FakeHeadsetServer, keyframes: list, rate: float = 72.0, *, loop
             if not loop:
                 break
             t0, k, t = time.monotonic(), 0, 0.0
+        if on_tick is not None:
+            on_tick(t)
+        frame = hs.frame(sample(keyframes, t), time.monotonic())   # the headset runs on during an outage
         if not pause(t):
-            server.send(hs.frame(sample(keyframes, t), time.monotonic()))
+            server.send(frame)
         k += 1
         delay = t0 + k / rate - time.monotonic()
         if delay > 0:
