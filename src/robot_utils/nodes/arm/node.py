@@ -48,6 +48,8 @@ from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
+from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
+from .jam import updated as jam_updated
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
 from . import queries as Q
@@ -112,28 +114,6 @@ class Motion:
                 "progress": round(prog, 4), "duration": round(tr.duration, 3),
                 "t_start": tr.t[0], "t_end_planned": tr.t[-1],
                 "goal": None if tr.goal is None else pose_public(tr.goal), "info": tr.info}
-
-
-@dataclass
-class JamConfig:
-    """Jam detection: a STATIC arm still pushing (the aftermath of a contact, not the instant of it). Judged only
-    while servoing with no motion executing (a finished move counts; a move still settling too), every joint
-    slower than ``static_qd`` for ``settle_s``. A joint's residual |tau - tau_g| above its band for ``hold_s``
-    fires; it clears below ``release`` x band."""
-    bands: list = field(default_factory=lambda: [1.0, 4.0, 4.0, 1.5, 0.8, 0.6])   # Nm per joint (draft, offline study)
-    hold_s: float = 1.0
-    release: float = 0.7
-    static_qd: float = 0.05          # rad/s: every joint slower than this counts as static
-    settle_s: float = 0.5            # s static before judging
-    response: str = "hold"           # hold: command pulled to the reading (a move ends `jammed`) | report | off
-    refire: bool = True              # fire again after clearing (e.g. the base keeps pushing the arm in)
-
-    def public(self) -> dict:
-        return {"bands": list(self.bands), "hold_s": self.hold_s, "release": self.release, "static_qd": self.static_qd,
-                "settle_s": self.settle_s, "response": self.response, "refire": self.refire}
-
-
-JAM_RESPONSES = ("hold", "report", "off")
 
 
 @dataclass
@@ -239,13 +219,7 @@ class ArmNode:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connect_at = 0.0
-        self.jam = JamConfig()
-        self.jam_active: Optional[dict] = None    # the jam in force: joint, residual, since, response
-        self.jams: list[dict] = []                # recent jams (last 20), newest last
-        self.jam_count = 0
-        self._static_since: Optional[float] = None
-        self._over_since = np.full(N, np.nan)     # per joint: when its residual went over its band (NaN = under)
-        self._jam_fired_cmd: Optional[int] = None # with refire off: the command it fired for (fires once per command)
+        self.jam_detector = JamDetector()         # jam (its config), jam_active, jams, jam_count: properties below
         self._cmd_count = 0                       # every new command / motion (refire off: one jam per command)
         self._aib: Optional[dict] = None           # arm_in_base's cache (queries.arm_in_base)
 
@@ -764,54 +738,45 @@ class ArmNode:
 
     # -- jam detection: a static arm still pushing ----------------------------------------------------
 
+    @property
+    def jam(self) -> JamConfig:
+        return self.jam_detector.cfg
+
+    @jam.setter
+    def jam(self, cfg: JamConfig) -> None:
+        self.jam_detector.cfg = cfg
+
+    @property
+    def jam_active(self) -> Optional[dict]:
+        """The jam in force: joint, residual, since, response."""
+        return self.jam_detector.active
+
+    @property
+    def jams(self) -> list:
+        """Recent jams (last 20), newest last."""
+        return self.jam_detector.recent
+
+    @property
+    def jam_count(self) -> int:
+        return self.jam_detector.count
+
     def _jam_reset(self) -> None:
-        self._static_since = None
-        self._over_since[:] = np.nan
-        self.jam_active = None
+        self.jam_detector.reset()
 
     def _jam_check(self, now: float, r, src, tau_g) -> None:
-        """Control thread, while servoing. See JamConfig. Planned motions and holds get the response; track (a
-        teleop stream overwrites the command every tick) is report-only."""
-        cfg = self.jam
-        if cfg.response == "off" or tau_g is None:
-            self._jam_reset()
-            return
+        """Control thread, while servoing (jam.JamDetector judges). Planned motions and holds get the response: the
+        command is pulled to the reading (a motion ends `jammed`); track (a teleop stream overwrites the command
+        every tick) is report-only."""
         m = self.motion
-        moving = (m is not None and m.phase == "executing") or bool(np.any(np.abs(r.qd) > cfg.static_qd))
-        if moving:
-            self._static_since = None
-            self._over_since[:] = np.nan
+        ev = self.jam_detector.check(now, r.qd, r.tau, tau_g, m is not None and m.phase == "executing", src,
+                                     self._cmd_count)
+        if ev is None:
             return
-        self._static_since = self._static_since or now
-        if now - self._static_since < cfg.settle_s:
+        if ev.cleared:
+            self.events.add(f"jam cleared (joint{ev.joint})")
             return
-        res = np.asarray(r.tau, float) - np.asarray(tau_g, float)
-        bands = np.asarray(cfg.bands, float)
-        if self.jam_active is not None:                       # hysteresis: clear only well under every band
-            if np.all(np.abs(res) < cfg.release * bands):
-                self.events.add(f"jam cleared (joint{self.jam_active['joint']})")
-                self.jam_active = None
-                self._over_since[:] = np.nan
-            return
-        over = np.abs(res) > bands
-        self._over_since = np.where(over, np.where(np.isnan(self._over_since), now, self._over_since), np.nan)
-        held = np.where(over, now - self._over_since, 0.0)
-        if not np.any(held >= cfg.hold_s):
-            return
-        if not cfg.refire and self._jam_fired_cmd == self._cmd_count:
-            return
-        i = int(np.argmax(np.where(held >= cfg.hold_s, np.abs(res) / bands, 0.0)))
-        track = src == "track"
-        act = "report" if (cfg.response == "report" or track) else "hold"
-        jam = {"t": now, "wall": time.time(), "joint": i + 1, "residual_nm": round(float(res[i]), 3),
-               "band_nm": float(bands[i]), "held_s": round(float(held[i]), 2), "response": act, "source": src,
-               "residuals_nm": [round(float(v), 3) for v in res]}
-        self.jam_count += 1
-        jam["count"] = self.jam_count
-        self.jam_active, self._jam_fired_cmd = jam, self._cmd_count
-        self.jams = (self.jams + [jam])[-20:]
-        what = (f"jam: joint{i + 1} residual {res[i]:+.1f} Nm (band {bands[i]:g}) for {held[i]:.1f} s while static")
-        if act == "hold":
+        what = ev.message
+        if ev.jam["response"] == "hold":
             with self._lock:     # stop pushing: hold where the arm is, not where it was told to be
                 self._command_from_reading(r, np.zeros(N))
             if self.motion is not None:
@@ -819,7 +784,7 @@ class ArmNode:
             else:
                 self.events.add(what + ": holding where it is", "warn")
         else:
-            self.events.add(what + (" (track: report only)" if track else " (report only)"), "warn")
+            self.events.add(what + (" (track: report only)" if src == "track" else " (report only)"), "warn")
 
     def jam_state(self) -> dict:
         return finite({"config": self.jam.public(), "active": self.jam_active, "count": self.jam_count,
@@ -827,15 +792,7 @@ class ArmNode:
 
     def set_jam(self, changes: dict) -> dict:
         """Change the jam detector (the server allows it for a human only)."""
-        cfg = self.jam
-        new = JamConfig(**{**cfg.public(), **{k: v for k, v in changes.items() if v is not None}})
-        if len(new.bands) != N or not all(math.isfinite(b) and b > 0 for b in new.bands):
-            raise ValueError(f"bands: {N} positive numbers (Nm, one per joint)")
-        if new.response not in JAM_RESPONSES:
-            raise ValueError(f"response: one of {', '.join(JAM_RESPONSES)}")
-        if not (0 < new.release < 1) or new.hold_s <= 0 or new.settle_s < 0 or new.static_qd <= 0:
-            raise ValueError("release in (0, 1); hold_s > 0; settle_s >= 0; static_qd > 0")
-        self.jam = new
+        self.jam = jam_updated(self.jam, changes)
         self.events.add("jam detection: " + ", ".join(f"{k}={v}" for k, v in changes.items() if v is not None))
         return self.jam_state()
 
