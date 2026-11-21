@@ -17,7 +17,7 @@ def test_granted(monkeypatch):
     calls = []
     fake_os(monkeypatch, lambda pid, policy, param: calls.append((pid, policy, param)))
     rt = realtime.make_realtime(40, "test")
-    assert rt == {"policy": "SCHED_FIFO", "priority": 40, "requested": 40, "error": None}
+    assert rt == {"policy": "SCHED_FIFO", "priority": 40, "requested": 40, "error": None, "cpus": None}
     assert calls == [(0, 1 | 0x40000000, 40)]          # the calling thread, reset in children
     assert "SCHED_FIFO 40" in realtime.describe(rt)
     RealtimeOut(**rt)
@@ -48,3 +48,35 @@ def test_other_os(monkeypatch):
 
 def test_not_started_matches_the_model():
     RealtimeOut(**realtime.not_started(20))
+
+
+def test_pinned(monkeypatch):
+    fake_os(monkeypatch, lambda *a: None)
+    mask = {0, 1, 2, 3}
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, cpus: (pid == 0 or pytest.fail("not the calling thread"),
+                                                                     mask.intersection_update(cpus)), raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(mask), raising=False)
+    rt = realtime.make_realtime(40, "test", cpus={3})
+    assert rt["policy"] == "SCHED_FIFO" and rt["cpus"] == [3] and rt["error"] is None
+    assert "pinned to CPUs 3" in realtime.describe(rt)
+    RealtimeOut(**rt)
+
+
+def test_pin_failure_is_reported_and_real_time_still_granted(monkeypatch):
+    fake_os(monkeypatch, lambda *a: None)
+
+    def refuse(pid, cpus):
+        raise OSError(22, "Invalid argument")
+    monkeypatch.setattr(os, "sched_setaffinity", refuse, raising=False)
+    rt = realtime.make_realtime(40, "test", cpus={7})
+    assert rt["policy"] == "SCHED_FIFO" and rt["cpus"] is None and "not pinned to CPUs [7]" in rt["error"]
+    RealtimeOut(**rt)
+
+
+def test_pinning_without_real_time(monkeypatch):
+    fake_os(monkeypatch, lambda *a: pytest.fail("must not be called"))
+    monkeypatch.setenv("ROBOT_UTILS_RT", "0")
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, cpus: None, raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {2}, raising=False)
+    rt = realtime.make_realtime(40, cpus={2})
+    assert rt["policy"] == "SCHED_OTHER" and rt["cpus"] == [2] and "ROBOT_UTILS_RT" in rt["error"]

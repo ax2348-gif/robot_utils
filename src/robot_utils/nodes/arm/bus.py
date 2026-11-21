@@ -20,6 +20,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
+from time import perf_counter   # phase timing (tests replace ``time``, the bus's clock)
 from typing import Optional
 
 import numpy as np
@@ -198,6 +199,9 @@ class HardwareBus(ArmBus):
         self._requested = False       # requests in flight for the next read
         self._t_req: Optional[float] = None   # when they were sent
         self._waited = 0              # ticks the requests in flight have already been waited for
+        # s of the last read: (collecting the replies, writing the next requests) (tick phases)
+        self.read_split: Optional[tuple] = None
+        self._req_s = 0.0
         assert self.names == [f"joint{i}" for i in range(1, N + 1)] + ["gripper"], self.names
 
     def connect(self) -> None:
@@ -317,14 +321,18 @@ class HardwareBus(ArmBus):
 
         arrived: dict = {}       # motor -> when its xout reply arrived (reply_latency)
         fed: dict = {}           # motor -> when its latest feedback frame arrived (refresh plan)
+        t_read = perf_counter()
+        self._req_s = 0.0
 
         def request():
+            t0 = perf_counter()
             self._t_req = time.monotonic()
             if not rb._request_xout(mm, self.names):
                 raise BusError("motorbridge without non-blocking register reads: upgrade it")
             for n in refresh.plan(fed):
                 mm[n].request_feedback()
             self._requested = True
+            self._req_s += perf_counter() - t0
 
         def states() -> list:
             if not refresh.skip:
@@ -348,6 +356,7 @@ class HardwareBus(ArmBus):
                     arrived[n] = time.monotonic() - float(cached[1])     # (value, age since it arrived)
             return out
 
+        self.read_split = None
         try:
             if not self._requested:                  # first read: request and wait
                 request()
@@ -370,6 +379,7 @@ class HardwareBus(ArmBus):
             request()                                # for the next tick
         except CallError as e:
             raise BusError(f"read failed: {e}") from e
+        self.read_split = (perf_counter() - t_read - self._req_s, self._req_s)
         if missing:
             self.reply_latency = None
             raise ReadMiss(missing, f"no reply within {REPLY_WAIT_TICKS + 1} ticks from "

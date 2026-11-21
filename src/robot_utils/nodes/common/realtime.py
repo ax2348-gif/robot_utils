@@ -37,20 +37,49 @@ class RealtimeOut(BaseModel):
     requested: int = Field(description="The priority the loop asked for (0: none, real time is switched off).")
     error: Optional[str] = Field(description="Why the request was not granted; null if it was, or before the loop "
                                              "has started.")
+    cpus: Optional[list[int]] = Field(None, description="CPUs the loop's thread is pinned to (null: not pinned, "
+                                                        "it runs wherever the scheduler puts it).")
 
 
 def not_started(requested: int) -> dict:
     """The record before the loop's thread has run."""
-    return {"policy": "SCHED_OTHER", "priority": 0, "requested": requested, "error": None}
+    return {"policy": "SCHED_OTHER", "priority": 0, "requested": requested, "error": None, "cpus": None}
 
 
-def make_realtime(priority: int, name: str = "control loop") -> dict:
+def make_realtime(priority: int, name: str = "control loop", cpus: Optional[set] = None) -> dict:
     """Give the CALLING thread SCHED_FIFO at ``priority``; returns a ``RealtimeOut`` record.
 
     Call it first thing in the loop's thread. The policy is reset in anything the thread starts
     (SCHED_RESET_ON_FORK), so a planner process or a helper thread is not real time too.
+
+    ``cpus``: also pin the calling thread to these CPUs (independent of real time; a failure is
+    logged and reported in ``error``, the loop runs unpinned). Unlike the policy, the affinity IS
+    inherited by threads the loop's thread starts (e.g. motorbridge's bus poller). Pin a SCHED_FIFO
+    loop only to CPUs no other real-time loop runs on: a FIFO thread is never preempted by another
+    of the same priority, and a pinned one cannot move away from it.
     """
     out = not_started(priority)
+    pin_error = _pin(cpus, name, out) if cpus else None
+    out = _make_realtime(priority, name, out)
+    if pin_error is not None:
+        out["error"] = pin_error if out["error"] is None else f"{out['error']}; {pin_error}"
+    return out
+
+
+def _pin(cpus: set, name: str, out: dict) -> Optional[str]:
+    if not hasattr(os, "sched_setaffinity"):
+        return "CPU pinning not available on this OS"
+    try:
+        os.sched_setaffinity(0, set(cpus))                                # 0: the calling thread
+        out["cpus"] = sorted(os.sched_getaffinity(0))
+        log.info("%s: pinned to CPUs %s", name, out["cpus"])
+        return None
+    except (OSError, ValueError) as e:
+        log.warning("%s: not pinned to CPUs %s (%s)", name, sorted(cpus), e)
+        return f"not pinned to CPUs {sorted(cpus)}: {type(e).__name__}: {e}"
+
+
+def _make_realtime(priority: int, name: str, out: dict) -> dict:
     if os.environ.get("ROBOT_UTILS_RT", "1").strip().lower() in ("0", "off", "false", "no"):
         out.update(requested=0, error="switched off (ROBOT_UTILS_RT=0)")
         return out
@@ -74,6 +103,8 @@ def make_realtime(priority: int, name: str = "control loop") -> dict:
 
 def describe(rt: dict) -> str:
     """One line for a node's event log."""
+    pinned = f", pinned to CPUs {','.join(map(str, rt['cpus']))}" if rt.get("cpus") else ""
     if rt["policy"] == "SCHED_FIFO":
-        return f"control loop is real time (SCHED_FIFO {rt['priority']})"
-    return f"control loop is NOT real time: {rt['error']}"
+        return f"control loop is real time (SCHED_FIFO {rt['priority']}){pinned}" + (
+            f"; {rt['error']}" if rt.get("error") else "")
+    return f"control loop is NOT real time: {rt['error']}{pinned}"

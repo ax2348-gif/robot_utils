@@ -654,3 +654,35 @@ class ArmStateOut(BaseModel):
     latest: Optional[TickRow] = Field(description="The latest control tick; null before the first.")
     server_mono: float = Field(description="Server monotonic s when this was built.")
 
+
+
+# -- debugging -----------------------------------------------------------------------------------
+
+class TickPhaseStats(BaseModel):
+    p50: float = Field(description="ms")
+    p90: float = Field(description="ms")
+    p99: float = Field(description="ms")
+    max: float = Field(description="ms")
+
+
+class TickPhaseRow(BaseModel):
+    age_s: float = Field(description="s before the newest recorded tick")
+    wake: Optional[float] = Field(description="ms the thread woke late from its sleep (interpreter lock, a CPU)")
+    read: Optional[float] = Field(description="ms in bus.read()")
+    read_collect: Optional[float] = Field(description="ms of the read collecting replies (hardware bus; 0 otherwise)")
+    read_request: Optional[float] = Field(description="ms of the read writing the next requests (hardware bus)")
+    control: Optional[float] = Field(description="ms of computation")
+    send: Optional[float] = Field(description="ms in bus.send() (the MIT frames)")
+    publish: Optional[float] = Field(description="ms building and handing over the telemetry row")
+    work: Optional[float] = Field(description="ms from waking to the end of the tick")
+    cpu: Optional[float] = Field(description="ms of the control thread's own CPU time in the tick (work - cpu: blocked)")
+
+
+class TickPhasesOut(BaseModel):
+    enabled: bool = Field(description="false: the node runs without --tick-phases (nothing recorded)")
+    ticks: int = Field(0, description="ticks in the statistics (the last 6000 at most: 60 s)")
+    recorded: int = Field(0, description="ticks recorded since the node started")
+    phases: dict[str, TickPhaseStats] = Field(default_factory=dict, description="per phase (see `worst` for the names)")
+    worst: list[TickPhaseRow] = Field(default_factory=list, description="the slowest ticks (wake + work), slowest first")
+    over_10ms: int = Field(0, description="ticks whose wake + work exceeded the 10 ms period (the next one started late)")
+    over_15ms: int = Field(0, description="... exceeded 15 ms (an overrun)")

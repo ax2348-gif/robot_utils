@@ -108,6 +108,7 @@ def test_every_json_endpoint_is_typed_and_lossless(api):
     call("GET", "/limits")
     call("GET", "/gains")
     call("GET", "/gripper")
+    assert call("GET", "/debug/tick_phases") == {"enabled": False}       # the node runs without --tick-phases
     call("GET", "/jam")
     call("POST", "/jam", json={"hold_s": 1.5}, headers={"X-Operator": "human"})
     call("POST", "/jam", json={"hold_s": 1.0}, headers={"X-Operator": "human"})

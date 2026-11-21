@@ -51,6 +51,7 @@ from . import config as C
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
 from .kin import ArmKinematics, N, pose_error, pose_public
 from .motion import PlanError, Trajectory
+from .phases import TickPhases
 from .planner import Planner
 from .render import VIEW_DEFAULTS
 
@@ -224,8 +225,14 @@ class ArmNode:
     def __init__(self, bus_factory: Callable[[], ArmBus], profile: str = C.DEFAULT_PROFILE,
                  settings: Optional[C.NodeSettings] = None, hub: Optional[RowHub] = None,
                  locks: Optional[LockStore] = None, clock: Callable[[], float] = time.monotonic,
-                 description_node: str = "description"):
+                 description_node: str = "description", tick_phases: bool = False,
+                 rt_cpus: Optional[set] = None):
+        """``tick_phases``: record where each tick's time goes (``phases``; GET /debug/tick_phases).
+        ``rt_cpus``: CPUs the control thread is pinned to (None: wherever the scheduler puts it)."""
         self.bus_factory = bus_factory
+        self.phases: Optional[TickPhases] = TickPhases() if tick_phases else None
+        self.rt_cpus = None if rt_cpus is None else set(rt_cpus)
+        self._wake_late = 0.0             # s the thread woke late from its last sleep (0: it did not sleep)
         self.description_node = description_node     # where the arm frame's pose in the robot base frame comes from
         self.clock = clock
         self.settings = settings or C.NodeSettings()
@@ -347,10 +354,12 @@ class ArmNode:
         self.bus, self.motors_on, self.g_motor_on = None, False, False
 
     def _run(self) -> None:
-        self.realtime = realtime.make_realtime(realtime.PRIO_BUS, "arm control loop")
+        self.realtime = realtime.make_realtime(realtime.PRIO_BUS, "arm control loop", cpus=self.rt_cpus)
         self.events.add(realtime.describe(self.realtime), "info" if self.realtime["error"] is None else "warn")
         next_t = time.monotonic()
+        slept = False
         while not self._stop.is_set():
+            self._wake_late = time.monotonic() - next_t if slept else 0.0
             try:
                 self.step()
             except Exception as e:  # noqa: BLE001 - never let the loop die silently
@@ -358,10 +367,12 @@ class ArmNode:
                 self._fault(f"control loop: {type(e).__name__}: {e}")
             next_t += DT
             delay = next_t - time.monotonic()
+            slept = False
             if delay < -0.05:
                 next_t = time.monotonic()
             elif delay > 0:
                 time.sleep(delay)
+                slept = True
 
     def step(self) -> None:
         """One iteration of the control thread: connect if needed, else one tick."""
@@ -409,6 +420,9 @@ class ArmNode:
     # -- control tick ------------------------------------------------------------------------------
 
     def tick(self) -> None:
+        ph = self.phases
+        if ph is not None:
+            ph.begin(self._wake_late)
         now = self.clock()
         dt_tick = math.nan if self._last_t is None else now - self._last_t
         self._last_t = now
@@ -419,7 +433,15 @@ class ArmNode:
             self.events.add(f"control tick {dt_tick * 1e3:.0f} ms late", "warn")
         stale = False
         try:
-            r = self.bus.read()
+            try:
+                r = self.bus.read()
+            finally:
+                if ph is not None:
+                    ph.mark("read")
+                    split = getattr(self.bus, "read_split", None)
+                    if split is not None:
+                        ph.set("read_collect", split[0])
+                        ph.set("read_request", split[1])
             self.reading, self._fresh_t, self.read_age = r, now, 0.0
             self._stale_warned = False
             self._note_latency(now)
@@ -467,7 +489,12 @@ class ArmNode:
             return
         if self.motors_on:
             self._control(now, r)
+        if ph is not None:
+            ph.mark("control")
         self._publish(now, dt_tick, r)
+        if ph is not None:
+            ph.mark("publish")
+            ph.end()
 
     def _stale_warn(self, now: float, age: float, missing: list) -> None:
         """Control thread: a gap in the readings is nearing the fault (STALE_ON): say so, at most
@@ -734,8 +761,13 @@ class ArmNode:
             g_q, tau_est, force, g_ff, limiting, g_kp, g_kd = r.g_q_mot, math.nan, math.nan, 0.0, False, 0.0, 0.0
             applied = math.nan
         self._g = {"tau_est": tau_est, "force": applied, "demand": force, "ff": g_ff, "limiting": limiting, "tau_g": tau_g}
+        ph = self.phases
+        if ph is not None:
+            ph.mark("control")
         try:
             self.bus.send(q_cmd, qd_ff, kp, kd, tau_g, g_q, 0.0, g_kp, g_kd, g_ff, gripper=self.g_motor_on)
+            if ph is not None:
+                ph.mark("send")
         except BusError as e:
             self._fault(str(e))
             return

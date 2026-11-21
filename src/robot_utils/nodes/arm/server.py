@@ -486,4 +486,12 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def set_limits(body: LimitsIn, token: LeaseToken = None):
         return node.set_limits(token, **body.model_dump())
 
+    @app.get("/debug/tick_phases", response_model=M.TickPhasesOut, response_model_exclude_unset=True, tags=["debug"],
+             summary="Where the control ticks' time goes, per phase (the node runs with --tick-phases)")
+    async def tick_phases():
+        ph = node.phases
+        if ph is None:
+            return {"enabled": False}
+        return {"enabled": True, **(await asyncio.to_thread(ph.stats))}
+
     return app
