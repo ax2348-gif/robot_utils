@@ -113,7 +113,7 @@ class SimNode:
             self.cameras.stop(cam)
             return {}
         if op == "frames":
-            metas, data = self.cameras.frames(cam, h.get("after") or {}, float(h.get("timeout", 0.05)))
+            metas, data = self.cameras.frames(cam, h.get("after") or {}, float(h.get("wait", 0.05)))
             return {"frames": metas}, data
         raise SimError(f"unknown camera op {op!r}")
 
