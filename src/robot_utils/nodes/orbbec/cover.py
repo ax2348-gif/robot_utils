@@ -5,7 +5,7 @@ Each enabled stream gets frames of its configured size and rate, flagged ``cover
   re-rendered at 2 Hz and re-sent at the stream's rate;
 - depth: a synthetic scene (a floor sloping away under a far wall) in millimetres, slowly breathing;
 - IR: a gray pattern.
-So every endpoint, page and consumer (3d_perception, agent_nav) keeps working on frames that are
+So every endpoint, page and consumer (3d_perception, agent_interface) keeps working on frames that are
 clearly marked as not real.
 """
 from __future__ import annotations

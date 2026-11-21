@@ -12,7 +12,7 @@ them.
 
 **What keeps working while locked:**
 - **chock:** telemetry, the API and the page. Everything that drives through the swerve is also
-  covered: pose_servo, agent_nav, and the description node's yaw calibration.
+  covered: pose_servo, agent_interface, and the description node's yaw calibration.
 - **cover:** every endpoint, page and consumer works on the procedural frames, at the configured
   sizes and rates. Frame headers and `/state` carry `covered: true`, and 3d_perception passes the
   flag on. The **IMU keeps running**, because the estimator's heading depends on it.

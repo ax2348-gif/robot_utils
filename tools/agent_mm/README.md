@@ -7,7 +7,7 @@ are kept exactly as they ran; these are the reusable versions.
 |---|---|
 | `mm.py` | logged robot calls (`nav`/`arm METHOD PATH [JSON]`), arm lease `keeper`, `servo`/`step`/`grip`/`tcp`. Writes into `$MM_RUN` (default: the current folder): `calls.jsonl`, `img/` |
 | `record.py` | high-rate client-side recording for the whole episode: arm + estimator `/stream` (raw bytes), camera depth (PNG, 16-bit mm) + colour at `--cam-hz` for each of `--cameras` (default head `camera` → `cam/`, `wrist_camera` → `cam_wrist_camera/`), calibrations. Restarting into the same folder continues it. Read-only |
-| `ray.py` | pixel → 3D at a given height from `GET /agent_nav/robot` (approximate pinhole) |
+| `ray.py` | pixel → 3D at a given height from `GET /agent_interface/robot` (approximate pinhole) |
 
 ## Per episode
 
@@ -33,6 +33,6 @@ for h, rows in iter_rows(iter_records(open(f"{run}/streams/arm.bin", "rb"))):
 **Ego point cloud for frame n:**
 1. Back-project `cam/n_depth.png` (mm) with `calibration.json["depth"]` (fx, fy, cx, cy).
 2. Move to the colour optical frame with `calibration.json["depth_to_color"]`.
-3. Move to the base frame with `base_to_color` from `GET /agent_nav/robot`.
+3. Move to the base frame with `base_to_color` from `GET /agent_interface/robot`.
 4. Move to the world frame with the estimator pose at `frames.jsonl[n].depth.t_capture` (camera monotonic clock; the
    estimator `t` is on the same Pi monotonic clock, so interpolate `estimator.bin` directly).

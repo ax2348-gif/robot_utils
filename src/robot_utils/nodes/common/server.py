@@ -54,7 +54,7 @@ class Event(BaseModel):
 
 
 class Health(BaseModel):
-    """``GET /health``. Open-ended: each node adds its own keys (agent_nav: `session`)."""
+    """``GET /health``. Open-ended: each node adds its own keys (agent_interface: `session`)."""
     ok: bool = Field(description="Always true: the node answers.")
     node: Optional[str] = Field(None, description="Node kind, e.g. `swerve`.")
     state: Optional[str] = Field(None, description="The node's status word (the `state` of its /state).")

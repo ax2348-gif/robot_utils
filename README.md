@@ -53,7 +53,7 @@ landing page that indexes them. Start each on the robot from this checkout, with
 | pose servo (drive the base to a pose: jerk-limited, uses the estimator) | `python -m robot_utils.nodes.pose_servo` | `/nodes/pose_servo/` | [docs/pose_servo_node.md](docs/pose_servo_node.md) |
 | robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | `/nodes/description/` | [docs/description_node.md](docs/description_node.md) |
 | 3d_perception (depth registered into the colour image, motion-compensated; pixel → 3D point) | `python -m robot_utils.nodes.perception3d` | `/nodes/3d_perception/` | [docs/perception3d_node.md](docs/perception3d_node.md) |
-| agent_nav (navigation for AI agents: read-only perception + explicit goals, dialogue transcript; agents read `/nodes/agent_nav/guide.md`) | `python -m robot_utils.nodes.agent_nav` | `/nodes/agent_nav/` | [docs/agent_nav.md](docs/agent_nav.md) |
+| agent_interface (Agent MoMa: mobile manipulation for AI agents: read-only perception, explicit goals for the base and the arm, dialogue transcript; agents read `/nodes/agent_interface/guide.md`) | `python -m robot_utils.nodes.agent_interface` | `/nodes/agent_interface/` | [docs/agent_interface.md](docs/agent_interface.md) |
 | landing page | `python -m robot_utils.frontend` | `/` | [docs/frontend.md](docs/frontend.md) |
 
 Everything is one origin on port 80: nginx (`robot-proxy.service`) serves the landing page at `/`
