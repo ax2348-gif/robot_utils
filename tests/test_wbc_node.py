@@ -34,6 +34,8 @@ class Rig:
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.seq = 0
         self.session = None
+        self.armed = True             # the client's latch (docs/wbc.md "The armed latch"): a press, armed
+        self.aseq = 1
 
     def step(self, n=1):
         for _ in range(n):
@@ -49,11 +51,13 @@ class Rig:
         self.node.enable(self.tok)
         out = self.node.open_session(self.tok)
         self.session = out["session"]
+        self.aseq = out["arm_seq"] + 1            # a press above the WBC's floor: the first target arms
+        self.step(1)                              # a row with the commanded pose (an arming datagram must be valid)
         return out
 
     def send(self, msg, raw=None):
         self.seq += 1
-        m = {"session": self.session, "seq": self.seq, **msg}
+        m = {"session": self.session, "seq": self.seq, "armed": self.armed, "arm_seq": self.aseq, **msg}
         self.udp.sendto(raw if raw is not None else json.dumps(m).encode(), ("127.0.0.1", self.node.receiver.udp_port))
         time.sleep(0.003)
 
@@ -103,8 +107,9 @@ def test_enable_session_track_and_stream(rig):
     assert np.allclose(p0, T0.translation, atol=1e-9)        # seeded from the measured joints
     # a world target at the commanded pose: no jump
     qc = node.q_cmd["arm"].copy()
-    rig.target(p0, q0)
+    rig.target(p0, q0)                                       # (armed: this target arms the latch)
     rig.step(3)
+    assert node.armed and rig.row()["armed"] == 1.0
     assert node.state == "tracking" and np.max(np.abs(node.q_cmd["arm"] - qc)) < 1e-9
     # a move: the fake arm follows the commands; commanded and measured agree, the target is reached
     goal = p0 + [0.04, -0.03, 0.03]
@@ -123,10 +128,11 @@ def test_enable_session_track_and_stream(rig):
     # the unix socket path delivers too
     u = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     rig.seq += 1
-    u.sendto(json.dumps({"type": "alive", "session": rig.session, "seq": rig.seq}).encode(), node.receiver.unix_path)
+    u.sendto(json.dumps({"type": "alive", "session": rig.session, "seq": rig.seq, "armed": True,
+                         "arm_seq": rig.aseq}).encode(), node.receiver.unix_path)
     time.sleep(0.01)
     rig.step(1)
-    assert rig.row()["seq"] == rig.seq
+    assert rig.row()["seq"] == rig.seq and node.armed
     node.disable("done")
     time.sleep(0.2)
     assert arm.token is None and not arm.enabled             # released
@@ -143,15 +149,24 @@ def test_staleness_two_stages_and_resume(rig):
     rig.step(10)                                             # 0.15 s: the feedforward fades
     assert 0.0 < rig.row()["arm_ff_scale"] < 1.0 and node.state == "tracking"
     node.renew(rig.tok)
-    rig.step(15)                                             # past hold_timeout (0.25 s): holding
-    assert node.state == "holding" and rig.row()["hold"] == 1.0 and "stale" in node.state_dict()["hold_reason"]
+    rig.step(15)                                             # past hold_timeout (0.25 s): held
+    # the armed latch (deliberate change): stale input DISARMS (the target cleared), the state is idle, holding
+    assert not node.armed and "input stale" in node.state_dict()["disarm_reason"]
+    assert node.state == "idle" and rig.row()["hold"] == 1.0 and rig.row()["armed"] == 0.0
+    assert "disarmed: input stale" in node.state_dict()["hold_reason"]
+    assert all(b.kind is None for b in node.buffers.values())
     q_hold = node.q_cmd["arm"].copy()
     node.renew(rig.tok)
     rig.step(20)
-    assert np.max(np.abs(node.q_cmd["arm"] - q_hold)) < 0.01    # stops (decelerating within the limits)
-    rig.send({"type": "alive"})                              # the client is back: the pose in force is tracked again
+    assert np.max(np.abs(node.q_cmd["arm"] - q_hold)) < 1e-12  # held at its commanded joints (disarmed: at once)
+    rig.send({"type": "alive"})                              # the client is back with its old press: NOT resumed
+    rig.target(p0 + [0.02, 0, 0], q0)
     rig.step(1)
-    assert node.state == "tracking"
+    assert not node.armed and node.state == "idle" and np.max(np.abs(node.q_cmd["arm"] - q_hold)) < 1e-12
+    rig.aseq += 1                                            # a new press: tracking again
+    rig.target(p0 + [0.02, 0, 0], q0)
+    rig.step(1)
+    assert node.armed and node.state == "tracking"
 
 
 def test_a_datagram_base_hint_refreshes_the_hint_age(rig):
@@ -240,11 +255,15 @@ def test_client_lease_lapse_holds(rig):
     p0, q0 = rig.cmd_pose()
     rig.target(p0, q0)
     rig.step(1)
+    assert node.armed
     rig.clock.t += 2.0                                       # the lease (1 s) lapses
     rig.step(1)
     rig.send({"type": "alive"})                              # its session is gone too: dropped
     rig.step(1)
-    assert node.state == "holding" and node.state_dict()["hold_reason"] == "no client lease"
+    # the armed latch (deliberate change): disarmed (here the 2 s jump is also a late tick), so the state is idle;
+    # the hold reason is still the missing client lease
+    assert not node.armed and rig.row()["armed"] == 0.0
+    assert node.state == "idle" and node.state_dict()["hold_reason"] == "no client lease"
     assert node.receiver.counts["dropped"].get("unknown_session", 0) >= 1
     assert node.enabled                                      # the downstream leases stay until POST /disable
 
@@ -253,6 +272,9 @@ def test_datagram_drops_are_counted(rig):
     node = rig.node
     rig.lease_enable()
     p0, q0 = rig.cmd_pose()
+    rig.target(p0, q0)                                       # armed: the invalid datagrams below are checked
+    rig.step(1)
+    assert node.armed
     rig.send({}, raw=b"not json")
     rig.send({"type": "target", "session": rig.session + 1, "ees": {}})      # unknown session
     rig.seq += 1                                                              # (session overridden by **msg)
@@ -269,6 +291,16 @@ def test_datagram_drops_are_counted(rig):
     d = node.state_dict()["session"]["dropped"]
     assert d["not_json"] == 1 and d["unknown_session"] == 1 and d["old_seq"] == 1
     assert d["bad_t"] == 1 and d["frame"] == 1 and d["invalid"] >= 2
+    assert node.armed                                        # the drops changed nothing in the latch
+    # the armed latch (deliberate change): disarmed, targets are ignored before any check (counted, not dropped)
+    rig.armed = False
+    rig.target(p0, q0)
+    rig.step(1)
+    ign = node.latch_counts["ignored_disarmed"]
+    rig.send({"type": "target", "t": rig.clock.t - 5.0, "ees": {"arm": {"pos": list(p0), "quat": list(q0)}}})
+    rig.step(1)
+    d = node.state_dict()["session"]["dropped"]
+    assert d["bad_t"] == 1 and node.latch_counts["ignored_disarmed"] == ign + 1
 
 
 def test_est_reset_drops_and_aborts(model):
@@ -291,7 +323,7 @@ def test_est_reset_drops_and_aborts(model):
     est(3)
     step(2)
     T = node.model.fk(node.model.config((0, 0, 0), node.q_cmd), "arm")
-    msg = {"type": "target", "session": sess, "t": None,
+    msg = {"type": "target", "session": sess, "t": None, "armed": True, "arm_seq": 1,     # armed (one press)
            "ees": {"arm": {"pos": list(T.translation + [0.02, 0, 0]), "quat": list(R_to_quat(T.rotation))}}}
     assert node.receiver.handle(json.dumps({**msg, "seq": 1, "est_reset": 2}).encode()) is None
     step(1)
@@ -303,6 +335,7 @@ def test_est_reset_drops_and_aborts(model):
     step(1)
     assert node.state == "idle" and all(b.kind is None for b in node.buffers.values())
     assert any("estimator reset" in e["msg"] for e in node.events.list())
+    assert not node.armed and "estimator reset" in node.disarm_reason     # the latch: a reset also disarms
     node.disable("done")
     node.receiver.close()
 
@@ -351,11 +384,14 @@ def test_arm_pause_holds_then_resumes_from_the_measured_joints_and_bye_faults(ri
     p0, q0 = rig.cmd_pose()
     rig.target(p0, q0)
     rig.step(5)
+    assert node.armed
     n_goals = len(arm.commands)
     with arm.lock:
         arm.paused = True
     rig.step(3)
-    assert node.state == "holding" and node.state_dict()["hold_reason"] == "arm paused by a planned motion"
+    # the armed latch (deliberate change): the pause disarms, so the state is idle (holding, for the pause)
+    assert not node.armed and node.disarm_reason == "arm paused by a planned motion"
+    assert node.state == "idle" and node.state_dict()["hold_reason"] == "arm paused by a planned motion"
     with arm.lock:
         arm.q = arm.q + np.radians([5, -5, 0, 0, 0, 0])          # the planned motion moved the arm
     rig.send({"type": "alive"})
@@ -366,6 +402,7 @@ def test_arm_pause_holds_then_resumes_from_the_measured_joints_and_bye_faults(ri
     rig.step(2)
     assert np.allclose(node.q_cmd["arm"], arm.q, atol=1e-6)   # resumed from the measured joints
     assert node.resyncs == 0 and len(arm.commands) > n_goals
+    assert not node.armed                                     # still disarmed: tracking needs a new press
     with arm.lock:                                            # the arm closes the session
         arm.sock.sendto(json.dumps({"type": "bye", "reason": "lease ended"}).encode(), arm.client_addr)
     rig.step(2)
@@ -386,7 +423,8 @@ def test_http_api_and_page(rig):
         assert r["heartbeat"] == 1.0
         assert c.post("/session", json={}).status_code == 401
         s = c.post("/session", json={}, headers=h).json()
-        assert set(s) == {"session", "udp_port", "unix_socket"}
+        # the armed latch (deliberate change): POST /session also returns the arm_seq floor
+        assert set(s) == {"session", "udp_port", "unix_socket", "arm_seq"} and s["arm_seq"] == 0
         assert c.post("/hints", json={"base": {"mode": "locked"}}, headers=h).json()["hints"]["base"]["mode"] == "locked"
         assert c.post("/hints", json={"base": {"mode": "flying"}}, headers=h).status_code == 422
         assert c.post("/hints", json={"base": {"limits": {"max_speed": 9}}}, headers=h).status_code == 422
@@ -455,6 +493,7 @@ def test_whole_body_reach_with_the_real_swerve_and_estimator(stack):
     while time.monotonic() < t_end:
         seq += 1
         udp.sendto(json.dumps({"type": "target", "session": s["session"], "seq": seq, "t": None,
+                               "armed": True, "arm_seq": s["arm_seq"] + 1,              # armed (one press)
                                "ees": {"arm": {"pos": list(goal), "quat": q0}}}).encode(),
                    ("127.0.0.1", s["udp_port"]))
         if seq % 30 == 0:
