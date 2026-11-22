@@ -1,5 +1,5 @@
 """python -m robot_utils.nodes.wbc [--name wbc] [--model description|local|FILE.urdf] [--arm NAME] [--swerve NAME|URL]
-[--estimator NAME|URL] [--udp-host ADDR] [--udp-port N] [--config FILE.yaml]
+[--estimator NAME|URL] [--udp-host ADDR] [--udp-port N] [--config FILE.yaml] [--switch-interval S]
 
 Runs the whole-body control node (docs/wbc.md): end-effector targets in the world frame (datagrams), the arm
 (through its local joint channel) and the base (the swerve's /command) out. Serves on
@@ -8,6 +8,8 @@ Runs the whole-body control node (docs/wbc.md): end-effector targets in the worl
 """
 import argparse
 import logging
+import os
+import sys
 
 from ..common.serve import add_serve_args, serve
 
@@ -22,9 +24,17 @@ def main() -> None:
     p.add_argument("--udp-host", default="127.0.0.1", help="address for target datagrams ('none' = UDP off)")
     p.add_argument("--udp-port", type=int, default=9410)
     p.add_argument("--config", help="YAML of Config keys (caps, gains, timeouts) over the defaults")
+    p.add_argument("--switch-interval", type=float,
+                   default=float(os.environ.get("WBC_SWITCH_INTERVAL", "0.0005")),
+                   help="Python's GIL switch interval (s; sys.setswitchinterval) for this process: the real-time "
+                        "control thread waits at most about this long for the GIL held by a normal-priority thread "
+                        "(HTTP, SSE, stream readers). Default 0.0005 (env WBC_SWITCH_INTERVAL; Python's own: 0.005)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "wbc")
     a = p.parse_args()
+    if not 0 < a.switch_interval <= 0.1:
+        p.error("--switch-interval must be within (0, 0.1] s")
+    sys.setswitchinterval(a.switch_interval)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)    # 100 commands/s
