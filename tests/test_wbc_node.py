@@ -154,6 +154,86 @@ def test_staleness_two_stages_and_resume(rig):
     assert node.state == "tracking"
 
 
+def test_a_datagram_base_hint_refreshes_the_hint_age(rig):
+    """Regression: a target datagram carrying a base hint target (pose / heading) restarts the hint's age, so its
+    velocity feedforward stays fresh while the client streams (the check once looked for a 'target' key that
+    parse_base never returns: the head-velocity feedforward always faded to zero). A datagram without a hint target
+    (mode only) leaves the age running; a commanded velocity restarts the velocity's age."""
+    node = rig.node
+    snaps = []
+    step = node.ctl.step
+    node.ctl.step = lambda snap: (snaps.append(snap), step(snap))[1]
+    rig.lease_enable()
+    p0, q0 = rig.cmd_pose()
+    hint = {"mode": "hint", "target": {"pose": {"x": 0.0, "y": 0.0, "vx": 0.2}, "heading": {"yaw": 0.0}}}
+    for _ in range(30):                                       # streaming at the loop rate: always fresh
+        rig.send({"type": "target", "t": None, "ees": {"arm": {"frame": "world", "pos": list(p0), "quat": list(q0)}},
+                  "base": hint})
+        rig.step(1)
+        assert snaps[-1].hint_age <= DT + 1e-9, snaps[-1].hint_age
+    assert snaps[-1].hints.mode == "hint" and snaps[-1].hints.target_pose.vx == 0.2
+    for _ in range(20):                                       # the same stream without a hint target: it ages
+        rig.send({"type": "target", "t": None, "ees": {"arm": {"frame": "world", "pos": list(p0), "quat": list(q0)}},
+                  "base": {"mode": "hint"}})
+        rig.step(1)
+    assert snaps[-1].hint_age == pytest.approx(20 * DT, abs=1e-6)
+    assert snaps[-1].velocity_age > 1.0                      # never given
+    rig.send({"type": "target", "t": None, "ees": {"arm": {"frame": "world", "pos": list(p0), "quat": list(q0)}},
+              "base": {"mode": "commanded", "velocity": {"vx": 0.1}}})
+    rig.step(1)
+    assert snaps[-1].velocity_age <= DT + 1e-9
+
+
+class FakeSwerveBase:
+    """Stands in for the WBC's swerve link (links.SwerveBase) in the config tests: its hard limits, set_limits."""
+
+    def __init__(self, hard):
+        self.hard = hard
+        self.limits = []
+        self.client = self
+
+    def set_limits(self, speed, omega):
+        self.limits.append((speed, omega))
+
+
+def test_runtime_config_bounds_and_structural_keys(rig):
+    """POST /config: the keys that mean off accept 0; max_speed / max_omega beyond the swerve's hard limits are
+    refused (422, the config in force kept) and a change within them is pushed to the swerve; structural keys only
+    while disabled."""
+    from fastapi.testclient import TestClient
+    from robot_utils.nodes.wbc.server import create_app
+    node = rig.node
+    with TestClient(create_app(node, start=False)) as c:
+        r = c.post("/config", json={"w_min": 0.0, "w_manip": 0.0, "base_start_charge": 0.0})
+        assert r.status_code == 200, r.text
+        assert {k: r.json()["config"][k] for k in ("w_min", "w_manip", "base_start_charge")} == \
+            {"w_min": 0.0, "w_manip": 0.0, "base_start_charge": 0.0}
+        assert node.ctl.cfg.base_start_charge == 0.0                  # the controller uses it
+        for bad in ({"base_start_charge": -0.01}, {"w_min": -1}, {"w_min": 0.01},   # w_min < w_influence
+                    {"deadband_lin_on": 0.05}, {"max_speed": 0}):
+            assert c.post("/config", json=bad).status_code == 422, bad
+        assert c.post("/config", json={"rate_hz": 100.0}).status_code == 200      # disabled: structural is fine
+        rig.lease_enable()
+        base = FakeSwerveBase({"max_speed": 1.0, "max_omega": 1.5})
+        node.base = base
+        try:
+            assert c.get("/config").json()["hard"] == {"max_speed": 1.0, "max_omega": 1.5}
+            r = c.post("/config", json={"max_speed": 1.2})
+            assert r.status_code == 422 and "hard limits" in r.json()["detail"]
+            r = c.post("/config", json={"max_omega": 2.0})
+            assert r.status_code == 422 and "hard limits" in r.json()["detail"]
+            assert node.cfg.max_speed == 0.6 and base.limits == []          # refused: nothing changed
+            r = c.post("/config", json={"max_speed": 0.9})
+            assert r.status_code == 200 and node.cfg.max_speed == 0.9 and base.limits == [(0.9, node.cfg.max_omega)]
+            for k, v in (("rate_hz", 50.0), ("reach", 0.6), ("joint_vel", [1, 1, 1, 1, 1, 1]),
+                         ("lease_heartbeat", 2.0)):
+                r = c.post("/config", json={k: v})
+                assert r.status_code == 422 and "only while disabled" in r.json()["detail"], k
+            assert node.cfg.rate_hz == 100.0
+        finally:
+            node.base = None
+
+
 def test_client_lease_lapse_holds(rig):
     node = rig.node
     rig.lease_enable()
