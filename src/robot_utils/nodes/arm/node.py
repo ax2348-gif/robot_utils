@@ -50,7 +50,7 @@ from . import config as C
 from . import queries as Q
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
 from .config import N
-from .gripper import Gripper, check_gripper
+from .gripper import Contact, Gripper, check_gripper
 from .gripper import free as gripper_free
 from .gripper import holding as gripper_holding
 from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
@@ -194,6 +194,7 @@ class ArmNode(JointStream):
         self.hold_q: Optional[np.ndarray] = None
         self.last_motion: Optional[Motion] = None
         self.gripper = Gripper()
+        self._g_contact = Contact()               # the squeeze limit's contact detector (control thread)
         self._g_engage = False
         self.reading = None
         self.latched: list[str] = []      # motor fault codes latched while the motors are off (enable clears them)
@@ -624,7 +625,7 @@ class ArmNode(JointStream):
 
     def _control(self, now: float, r) -> None:
         """One frame per motor (motors on). Arm: servoing (profile gains) or floating (kp = kd = 0);
-        gravity feedforward either way. Gripper: holding its goal (with the force limit) or free."""
+        gravity feedforward either way. Gripper: holding its goal (the force limit in contact) or free."""
         kin, p = self.kin, self.profile
         src = None
         with self._lock:
@@ -651,10 +652,12 @@ class ArmNode(JointStream):
             g_goal, max_force, g_on = g.goal, g.max_force, self.g_servo
         tau_g = kin.gravity(r.q) * p.tau_scale
         kp, kd = (p.kp, p.kd) if self.servo else (np.zeros(N), np.zeros(N))
-        if g_on:      # holding its goal, with the force limit (gripper.holding)
-            gc = gripper_holding(g_goal, max_force, r.g_q, r.g_q_mot, r.g_qd, p.g_kp, p.g_kd)
+        if g_on:      # holding its goal; the force limit in contact (gripper.holding)
+            gc = gripper_holding(g_goal, max_force, r.g_q, r.g_q_mot, r.g_qd, p.g_kp, p.g_kd, now,
+                                 self._g_contact, self.settings.gripper)
             g.sent = C.rad_to_gap(gc.q)
         else:
+            self._g_contact.reset()
             gc = gripper_free(r.g_q_mot)
         self._g = {"tau_est": gc.tau_est, "force": gc.applied, "demand": gc.demand, "ff": gc.ff,
                    "limiting": gc.limiting, "tau_g": tau_g}
@@ -882,6 +885,7 @@ class ArmNode(JointStream):
         self._g_engage = False
         self.gripper.goal = self.gripper.sent = None
         self.gripper.max_force = C.DEFAULT_MAX_FORCE
+        self._g_contact.reset()
 
     def _disable(self, why: str) -> None:
         """Not enabled: the arm floats, the gripper goes into damping (its motor off, next tick),

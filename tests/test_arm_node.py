@@ -379,6 +379,39 @@ def test_gripper_gap_and_force_limit(rig):
         n.gripper_cmd(rig.tok, gap_mm=10, max_force_n=-1)
 
 
+def test_gripper_free_close_is_uncapped_and_contact_limits_the_squeeze(rig):
+    """The force limit bounds the squeeze in contact only: a free close from fully open runs the plain MIT law
+    (never limiting, as fast as the uncapped law: tests/test_arm_gripper.py's harness on the same SimBus inertia),
+    and each command's max_force_n holds on an object."""
+    from test_arm_gripper import run, t_reach
+    n = ready(rig).node
+    n.gripper_cmd(rig.tok, gap_mm=C.GAP_MAX * 1000)
+    rig.keep(1.0)
+    n.gripper_cmd(rig.tok, gap_mm=0.0)
+    gaps, limiting = [], []
+    for _ in range(100):
+        rig.step(1)
+        gaps.append(C.rad_to_gap(rig.sim.g_q))
+        limiting.append(rig.row()["g_limiting"])
+    assert not any(limiting) and not n._g_contact.on
+    t_node = t_reach({"gap": np.array(gaps), "t": DT * np.arange(1, 101)}, 0.0, 0.001)
+    raw, _ = run(0.0, law="raw")
+    assert t_node <= 1.10 * t_reach(raw, 0.0, 0.001) + DT
+    n.gripper_cmd(rig.tok, gap_mm=45.0)
+    rig.keep(1.0)
+    rig.sim.object_gap_rad = C.gap_to_rad(0.040)        # the law alone would squeeze it with 156 N
+    for f in (10.0, 30.0, 100.0, 50.0):
+        n.gripper_cmd(rig.tok, gap_mm=0.0, max_force_n=f)
+        rig.keep(0.5)
+        assert n._g_contact.on and rig.row()["g_limiting"] == 1.0
+        assert abs(C.force_of_torque(rig.sim.g_tau) - f) < 0.01 * f, (f, C.force_of_torque(rig.sim.g_tau))
+        gs = n.gripper_state()
+        assert abs(gs["force_n"] - f) < 0.01 * f and gs["demand_n"] > f and gs["limiting"]
+    n.gripper_cmd(rig.tok, gap_mm=45.0)                   # opening releases the contact
+    rig.keep(0.5)
+    assert not n._g_contact.on and abs(C.rad_to_gap(rig.sim.g_q) - 0.045) < 1e-3
+
+
 def test_force_limit_off_near_fully_open(rig):
     n = ready(rig).node
     n.gripper_cmd(rig.tok, gap_mm=C.GAP_MAX * 1000)

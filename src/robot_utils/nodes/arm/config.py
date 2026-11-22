@@ -13,6 +13,13 @@ Named poses and limits: packaged defaults below, overridden by ``~/.config/robot
       ready: [0, -40, -60, 0, 30, 0]
     home_via: [ready]     # optional: poses `home` passes through, in order
     joint_vel_max: [2, 2, 2, 6, 6, 6]   # rad/s, hard caps of the step limit
+    gripper:              # the contact detector of the squeeze limit (GripperContact; defaults shown)
+      stall_vel: 0.5      # rad/s motor
+      stall_ms: 30
+      contact_err_mm: 0.5
+      release_mm: 1.0
+      approach_mm: 3.0
+      forget_mm: 10.0
 """
 from __future__ import annotations
 
@@ -114,6 +121,33 @@ DEFAULT_SOFT = Limits(joint_vel=HARD.joint_vel.copy())
 
 
 @dataclass
+class GripperContact:
+    """The gripper's contact detector (gripper.py): the squeeze limit applies in contact only. Gap distances in m
+    (16 mm of gap per rad of the motor). Defaults from the soft profile's gripper gains (kp 1.0 Nm/rad,
+    kd 0.05 Nm s/rad; F = tau / 16 mm, so 1 mm of gap error is 0.0625 Nm = 3.9 N of squeeze):
+
+    - ``stall_vel`` 0.5 rad/s (8 mm/s of gap): "the jaws are not moving". A free jaw with the goal past the limit's
+      own error is driven by more than ``max_force`` worth of torque and reaches this in a few ms; its damping term
+      kd x stall_vel is 0.025 Nm (1.6 N), negligible against the limit. A blocked jaw reads ~0.
+    - ``stall_s`` 30 ms (3 ticks): the stall must last this long, so a command starting from rest (the reading can
+      lag the command by up to 2 ticks) is not taken for a contact. It bounds the impact transient's duration.
+    - ``contact_err`` 0.5 mm: the goal must be past the jaws by more than this as well (2 N at kp 1.0): a free
+      jaw resting at its goal against friction is not a contact.
+    - ``release`` 1 mm: hysteresis. Contact ends when the goal comes back within (limit error - 1 mm) of the jaws,
+      i.e. the law alone would squeeze 3.9 N less than the limit; also how far the jaws may close past a remembered
+      contact before it is forgotten (the object is gone).
+    - ``approach`` 3 mm: closing back to within this of a remembered contact position is capped too (a re-grasp).
+    - ``forget`` 10 mm: opening this far past the remembered contact forgets it.
+    """
+    stall_vel: float = 0.5        # rad/s, motor side
+    stall_s: float = 0.03
+    contact_err: float = 0.0005   # m of gap
+    release: float = 0.001
+    approach: float = 0.003
+    forget: float = 0.010
+
+
+@dataclass
 class NodeSettings:
     named_poses: dict = field(default_factory=lambda: {"home": np.zeros(N)})   # rad
     home_via: list = field(default_factory=list)
@@ -130,6 +164,7 @@ class NodeSettings:
     # the measured pose by at most stream_max_lead (any joint)
     stream_stale_ms: float = 30.0
     stream_max_lead: float = math.radians(20.0)
+    gripper: GripperContact = field(default_factory=GripperContact)
 
 
 def config_path() -> Path:
@@ -169,4 +204,16 @@ def load_settings(path: Optional[Path] = None) -> NodeSettings:
         if not 0.5 <= v <= 45.0:
             raise ValueError(f"{p}: joint_channel.max_lead_deg must be within 0.5..45")
         s.stream_max_lead = math.radians(v)
+    gr = raw.get("gripper") or {}
+    for key, attr, lo, hi, scale in (("stall_vel", "stall_vel", 0.05, 5.0, 1.0),
+                                     ("stall_ms", "stall_s", 10.0, 200.0, 1e-3),
+                                     ("contact_err_mm", "contact_err", 0.0, 5.0, 1e-3),
+                                     ("release_mm", "release", 0.0, 10.0, 1e-3),
+                                     ("approach_mm", "approach", 0.0, 20.0, 1e-3),
+                                     ("forget_mm", "forget", 0.0, GAP_MAX * 1000, 1e-3)):
+        if key in gr:
+            v = float(gr[key])
+            if not lo <= v <= hi:
+                raise ValueError(f"{p}: gripper.{key} must be within {lo:g}..{hi:g}")
+            setattr(s.gripper, attr, v * scale)
     return s

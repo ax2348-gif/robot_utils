@@ -200,16 +200,54 @@ positions are inputs, and only an admin writes them. Servo accepts a name in pla
 - Geometry: module 1, 16 teeth, pitch radius 8 mm; one pinion drives both racks, so
   `gap_mm = 16 · |θ|` (θ in rad, closed 0, opening negative) and squeeze force
   `F = τ / (2 · 0.008 m)`.
-- Force limit, every tick: `τ_est = kp·(θ_cmd − θ) − kd·θ̇` from motor-side feedback; if
-  `F(τ_est)` exceeds `max_force_n` in the closing direction, a feedforward `τ_ff` opposes the
-  excess. `|τ_ff| ≤ |τ_est|` and it only ever opposes closing, so it can never drive the jaws
-  open. Within 5 mm of fully open there is no feedforward (protecting the printed stops); there
-  the position command is pulled back toward the jaws instead, so wide objects are force-limited
-  too. `max_force_n ≥ 0`.
+- Force limit: it bounds the **squeeze**, in contact only (`nodes/arm/gripper.py`). Free motion is the plain
+  MIT law toward the goal with the profile's gains, uncapped: as fast as the raw interface.
+  - Contact detection, every tick, from the motor-side feedback (position θ, velocity θ̇): the jaws are
+    *stalled* (`|θ̇| < stall_vel`) while the goal is past them by more than the limit's own error
+    (`kp·(θ_goal − θ) > τ_lim`, `τ_lim = max_force_n · 16 mm`) and by more than `contact_err`, for `stall_s`.
+    The motor's torque reading `g_tau` is not used: under the MIT law the motor delivers what it is
+    commanded whether the jaws move or not, so the reading carries no contact information.
+  - In contact the law's position term is capped at `τ_lim` (the damping term `−kd·θ̇` is left as is: it
+    brakes, and cancelling it would come back as a spike when the jaws stop): away from fully open a
+    feedforward `τ_ff = −(kp·(θ_goal − θ) − τ_lim)` opposes the excess, `|τ_ff|` below the position term,
+    so it can never drive the jaws open. Within 5 mm of fully open there is no feedforward (protecting the
+    printed stops); there the position command is pulled back toward the jaws instead, so wide objects are
+    limited too. At rest the squeeze is exactly `max_force_n`; a jaw moving adds or loses `kd·θ̇`.
+  - Leaving contact (hysteresis): only when the command stops squeezing past the limit, i.e. the goal comes
+    back to within `τ_lim/kp − release` of the jaws. A soft object pushing back or creeping does not end it;
+    an object slipping out lets the jaws close at `τ_lim` until near the goal, then free.
+  - Re-grasp: where the jaws stalled is remembered. Closing back to within `approach` of it is capped too
+    (a loosen-and-squeeze never hits the object with more than the limit); it is forgotten when the jaws
+    close `release` past it (the object is gone) or open `forget` beyond it.
+  - Opening is never limited: the cap only ever removes closing torque.
+  - Settings (`~/.config/robot_utils/arm.yaml` `gripper:`; `config.GripperContact`), defaults from the soft
+    profile (gripper kp 1.0 Nm/rad, kd 0.05; 1 mm of gap error = 0.0625 Nm = 3.9 N of squeeze):
+
+    | key | default | why |
+    |---|---|---|
+    | `stall_vel` | 0.5 rad/s (8 mm/s of gap) | a free jaw driven by more than the limit passes it within a few ms; its damping there is 1.6 N |
+    | `stall_ms` | 30 | 3 ticks: a command starting from rest (feedback up to 2 ticks late) is not a contact |
+    | `contact_err_mm` | 0.5 | 2 N: a free jaw resting at its goal against friction is not a contact |
+    | `release_mm` | 1.0 | the hysteresis: 3.9 N of demand below the limit |
+    | `approach_mm` | 3.0 | the re-grasp zone |
+    | `forget_mm` | 10.0 | opened this far past the contact: forgotten |
+
+  - The impact transient, guaranteed: on first contact with an unknown object the law is the free one until
+    detection, so the squeeze is at most the raw MIT law's `kp·(θ_goal − θ_contact)` (what the old raw teleop
+    held permanently; e.g. 78 N for a close to 0 on a 20 mm object, 194 N at most for a full stroke), for at
+    most `stall_s` + 2 ticks + the feedback delay after the jaws stop (the test harness: 40, 50, 60 ms at
+    0, 1, 2 ticks of feedback delay), then
+    `max_force_n`. A re-grasp within `approach` of the last contact: at most `max_force_n` throughout. Not
+    bounded by any position law: the jaws' momentum at impact (same as under the raw law; only a slower
+    approach would reduce it).
+  - Below the gripper's breakaway friction (`max_force_n` of a few N) a jaw stopped short by friction is
+    indistinguishable from one on an object: it stays capped (as before the redesign, which capped always).
 - Reported (`/state` gripper `force_n`, stream `g_force`): the squeeze force applied, the MIT law
-  with the position sent plus the feedforward, so at most `max_force_n` while limiting. The demand
-  before the limit is `demand_n` / `g_force_demand`. Both are model estimates (stiffness × error
-  over an ideal pinion); the motor's own torque reading is `g_tau`.
+  with the position sent plus the feedforward, so at most `max_force_n` (at rest) while limiting. The demand
+  before the limit is `demand_n` / `g_force_demand` (the law alone, damping included). `limiting` /
+  `g_limiting`: the cap binds this tick (in contact, or closing back onto a remembered contact); free motion
+  never limits, however large the demand. Both forces are model estimates (stiffness × error over an ideal
+  pinion); the motor's own torque reading is `g_tau`.
 
 ## Kinematics: Jacobian and manipulability
 
