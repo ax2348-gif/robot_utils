@@ -2,7 +2,7 @@
 """Headset-side control for the Quest teleop: ``up``, ``down``, ``status`` (also as ``quest_up`` / ``quest_down`` /
 ``quest_status``). Mac or erid; stdlib only. Automates only the headset, not the teleop workflow.
 
-    quest_up [--scheme body-frozen|standard] [--demo] [--ar URL] [--restart] [--wait 30]
+    quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--restart] [--wait 30]
     quest_down
     quest_status
 
@@ -16,10 +16,10 @@ shell; profile.sh defines ``q`` only for interactive shells, so it is not used o
 2. ``git fetch`` then compare with the upstream; ``quest pull`` only if behind. ``pull`` fast-forwards only and
    refuses a dirty tree: a dirty tree is reported and left alone, never forced.
 3. Telemetry, headless: ``quest run --no-viewer --scheme=<scheme>`` (``-s`` too with ``--demo``, which renders the
-   headset's own kinematic demo; ``--ar=URL`` with ``--ar URL``, the robot AR view of the robot frontend at URL,
-   quest_env ROBOT_AR.md). The scheme works without ``-s``: the script writes ``off body-frozen`` to
-   ``~/.config/quest-env/demo-mode`` and native reads the second word into ``operatorIntent_.bodyFrozen``
-   regardless of the demo. ``run`` restarts the XR process, so it is skipped when the stream already answers, the
+   headset's own kinematic demo; ``--ar=URL`` with ``--ar``: the robot AR view, quest_env ROBOT_AR.md; bare ``--ar``
+   is this machine's sim stack at its address toward the headset). The scheme works without ``-s``: the script
+   writes ``off body-frozen`` to ``~/.config/quest-env/demo-mode`` and native reads the second word into
+   ``operatorIntent_.bodyFrozen`` regardless of the demo. ``run`` restarts the XR process, so it is skipped when the stream already answers, the
    mode file and the AR URL (``~/.config/quest-env/robot-ar``) match and nothing was pulled (``--restart`` forces
    it).
 4. Waits until port 9391 answers with ``teleop.quest_state.v1`` frames, then prints the status.
@@ -76,6 +76,28 @@ class SshRunner:
         except FileNotFoundError:
             return Result(127, "", "ssh not found")
         return Result(p.returncode, p.stdout, p.stderr)
+
+
+SIM_STACK_PORT = 8080   # python -m robot_utils.nodes.sim.stack's default
+
+
+def local_address_toward(host: str) -> str:
+    """This machine's address on the route to ``host`` (the Tailscale address when the headset is reached over
+    Tailscale, the LAN address on a shared LAN): a UDP connect sends nothing, it only picks the route."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((host, 9))
+        return s.getsockname()[0]
+
+
+def resolve_ar(value: str, headset: str, local=local_address_toward) -> str:
+    """``--ar`` value -> the URL the headset opens: ``auto`` (bare ``--ar``) or ``:PORT`` = this machine's sim stack
+    at its address toward the headset; ``host[:port]`` gets ``http://``; a full URL is kept."""
+    if "://" in value:
+        return value.rstrip("/")
+    if value == "auto" or value.startswith(":"):
+        port = value[1:] if value.startswith(":") else str(SIM_STACK_PORT)
+        return f"http://{local(headset)}:{port}"
+    return f"http://{value}".rstrip("/")
 
 
 def ssh_hostname(host: str) -> str:
@@ -305,16 +327,25 @@ def main(argv=None, prog: Optional[str] = None) -> int:
     ap.add_argument("--port", type=int, default=STREAM_PORT)
     ap.add_argument("--scheme", choices=("body-frozen", "standard"), default="body-frozen")
     ap.add_argument("--demo", action="store_true", help="also the headset's own kinematic demo (-s)")
-    ap.add_argument("--ar", metavar="URL", help="robot AR view: the robot frontend's root URL, plain http "
-                    "reachable from the headset (e.g. the Mac's sim stack, http://<mac>:8080)")
+    ap.add_argument("--ar", nargs="?", const="auto", metavar="URL|:PORT",
+                    help="robot AR view of a robot frontend (plain http). Bare --ar: this machine's sim stack "
+                    f"(port {SIM_STACK_PORT}) at its address toward the headset; :PORT another port; or a URL / host")
     ap.add_argument("--restart", action="store_true", help="restart telemetry even if it is already running")
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for the stream")
     args = ap.parse_args(argv)
     command = implied or args.command
-    ctl = QuestCtl(SshRunner(args.ssh_host), args.stream_host or ssh_hostname(args.ssh_host), port=args.port,
-                   log=lambda s: print(s, flush=True))
+    stream_host = args.stream_host or ssh_hostname(args.ssh_host)
+    ctl = QuestCtl(SshRunner(args.ssh_host), stream_host, port=args.port, log=lambda s: print(s, flush=True))
     if command == "up":
-        return ctl.up(args.scheme, args.demo, args.restart, args.wait, args.ar)
+        ar = None
+        if args.ar:
+            try:
+                ar = resolve_ar(args.ar, stream_host)
+            except OSError as e:
+                print(f"--ar: no route to the headset at {stream_host} ({e}); pass the URL", flush=True)
+                return 2
+            print(f"robot AR: {ar}", flush=True)
+        return ctl.up(args.scheme, args.demo, args.restart, args.wait, ar)
     return ctl.down() if command == "down" else ctl.status()
 
 
