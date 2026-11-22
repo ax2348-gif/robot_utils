@@ -182,7 +182,8 @@ class Engagement:
     est_reset: float
     head_yaw0: float
     head_p0: np.ndarray           # LOCAL
-    target: Optional[tuple] = None   # newest world target
+    target: Optional[tuple] = None   # newest world target (body-frozen, moved with the stick offset)
+    target_raw: Optional[tuple] = None   # the body-frozen target alone (operator hand and travel)
     head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
     head_dyaw: float = 0.0                                             # last head yaw change
     head_yaw_unwrapped: float = 0.0                                    # continuous (the velocity fit)
@@ -221,6 +222,8 @@ class Config:
     velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
     max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
+    ride_lead: float = 0.01           # s: released, the riding target is placed on the base pose predicted this far
+                                      # past the stream row's arrival (plus its age), so it does not lag the base
     feedforward: bool = True          # engaged: the EE twist and the hint velocity (see the module docstring)
     ff_window: float = 0.06           # s, the velocity fit's window (adds about half of it as lag)
     ff_max_speed: float = 1.0         # m/s, EE feedforward clamp
@@ -344,7 +347,7 @@ class TeleopCore:
             if hp is None:
                 self.drop("hand pose missing")
                 return
-            self.eng.target = body_frozen_target(self.eng, *hp)
+            self.eng.target_raw = body_frozen_target(self.eng, *hp)
             self._track(frame)
             self.status.state = "engaged"
             return
@@ -369,7 +372,8 @@ class TeleopCore:
             self.drop(f"engagement refused: {why}")
             self.status.state = "needs_release"
             return
-        eng.target = (robot.ee_p.copy(), robot.ee_r.copy())
+        eng.target_raw = (robot.ee_p.copy(), robot.ee_r.copy())
+        eng.target = eng.target_raw
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
@@ -393,6 +397,7 @@ class TeleopCore:
             elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
                 eng.head_fit.reset()
             eng.head_tracked = yaw is not None
+        eng.target = self._with_offset(eng.target_raw)
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
             return
@@ -405,6 +410,25 @@ class TeleopCore:
         if self.cfg.head_walk and eng.head_tracked:
             xy = eng.robot.r[:2, :2] @ eng.head_d[:2]
             eng.head_fit.push(t, [xy[0], xy[1], eng.head_yaw_unwrapped])
+
+    def _hint_pose(self, offset) -> tuple:
+        """The base hint (x, y, yaw) world: the base at engagement + the head's motion + ``offset``."""
+        eng = self.eng
+        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + offset[:2]
+        return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw + offset[2])
+
+    def _with_offset(self, target):
+        """The body-frozen target moved with the stick offset: the same planar rigid motion that takes the base
+        hint without the offset to the hint with it, so the EE and base references agree (the arm does not fight
+        the sticks)."""
+        if target is None or not np.any(self.offset):
+            return target
+        x0, y0, _ = self._hint_pose(np.zeros(3))
+        Rz = F.rot_z(float(self.offset[2]))
+        c0 = np.array([x0, y0, 0.0])
+        c1 = c0 + np.array([self.offset[0], self.offset[1], 0.0])
+        p, r = target
+        return c1 + Rz @ (np.asarray(p, float) - c0), Rz @ np.asarray(r, float)
 
     def feedforward(self) -> tuple:
         """(EE twist [vx, vy, vz, wx, wy, wz] world, hint velocity (vx, vy, omega) world) of the engagement: the
@@ -453,7 +477,14 @@ class TeleopCore:
                 return "alive"
             if self.hold_base is None:
                 self.hold_base = robot.base.to_local(robot.ee_p, robot.ee_r)
-            p, r = robot.base.to_world(*self.hold_base)    # rides with the platform
+            # rides with the platform: on the base pose predicted to when the WBC applies it (the stream row's age
+            # plus ride_lead, by the commanded twist), so the target does not trail a moving base
+            dt = max(0.0, now - robot.t_recv) + cfg.ride_lead
+            vx, vy, w = robot.base_twist
+            c, s_ = math.cos(robot.base_yaw), math.sin(robot.base_yaw)
+            base = F.PlanarFrame(robot.base_x + (c * vx - s_ * vy) * dt, robot.base_y + (s_ * vx + c * vy) * dt,
+                                 robot.base_yaw + w * dt)
+            p, r = base.to_world(*self.hold_base)
             ee = {"frame": "world", "pos": _l(p), "quat": _l(F.quat_from_matrix(r)), "twist": robot.twist_at(p)}
             reset = robot.est_reset
         intent = self.frame["control_intent"]
@@ -474,11 +505,8 @@ class TeleopCore:
                 return {"mode": "commanded", "velocity": {"vx": v[0], "vy": v[1], "omega": v[2], "frame": "base",
                                                           "ttl": cfg.velocity_ttl}}
             return {"mode": "locked"}
-        eng = self.eng
-        off = self.offset
-        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + off[:2]
-        hyaw = F.wrap(eng.robot.yaw + eng.head_dyaw + off[2])
-        target = {"pose": {"x": float(xy[0]), "y": float(xy[1]), "frame": "world",
+        hx, hy, hyaw = self._hint_pose(self.offset)
+        target = {"pose": {"x": hx, "y": hy, "frame": "world",
                            "weight": cfg.pose_weight, "tol": cfg.pose_tol},
                   "heading": {"yaw": hyaw, "frame": "world", "weight": cfg.heading_weight, "tol": cfg.heading_tol}}
         if cfg.feedforward:
