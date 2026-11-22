@@ -96,10 +96,27 @@ for fr in cam.frames("color,depth", mode="raw"):
 - **Latest frame wins.** Each client remembers the last sequence number it sent per stream. A slow
   client skips frames (its `dropped` counter says how many) instead of building a backlog; the
   server's memory stays flat. Uvicorn's write flow control blocks a generator while the client's
-  socket is full, which is exactly when it should skip.
+  socket is full, which is exactly when it should skip. This is the default for every client.
+- **Every frame, bounded (`every=true`, for recorders).** A recorder must not lose frames to a short
+  Wi-Fi or disk stall, so it can ask for every frame in order instead. The client gets its own queue
+  (`Hub.subscribe_frames`) holding *references* to the published frames (the same immutable
+  `Frame` objects every other client sees, never copies), filled on the event loop by a callback
+  the owner thread schedules, so the owner thread only appends a callback and never waits for a
+  client, and no client waits for another. The queue is bounded by `max_backlog` frames per
+  requested stream (default 60 = 2 s at 30 fps) and `max_backlog_mb` over all its streams
+  (default 64 MB), whichever bites first; past the bound the **oldest** queued frames are dropped
+  and counted per stream, and the count goes out in the `dropped` field of that stream's next
+  record. Per-client memory is therefore at most 60 × n streams × frame size: a 30 fps MJPG colour
+  stream (50–150 KB/frame) holds 3–9 MB at most, raw 848×480 depth ~49 MB (under the 64 MB cap).
+  Frames already held as "latest" cost nothing extra; the backlog keeps up to 2 s more alive. The
+  queue (and every reference in it) is released as soon as the client disconnects. Measured cost
+  (Mac, Python 3.12; the Pi is a few times slower): ~1–2 µs per frame on the owner thread and
+  ~1 µs per frame per every-frame client on the event loop, against ~33 ms between frames.
 - **Encode once.** JPEG / zlib encodes run in a small thread pool, once per frame and mode, and the
   result is shared by every client (the future is shielded, so one client disconnecting never
-  cancels another's encode). Color MJPG is passed through untouched; raw depth/IR is sent
+  cancels another's encode). The cache is keyed weakly by the frame, so an encode lives exactly as
+  long as some client still holds its frame: an every-frame client that lags reuses the encode a
+  live client already paid for. Color MJPG is passed through untouched; raw depth/IR is sent
   zero-copy.
 - **One worker, keep-alive.** uvicorn runs exactly one worker (a second process could not open the
   camera). HTTP/1.1 keep-alive (60 s) keeps `/time` exchanges on one warm connection.
@@ -131,7 +148,8 @@ All responses are JSON unless noted. `<pi>` = `100.80.153.120:8101` (Tailscale) 
 | `POST /settings` | partial update (see below) → `{settings, settings_version, restarted, t_applied}` |
 | `GET /properties[?all=true]` | device properties the device reports read/write (exposure, gain, white balance, laser…) |
 | `POST /properties` | `{id, value}` → updated list |
-| `GET /stream?streams=…&mode=jpeg\|raw&compress=none\|zlib` | live frames, binary records (below) |
+| `GET /stream?streams=…&mode=jpeg\|raw&compress=none\|zlib` | live frames (latest-frame-wins), binary records (below) |
+| `GET /stream?…&every=true[&max_backlog=60&max_backlog_mb=64]` | every frame in order, for recorders: bounded per-client backlog (frames per stream / MB), oldest dropped and counted in `dropped` past it |
 | `GET /frame/{stream}?mode=raw\|jpeg` | the latest frame as one binary record |
 | `GET /snapshot/{stream}?format=jpg\|png` | the latest frame as an image (`png`: lossless 16-bit depth/IR); header JSON in `X-Frame-Header` |
 | `GET /mjpeg/{stream}` | plain `multipart/x-mixed-replace` MJPEG (for `<img>`, VLC, OpenCV) |
@@ -244,6 +262,13 @@ overrides it per stream: `streams=color,depth:raw` = color as MJPEG, depth lossl
 `compress=zlib` adds level-1 zlib to raw payloads (`compression: "zlib"` in the header; depth gets
 ~2.5× smaller, costs Pi CPU).
 
+`every=true` sends every frame of the selected streams in publish order (records of several
+streams interleave as published) from a bounded per-client queue instead of skipping to the newest:
+`max_backlog` (frames per requested stream, default 60 ≈ 2 s at 30 fps, 1–10000) and
+`max_backlog_mb` (MB over all its streams, default 64). Payloads are the same as without it (colour
+= the camera's MJPEG bytes, no re-encode; raw / zlib as requested). Use it for recording; live views
+should keep the default.
+
 Frame header (`type: "frame"`):
 
 | field | meaning |
@@ -252,7 +277,7 @@ Frame header (`type: "frame"`):
 | `seq` | per-stream sequence number on the server (never resets while the node runs) |
 | `frameset` | frames from one SDK frameset share it |
 | `index` | the SDK's frame index |
-| `dropped` | frames of this stream skipped for *this* client since its previous record |
+| `dropped` | frames of this stream skipped for *this* client since its previous record (latest-frame-wins), or dropped from its full backlog (`every=true`: the oldest queued, counted exactly) |
 | `width`, `height` | of the payload image |
 | `format` | payload format: `MJPG`, `JPEG`, `Y16`, `Y8`, `RGB`, … |
 | `source_format` | camera pixel format |
@@ -512,8 +537,10 @@ imu_raw = [s for _, s in read_recording("rec_001/imu_raw.rec")]  # every 1 kHz s
 
 The `.rec` files are the wire records with each header extended by `t_recv` (receive time on the
 server clock), `t_recv_client` and `sync_uncertainty`; `meta.json` holds the settings, catalog,
-device and clock-sync history. Over a slow link raw depth may not keep up with the camera; the
-`dropped` field says how many frames were skipped (see the bandwidth column in the results).
+device and clock-sync history. `record()` asks for `every=true`, so a stall shorter than the
+backlog (2 s at 30 fps) loses nothing. Over a link that is slower than the stream on average (raw
+depth over Wi-Fi) the backlog fills and the oldest frames are dropped; the `dropped` field says how
+many (see the bandwidth column in the results).
 
 ## Results
 

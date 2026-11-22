@@ -4,7 +4,9 @@ Stream specs (``--streams``), relative to ``<robot>/nodes/``:
 
 - ``<node>/<path>/stream`` (e.g. ``arm/stream``, ``quest_teleop/oplog/stream``): that endpoint as is.
 - ``<camera node>/<camera stream>`` (e.g. ``camera/color``, ``wrist_camera/color``): the Orbbec node's
-  ``/stream?streams=<camera stream>&mode=jpeg`` (colour = the camera's MJPG bytes as sent).
+  ``/stream?streams=<camera stream>&mode=jpeg&every=true`` (colour = the camera's MJPG bytes as sent;
+  ``every``: every frame in order from a bounded per-client queue on the node, so a short Wi-Fi or
+  disk stall costs no frames; past the bound the oldest are dropped and counted in ``dropped``).
 - anything with a ``?`` is used verbatim (``camera/stream?streams=depth&mode=raw``).
 
 File names: the spec with a trailing ``/stream`` dropped and ``/`` -> ``.`` (``arm``,
@@ -55,7 +57,7 @@ class StreamSpec:
         node, _, cam = spec.partition("/")
         if "/" in cam:
             raise ValueError(f"stream spec {spec!r}: a camera spec is <node>/<stream>")
-        return cls(spec, f"{node}.{cam}", f"{node}/stream", {"streams": cam, "mode": "jpeg"})
+        return cls(spec, f"{node}.{cam}", f"{node}/stream", {"streams": cam, "mode": "jpeg", "every": "true"})
 
     def url(self, robot: str) -> str:
         return f"{robot.rstrip('/')}/nodes/{self.path}"
