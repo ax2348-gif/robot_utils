@@ -70,13 +70,18 @@ the state is `idle` with `hold_reason` `disarmed: <reason>`.
 
 - **Arms** only from a `target` or `chunk` datagram with `armed: true` and an `arm_seq` **greater than the floor**
   (the highest `arm_seq` seen when it was last disarmed; kept for the node's life, returned by `POST /session`),
-  while enabled without a fault, an e-stop or an arm pause, and only if the datagram itself is valid (its target is
-  applied). A client still sending `armed: true` with an old `arm_seq` can never re-arm after any disarm (counted
+  while enabled without a fault, an e-stop, an arm pause or an unusable estimator, and only if the datagram itself
+  is valid (its target is applied) and its target lies within `arm_target_pos` (0.02 m) and `arm_target_rot` (5°) of
+  the commanded EE: farther, the press is refused for good (counted `arm_far`, an event at most once a second; a new
+  `arm_seq` is needed), so a client's stale riding pose can never jump the arm. While disabled the rows carry NaN for
+  the commanded and measured EE (and `q_cmd`): the arm floats, there is no pose to capture; enable seeds them again
+  from the measured joints. A client still sending `armed: true` with an old `arm_seq` can never re-arm after any disarm (counted
   `arm_refused`). An `alive` never arms or resumes anything. Datagrams queued before an enable or a new session never
   arm.
 - **Disarms** (one `DISARMED: <reason>` event each; `/state.disarm_reason`): a datagram with `armed: false` (or
   without `armed` / `arm_seq`, or an older `arm_seq`); `POST /disarm`; stale input (no datagram for `hold_timeout`);
-  the client lease ending; a new session; enable; disable; an estimator reset or pose jump; a planned motion pausing
+  the client lease ending; a new session; enable; disable; an estimator reset, pose jump or unusable pose; a
+  planned motion pausing
   the arm; any fault; the e-stop; a control tick later than 3 dt (below). Headset latency / staleness is the
   client's: it sends `armed: false` or stops (then `hold_timeout`).
 - `/state`: `armed`, `disarm_reason`, `latch` (`arm_seq`, `arm_seq_seen`, `arm_floor`, `disarms`,
@@ -118,8 +123,9 @@ unknown EE; one event a second at most).
 - Staleness, two stages: past `ff_timeout` (0.1 s) after the sample the feedforward fades (zero at 2×) and the
   pose holds; no datagram for `hold_timeout` (0.25 s) → **disarmed** (the targets cleared: nothing resumes; a new
   press arms). A lapsed client lease disarms the same way (the downstream leases stay until `POST /disable`).
-- Estimator: a reset (`reset_id` changes) or a pose jump aborts the target buffers and disarms; a stale or
-  non-finite pose holds (armed: the target resumes when the pose is usable again). The base pose used is the estimator's latest, extrapolated by the commanded twist (at
+- Estimator: a reset (`reset_id` changes) or a pose jump aborts the target buffers and disarms; so does an unusable
+  pose (stale stream, non-finite, too old: `disarm_reason` `estimator: ...`), and no datagram arms until it is usable
+  again; its return never resumes anything (a new press). The base pose used is the estimator's latest, extrapolated by the commanded twist (at
   most `max_predict`).
 
 ### Hints

@@ -143,6 +143,8 @@ def test_staleness_two_stages_and_resume(rig):
     rig.lease_enable()
     rig.step(2)
     p0, q0 = rig.cmd_pose()
+    rig.target(p0, q0)                                       # armed at the commanded pose
+    rig.step(1)
     rig.target(p0 + [0.02, 0, 0], q0, twist=[0.05, 0, 0, 0, 0, 0])
     rig.step(5)
     assert rig.row()["arm_ff_scale"] == 1.0
@@ -163,8 +165,8 @@ def test_staleness_two_stages_and_resume(rig):
     rig.target(p0 + [0.02, 0, 0], q0)
     rig.step(1)
     assert not node.armed and node.state == "idle" and np.max(np.abs(node.q_cmd["arm"] - q_hold)) < 1e-12
-    rig.aseq += 1                                            # a new press: tracking again
-    rig.target(p0 + [0.02, 0, 0], q0)
+    rig.aseq += 1                                            # a new press (at the commanded pose): tracking again
+    rig.target(*rig.cmd_pose())
     rig.step(1)
     assert node.armed and node.state == "tracking"
 
@@ -493,8 +495,9 @@ def test_whole_body_reach_with_the_real_swerve_and_estimator(stack):
     while time.monotonic() < t_end:
         seq += 1
         udp.sendto(json.dumps({"type": "target", "session": s["session"], "seq": seq, "t": None,
-                               "armed": True, "arm_seq": s["arm_seq"] + 1,              # armed (one press)
-                               "ees": {"arm": {"pos": list(goal), "quat": q0}}}).encode(),
+                               "armed": True, "arm_seq": s["arm_seq"] + 1,              # armed (one press) at the
+                               "ees": {"arm": {"pos": list(p0 if seq <= 3 else goal),   # commanded pose, then
+                                               "quat": q0}}}).encode(),                 # the goal
                    ("127.0.0.1", s["udp_port"]))
         if seq % 30 == 0:
             L = latest()

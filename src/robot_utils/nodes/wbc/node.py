@@ -207,11 +207,13 @@ class WbcNode:
         self.arm_floor = 0               # arm_seq_seen at the last disarm: arming needs a greater one
         self.disarm_reason: Optional[str] = "not armed yet"
         self.disarms = 0
-        self.latch_counts = {"ignored_disarmed": 0, "arm_refused": 0, "limits_ignored": 0, "clamped": 0}
+        self.latch_counts = {"ignored_disarmed": 0, "arm_refused": 0, "arm_far": 0, "limits_ignored": 0,
+                             "clamped": 0}
         # control tick timing (D): the measured period and compute time, overruns (> 1.5 dt), late ticks (> 3 dt)
         self.tick = {"period_ms": math.nan, "compute_ms": math.nan, "max_period_ms": 0.0, "max_compute_ms": 0.0,
                      "overruns": 0, "late": 0}
         self._tick_prev: Optional[float] = None
+        self._est_health: Optional[str] = None   # the estimator check of the newest enabled tick (None: usable)
         self._t0 = time.perf_counter()
         self._late_log = -math.inf
         self.solve_fail = 0
@@ -417,8 +419,10 @@ class WbcNode:
             return {"armed": False, "was_armed": was, "disarm_reason": self.disarm_reason}
 
     def _live(self) -> bool:
-        """Arming is possible: enabled, no fault, no e-stop, the arm not paused by a planned motion."""
-        return self.enabled and self.fault is None and not self.estop.active and not self._paused
+        """Arming is possible: enabled, no fault, no e-stop, the arm not paused by a planned motion, the estimator
+        usable."""
+        return (self.enabled and self.fault is None and not self.estop.active and not self._paused
+                and self._est_health is None)
 
     def _apply_messages(self, now: float) -> None:
         live = self._live()
@@ -477,6 +481,18 @@ class WbcNode:
                     b.clear()
                 self.override = {}
             raise
+        if arming and why is None:
+            far = self._arming_too_far(now)
+            if far:                                  # not a drop; this press never arms (a new arm_seq is needed)
+                self.arm_floor = max(self.arm_floor, aseq)
+                self.latch_counts["arm_far"] += 1
+                if now - self._last.get("arm_far_ev", -math.inf) > 1.0:   # at most one event a second
+                    self._last["arm_far_ev"] = now
+                    self.events.add(f"arm refused: {far}", "warn")
+                for b in self.buffers.values():
+                    b.clear()
+                self.override = {}
+                return None
         if arming:
             if why is None:
                 self.armed, self.arm_seq = True, aseq
@@ -490,6 +506,22 @@ class WbcNode:
         elif self.armed and aseq > self.arm_seq:     # a newer press while armed: stays armed, newer seq
             self.arm_seq = aseq
         return why
+
+    def _arming_too_far(self, now: float) -> Optional[str]:
+        """The arming datagram's targets (as they apply now) against the commanded EE: the reason it is too far, or
+        None. A chunk is blended in from the commanded pose, so it always passes."""
+        cfg = self.cfg
+        for e, b in self.buffers.items():
+            if b.kind is None or e not in self.q_cmd:
+                continue
+            tg = b.sample(now)
+            T, _ = self._cmd_pose(e, now)
+            dp = float(np.linalg.norm(tg.p - T.translation))
+            dr = float(np.linalg.norm(pin.log3(tg.R @ T.rotation.T)))
+            if dp > cfg.arm_target_pos or dr > cfg.arm_target_rot:
+                return (f"{e} target {dp * 1e3:.0f} mm / {math.degrees(dr):.1f}° from the commanded pose (more than "
+                        f"{cfg.arm_target_pos * 1e3:.0f} mm / {math.degrees(cfg.arm_target_rot):.1f}°: a stale pose?)")
+        return None
 
     def _base_moving(self) -> bool:
         return bool(np.any(np.asarray(self.base_twist) != 0.0))
@@ -637,8 +669,12 @@ class WbcNode:
                 self._send_hold(arm=True, base=False)
                 self._publish(now, None, hold=True)
                 return
-            # the estimator: resets and jumps abort the world-frame targets and disarm; unusable -> hold
+            # the estimator: resets and jumps abort the world-frame targets and disarm; unusable (stale, non-finite,
+            # too old) -> disarm too (like every automatic hold: nothing resumes on its own) and no arming meanwhile
             health = self.estimator_health(now)
+            self._est_health = health
+            if health:
+                self._disarm_locked("estimator: " + health)
             if self.est.reset_id != self._last.get("reset_id") or self.est.jumps != self._last.get("jumps"):
                 if self._last.get("reset_id") is not None:
                     what = ("estimator reset (world frame changed)" if self.est.reset_id != self._last.get("reset_id")
@@ -1034,6 +1070,10 @@ class WbcNode:
             self.enabled, self.fault, self.state = False, None, "disabled"
             self.disabled_reason = reason
             self.base_twist = np.zeros(3)
+            # the arm floats while disabled: no commanded / measured EE pose from the old command (the rows carry NaN)
+            # that a client could capture as a riding pose; enable seeds them again from the measured joints
+            self.q_cmd, self.v_cmd, self.cmd_twist = {}, {}, {}
+            self.arm_state = None
             self.events.add(f"disabled: {reason}")
         if base is not None:
             base.close(disable=True)

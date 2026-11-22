@@ -57,6 +57,8 @@ class Rig:
         p0 = np.array([r[f"arm_cmd_{k}"] for k in "xyz"])
         q0 = np.array([r[f"arm_cmd_q{k}"] for k in "xyzw"])
         self.goal = (p0 + [0.0, 0.0, 0.08], q0)
+        self.target(p0, q0)                                   # armed at the commanded pose, then a goal
+        self.step(1)
         for _ in range(8):
             self.target(*self.goal)
             self.step(1)
@@ -100,7 +102,8 @@ def test_a_late_tick_disarms_and_is_counted(rig):
         rig.target(*rig.goal)
         rig.step(1)
     assert not node.armed and np.max(np.abs(node.q_cmd["arm"] - q)) < 1e-12
-    rig.target(*rig.goal, aseq=2)                             # a new press arms
+    r = rig.row()                                             # a new press arms (at the commanded pose)
+    rig.target([r[f"arm_cmd_{k}"] for k in "xyz"], [r[f"arm_cmd_q{k}"] for k in "xyzw"], aseq=2)
     rig.step(1)
     assert node.armed
 

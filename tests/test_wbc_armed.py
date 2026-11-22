@@ -340,6 +340,111 @@ def test_estimator_reset_and_pose_jump_disarm(model):
     node.disable("done")
 
 
+def test_an_estimator_dropout_disarms_and_its_return_never_resumes(model):
+    """The estimator stream dead for 0.5 s while the client keeps sending armed datagrams: disarmed (not a mere
+    hold); the stream back: no tracking, no motion, until a new arm_seq."""
+    from robot_utils.nodes.wbc.targets import R_to_quat
+    d = tempfile.mkdtemp(prefix="wbca")
+    clock = Clock(1000.0)
+    node = WbcNode(model, arm=None, swerve=None, estimator="est", clock=clock, udp_host=None,
+                   unix_socket=d + "/t.sock")
+    tok, _ = node.acquire("t")
+    node.enable(tok)
+    sess = node.open_session(tok)["session"]
+    seq, live = [0], {"est": True}
+
+    def step(n=1, aseq=1, goal=(0.0, 0.0, 0.0)):
+        for _ in range(n):
+            clock.t += DT
+            if live["est"]:
+                node.feed_estimator({"t": clock.t, "x": 0.0, "y": 0.0, "theta": 0.0, "reset_id": 3.0, "odom_ok": 1.0})
+            T = node.model.fk(node.model.config((0, 0, 0), node.q_cmd), "arm")
+            seq[0] += 1
+            node.receiver.handle(json.dumps({
+                "type": "target", "session": sess, "seq": seq[0], "t": None, "armed": True, "arm_seq": aseq,
+                "ees": {"arm": {"pos": list(T.translation + np.asarray(goal)) if seq[0] > 3 else list(T.translation),
+                                "quat": list(R_to_quat(T.rotation))}}}).encode())
+            node.step()
+    step(5)
+    assert node.armed
+    step(10, goal=(0.0, 0.0, 0.02))                            # tracking a moving target
+    assert node.state == "tracking"
+    live["est"] = False
+    step(50, goal=(0.0, 0.0, 0.02))                            # 0.5 s without an estimator row, still sending
+    assert not node.armed and node.disarm_reason.startswith("estimator:"), node.disarm_reason
+    q = node.q_cmd["arm"].copy()
+    live["est"] = True
+    step(50, goal=(0.0, 0.0, 0.02))                            # the stream is back, the old press still sent
+    assert not node.armed and node.state == "idle"
+    assert np.max(np.abs(node.q_cmd["arm"] - q)) < 1e-12        # no motion
+    assert node.latch_counts["arm_refused"] > 0
+    step(1, aseq=2)                                            # a new press arms
+    assert node.armed
+    node.disable("done")
+
+
+def test_arming_refuses_a_target_far_from_the_commanded_pose(rig):
+    """An ARMING datagram whose target is more than arm_target_pos / arm_target_rot from the commanded EE is
+    refused (counted, an event at most once a second); that press never arms; a new press at the pose arms."""
+    node = rig.node
+    rig.lease_enable()
+    rig.step(2)
+    p0, q0 = rig.cmd_pose()
+    assert node.cfg.arm_target_pos == 0.02 and abs(node.cfg.arm_target_rot - np.radians(5)) < 1e-3
+    rig.aseq, rig.armed = 1, True
+    for _ in range(5):
+        rig.target(p0 + [0.03, 0, 0], q0)                     # 30 mm off
+        rig.step(1)
+    # the first refuses the press (counted arm_far); the same press after it is an old arm_seq (arm_refused)
+    assert not node.armed and node.latch_counts["arm_far"] == 1 and node.latch_counts["arm_refused"] == 4
+    assert all(b.kind is None for b in node.buffers.values())
+    assert sum("arm refused" in e["msg"] for e in node.events.list()) == 1
+    rig.target(p0, q0)                                        # the same press, now at the pose: still refused
+    rig.step(1)
+    assert not node.armed
+    from robot_utils.nodes.wbc.targets import R_to_quat, quat_to_R
+    rot = R_to_quat(quat_to_R(q0) @ np.array([[1, 0, 0], [0, np.cos(0.105), -np.sin(0.105)],
+                                               [0, np.sin(0.105), np.cos(0.105)]]))   # 6 deg off
+    rig.aseq += 1
+    rig.target(p0, rot)
+    rig.step(1)
+    assert not node.armed and node.latch_counts["arm_far"] == 2
+    rig.aseq += 1
+    rig.target(p0 + [0.015, 0, 0], q0)                        # within 20 mm: arms
+    rig.step(1)
+    assert node.armed
+
+
+def test_disabled_rows_carry_no_pose_and_a_stale_riding_pose_after_x_is_refused(rig):
+    """X (disable) -> the arm floats away -> Y with the client's stale riding pose: while disabled the rows carry NaN
+    for the commanded and measured EE (nothing stale to capture); after the enable the stale target is refused."""
+    node, arm = rig.node, rig.arm
+    rig.lease_enable()
+    rig.step(2)
+    p0, q0 = rig.cmd_pose()
+    rig.arm_now(p0, q0)
+    node.disable("X")
+    rig.step(2)
+    r = rig.row()
+    assert all(math.isnan(r[f"arm_{w}_{k}"]) for w in ("cmd", "meas") for k in ("x", "y", "z", "qw"))
+    assert all(math.isnan(r[f"arm_q_cmd{i}"]) for i in range(1, 7))
+    wait_for(lambda: arm.token is None, 3)
+    with arm.lock:                                            # floating: the operator pushed the arm
+        arm.q = arm.q + np.radians([10, -8, 6, 0, 0, 0])
+    node.enable(rig.tok)
+    rig.step(2)
+    p1, q1 = rig.cmd_pose()
+    assert np.linalg.norm(p1 - p0) > 0.03                     # seeded from where the arm is now
+    rig.aseq += 1
+    rig.target(p0, q0)                                        # Y with the stale riding pose
+    rig.step(1)
+    assert not node.armed and node.latch_counts["arm_far"] == 1
+    rig.aseq += 1
+    rig.target(p1, q1)                                        # a fresh press at the current command
+    rig.step(1)
+    assert node.armed
+
+
 # -- what disarmed means for the motors -----------------------------------------------------------------------
 
 def test_disarm_brakes_the_base_within_its_rate_limit(rig):
@@ -409,8 +514,8 @@ def test_no_recovery_rearms_and_the_old_arm_seq_is_refused(rig):
     q = node.q_cmd["arm"].copy()
     rig.step(5)
     assert np.max(np.abs(node.q_cmd["arm"] - q)) < 1e-12       # nothing moves
-    rig.aseq += 1                                              # a new press arms
-    rig.target(p0, q0)
+    rig.aseq += 1                                              # a new press arms (at the commanded pose, as the
+    rig.target(*rig.cmd_pose())                                # client's riding target is)
     rig.step(1)
     assert node.armed and node.arm_seq == 2
 
