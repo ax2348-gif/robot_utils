@@ -2,7 +2,7 @@
 """Headset-side control for the Quest teleop: ``up``, ``down``, ``status`` (also as ``quest_up`` / ``quest_down`` /
 ``quest_status``). Mac or erid; stdlib only. Automates only the headset, not the teleop workflow.
 
-    quest_up [--scheme body-frozen|standard] [--demo] [--restart] [--wait 30]
+    quest_up [--scheme body-frozen|standard] [--demo] [--ar URL] [--restart] [--wait 30]
     quest_down
     quest_status
 
@@ -16,10 +16,12 @@ shell; profile.sh defines ``q`` only for interactive shells, so it is not used o
 2. ``git fetch`` then compare with the upstream; ``quest pull`` only if behind. ``pull`` fast-forwards only and
    refuses a dirty tree: a dirty tree is reported and left alone, never forced.
 3. Telemetry, headless: ``quest run --no-viewer --scheme=<scheme>`` (``-s`` too with ``--demo``, which renders the
-   headset's own kinematic demo). The scheme works without ``-s``: the script writes ``off body-frozen`` to
+   headset's own kinematic demo; ``--ar=URL`` with ``--ar URL``, the robot AR view of the robot frontend at URL,
+   quest_env ROBOT_AR.md). The scheme works without ``-s``: the script writes ``off body-frozen`` to
    ``~/.config/quest-env/demo-mode`` and native reads the second word into ``operatorIntent_.bodyFrozen``
    regardless of the demo. ``run`` restarts the XR process, so it is skipped when the stream already answers, the
-   mode file matches and nothing was pulled (``--restart`` forces it).
+   mode file and the AR URL (``~/.config/quest-env/robot-ar``) match and nothing was pulled (``--restart`` forces
+   it).
 4. Waits until port 9391 answers with ``teleop.quest_state.v1`` frames, then prints the status.
 
 ``down``: ``quest stop``. ``status``: ``quest status``, the mode file, the stream's liveness and the battery.
@@ -42,6 +44,7 @@ STREAM_PORT = 9391
 SCHEMA = "teleop.quest_state.v1"
 ROOT = 'R=$(cat "$HOME/.config/quest-env/root" 2>/dev/null || echo "$HOME/workspace/quest_env"); '
 MODE_FILE = '"$HOME/.config/quest-env/demo-mode"'
+AR_FILE = '"$HOME/.config/quest-env/robot-ar"'
 XR_STATES = {"0": "UNKNOWN", "1": "IDLE (headset not worn?)", "2": "READY", "3": "SYNCHRONIZED", "4": "VISIBLE",
              "5": "FOCUSED", "6": "STOPPING", "7": "LOSS_PENDING", "8": "EXITING"}
 UNREACHABLE = ("the headset does not answer SSH ({detail}). Is it asleep, off, or off the network, or is the "
@@ -185,6 +188,14 @@ class QuestCtl:
         r = self.run(f"cat {MODE_FILE} 2>/dev/null", 15)
         return " ".join(r.out.split()) if r.rc == 0 else ""
 
+    def ar_url(self) -> Optional[str]:
+        """The robot AR URL the running telemetry was launched with (``url=`` in the AR file), None without one."""
+        r = self.run(f"cat {AR_FILE} 2>/dev/null", 15)
+        for line in r.out.splitlines() if r.rc == 0 else []:
+            if line.startswith("url="):
+                return line[4:].strip()
+        return None
+
     def xr_state(self) -> str:
         """The telemetry process's last OpenXR session state, from ``quest status`` (its pid) and logcat (read-only).
         The stream only flows once the session runs (FOCUSED/VISIBLE): IDLE means the headset is not being worn."""
@@ -215,7 +226,8 @@ class QuestCtl:
             info = self.probe(self.stream_host, self.port, 1.0)
         return info
 
-    def up(self, scheme: str = "body-frozen", demo: bool = False, restart: bool = False, wait: float = 30.0) -> int:
+    def up(self, scheme: str = "body-frozen", demo: bool = False, restart: bool = False, wait: float = 30.0,
+           ar: Optional[str] = None) -> int:
         if not self.reachable():
             return 2
         pulled = False
@@ -235,14 +247,16 @@ class QuestCtl:
             else:
                 self.log("headset clone is up to date" + (f" ({dirty} local change(s))" if dirty else ""))
         want = f"{'live' if demo else 'off'}{' body-frozen' if scheme == 'body-frozen' else ''}"
-        current = self.mode()
+        current, current_ar = self.mode(), self.ar_url()
         live = self.probe(self.stream_host, self.port, 1.0)
-        if live.live and current == want and not pulled and not restart:
-            self.log(f"telemetry already running ({want}); not restarting")
+        if live.live and current == want and current_ar == ar and not pulled and not restart:
+            self.log(f"telemetry already running ({want}{', AR ' + ar if ar else ''}); not restarting")
         else:
             why = ("--restart" if restart else "updated" if pulled else
-                   "stream not answering" if not live.live else f"mode {current or 'unset'!r} -> {want!r}")
-            args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "")
+                   "stream not answering" if not live.live else
+                   f"mode {current or 'unset'!r} -> {want!r}" if current != want else
+                   f"AR {current_ar or 'off'} -> {ar or 'off'}")
+            args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "") + (f" --ar={ar}" if ar else "")
             self.log(f"starting telemetry: quest {args} ({why})")
             r = self.q(args, 120)
             if r.rc != 0:
@@ -291,6 +305,8 @@ def main(argv=None, prog: Optional[str] = None) -> int:
     ap.add_argument("--port", type=int, default=STREAM_PORT)
     ap.add_argument("--scheme", choices=("body-frozen", "standard"), default="body-frozen")
     ap.add_argument("--demo", action="store_true", help="also the headset's own kinematic demo (-s)")
+    ap.add_argument("--ar", metavar="URL", help="robot AR view: the robot frontend's root URL, plain http "
+                    "reachable from the headset (e.g. the Mac's sim stack, http://<mac>:8080)")
     ap.add_argument("--restart", action="store_true", help="restart telemetry even if it is already running")
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for the stream")
     args = ap.parse_args(argv)
@@ -298,7 +314,7 @@ def main(argv=None, prog: Optional[str] = None) -> int:
     ctl = QuestCtl(SshRunner(args.ssh_host), args.stream_host or ssh_hostname(args.ssh_host), port=args.port,
                    log=lambda s: print(s, flush=True))
     if command == "up":
-        return ctl.up(args.scheme, args.demo, args.restart, args.wait)
+        return ctl.up(args.scheme, args.demo, args.restart, args.wait, args.ar)
     return ctl.down() if command == "down" else ctl.status()
 
 

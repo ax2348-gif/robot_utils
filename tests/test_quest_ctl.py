@@ -25,6 +25,7 @@ class FakeQuest:
         self.reachable, self.behind, self.dirty, self.mode = reachable, behind, dirty, mode
         self.running, self.pull_rc, self.run_rc, self.battery = running, pull_rc, run_rc, battery
         self.xr = xr
+        self.ar = None                        # the robot AR URL in ~/.config/quest-env/robot-ar (None: no file)
         self.commands: list[str] = []
 
     def __call__(self, cmd, timeout=60.0):
@@ -45,6 +46,7 @@ class FakeQuest:
                 self.mode = "live" if " -s" in cmd else "off"
                 if "--scheme=body-frozen" in cmd:
                     self.mode += " body-frozen"
+                self.ar = cmd.split("--ar=", 1)[1].split()[0] if "--ar=" in cmd else None
             return Result(self.run_rc, "", "" if self.run_rc == 0 else "No built telemetry package")
         if 'quest" stop' in cmd:
             self.running = False
@@ -55,6 +57,8 @@ class FakeQuest:
                                          "last_load_process_alive": self.running}) + "\n")
         if cmd.startswith("logcat"):
             return Result(0, f"11-21 18:50:44.031 11444 11475 I QuestRuntimeXR: OpenXR session state {self.xr}\n")
+        if "robot-ar" in cmd:
+            return Result(0, f"url={self.ar}\n") if self.ar else Result(1, "")
         if "demo-mode" in cmd:
             return Result(0, self.mode + "\n")
         if "power_supply" in cmd:
@@ -225,3 +229,15 @@ def test_ssh_runner_builds_a_batch_mode_command(monkeypatch):
     monkeypatch.setattr(quest_ctl.subprocess, "run", fake_run)
     r = quest_ctl.SshRunner("quest", 5)("echo quest-ok")
     assert r.rc == 0 and seen["argv"][:7] == ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "quest"]
+
+
+def test_up_with_ar_restarts_only_when_the_ar_url_changes():
+    fq = FakeQuest()
+    ctl, logs = ctl_for(fq)
+    assert ctl.up(ar="http://100.65.75.106:8080") == 0
+    assert fq.ran("--ar=http://100.65.75.106:8080") and fq.ar == "http://100.65.75.106:8080"
+    assert any("AR off -> http://100.65.75.106:8080" in s for s in logs)
+    n = len(fq.ran('quest" run'))
+    assert ctl.up(ar="http://100.65.75.106:8080") == 0 and len(fq.ran('quest" run')) == n     # same URL: no restart
+    assert ctl.up() == 0 and len(fq.ran('quest" run')) == n + 1 and fq.ar is None            # AR off: restart
+    assert_safe(fq)
