@@ -79,6 +79,7 @@ _COLS = [
     ("wbc_armed", "bool", "the WBC's own armed flag (its stream)"),
     ("quest_latency", "s", "the newest headset frame's latency over the session's best (arrival - sample time)"),
     ("quest_rate_short", "Hz", "valid headset frames over the last 0.5 s (below 30 Hz: stale, disarms)"),
+    ("battery_pct", "%", "the headset battery (its telemetry's device block; NaN when not reported)"),
 ]
 FIELDS = [c[0] for c in _COLS]
 UNITS = [c[1] for c in _COLS]
@@ -144,6 +145,19 @@ class HeadsetMonitor:
                       "gripper": _f(h.get("gripper")) if h.get("gripper") is not None else None}
         return out
 
+    def battery(self) -> dict:
+        """The headset's ``device`` block (newer telemetry builds): battery %, charging / plugged, temperature, and a
+        line formatted as quest_ctl's (``QuestCtl.battery``); "not reported" when the block is absent."""
+        d = self.last or {}
+        dev = d.get("device") if isinstance(d.get("device"), dict) else None
+        pct = dev.get("battery_pct") if dev else None
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            return {"pct": None, "charging": None, "plugged": None, "temperature_c": None, "text": "not reported"}
+        from types import SimpleNamespace
+        return {"pct": float(pct), "charging": bool(dev.get("charging")), "plugged": bool(dev.get("plugged")),
+                "temperature_c": dev.get("temperature_c") if isinstance(dev.get("temperature_c"), (int, float))
+                else None, "text": quest_ctl.QuestCtl.battery(SimpleNamespace(device=dev, live=True))}
+
     def snapshot(self, now: float) -> dict:
         with self._lock:
             n = sum(1 for t in self.arrivals if now - t <= 1.0)
@@ -151,6 +165,7 @@ class HeadsetMonitor:
         intent = d.get("control_intent") if isinstance(d.get("control_intent"), dict) else {}
         r = self.reader
         return {"connected": bool(getattr(r, "connected", False)), "rate_hz": float(n),
+                "battery": self.battery(),
                 "age": None if t is None else round(now - t, 4), "frames": self.frames,
                 "focused": d.get("input_focused") if d else None,
                 "xr_state": d.get("xr_session_state") if d else None,
@@ -468,6 +483,8 @@ class QuestTeleopNode:
         for k, v in (h["hands"] or {}).items():
             row[f"{k}_valid"], row[f"{k}_engaged"] = float(v["valid"]), float(v["engaged"])
             row[f"{k}_gripper"] = nan if v["gripper"] is None else v["gripper"]
+        bp = h["battery"]["pct"]
+        row["battery_pct"] = nan if bp is None else bp
         wrow, wt = self.stream.latest()
         if wrow is not None:
             ee = self.cfg.ee
@@ -610,6 +627,7 @@ class QuestTeleopNode:
             "estop": {"latched": bool(e.get("latched")), "reason": e.get("reason"), "source": e.get("source"),
                       "t": e.get("t"), "on": "wbc"},
             "ctl": self.ctl_info(),
+            "battery_pct": self.monitor.battery()["pct"],
             "config": {"wbc": self.wbc_target, "arm": self.arm_target, "swerve": self.swerve_target,
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,

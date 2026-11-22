@@ -130,7 +130,9 @@ RU.sse("events", s => {
     ["stream", `${esc(s.config.quest_host)}:${s.config.quest_port} · ${H.connected ? "connected" : "not connected"}`],
     ["rate", `${f(H.rate_hz, 0)} frames/s · age ${age}`],
     ["latency", T.input ? `${T.input.latency_ms === null ? "–" : f(T.input.latency_ms, 0) + " ms"} · ${f(T.input.rate_hz, 0)} Hz (0.5 s)${T.input.fresh ? "" : " · stale: " + esc(T.input.why)}` : "–"],
-    ["focus", H.focused === null ? "–" : (H.focused ? "focused" : "not focused")],    ["XR session", esc(H.xr_state || "–")],
+    ["focus", H.focused === null ? "–" : (H.focused ? "focused" : "not focused")],
+    ["battery", esc(H.battery ? H.battery.text : "not reported")],
+    ["XR session", esc(H.xr_state || "–")],
     ["session", esc(H.session_id || "–") + (H.scheme ? " · " + esc(H.scheme) : "")],
   ];
   if (!H.connected && H.last_error) link.push(["error", esc(H.last_error)]);

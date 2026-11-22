@@ -126,9 +126,22 @@ def test_y_arms_through_the_node_and_the_estop_stops_teleop(env):
     wait_for(lambda: node.phase == "stopped", 3)
 
 
+def test_headset_battery_in_state_and_stream(env):
+    node = env["node"]
+    wait_for(lambda: node.state()["headset"]["battery"]["pct"] == 87, 3)
+    st = node.state()
+    assert st["battery_pct"] == 87 and st["headset"]["battery"]["text"] == "87%, plugged, 35 C"
+    assert st["headset"]["battery"]["plugged"] is True and st["headset"]["battery"]["temperature_c"] == 35.2
+    assert FIELDS[-1] == "battery_pct"
+    wait_for(lambda: node.latest and node.latest.get("battery_pct") == 87, 2)
+    node.monitor.last = {k: v for k, v in node.monitor.last.items() if k != "device"}   # an older headset build
+    assert node.monitor.battery() == {"pct": None, "charging": None, "plugged": None, "temperature_c": None,
+                                      "text": "not reported"}
+
+
 def test_latency_and_armed_in_the_stream(env):
     node = env["node"]
-    assert FIELDS[-4:] == ["armed", "wbc_armed", "quest_latency", "quest_rate_short"]
+    assert FIELDS[-5:-1] == ["armed", "wbc_armed", "quest_latency", "quest_rate_short"]
     node.start_teleop()
     wait_for(lambda: node.latest and node.latest.get("quest_rate_short") and node.latest["quest_rate_short"] > 30, 3)
     assert node.latest["armed"] == 0.0 and node.latest["quest_latency"] is not None
