@@ -481,6 +481,14 @@ def main():
             f"record with: python -m robot_utils.collect run --robot http://botcore-desktop.local --teleop {a.teleop} "
             "--out DIR --task soak")
         cpu = []
+        arm_hist = []
+        try:
+            a0 = call("arm", "GET", "/state", timeout=2.0)
+            verdict["arm_start"] = {"overruns": a0.get("overruns"), "realtime": a0.get("realtime"),
+                                    "process": a0.get("process")}
+            log(f"arm realtime {a0.get('realtime')}; process {(a0.get('process') or {}).get('mode')}")
+        except Exception as e:  # noqa: BLE001
+            log(f"arm state: {e}")
         while time.monotonic() - t0 < a.duration:
             if sleep_watch(a.status):
                 raise SystemExit
@@ -491,6 +499,15 @@ def main():
             cpu.append(pc)
             c0, tc0 = c1, tc1
             r = wd.wbc
+            try:
+                ar = call("arm", "GET", "/state", timeout=2.0)
+                rl = ar.get("reply_latency") or {}
+                arm_s = (f"arm {ar.get('loop_hz', 0):.1f} Hz, overruns {ar.get('overruns')}, reply p50/p99 "
+                         f"{rl.get('p50_ms')}/{rl.get('p99_ms')} ms")
+                arm_hist.append((ar.get("loop_hz"), ar.get("overruns"), rl.get("p99_ms")))
+            except Exception as e:  # noqa: BLE001
+                arm_s = f"arm state: {e}"
+            log(arm_s)
             log(f"{time.monotonic() - t0:5.0f}s WBC {st.get('state')} hz {st.get('loop_hz', 0):.1f} "
                 f"period max {tk.get('max_period_ms', float('nan')):.1f} ms, overruns {tk.get('overruns')}, late "
                 f"{tk.get('late')}, input_age {r.get('input_age', float('nan')):.3f}, est_age "
@@ -506,6 +523,7 @@ def main():
                           "disarm_reason": w1.get("disarm_reason"), "loop_hz": w1.get("loop_hz"),
                           "solve_failures": w1.get("solve_failures"), "max_period_stream_ms": wd.wbc_max_period,
                           "cpu_pct": {"mean": sum(cpu) / len(cpu) if cpu else None, "max": max(cpu, default=None)}}
+        verdict["arm"] = {"samples": arm_hist}
         d_over = (tick1.get("overruns") or 0) - (tick0.get("overruns") or 0)
         d_late = (tick1.get("late") or 0) - (tick0.get("late") or 0)
         verdict["wbc"].update(overruns_during=d_over, late_during=d_late)
