@@ -38,6 +38,9 @@ dev = ["playwright>=1.40"]
 power = ["smbus2>=0.4"]
 # the MuJoCo sim world (robot_utils.nodes.sim, docs/plans/sim_v1.md); development machines and erid, never the robot
 sim = ["mujoco>=3.2"]
+# whole-body control (robot_utils.nodes.wbc): pinocchio kinematics and the daqp QP (installed on the robot, 2026-11-21:
+# pin 4.1.0, qpsolvers 4.13.0, daqp 0.11.2)
+wbc = ["pin>=4.1", "qpsolvers>=4.13", "daqp>=0.11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -103,7 +103,7 @@ step "rev_ctl, rebot_ctl (editable), robot_utils and LeRobot"
 "$PY" -m pip install --quiet -c "$ROOT/constraints.txt" ${EXTRA_INDEX[@]+"${EXTRA_INDEX[@]}"} \
   -e "$ROOT/rev_ctl[slcan]" \
   -e "$ROOT/rebot_ctl" \
-  -e "$ROOT"
+  -e "$ROOT[wbc]"
 
 step "pyorbbecsdk2 (Orbbec camera SDK, without its example dependencies)"
 # --no-deps: see constraints.txt. Its only runtime dependency, numpy, is already installed.
