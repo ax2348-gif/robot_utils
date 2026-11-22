@@ -36,6 +36,22 @@ policy and to diagnose the run afterwards. The same client, recorder and episode
   boundaries. Built after the safety build merges.
 - No headset HUD: the headset is an input device; recording state shows on the script's / node's page.
 
+**The node <-> script contract (fixed 2026-11-21; both sides build against it):**
+- **Event line** (the Pi log's JSONL lines and the stream's `event` records alike):
+  `{"seq": int, "t": <Pi monotonic s>, "wall": <unix s>, "kind": str, "episode": <id> | null, "detail": {...}}`.
+  `seq` increments by one per event for the node's life and continues across restarts (read back from the newest
+  log file), so a gap is detectable. `kind` is one of `button` (detail: `button` A/B/X/Y, `pressed` bool), `armed`
+  (`arm_seq`), `disarmed` (`reason`), `enabled`, `disabled` (`reason`), `episode_start` (`task`), `episode_stop`,
+  `episode_abort` (`reason`), `estop` (`reason`, `source`), `fault` (`reason`), `hold` (`reason`), `stale`
+  (`reason`: staleness / latency / rate), `teleop_start`, `teleop_stop` (`reason`), `sim_reset` (`reset_seq`).
+  Episode ids: `YYYYMMDD-NNNN` (the node's counter per day).
+- **Operator stream** `GET /nodes/quest_teleop/oplog/stream`: the node protocol's record framing (docs/nodes.md
+  "Streams"), JSON in the header, no payload, three types: `headset` (`t_rx` Pi monotonic, `frame`: the raw
+  teleop.quest_state.v1 record), `sent` (`t_send`, `datagram`: exactly what went to the WBC), `event` (the event
+  line). Every record in order of occurrence.
+- **API:** `POST /task {"text"}` (the task of the next episodes), `GET /eventlog?since_seq=N` (JSON lines after N,
+  from the log files), `GET /eventlog/files` (`[{name, bytes, first_seq, last_seq}]`); start / stop as today.
+
 **Recommendations standing (2026-11-21):** raw stream bytes + an episode index, converted offline (e.g. LeRobot);
 MJPG as sent with an every-frame camera stream mode for recorders (gaps counted per episode); the Pi clock as the
 time base (WBC tick as master, alignment offline); seeded per-object position / yaw randomisation in the sim scene,
