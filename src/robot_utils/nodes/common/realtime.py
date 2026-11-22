@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -56,6 +57,8 @@ def make_realtime(priority: int, name: str = "control loop") -> dict:
         return out
     if not hasattr(os, "sched_setscheduler") or not hasattr(os, "SCHED_FIFO"):
         out["error"] = "not available on this OS"
+        if sys.platform == "darwin":                 # the dev Mac (sim): the closest macOS offers, see _macos_latency
+            out["error"] += f" (macOS: {_macos_latency(name)})"
         return out
     try:
         policy = os.SCHED_FIFO | getattr(os, "SCHED_RESET_ON_FORK", 0)
@@ -70,6 +73,55 @@ def make_realtime(priority: int, name: str = "control loop") -> dict:
         out["error"] = f"{type(e).__name__}: {e}"
         log.warning("%s: no real-time priority (%s)", name, out["error"])
     return out
+
+
+_MAC_ACTIVITY = None   # the process's NSProcessInfo activity (held for its lifetime)
+
+
+def _macos_latency(name: str) -> str:
+    """macOS has no SCHED_FIFO for us. Ask for what it offers, process-locally, no permissions needed: the calling
+    thread's QoS class user-interactive, and (once per process) an NSProcessInfo activity "user initiated + latency
+    critical", which turns off App Nap and timer coalescing: without it a node whose terminal or browser window is
+    out of view gets its timers delayed by ~100 ms (the sim arm's 0.1 s motor watchdog then trips)."""
+    global _MAC_ACTIVITY
+    import ctypes
+    import ctypes.util
+    notes = []
+    try:
+        libsys = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        rc = libsys.pthread_set_qos_class_self_np(ctypes.c_uint(0x21), ctypes.c_int(0))   # QOS_CLASS_USER_INTERACTIVE
+        notes.append("thread QoS user-interactive" if rc == 0 else f"thread QoS refused ({rc})")
+    except Exception as e:  # noqa: BLE001 - best effort, never raises
+        notes.append(f"thread QoS: {type(e).__name__}")
+    if _MAC_ACTIVITY is None:
+        try:
+            objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+            ctypes.CDLL(ctypes.util.find_library("Foundation"))
+            objc.objc_getClass.restype = ctypes.c_void_p
+            objc.objc_getClass.argtypes = [ctypes.c_char_p]
+            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.sel_registerName.argtypes = [ctypes.c_char_p]
+            send = objc.objc_msgSend
+
+            def msg(obj, sel, *args, argtypes=()):
+                send.restype = ctypes.c_void_p
+                send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]
+                return send(obj, objc.sel_registerName(sel), *args)
+            info = msg(objc.objc_getClass(b"NSProcessInfo"), b"processInfo")
+            reason = msg(objc.objc_getClass(b"NSString"), b"stringWithUTF8String:", f"robot_utils {name}".encode(),
+                         argtypes=(ctypes.c_char_p,))
+            options = 0x00FFFFFF | 0xFF00000000           # NSActivityUserInitiated | NSActivityLatencyCritical
+            act = msg(info, b"beginActivityWithOptions:reason:", ctypes.c_uint64(options), reason,
+                      argtypes=(ctypes.c_uint64, ctypes.c_void_p))
+            if not act:
+                raise RuntimeError("no activity")
+            msg(act, b"retain")
+            _MAC_ACTIVITY = act
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"App Nap not disabled ({type(e).__name__}: {e})")
+            return ", ".join(notes)
+    notes.append("App Nap and timer coalescing off")
+    return ", ".join(notes)
 
 
 def describe(rt: dict) -> str:

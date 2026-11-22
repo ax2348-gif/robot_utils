@@ -596,6 +596,8 @@ class World:
             self._thread.join(timeout=2)
 
     def _loop(self) -> None:
+        from ..common import realtime
+        self.realtime = realtime.make_realtime(realtime.PRIO_ESTIMATE, "sim physics loop")   # macOS: no App Nap
         dt = self.m.opt.timestep
         while not self._stop.is_set():
             if not self.running:
