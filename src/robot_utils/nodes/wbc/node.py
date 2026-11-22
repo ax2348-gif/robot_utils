@@ -12,9 +12,20 @@ Threads:
 
 Requests (server.py) only touch state under ``self.lock``; enable / disable talk to the peers outside the tick.
 
-States: ``disabled`` | ``enabling`` | ``idle`` (enabled, no target: holding) | ``tracking`` | ``holding`` (stale
-input, client lease gone, estimator unusable) | ``fault`` (latched until ``POST /disable``: an infeasible solve, a
-cross-bus fault, a lost peer; the healthy half holds: the arm keeps its commanded joints, the base gets zero).
+States: ``disabled`` | ``enabling`` | ``idle`` (enabled, no target: holding; always while disarmed) | ``tracking``
+| ``holding`` (stale input, client lease gone, estimator unusable) | ``fault`` (latched until ``POST /disable``: an
+infeasible solve, a cross-bus fault, a lost peer; the healthy half holds: the arm keeps its commanded joints, the base
+gets zero).
+
+**Armed latch** (inside enabled; false at enable): only an armed WBC follows targets. Disarmed = hold: the target
+buffers and the per-datagram base override are cleared (never resumed), the base brakes to zero within its rate limit,
+the arm stops at its commanded joints, the gripper keeps its last goal; targets in datagrams are ignored (counted, not
+buffered). Disarmed by a datagram with ``armed: false`` (or without ``armed`` / ``arm_seq``), ``POST /disarm``, stale
+input (``hold_timeout``), the client lease ending, a new session, enable, disable, an estimator reset or pose jump, a
+planned motion pausing the arm, any fault, the e-stop and a control tick later than 3 dt. Armed only by a ``target``
+or ``chunk`` datagram (never ``alive``) carrying ``armed: true`` and an ``arm_seq`` greater than the highest
+``arm_seq`` seen when it was last disarmed (the floor; kept for the node's life, ``POST /session`` returns it), while
+enabled, without a fault, e-stop or pause.
 """
 from __future__ import annotations
 
@@ -71,6 +82,8 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         f += [(f"{e}_err_pos", "m"), (f"{e}_err_rot", "rad"), (f"{e}_ff_scale", ""), (f"{e}_target_id", "id"),
               (f"{e}_manip", ""), (f"{e}_reach", "")]
         f += [(f"{e}_q_cmd{i}", "rad") for i in range(1, 7)] + [(f"{e}_qd{i}", "rad/s") for i in range(1, 7)]
+    f += [("armed", "bool"), ("tick_period", "ms"), ("tick_compute", "ms"), ("overruns", "count"),
+          ("late_ticks", "count")]
     doc = {
         "t_tick": "control tick time, Pi monotonic s (the clock of target t)",
         "seq": "seq of the latest accepted datagram in force (0 = none)",
@@ -101,6 +114,11 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         "<ee>_tgt_*": "the target of this tick, world (after blending)",
         "<ee>_reach": "shoulder-to-target distance / the nominal reach (the limit is reach_fraction)",
         "<ee>_manip": "arm-only manipulability (Yoshikawa) at the commanded joints",
+        "armed": "1 if armed (targets are followed); 0 disarmed: holding, targets ignored (/state disarm_reason)",
+        "tick_period": "this tick's measured period (ms; nominal 1000 / rate_hz)",
+        "tick_compute": "this tick's compute time up to the publish (ms)",
+        "overruns": "ticks whose period exceeded 1.5 dt (since start)",
+        "late_ticks": "ticks later than 3 dt after the previous one (each disarms; since start)",
     }
     return [n for n, _ in f], [u for _, u in f], doc
 
@@ -182,6 +200,20 @@ class WbcNode:
         from ..arm.config import GAP_MAX
         self.gap_max = GAP_MAX
         self._paused = False
+        # the armed latch (module docstring)
+        self.armed = False
+        self.arm_seq = 0                 # the arm_seq that armed it (0: none this session)
+        self.arm_seq_seen = 0            # the highest arm_seq in this session's datagrams
+        self.arm_floor = 0               # arm_seq_seen at the last disarm: arming needs a greater one
+        self.disarm_reason: Optional[str] = "not armed yet"
+        self.disarms = 0
+        self.latch_counts = {"ignored_disarmed": 0, "arm_refused": 0, "limits_ignored": 0, "clamped": 0}
+        # control tick timing (D): the measured period and compute time, overruns (> 1.5 dt), late ticks (> 3 dt)
+        self.tick = {"period_ms": math.nan, "compute_ms": math.nan, "max_period_ms": 0.0, "max_compute_ms": 0.0,
+                     "overruns": 0, "late": 0}
+        self._tick_prev: Optional[float] = None
+        self._t0 = time.perf_counter()
+        self._late_log = -math.inf
         self.solve_fail = 0
         self.limited_counts: dict = {}
         self._tick_times: list = []
@@ -349,14 +381,54 @@ class WbcNode:
             sid = secrets.randbits(31) or 1
             self.session_token = token
             self.receiver.open_session(sid)
-            self.events.add(f"session {sid} opened")
-        return {"session": sid, "udp_port": self.receiver.udp_port, "unix_socket": self.receiver.unix_path}
+            self.inbox.drain()                           # the previous session's datagrams never apply
+            self._disarm_locked("new session", note=True)
+            floor = self.arm_floor                       # kept for the node's life: arming needs a greater arm_seq
+            self.events.add(f"session {sid} opened (arm_seq floor {floor})")
+        return {"session": sid, "udp_port": self.receiver.udp_port, "unix_socket": self.receiver.unix_path,
+                "arm_seq": floor}
+
+    # -- the armed latch -------------------------------------------------------------------------------------
+
+    def _disarm_locked(self, reason: str, note: bool = False) -> None:
+        """Disarm (under ``self.lock``): clear the targets and the per-datagram base override (never resumed); the
+        next ticks hold. One event per armed -> disarmed transition; ``note`` also records the reason when already
+        disarmed (enable, a new session)."""
+        self.arm_floor = max(self.arm_floor, self.arm_seq_seen, self.arm_seq)
+        for b in self.buffers.values():
+            b.clear()
+        self.override = {}
+        self.velocity_t = self.hint_t = -math.inf
+        if self.armed:
+            self.armed = False
+            self.disarms += 1
+            self.disarm_reason = reason
+            self.events.add(f"DISARMED: {reason}", "warn")
+            log.warning("disarmed: %s", reason)
+        elif note:
+            self.disarm_reason = reason
+
+    def disarm(self, reason: str = "", source: str = "") -> dict:
+        """``POST /disarm``: anyone (no lease, like the e-stop). Holds; arming again needs a new ``arm_seq``."""
+        why = "POST /disarm" + (f" ({source})" if source else "") + (f": {reason}" if reason else "")
+        with self.lock:
+            was = self.armed
+            self._disarm_locked(why)
+            return {"armed": False, "was_armed": was, "disarm_reason": self.disarm_reason}
+
+    def _live(self) -> bool:
+        """Arming is possible: enabled, no fault, no e-stop, the arm not paused by a planned motion."""
+        return self.enabled and self.fault is None and not self.estop.active and not self._paused
 
     def _apply_messages(self, now: float) -> None:
+        live = self._live()
         for msg, t_rx in self.inbox.drain():
+            if msg.get("session") != self.receiver.session:     # queued before a new session (or after its end)
+                self.receiver.drop("unknown_session")
+                continue
             why = None
             try:
-                why = self._apply(msg, now)
+                why = self._apply(msg, now, live)
             except (ValueError, TypeError, KeyError) as e:
                 why = "invalid"
                 self._note_invalid(f"{msg.get('type')} {msg.get('seq')}: {e}")
@@ -372,14 +444,57 @@ class WbcNode:
             self._last["invalid_ev"] = t
             self.events.add(f"datagram refused: {msg}", "warn")
 
-    def _apply(self, msg: dict, now: float) -> Optional[str]:
-        """Control thread: one datagram -> buffers / overrides. Returns a drop reason, or None."""
+    def _apply(self, msg: dict, now: float, live: bool = True) -> Optional[str]:
+        """Control thread: one datagram -> the armed latch, then buffers / overrides (only while armed). Returns a
+        drop reason, or None (applied, or ignored while disarmed)."""
         kind = msg["type"]
+        # the latch first, whatever else the datagram holds: armed / arm_seq are state, sent in every datagram
+        flag = msg.get("armed")
+        aseq = msg.get("arm_seq")
+        aseq = aseq if isinstance(aseq, int) and not isinstance(aseq, bool) else None
+        if aseq is not None:
+            self.arm_seq_seen = max(self.arm_seq_seen, aseq)
+        if self.armed and (flag is not True or aseq is None or aseq < self.arm_seq):
+            self._disarm_locked("client: armed false" if flag is False else
+                                "client: a datagram without armed / arm_seq" if flag is None or aseq is None else
+                                f"client: arm_seq {aseq} older than {self.arm_seq}")
         er = msg.get("est_reset")
         if er is not None and self.est.reset_id is not None and float(er) != float(self.est.reset_id):
             return "est_reset"
         if kind == "alive":
+            return None                              # never arms, never resumes
+        arming = (not self.armed and flag is True and aseq is not None and aseq > self.arm_floor and live)
+        if not self.armed and not arming:
+            self.latch_counts["ignored_disarmed"] += 1   # disarmed: targets are ignored, not buffered
+            if flag is True and aseq is not None and aseq <= self.arm_floor:
+                self.latch_counts["arm_refused"] += 1    # an arm_seq from before the last disarm
             return None
+        try:
+            why = self._apply_targets(msg, kind, now)
+        except BaseException:
+            if arming:                               # an arming datagram that fails leaves nothing behind
+                for b in self.buffers.values():
+                    b.clear()
+                self.override = {}
+            raise
+        if arming:
+            if why is None:
+                self.armed, self.arm_seq = True, aseq
+                self.disarm_reason = None
+                self.events.add(f"ARMED (arm_seq {aseq})", "warn")
+                log.warning("armed (arm_seq %d)", aseq)
+            else:
+                for b in self.buffers.values():
+                    b.clear()
+                self.override = {}
+        elif self.armed and aseq > self.arm_seq:     # a newer press while armed: stays armed, newer seq
+            self.arm_seq = aseq
+        return why
+
+    def _base_moving(self) -> bool:
+        return bool(np.any(np.asarray(self.base_twist) != 0.0))
+
+    def _apply_targets(self, msg: dict, kind: str, now: float) -> Optional[str]:
         ees = msg.get("ees") or {}
         if not isinstance(ees, dict) or any(k not in self.buffers for k in ees):
             raise ValueError(f"ees must map end effectors {self.ees} to targets")
@@ -388,7 +503,15 @@ class WbcNode:
                 return "frame"                       # world-frame targets only (the owner's decision)
         cfg = self.cfg
         if "base" in msg and msg["base"] is not None:
-            ov = parse_base(msg["base"], cfg, self.ees)
+            clamp: dict = {}
+            ov = parse_base(msg["base"], cfg, self.ees, clamp=clamp)   # velocities beyond the caps: clamped
+            self.latch_counts["clamped"] += clamp.get("n", 0)
+            if self._base_moving():
+                # caps never change while the base moves: the limits in force stay (counted if it tried)
+                cur = self.effective_hints().limits
+                if "limits" in ov and ov["limits"] != cur:
+                    self.latch_counts["limits_ignored"] += 1
+                ov["limits"] = cur
             self.override = ov
             if "target_pose" in ov or "target_heading" in ov:   # parse_base's keys (a "target" key never exists)
                 self.hint_t = now
@@ -451,7 +574,40 @@ class WbcNode:
     def step(self) -> None:
         if self.model is None:
             return
+        self._t0 = time.perf_counter()
+        try:
+            self._step()
+        finally:
+            c = (time.perf_counter() - self._t0) * 1e3
+            t = self.tick
+            t["compute_ms"] = c
+            t["max_compute_ms"] = max(t["max_compute_ms"], c)
+
+    def _tick_timing(self, now: float) -> tuple[float, Optional[float]]:
+        """The measured period since the previous tick: counts overruns (> 1.5 dt) and late ticks (> 3 dt); returns
+        (the integration step, the measured period clamped to [dt, 3 dt]; the late period or None)."""
+        dt = self.cfg.dt
+        prev, self._tick_prev = self._tick_prev, now
+        if prev is None:
+            return dt, None
+        period = now - prev
+        t = self.tick
+        t["period_ms"] = period * 1e3
+        t["max_period_ms"] = max(t["max_period_ms"], period * 1e3)
+        if period > 1.5 * dt:
+            t["overruns"] += 1
+        late = None
+        if period > 3 * dt:
+            t["late"] += 1
+            late = period
+            if now - self._late_log > 1.0:              # the log at most once a second (the event: on disarm)
+                self._late_log = now
+                log.warning("control tick late: %.0f ms since the previous one (dt %.0f ms)", period * 1e3, dt * 1e3)
+        return min(max(period, dt), 3 * dt), late
+
+    def _step(self) -> None:
         now = self.clock()
+        dt_int, late = self._tick_timing(now)
         self._drain_inputs(now)
         st = self.channel.poll(now) if self.channel is not None else None
         if st is not None:
@@ -459,8 +615,10 @@ class WbcNode:
         self.lease.expire_if_due()
         with self.lock:
             self._tick_times = (self._tick_times + [now])[-100:]
+            if late is not None:
+                self._disarm_locked(f"control tick overrun: {late * 1e3:.0f} ms")
             if not self.enabled:
-                self._apply_messages(now)            # counted (and dropped: nothing to drive)
+                self._apply_messages(now)            # counted (and ignored: nothing to drive)
                 for b in self.buffers.values():
                     b.clear()
                 self._publish(now, None, hold=True)
@@ -471,29 +629,39 @@ class WbcNode:
                 self._send_fault_hold(now)
                 self._publish(now, None, hold=True)
                 return
-            # the estimator: resets and jumps abort the world-frame targets; unusable -> hold
+            if self.estop.active:                    # e-stopped, until the disable: hold both halves, track nothing
+                self._disarm_locked("e-stop")
+                self._apply_messages(now)
+                self._send_hold(arm=True, base=True)
+                self._publish(now, None, hold=True)
+                return
+            # the estimator: resets and jumps abort the world-frame targets and disarm; unusable -> hold
             health = self.estimator_health(now)
             if self.est.reset_id != self._last.get("reset_id") or self.est.jumps != self._last.get("jumps"):
-                if self._last.get("reset_id") is not None and any(b.kind for b in self.buffers.values()):
-                    self.events.add("targets aborted: " + ("estimator reset (world frame changed)"
-                                                           if self.est.reset_id != self._last.get("reset_id")
-                                                           else (self.est.last_jump or "pose jump")), "warn")
-                    for b in self.buffers.values():
-                        b.clear()
+                if self._last.get("reset_id") is not None:
+                    what = ("estimator reset (world frame changed)" if self.est.reset_id != self._last.get("reset_id")
+                            else (self.est.last_jump or "pose jump"))
+                    if any(b.kind for b in self.buffers.values()):
+                        self.events.add("targets aborted: " + what, "warn")
+                    self._disarm_locked(what)
                 self._last["reset_id"], self._last["jumps"] = self.est.reset_id, self.est.jumps
-            self._apply_messages(now)
-            hints = self.effective_hints()
-            # a planned motion on the arm (HTTP) paused the session: hold, follow the measured joints, send
-            # keep-alives; when it ends, resume from the measured joints
+            # a planned motion on the arm (HTTP) paused the session: disarm and hold, follow the measured joints,
+            # send keep-alives; when it ends, restart from the measured joints (still disarmed)
             st = self.arm_state
             paused = st is not None and st.paused
             if paused != self._paused:
                 self._paused = paused
                 self.events.add("arm session paused by a planned motion: holding" if paused else
                                 "arm session resumed: commands resynced to the measured joints", "warn")
+                if paused:
+                    self._disarm_locked("arm paused by a planned motion")
                 if not paused and st is not None and np.all(np.isfinite(st.q)):
                     self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
                     self.ctl.reset()
+            self._apply_messages(now)
+            if self.armed and now - self.last_rx > self.cfg.hold_timeout:
+                self._disarm_locked(f"input stale ({now - self.last_rx:.2f} s without a datagram)")
+            hints = self.effective_hints()
             # resync the integration to the measured joints past a threshold (well inside the arm's lead bound)
             if st is not None and "arm" in self.q_cmd and np.all(np.isfinite(st.q)) and not paused:
                 if np.max(np.abs(st.q - self.q_cmd["arm"])) > self.resync:
@@ -505,14 +673,16 @@ class WbcNode:
             stale = now - self.last_rx > self.cfg.hold_timeout and any(b.kind for b in self.buffers.values())
             no_client = not self.lease.held
             why_hold = ("arm paused by a planned motion" if paused else ("estimator: " + health) if health else
-                        ("no client lease" if no_client else ("input stale" if stale else None)))
+                        ("no client lease" if no_client else ("input stale" if stale else
+                                                              None if self.armed else
+                                                              f"disarmed: {self.disarm_reason}")))
             base, est_age = self.base_pose(now)
-            targets = {e: (None if why_hold else self.buffers[e].sample(now)) for e in self.ees}
+            targets = {e: (None if why_hold or not self.armed else self.buffers[e].sample(now)) for e in self.ees}
             snap = Snapshot(now, base, self.base_twist.copy(),
                             {e: EEState(self.q_cmd[e].copy(), self.v_cmd[e].copy(), targets[e],
                                         hints.ee(e, self.cfg), self._posture(hints, e)) for e in self.ees},
                             hints, hold=why_hold is not None, base_available=self.base is not None,
-                            velocity_age=now - self.velocity_t, hint_age=now - self.hint_t)
+                            velocity_age=now - self.velocity_t, hint_age=now - self.hint_t, dt=dt_int)
             out = self.ctl.step(snap)
             if out.status != "ok":
                 self.solve_fail += 1
@@ -521,16 +691,19 @@ class WbcNode:
                 self._publish(now, out, hold=True, targets=targets, base=base, est_age=est_age)
                 return
             for e in self.ees:
-                self.q_cmd[e] = self.q_cmd[e] + out.dq[e]
-                self.v_cmd[e] = out.qd[e].copy()
+                if self.armed:
+                    self.q_cmd[e] = self.q_cmd[e] + out.dq[e]
+                    self.v_cmd[e] = out.qd[e].copy()
+                else:                                        # disarmed: the arm held at its commanded joints
+                    self.v_cmd[e] = np.zeros_like(self.v_cmd[e])
             if paused and np.all(np.isfinite(st.q)):         # the planned motion moves the arm, not the WBC
                 self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
             self.base_twist = np.asarray(out.base_twist, float)
             self._cmd_twists(base)
             if out.limited_by != "none":
                 self.limited_counts[out.limited_by] = self.limited_counts.get(out.limited_by, 0) + 1
-            self.state = "holding" if why_hold else ("tracking" if any(t is not None for t in targets.values())
-                                                     else "idle")
+            self.state = ("idle" if not self.armed else "holding" if why_hold else
+                          "tracking" if any(t is not None for t in targets.values()) else "idle")
             self._hold_reason = why_hold
             gr = targets.get("arm")
             gap = math.nan
@@ -568,14 +741,18 @@ class WbcNode:
 
     def _send_fault_hold(self, now: float) -> None:
         """In a fault: the healthy half holds (the arm its commanded joints, the base zero)."""
+        self._send_hold(arm=self.fault_arm_ok, base=self.fault_base_ok)
+
+    def _send_hold(self, arm: bool, base: bool) -> None:
+        """Track nothing: the arm keeps its commanded joints (zero velocity), the base gets a zero twist."""
         self.base_twist = np.zeros(3)
         for e in self.v_cmd:
             self.v_cmd[e] = np.zeros_like(self.v_cmd[e])
-        if self.fault_arm_ok and self.channel is not None and "arm" in self.q_cmd:
+        if arm and self.channel is not None and "arm" in self.q_cmd:
             st = self.arm_state
             self.channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])),
                               keepalive=st is not None and st.paused)
-        if self.fault_base_ok and self.base is not None:
+        if base and self.base is not None:
             self.base.send((0.0, 0.0, 0.0))
 
     def _check_peers(self, now: float) -> None:
@@ -620,8 +797,7 @@ class WbcNode:
         self.fault = reason
         self.fault_arm_ok, self.fault_base_ok = arm_ok, base_ok
         self.state = "fault"
-        for b in self.buffers.values():
-            b.clear()
+        self._disarm_locked(f"fault: {reason}")
         self.ctl.reset()
         self.events.add(f"FAULT: {reason} (" + ", ".join(
             [("arm holds" if arm_ok else "arm stopped"), ("base zero" if base_ok else "base stopped")]) +
@@ -693,6 +869,9 @@ class WbcNode:
                     t.ff_scale if t is not None else nan, float(t.id) if t is not None else nan,
                     d.get("manip", {}).get(e, nan), d.get("reach", {}).get(e, nan)]
             row += list(self.q_cmd.get(e, [nan] * 6)) + list(self.v_cmd.get(e, [nan] * 6))
+        tk = self.tick
+        row += [float(self.armed), tk["period_ms"], (time.perf_counter() - self._t0) * 1e3, float(tk["overruns"]),
+                float(tk["late"])]
         self._last["out"] = out
         self.hub.publish_rows(np.array([row], dtype=np.float64), "tick")
 
@@ -712,6 +891,8 @@ class WbcNode:
     def _client_lease_ended(self, reason: str) -> None:
         self.receiver.close_session()
         self.session_token = None
+        with self.lock:
+            self._disarm_locked(f"client lease {reason}")
         self.events.add(f"client lease {reason}" + (": holding (POST /disable releases the arm and base)"
                                                     if self.enabled else ""), "warn" if self.enabled else "info")
 
@@ -801,9 +982,12 @@ class WbcNode:
             self.v_cmd = {e: np.zeros(n) for e in self.ees}
             self.base_twist = np.zeros(3)
             self.cmd_twist = {e: np.zeros(6) for e in self.ees}
-            for b in self.buffers.values():
-                b.clear()
-            self.override = {}
+            # disarmed at enable: datagrams queued before it never arm (their arm_seq counts as seen)
+            for msg, _ in self.inbox.drain():
+                a = msg.get("arm_seq")
+                if isinstance(a, int) and not isinstance(a, bool) and msg.get("session") == self.receiver.session:
+                    self.arm_seq_seen = max(self.arm_seq_seen, a)
+            self._disarm_locked("enable", note=True)
             self.ctl.reset()
             self.enabled, self.fault, self.disabled_reason = True, None, None
             self._paused = False
@@ -842,10 +1026,9 @@ class WbcNode:
             if channel is not None and "arm" in self.q_cmd:
                 channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
             self.channel = self.base = self.arm_http = None
+            self._disarm_locked(f"disabled: {reason}")
             self.enabled, self.fault, self.state = False, None, "disabled"
             self.disabled_reason = reason
-            for b in self.buffers.values():
-                b.clear()
             self.base_twist = np.zeros(3)
             self.events.add(f"disabled: {reason}")
         if base is not None:
@@ -863,28 +1046,50 @@ class WbcNode:
             threading.Thread(target=release, daemon=True).start()
         return {"enabled": False, "was_enabled": was}
 
+    ESTOP_JOIN_S = 2.5          # the fan-out waits this long for the arm's and the swerve's answers
+
     def trigger_estop(self, reason: str, source: str) -> dict:
-        """Anyone: forwarded to the arm and the swerve (both latch), then disable."""
+        """Anyone. First, under the lock, stop tracking: disarm, zero base twist, the arm held at its commanded
+        joints (the ticks hold too until the disable). Then the e-stop goes to the arm and the swerve IN PARALLEL
+        (both latch and coast: no braking by the robot), then disable."""
         info = self.estop.trigger(reason, source)
-        out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": {}}
+        with self.lock:
+            self._disarm_locked(f"e-stop ({reason or 'no reason'})")
+            if self.enabled:
+                self._send_hold(arm=True, base=True)    # zero twist, the arm at its commanded joints
+        fw: dict = {}
         msg = f"wbc: {reason}" if reason else "wbc"
-        if self.arm_target:
+
+        def to_arm():
+            h = self.arm_http or ArmHttpFactory(self.arm_target)
+            h.estop(msg, source or "wbc")
+
+        def to_swerve():
+            from ..swerve.client import SwerveClient
+            with SwerveClient(self.swerve_target, timeout=0.5) as c:
+                c.estop(msg, source or "wbc")
+
+        def run(name, fn):
             try:
-                h = self.arm_http or ArmHttpFactory(self.arm_target)
-                h.estop(msg, source or "wbc")
-                out["forwarded"]["arm"] = True
+                fn()
+                fw[name] = True
             except Exception as e:  # noqa: BLE001
-                out["forwarded"]["arm"] = False
-                self.events.add(f"e-stop forward to the arm failed: {e}", "error")
-        if self.swerve_target:
-            try:
-                from ..swerve.client import SwerveClient
-                with SwerveClient(self.swerve_target, timeout=0.5) as c:
-                    c.estop(msg, source or "wbc")
-                out["forwarded"]["swerve"] = True
-            except Exception as e:  # noqa: BLE001
-                out["forwarded"]["swerve"] = False
-                self.events.add(f"e-stop forward to the swerve failed: {e}", "error")
+                fw[name] = False
+                self.events.add(f"e-stop forward to the {name} failed: {e}", "error")
+
+        threads = [threading.Thread(target=run, args=(n, f), name=f"wbc-estop-{n}", daemon=True)
+                   for n, f, t in (("arm", to_arm, self.arm_target), ("swerve", to_swerve, self.swerve_target)) if t]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + self.ESTOP_JOIN_S
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": {}}
+        for n, t in (("arm", self.arm_target), ("swerve", self.swerve_target)):
+            if t:
+                out["forwarded"][n] = bool(fw.get(n, False))
+                if n not in fw:
+                    self.events.add(f"e-stop forward to the {n}: no answer within {self.ESTOP_JOIN_S} s", "error")
         self.disable(f"e-stop ({reason or 'no reason'})")
         return out
 
@@ -913,7 +1118,7 @@ class WbcNode:
 
     def status(self) -> dict:
         with self.lock:
-            return {"state": self.state, "enabled": self.enabled, "fault": self.fault}
+            return {"state": self.state, "enabled": self.enabled, "fault": self.fault, "armed": self.armed}
 
     def state_dict(self) -> dict:
         now = self.clock()
@@ -930,6 +1135,12 @@ class WbcNode:
             return {
                 "state": self.state,
                 "enabled": self.enabled,
+                "armed": self.armed,
+                "disarm_reason": None if self.armed else self.disarm_reason,
+                "latch": {"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
+                          "disarms": self.disarms, **self.latch_counts},
+                "tick": {k: (round(v, 3) if isinstance(v, float) and math.isfinite(v) else
+                             None if isinstance(v, float) else v) for k, v in self.tick.items()},
                 "holder": self.holder if self.enabled else None,
                 "fault": self.fault,
                 "hold_reason": getattr(self, "_hold_reason", None) if self.enabled else None,
@@ -989,13 +1200,25 @@ class WbcNode:
         return {"config": js(_asdict(self.cfg)), "defaults": js(_asdict(_C())), "hard": hard,
                 "structural": list(self.STRUCTURAL)}
 
+    BASE_CAPS = ("max_speed", "max_omega", "max_accel", "max_alpha", "wheel_speed")
+
+    def _caps_check_locked(self, changes: dict) -> None:
+        """The base caps change only while the base is still (disabled, or a zero commanded twist)."""
+        changed = [k for k in self.BASE_CAPS if k in changes and changes[k] != getattr(self.cfg, k)]
+        if changed and self.enabled and self._base_moving():
+            tw = ", ".join(f"{v:.3f}" for v in self.base_twist)
+            raise ValueError(f"{changed}: the base caps cannot change while the base moves (commanded twist {tw}); "
+                             "stop it first (disarm, or base mode locked)")
+
     def set_config(self, changes: dict) -> dict:
         """Change config keys at runtime (any time; no lease: the operator tunes while a client drives). Validated
-        as at start, the base caps against the swerve's hard limits; structural keys only while disabled."""
+        as at start, the base caps against the swerve's hard limits and only while the base is still; structural
+        keys only while disabled."""
         changes = dict(changes or {})
         with self.lock:
             if self.enabled and any(k in changes for k in self.STRUCTURAL):
                 raise ValueError(f"{sorted(set(changes) & set(self.STRUCTURAL))}: only while disabled")
+            self._caps_check_locked(changes)
             new = make_config(changes, base=self.cfg)
             hard = getattr(self.base, "hard", None) or {} if self.base is not None else {}
             hs, hw = hard.get("max_speed"), hard.get("max_omega")
@@ -1006,12 +1229,26 @@ class WbcNode:
                                                                                                 old.max_omega)
         if push:
             self.base.client.set_limits(new.max_speed, new.max_omega)
+        moved = None
         with self.lock:
-            self.cfg = new
-            self.ctl.cfg = new
-            for b in self.buffers.values():
-                b.ff_timeout, b.blend_tau = new.ff_timeout, new.blend_tau
-            self.events.add("config: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+            try:
+                self._caps_check_locked(changes)          # the base started moving meanwhile: undo the push
+            except ValueError as e:
+                moved = e
+            base = self.base
+            if moved is None:
+                self.cfg = new
+                self.ctl.cfg = new
+                for b in self.buffers.values():
+                    b.ff_timeout, b.blend_tau = new.ff_timeout, new.blend_tau
+                self.events.add("config: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+        if moved is not None:
+            if push and base is not None and base.client is not None:
+                try:
+                    base.client.set_limits(old.max_speed, old.max_omega)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise moved
         return self.get_config()
 
 

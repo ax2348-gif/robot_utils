@@ -131,6 +131,8 @@ class Snapshot:
     base_available: bool = True       # False: no base (treated as locked)
     velocity_age: float = math.inf    # s since the commanded base velocity was given (mode commanded)
     hint_age: float = 0.0             # s since the base hint in force was given (its velocity feedforward fades)
+    dt: Optional[float] = None        # s, this tick's measured step (the node clamps it to [dt, 3 dt]): the arm
+                                      # joint step is qd * dt and the joint position damper uses it; None = cfg.dt
 
 
 @dataclass
@@ -270,16 +272,19 @@ class QPController(Controller):
                 p_ref, yaw_ref, v_ref = np.array([h.pose.x, h.pose.y]), h.pose.yaw, np.zeros(3)
         return p_ref, yaw_ref, v_ref, tol_p, tol_y
 
-    def _joint_box(self, ee: str, q: np.ndarray, v_prev: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(L, U, position-bound mask) velocity bounds of an arm's joints this tick (always L <= U)."""
+    def _joint_box(self, ee: str, q: np.ndarray, v_prev: np.ndarray,
+                   dt_step: Optional[float] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(L, U, position-bound mask) velocity bounds of an arm's joints this tick (always L <= U). ``dt_step``: the
+        step the velocity is integrated over (the measured one on a late tick), so a step never crosses a limit."""
         cfg, dt = self.cfg, self.cfg.dt
+        ds = dt_step or dt
         n = len(q)
         lo, hi = self.m.arm_limits(ee)
         vm, a = self.caps[ee]
         dh, dl = hi - q, q - lo
         # within the limits: the damper and the braking distance; beyond one: back toward it (same law)
-        U_pos = np.sign(dh) * np.minimum(cfg.limit_gain * np.abs(dh) / dt, np.sqrt(2 * a * np.abs(dh)))
-        L_pos = -np.sign(dl) * np.minimum(cfg.limit_gain * np.abs(dl) / dt, np.sqrt(2 * a * np.abs(dl)))
+        U_pos = np.sign(dh) * np.minimum(cfg.limit_gain * np.abs(dh) / ds, np.sqrt(2 * a * np.abs(dh)))
+        L_pos = -np.sign(dl) * np.minimum(cfg.limit_gain * np.abs(dl) / ds, np.sqrt(2 * a * np.abs(dl)))
         U = np.minimum(np.minimum(vm, v_prev + a * dt), U_pos)
         L = np.maximum(np.maximum(-vm, v_prev - a * dt), L_pos)
         # infeasible (moving too fast toward a limit, or beyond a cap): the acceleration limit wins
@@ -332,7 +337,7 @@ class QPController(Controller):
         for name, e in snap.ees.items():
             iv = m.arm_v[name]
             x_prev[iv] = e.v_prev
-            L, U, posmask, Lr, Ur = self._joint_box(name, e.q_cmd, e.v_prev)
+            L, U, posmask, Lr, Ur = self._joint_box(name, e.q_cmd, e.v_prev, snap.dt)
             S = np.zeros((len(iv), nv))
             S[np.arange(len(iv)), iv] = 1.0
             groups.append(("joint_limit_box", np.vstack([S, -S]), np.concatenate([U, -L]), posmask,
@@ -569,7 +574,7 @@ class QPController(Controller):
             limited = "base_limit"                 # the base's twist-rate rows (LIMITED is the stream's enum)
         tw = fixed if fixed is not None else twist_of(u)
         self.active = bool(np.any(np.abs(tw) > 1e-9))
-        dqs = {k: u[m.arm_v[k]] * dt for k in snap.ees}
+        dqs = {k: u[m.arm_v[k]] * (snap.dt or dt) for k in snap.ees}   # integrated over the measured step
         diag.update(solves=n_solves, wheel_max=self._wheel_max(tw), hold=hold,
                     slack=[float(v) for v in slack[:2]], flat=[float(v) for v in slack[2:]])
         return Output("ok", np.asarray(tw, float), dqs, {k: u[m.arm_v[k]].copy() for k in snap.ees},
