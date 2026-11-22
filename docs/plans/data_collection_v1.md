@@ -12,6 +12,36 @@ Episodes of whole-body teleop (Quest, body-frozen scheme, WBC) recorded with no 
 starts, stops and (in the sim) resets from the controllers, and every episode holds everything needed to train a
 policy and to diagnose the run afterwards. The same client, recorder and episode format in the sim and on the robot.
 
+## Architecture (decided 2026-11-21, later; supersedes the client-side parts below where they differ)
+
+**Hybrid: teleop on the robot, everything else client-side.**
+- **The Pi's `quest_teleop` node is the teleop implementation** in production as in testing: it reads the headset
+  (one consumer), runs the client core (body-frozen, the armed latch, Y = arm / X = disable, A = start episode and
+  the sim reset sequence, B tap = stop and keep), and sends datagrams to the WBC over the local unix socket. The
+  control loop never crosses erid / the Mac: a recording machine that crashes, sleeps or loses Wi-Fi changes nothing
+  about teleop or its safety.
+- **A client-side script (erid for real collection, the Mac for the sim) controls everything else:** starting a
+  session through the node's API, the task text, which streams to record, and writing the files. The Pi never
+  records streams or video.
+- **The node publishes what it does as a full-rate stream:** each headset frame (stamped on arrival in Pi time) and
+  each datagram it sent, plus the episode events. Episode boundaries are DATA in that ordered stream, so the script
+  cuts episodes exactly even when it lags or reconnects; recording continuously and cutting afterwards gives
+  pre-roll for free.
+- **An event log on the Pi** (a deliberate small exception to "the Pi never records", like agent_interface's
+  transcripts): button edges (A/B/X/Y), arm / disarm (reason, arm_seq), enable / disable, episode start / stop /
+  abort (reason), e-stops, faults, holds, staleness / latency trips, teleop start / stop, sim resets — events only,
+  never frames — with the Pi's monotonic and wall time. One append-only JSONL file per day under
+  `~/.local/share/robot_utils/quest_teleop/`, each line flushed and fsynced, pruned at a size cap (oldest first).
+  `GET /eventlog?since=` and `GET /eventlog/files`: the script retrieves what a Wi-Fi drop cost it and reconciles the
+  boundaries. Built after the safety build merges.
+- No headset HUD: the headset is an input device; recording state shows on the script's / node's page.
+
+**Recommendations standing (2026-11-21):** raw stream bytes + an episode index, converted offline (e.g. LeRobot);
+MJPG as sent with an every-frame camera stream mode for recorders (gaps counted per episode); the Pi clock as the
+time base (WBC tick as master, alignment offline); seeded per-object position / yaw randomisation in the sim scene,
+the seed in the episode; the review page later. Episode outcome labels: open, out of scope for now (abort reasons
+are recorded automatically).
+
 ## Decided (2026-11-21)
 
 **Body-frozen is the standard scheme** for the robot from now on. The headset's `standard` scheme stays in
@@ -22,8 +52,8 @@ Mac client's choice; quest_env changes are marked *headset*):
 
 | button | action | sim | robot |
 |---|---|---|---|
-| **Y** | enable (WBC lease + enable), as the existing teleop's Y | same | same |
-| **X** | disable, as the existing teleop's X | same | same |
+| **Y** | arm (enable if disabled): the armed latch, a deliberate press only (docs/wbc.md) | same | same |
+| **X** | disable (level-triggered: the arm floats, the gripper damps, the base coasts) | same | same |
 | **A** | **start an episode** | reset, re-anchor the AR scene, then record | record (no reset; re-anchor the AR scene) |
 | **B** tap (released < 2 s) | **stop the episode** (keep) | same | same |
 | **B** hold 2 s | stop telemetry (unchanged headset behaviour); an open episode ends with it | same | same |
