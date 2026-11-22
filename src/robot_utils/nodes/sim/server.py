@@ -49,7 +49,8 @@ class ObjectIn(_In):
     size: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="m, box full extents x, y, z.")
     radius: Optional[float] = Field(None, gt=0, description="m, cylinder radius.")
     length: Optional[float] = Field(None, gt=0, description="m, cylinder length.")
-    mass: float = Field(0.5, gt=0, description="kg.")
+    mass: float = Field(0.5, gt=0, description="kg (ignored when fixed).")
+    fixed: bool = Field(False, description="Welded to the world (furniture): never moves, no mass.")
     xyz: list[float] = Field([0.5, 0.0, 0.2], min_length=3, max_length=3, description="m, world position of its centre.")
     rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="rad, orientation (URDF rpy).")
     yaw: Optional[float] = Field(None, description="rad, heading (when rpy is absent).")
@@ -65,6 +66,11 @@ class MoveIn(_In):
 class SceneIn(_In):
     name: Optional[str] = Field(None, description="A saved scene's name (POST /scene/save).")
     objects: Optional[list[ObjectIn]] = Field(None, description="Or the objects themselves.")
+
+
+class ResetIn(_In):
+    start: bool = Field(False, description="Reload the scene the world started with (the default tabletop and the "
+                                           "config's objects) instead of putting the current objects back.")
 
 
 class SaveIn(_In):
@@ -139,6 +145,8 @@ class ObjectState(BaseModel):
     radius: Optional[float] = Field(None, description="m.")
     length: Optional[float] = Field(None, description="m.")
     mass: float = Field(description="kg.")
+    fixed: Optional[bool] = Field(None, description="Welded to the world (present only when true).")
+    rgba: Optional[list[float]] = Field(None, description="Colour, 0..1.")
     xyz: list[float] = Field(description="m.")
     rpy: list[float] = Field(description="rad.")
     speed: float = Field(description="m/s.")
@@ -300,6 +308,7 @@ class VizFrame(BaseModel):
 class StateObject(BaseModel):
     pose: list[float] = Field(description="World pose [x, y, z, qx, qy, qz, qw] of its centre.")
     geom: dict = Field(description="{type: box | cylinder, size (box full extents) | radius + length (along z), rgba}.")
+    fixed: bool = Field(description="Welded to the world (furniture).")
 
 
 class RobotStateOverlays(BaseModel):
@@ -436,10 +445,11 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
         return node.world.scene()
 
     @app.post("/scene/reset", response_model=TimeOut, tags=["scene"],
-              summary="Time 0: robot at its start pose, objects where added, commands dropped")
-    async def reset():
-        await call(node.world.reset)
-        node.events.add("reset")
+              summary="Time 0: robot at its start pose, objects where added (or the start scene), commands dropped")
+    async def reset(body: Optional[ResetIn] = None):
+        start = bool(body and body.start)
+        await call(node.world.reset, start)
+        node.events.add("reset" + (" to the start scene" if start else ""))
         return time_out()
 
     @app.post("/scene/save", response_model=SavedScene, tags=["scene"], summary="Save the objects (current poses)")

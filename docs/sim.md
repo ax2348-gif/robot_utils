@@ -50,6 +50,30 @@ The robot never collides with itself; it collides with the floor and objects.
 `dynamic` fidelity (MIT motors, backlash, friction, gripper contact law) is the next step: the config already
 has `components.arm.fidelity`; anything but `kinematic` is refused for now.
 
+## The default scene
+
+The world starts with a tabletop scene (`scene.tabletop: true` in `default_sim.yaml`; `nodes/sim/scene.py`), the base
+at the origin facing +x. Derived from the model, not guessed:
+
+- **table** (fixed, 0.6 × 1.6 m, 3 cm top, four legs): top at the arm's mount height (the base's top surface
+  `TOP_Z` = 0.222 m, where the arm's plate sits) + 0.08 m = **0.302 m**, in the band where the arm reaches farthest
+  pointing straight down (sampled from the model's joint ranges: top-down grasps reach x ≈ 0.55–0.6 m for table
+  heights 0.15–0.40 m); its front edge **4 cm in front of the base** (`FRAME`/2 + 0.04 = 0.256 m), so the first
+  ~0.3 m of the top is in reach from the start pose. It is long in y: driving sideways along it brings the rest in
+  reach (the robot cannot pass under it: the arm and camera are above its top).
+- **on it**: `cube` (4 cm, red, x 0.36 y −0.15), `can` (cylinder ⌀ 40 mm × 10 cm, blue, x 0.42 y 0.05), `block`
+  (3 × 8 × 5 cm, green, turned 0.4 rad, x 0.46 y −0.32): each narrower than 0.8 × the gripper's opening (`GAP_MAX`
+  49.6 mm) and reachable pointing down from the start pose (tested with the model's kinematics); `cube_far` (4 cm,
+  yellow, y 0.55): out of reach until the base moves ~0.5 m left.
+- **in the head camera's view**: `cube_view` (4.5 cm, white, x 0.74 y 0, near the table's far edge). On the robot the
+  head camera sits ~1.0 m up pitched ~19° down (its calibrated mount), so it sees the table top only beyond
+  x ≈ 0.68 m: the near objects are seen by the wrist camera (the gripper looking down), as on the robot.
+- **on the floor**: `crate` (0.3 m box, 3 kg, at (1.2, −1.4)) and `bin` (cylinder ⌀ 0.3 × 0.4 m, 2 kg, at (−1.0, 1.3)),
+  for walking tasks.
+
+They are in `/scene` (fixed ones with `fixed: true`), the page's 3D view, both camera renders, and `robot_state.v1`
+`objects` (`fixed` too). `scene: {tabletop: false}` in a sim config starts empty (the tests' default world does).
+
 ## Limits come from the robot config
 
 The world has no actuator limits of its own: `nodes/sim/limits.py` computes them from the robot codebase at start
@@ -87,9 +111,11 @@ delivers no new frames (the camera node then reports a stall after 4 s). Tests r
 
 ## Scene and privileged controls
 
-`GET /scene`; `POST /scene/objects {name, shape: box|cylinder, size | radius+length, mass, xyz, rpy|yaw}`;
+`GET /scene`; `POST /scene/objects {name, shape: box|cylinder, size | radius+length, mass, fixed, xyz, rpy|yaw}`
+(`fixed: true` welds it to the world: furniture, no mass, pushes do nothing; a teleport still moves it);
 `PUT /scene/objects/{name} {xyz, rpy|yaw}` (teleport); `DELETE /scene/objects/{name}`; `POST /scene/reset` (time
-0, robot at its start pose, objects where added, commands dropped); `POST /scene/save {name}` (current poses to
+0, robot at its start pose, objects where added, commands dropped; `{"start": true}` reloads the start scene
+instead: the default tabletop and the config's objects); `POST /scene/save {name}` (current poses to
 `<scene dir>/<name>.yaml`) and `POST /scene/load {name | objects}`. Adding or removing an object recompiles the
 model with the state kept.
 

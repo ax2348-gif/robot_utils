@@ -63,9 +63,12 @@ render:
   shadows: true
   reflections: true
 
-# Objects in the scene at start / reset (POST /scene/objects adds more): box (size: full x, y, z) or cylinder
-# (radius, length along z); mass kg; pose xyz + yaw (or rpy).
+# The scene at start (POST /scene/reset puts the objects back where they were added; {start: true} reloads this):
+# tabletop: the default tabletop scene (scene.py: a fixed table in reach of the arm, graspable objects on it, two on
+# the floor), then objects: box (size: full x, y, z) or cylinder (radius, length along z); mass kg; pose xyz + yaw
+# (or rpy); fixed: true welds it to the world (furniture).
 scene:
+  tabletop: true
   objects: []
 
 time:

@@ -84,7 +84,8 @@ table.ru-table td,table.ru-table th{font-size:12px}
       z <input type="number" id="oz" value="0.1" step="0.05">
       <button class="ru" id="add">Add</button><button class="ru" id="move" title="Teleport the named object to x, y, z">Move</button></div>
     <div class="ru-row" style="margin-top:4px"><span class="ru-muted">scene file</span><input id="sname" value="scene1" style="width:80px">
-      <button class="ru" id="ssave">Save</button><button class="ru" id="sload">Load</button></div>
+      <button class="ru" id="ssave">Save</button><button class="ru" id="sload">Load</button>
+      <button class="ru" id="sstart" title="Reset the world to the scene it started with (the default tabletop)">Start scene</button></div>
   </div>
   <div class="ru-card priv" data-panel="physics" data-role="control"><b>Privileged physics</b><span class="tag">SIM-ONLY</span>
     <div class="ru-muted" style="font-size:12px;margin:2px 0 6px">Never exposed by a hardware node.</div>
@@ -181,6 +182,7 @@ function objSpec() {
 $("#add").onclick = () => api("POST", "scene/objects", objSpec());
 $("#move").onclick = () => api("PUT", `scene/objects/${encodeURIComponent($("#oname").value)}`, {xyz: [+$("#ox").value, +$("#oy").value, +$("#oz").value]});
 $("#ssave").onclick = () => api("POST", "scene/save", {name: $("#sname").value});
+$("#sstart").onclick = () => api("POST", "scene/reset", {start: true}).then(snap);
 $("#sload").onclick = () => api("POST", "scene/load", {name: $("#sname").value});
 $("#objs").onclick = e => { const n = e.target.dataset.del; if (n) api("DELETE", `scene/objects/${encodeURIComponent(n)}`); };
 $("#push").onclick = () => api("POST", "physics/wrench", {body: $("#pbody").value, force: [+$("#fx").value, +$("#fy").value, +$("#fz").value], duration: +$("#fdur").value});

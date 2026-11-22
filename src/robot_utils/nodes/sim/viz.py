@@ -142,7 +142,8 @@ def robot_state(world) -> dict:
             geom = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
                                            else {"radius": o["radius"], "length": o["length"]}),
                     "rgba": o.get("rgba")}
-            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]), "geom": geom}
+            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]), "geom": geom,
+                             "fixed": bool(o.get("fixed"))}
         return {"t": round(float(d.time), 4), "model_version": world.model_info.get("model_version"),
                 "base": [round(float(v), 6) for v in q[:3]] + _xyzw(q[3:7]), "joints": joints, "objects": objects,
                 "sim": {"running": world.running, "rtf": world.rtf}}

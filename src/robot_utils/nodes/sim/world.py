@@ -150,7 +150,7 @@ class World:
         self.imu_seq = 0
         self.imu_cond = threading.Condition(threading.Lock())
         self.spec = self._build_spec(urdf, assets)
-        for o in (self.cfg.get("scene") or {}).get("objects") or []:
+        for o in self.start_objects():
             self._spec_object(self._check_object(o))
         self.m = self.spec.compile()
         self.d = mujoco.MjData(self.m)
@@ -310,9 +310,21 @@ class World:
             except KeyError:
                 pass
         self.obj_idx = {}
-        for name in self.objects:
-            jj = m.joint(f"obj_{name}_free")
-            self.obj_idx[name] = (m.body(f"obj_{name}").id, int(jj.qposadr[0]), int(jj.dofadr[0]))
+        for name, o in self.objects.items():
+            if o.get("fixed"):
+                self.obj_idx[name] = (m.body(f"obj_{name}").id, None, None)
+            else:
+                jj = m.joint(f"obj_{name}_free")
+                self.obj_idx[name] = (m.body(f"obj_{name}").id, int(jj.qposadr[0]), int(jj.dofadr[0]))
+
+    def start_objects(self) -> list:
+        """The scene at start: the default tabletop (scene.py) when ``scene.tabletop``, then ``scene.objects``."""
+        sc = self.cfg.get("scene") or {}
+        out = []
+        if sc.get("tabletop"):
+            from .scene import tabletop
+            out += tabletop()
+        return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
 
@@ -333,9 +345,12 @@ class World:
             o["radius"], o["length"] = float(o.get("radius", 0.05)), float(o.get("length", 0.1))
             if o["radius"] <= 0 or o["length"] <= 0:
                 raise SimError("a cylinder needs radius and length > 0 (m)")
+        o["fixed"] = bool(o.get("fixed", False))
         o["mass"] = float(o.get("mass", 0.5))
         if not o["mass"] > 0:
             raise SimError("mass must be > 0 (kg)")
+        if not o["fixed"]:
+            o.pop("fixed")
         o["xyz"] = [float(v) for v in o.get("xyz", [0.5, 0.0, 0.2])]
         o["rpy"] = [float(v) for v in o.get("rpy", [0.0, 0.0, float(o.get("yaw", 0.0))])]
         o.pop("yaw", None)
@@ -348,8 +363,9 @@ class World:
         if o["name"] in self.objects:
             raise SimError(f"object {o['name']!r} exists")
         b = self.spec.worldbody.add_body(name=f"obj_{o['name']}", pos=o["xyz"], quat=rpy_quat(o["rpy"]))
-        fj = b.add_freejoint()
-        fj.name = f"obj_{o['name']}_free"
+        if not o.get("fixed"):                       # fixed: welded to the world (furniture)
+            fj = b.add_freejoint()
+            fj.name = f"obj_{o['name']}_free"
         if o["shape"] == "box":
             g = b.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[v / 2 for v in o["size"]], mass=o["mass"], rgba=o["rgba"])
         else:
@@ -387,7 +403,13 @@ class World:
             self._recompile()
 
     def _place(self, name: str, xyz, quat) -> None:
-        _, qa, va = self.obj_idx[name]
+        b, qa, va = self.obj_idx[name]
+        if qa is None:                                # fixed: move the body itself (model and spec, for recompiles)
+            self.m.body_pos[b], self.m.body_quat[b] = xyz, quat
+            sb = self.spec.body(f"obj_{name}")
+            sb.pos, sb.quat = list(xyz), list(quat)
+            mujoco.mj_forward(self.m, self.d)
+            return
         self.d.qpos[qa:qa + 3] = xyz
         self.d.qpos[qa + 3:qa + 7] = quat
         self.d.qvel[va:va + 6] = 0.0
@@ -404,8 +426,13 @@ class World:
 
     def object_state(self, name: str) -> dict:
         o = self.objects[name]
-        _, qa, va = self.obj_idx[name]
-        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass") if k in o}
+        b, qa, va = self.obj_idx[name]
+        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba") if k in o}
+        if qa is None:
+            out["xyz"] = [round(float(v), 6) for v in self.d.xpos[b]]
+            out["rpy"] = [round(v, 6) for v in quat_rpy(self.d.xquat[b])]
+            out["speed"] = 0.0
+            return out
         out["xyz"] = [round(float(v), 6) for v in self.d.qpos[qa:qa + 3]]
         out["rpy"] = [round(v, 6) for v in quat_rpy(self.d.qpos[qa + 3:qa + 7])]
         out["speed"] = round(float(np.linalg.norm(self.d.qvel[va:va + 3])), 6)
@@ -434,8 +461,11 @@ class World:
 
     # -- state reset -----------------------------------------------------------------------------------
 
-    def reset(self) -> None:
-        """Time 0, the robot at its start pose, objects where they were added, every command dropped."""
+    def reset(self, start_scene: bool = False) -> None:
+        """Time 0, the robot at its start pose, objects where they were added, every command dropped.
+        ``start_scene``: the scene the world started with (the default tabletop + config objects) instead."""
+        if start_scene:
+            self.load_scene(self.start_objects())
         with self.lock:
             m, d = self.m, self.d
             mujoco.mj_resetData(m, d)
@@ -448,7 +478,12 @@ class World:
                 self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
                 d.qpos[self.arm_q] = self.arm.q_ref
             for name, o in self.objects.items():
-                _, qa, _ = self.obj_idx[name]
+                b, qa, _ = self.obj_idx[name]
+                if qa is None:
+                    m.body_pos[b], m.body_quat[b] = o["xyz"], rpy_quat(o["rpy"])
+                    sb = self.spec.body(f"obj_{name}")
+                    sb.pos, sb.quat = list(o["xyz"]), list(rpy_quat(o["rpy"]))
+                    continue
                 d.qpos[qa:qa + 3] = o["xyz"]
                 d.qpos[qa + 3:qa + 7] = rpy_quat(o["rpy"])
             self.wrenches = []

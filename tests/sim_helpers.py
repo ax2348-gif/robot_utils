@@ -15,6 +15,7 @@ def bundle(variant: str = "full") -> bytes:
 def make_world(variant: str = "full", **over):
     from robot_utils.nodes.sim.world import World, load_config, unzip_bundle
     urdf, assets, info = unzip_bundle(bundle(variant))
+    over.setdefault("scene", {"tabletop": False})                 # an empty world unless a test asks
     cfg = load_config(overrides={"time": {"run": False}, **over})
     return World(urdf, assets, cfg, {"source": "test", "model_version": info.get("model_version")})
 
