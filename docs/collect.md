@@ -142,6 +142,14 @@ rows, by_type, dropped (the sum of the records' own dropped counts), time_fields
 Training conversion (e.g. LeRobot), the arm's `t_meas` latency compensation and interpolation onto a master
 clock are offline steps on these files, not part of the cut.
 
+## The robot description
+
+Every session saves the robot as it was when recording started, unconditionally: `description.json` (the
+description node's `GET /description`: frames, cameras with their active calibrations, conventions), `model.json`
+(`GET /model`: `model_version`, components, joints) and `model.urdf` (the assembled URDF), with
+`session.json` `description` (`model_version`, the node URL). The recorder refuses to start without them: a
+recording without the robot it was made on can't be replayed with the right mounts.
+
 ## Known limits
 
 - Video is every frame from a bounded per-client queue on the camera node (`every=true`): a stall longer than

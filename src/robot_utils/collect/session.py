@@ -27,6 +27,7 @@ from .streams import DEFAULT_STREAMS, StreamRecorder, StreamSpec
 log = logging.getLogger("collect")
 
 TELEOP = "quest_teleop"
+DESCRIPTION = "description"
 
 
 def parse_event_lines(r: httpx.Response) -> list[dict]:
@@ -95,6 +96,35 @@ class Session:
                 detail = r.text
             raise RuntimeError(f"POST {path}: {r.status_code} {detail}")
         return r.json() if r.content else None
+
+    async def _save_description(self, client: httpx.AsyncClient) -> None:
+        """The robot as it is now, saved unconditionally at the start (a recording without it can't be replayed
+        or used with the right mounts): ``description.json`` (GET description/description: frames, cameras with
+        their active calibrations, conventions; what the browser reads), ``model.json`` (GET description/model:
+        model_version, components, joints) and ``model.urdf`` (the assembled URDF). No description node, no
+        recording."""
+        base = f"{self.robot}/nodes/{DESCRIPTION}"
+        last = None
+        for attempt in range(3):
+            try:
+                got = {}
+                for path, fname in (("/description", "description.json"), ("/model", "model.json"),
+                                    ("/model/urdf", "model.urdf")):
+                    r = await client.get(base + path, timeout=10.0)
+                    r.raise_for_status()
+                    got[fname] = r.content
+                break
+            except (httpx.HTTPError, OSError) as e:
+                last = e
+                await asyncio.sleep(1.0)
+        else:
+            raise RuntimeError(f"cannot record without the robot description ({base}): {last}")
+        for fname, data in got.items():
+            (self.dir / fname).write_bytes(data)
+        model = json.loads(got["model.json"])
+        self.meta["description"] = {"node": base, "model_version": model.get("model_version"),
+                                    "options": model.get("options"),
+                                    "files": sorted(got)}
 
     async def _baseline_seq(self, client: httpx.AsyncClient) -> Optional[int]:
         """The newest seq in the Pi event log now (events after it are this session's)."""
@@ -242,6 +272,8 @@ class Session:
         self._write_meta()
         limits = httpx.Limits(max_connections=len(self.specs) + 8, max_keepalive_connections=8)
         async with httpx.AsyncClient(limits=limits) as client:
+            await self._save_description(client)
+            self._write_meta()
             await self._post(client, "/task", {"text": self.task})
             baseline = await self._baseline_seq(client)
             open_ep = await self._open_episode(client)

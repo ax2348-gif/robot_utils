@@ -25,7 +25,7 @@ import threading
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from robot_utils.nodes.common.protocol import pack_record, rows_record, schema_record
 
@@ -180,6 +180,20 @@ class FakeRobot:
         @app.get("/nodes/quest_teleop/oplog/stream")
         def oplog():
             return self._stream("oplog", self._oplog())
+
+        @app.get("/nodes/description/description")
+        def description():
+            if "description" in self.refuse:
+                return JSONResponse({"detail": "down"}, status_code=503)
+            return {"frames": {"base": {}}, "cameras": {"camera": {"serial": "FAKE"}}, "conventions": {}}
+
+        @app.get("/nodes/description/model")
+        def model():
+            return {"model_version": "fake0001", "options": {"mounts": "calibrated"}, "joints": []}
+
+        @app.get("/nodes/description/model/urdf")
+        def urdf():
+            return Response('<robot name="fake"/>', media_type="application/xml")
 
         @app.post("/nodes/quest_teleop/task")
         async def task(request: Request):
