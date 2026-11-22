@@ -3,7 +3,8 @@
 
 Runs the Quest whole-body teleop client (tools/quest_teleop) as a node on this machine, against the local WBC node
 (target datagrams over its unix socket), with a page to start / stop it, watch it, and bring the headset's telemetry
-up or down over ssh (docs/quest_teleop_node.md). Same on the robot and in the sim stack. Writes nothing to disk.
+up or down over ssh (docs/quest_teleop_node.md). Same on the robot and in the sim stack. Writes only its event log
+(--data-dir; events, never frames).
 """
 import argparse
 import logging
@@ -39,6 +40,13 @@ def main() -> None:
     p.add_argument("--stale-ms", type=float, default=200.0, help="headset freshness timeout")
     p.add_argument("--ctl-timeout", type=float, default=240.0, help="s: overall limit of one quest up / down")
     p.add_argument("--wait", type=float, default=30.0, help="s: quest up waits this long for the stream")
+    p.add_argument("--data-dir", default=None,
+                   help="the event log's directory (default ~/.local/share/robot_utils/quest_teleop)")
+    p.add_argument("--log-cap-mb", type=float, default=200.0, help="the event log's size cap: oldest files pruned")
+    p.add_argument("--sim", default="none", help="the sim node (instance or URL) when this stack is a sim: A resets "
+                                                 "it before an episode; 'none' (the robot) = no reset")
+    p.add_argument("--reset-timeout", type=float, default=5.0,
+                   help="s: a sim reset waits this long for the estimator's reset in the WBC stream")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "quest_teleop")
     a = p.parse_args()
@@ -46,6 +54,7 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from .client import Config
+    from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
     from .server import create_app
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, gripper=not a.no_gripper)
@@ -53,7 +62,9 @@ def main() -> None:
     node = QuestTeleopNode(a.wbc, arm=off(a.arm), swerve=off(a.swerve), quest_host=a.quest, quest_port=a.quest_port,
                            ssh_host=a.ssh_host, cfg=cfg, stale_s=a.stale_ms / 1e3, max_latency=a.max_latency_ms / 1e3,
                            min_rate=a.min_rate, ar=a.ar, scheme=a.scheme, ctl_timeout=a.ctl_timeout,
-                           wait=a.wait, name=a.name)
+                           wait=a.wait, name=a.name, data_dir=a.data_dir or DATA_DIR,
+                           log_cap_bytes=int(a.log_cap_mb * 1024 * 1024), sim=off(a.sim),
+                           reset_timeout=a.reset_timeout)
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "
                                       f"ssh {a.ssh_host}, AR {a.ar})")
 

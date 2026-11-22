@@ -12,12 +12,18 @@ from pydantic import BaseModel, Field
 from ..common.server import add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
 from . import __version__
 from .node import FIELD_DOC, FIELDS, ROW_PERIOD, UNITS, QuestTeleopNode
+from .oplog import MAX_RECORDS, oplog_stream
 
 TAGS = [
     {"name": "state", "description": "Teleop client state, headset link, the WBC echo, headset commands, events."},
     {"name": "control", "description": "Start / stop teleop (the WBC lease), e-stop, the headset (quest up / down)."},
-    {"name": "stream", "description": f"Rows every {ROW_PERIOD * 1e3:.0f} ms (binary float64)."},
+    {"name": "stream", "description": f"Rows every {ROW_PERIOD * 1e3:.0f} ms (binary float64); the operator stream."},
+    {"name": "episodes", "description": "The task, the event log (docs/plans/data_collection_v1.md, the contract)."},
 ]
+
+
+class TaskIn(BaseModel):
+    text: str = Field("", description="The task of the next episodes (in each episode_start's detail).")
 
 
 class EStopIn(BaseModel):
@@ -29,6 +35,7 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         node.hub.attach(asyncio.get_running_loop())
+        node.oplog.attach(asyncio.get_running_loop())
         if start:
             node.start()
         yield
@@ -44,7 +51,10 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             "Armed, every batch of headset frames becomes one target datagram. "
             "`POST /stop` disables the WBC and releases the lease. `POST /estop` e-stops the arm, the swerve and the "
             "WBC directly, in parallel, and stops teleop. `POST /quest/up` and `/quest/down` run quest_ctl's up / down "
-            "on the headset over ssh, only when asked. Nothing is recorded."),
+            "on the headset over ssh, only when asked. Episodes: A (right controller) starts one, a B tap stops "
+            "it (the sim stack: A resets the sim first); the node emits events (`GET /eventlog`, its only files) "
+            "and the operator stream (`GET /oplog/stream`: headset frames, datagrams sent, events); recording is "
+            "the client-side script's job."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 
@@ -79,6 +89,29 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
                           max_rows=int(max_backlog_s / ROW_PERIOD),
                           schema_extra={"node": "quest_teleop", "rate_hz": 1 / ROW_PERIOD})
         return StreamingResponse(gen, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+    @app.get("/oplog/stream", tags=["stream"], response_class=StreamingResponse,
+             summary="The operator stream: records `headset` {t_rx, frame}, `sent` {t_send, datagram}, `event` {the "
+                     "event line, flat}, in order; a client further behind than `max_records` loses the oldest "
+                     "(the next record's `dropped`)")
+    async def oplog(max_records: int = Query(MAX_RECORDS, ge=10, le=100000)):
+        return StreamingResponse(oplog_stream(node.oplog, max_records), media_type="application/octet-stream",
+                                 headers={"Cache-Control": "no-store"})
+
+    @app.post("/task", tags=["episodes"], summary="The task of the next episodes (in /state and each episode_start)")
+    async def task(body: TaskIn):
+        return node.set_task(body.text)
+
+    @app.get("/eventlog", tags=["episodes"], response_class=StreamingResponse,
+             summary="Event lines (JSON lines) after `since_seq`, from the log files, at most `limit`: repeat from "
+                     "the last seq until fewer come back")
+    async def eventlog(since_seq: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=100000)):
+        lines = await asyncio.to_thread(lambda: list(node.eventlog.since(since_seq, limit)))
+        return StreamingResponse(iter(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+
+    @app.get("/eventlog/files", tags=["episodes"], summary="The log files: [{name, bytes, first_seq, last_seq}]")
+    async def eventlog_files():
+        return await asyncio.to_thread(node.eventlog.files)
 
     @app.post("/start", tags=["control"], summary="Start teleop: WBC lease, hints, enable, a datagram session "
                                                    "(409 with the WBC's reason if it refuses)")

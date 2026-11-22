@@ -207,6 +207,7 @@ class SimNode:
         self._state_seq = getattr(self, "_state_seq", 0) + 1
         arm = self.world.arm if self.world.has_arm else None
         return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",
+                "reset_seq": self.world.reset_seq,
                 "t_host": round(time.monotonic(), 4), "model_version": s["model_version"], "frame": "world",
                 "base": s["base"], "joints": s["joints"], "objects": s["objects"],
                 "overlays": {"markers": self.markers.list(), "sim": sim,

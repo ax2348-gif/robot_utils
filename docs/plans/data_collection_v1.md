@@ -1,6 +1,9 @@
 # Teleop data collection, v1: draft
 
-Status (2026-11-21): draft; **recording deferred** until the teleop integration (WBC + sim + Quest) is done. The
+Status (2026-11-21): **the node side is built** (branch `collect-node`, on the safety build): the event log, the
+operator stream, `POST /task`, A / B episodes with every abort reason, the sim reset on A and `reset_seq` in the sim
+(docs/quest_teleop_node.md, "Episodes"); the headset change (A without realignment in body-frozen mode) is still
+needed. Earlier status: draft; **recording deferred** until the teleop integration (WBC + sim + Quest) is done. The
 operator controls and the reset semantics are decided (below) and are built **now, as part of the integration**,
 without recording: Y/X enable/disable, A = reset (sim: the safe reset + AR re-anchor; robot: AR re-anchor only),
 B inert (the headset's 2 s hold still stops telemetry). Recording later adds "then record" to A and "stop" to the

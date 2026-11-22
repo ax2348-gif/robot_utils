@@ -100,6 +100,7 @@ class FakeWbc:
             if fake.estops:
                 raise HTTPException(409, "e-stop latched")
             fake.enabled = True
+            fake.row["state"] = 2.0          # the stream reports enabled (idle), as the real WBC's does
             return {"enabled": True}
 
         @app.post("/disable")
@@ -107,6 +108,7 @@ class FakeWbc:
             check(x_lease_token)
             fake.calls.append(("disable", None))
             fake.enabled = False
+            fake.row["state"] = 0.0
             return {"enabled": False}
 
         @app.post("/hints")

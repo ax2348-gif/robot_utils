@@ -15,6 +15,7 @@ sockets, the clock is passed in; ``teleop.TeleopClient`` runs the HTTP requests 
   LEFT controller inactive (the stop button gone); no command to send; the WBC's rows stale (newest older than
   ``wbc_stale_s``, 0.3 s); the WBC's own row showing it disarmed after it processed our arming datagram, or not
   enabled. Nothing re-arms on its own: every arm is a new Y press.
+- ``inhibit`` (a reason; the teleop node's sim reset sets it): every Y press is refused with it (no arm, no enable).
 """
 from __future__ import annotations
 
@@ -102,6 +103,7 @@ class ArmLatch:
         self.events: list = []
         self.requests: list = []
         self.presses = 0                  # arms (one per press)
+        self.inhibit: Optional[str] = None   # set: no press arms (or enables), e.g. "sim reset in progress"
         self._last_disable = -math.inf
 
     # -- transitions ----------------------------------------------------------------------------------------
@@ -182,6 +184,8 @@ class ArmLatch:
         return int(s), None
 
     def _preconditions(self, frame: dict, row, row_t, now: float, fresh: bool) -> Optional[str]:
+        if self.inhibit:
+            return self.inhibit
         if not fresh:
             return "headset input not fresh"
         if not grips_released(frame, self.cfg.grip_max):
@@ -254,6 +258,9 @@ class ArmLatch:
         """A pending arm: cancelled on a timeout or a fault row; completed on the first fresh row that processed a
         datagram sent after our enable succeeded and shows the WBC enabled, if the other preconditions hold then."""
         p = self.pending
+        if self.inhibit:                           # e.g. a sim reset started: never complete an arm during it
+            self._cancel(self.inhibit)
+            return
         if now - p["t"] > self.cfg.enable_timeout_s:
             self._cancel(f"the WBC did not enable within {self.cfg.enable_timeout_s:g} s")
             return

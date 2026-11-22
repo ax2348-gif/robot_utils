@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[4] / "tools"
@@ -23,7 +24,9 @@ except ImportError:
     sys.path.insert(0, str(TOOLS))
 
 from quest_teleop import quest_ctl  # noqa: E402,F401
+from quest_teleop.arming import x_pressed  # noqa: E402,F401
 from quest_teleop.body_frozen import Config  # noqa: E402,F401
+from quest_teleop.episodes import EpisodeButtons  # noqa: E402,F401
 from quest_teleop.quest_stream import DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestReader  # noqa: E402,F401
 from quest_teleop.teleop import TeleopClient, close_wbc, open_wbc  # noqa: E402,F401
 from quest_teleop.wbc_client import WbcClient, WbcStream  # noqa: E402,F401
@@ -34,6 +37,14 @@ class LocalWbcClient(WbcClient):
     WBC's host at the session's port, as the CLI does). ``transport`` says which."""
 
     transport: str = ""
+    on_sent = None          # called with (t_send, datagram) after each datagram (the node's operator stream)
+
+    def _send(self, msg: dict) -> dict:
+        out = super()._send(msg)
+        cb = self.on_sent
+        if cb is not None:
+            cb(time.monotonic(), out)
+        return out
 
     def open_session(self) -> dict:
         # not super(): its int(udp_port) fails for a WBC without UDP (udp_port null)

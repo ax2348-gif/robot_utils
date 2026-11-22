@@ -139,7 +139,8 @@ delivers no new frames (the camera node then reports a stall after 4 s). Tests r
 `GET /scene`; `POST /scene/objects {name, shape: box|cylinder, size | radius+length, mass, fixed, xyz, rpy|yaw}`
 (`fixed: true` welds it to the world: furniture, no mass, pushes do nothing; a teleport still moves it);
 `PUT /scene/objects/{name} {xyz, rpy|yaw}` (teleport); `DELETE /scene/objects/{name}`; `POST /scene/reset` (time
-0, robot at its start pose, objects where added, commands dropped; `{"start": true}` reloads the start scene
+0, robot at its start pose, objects where added, commands dropped; `reset_seq` + 1, in the reply, `/state` and every
+`robot_state.v1` record: the headset re-anchors its AR scene when it changes; `{"start": true}` reloads the start scene
 instead: the default tabletop and the config's objects); `POST /scene/save {name}` (current poses to
 `<scene dir>/<name>.yaml`) and `POST /scene/load {name | objects}`. Adding or removing an object recompiles the
 model with the state kept.
@@ -338,7 +339,7 @@ page does; `arm_link6` and each `_wheel` link have no visuals; each module's ste
 one JSON object per line (`application/x-ndjson`, never ends):
 
 ```json
-{"schema":"robot_state.v1","source":"sim","seq":812,"t":27.0333,"clock":"sim","t_host":986921.5531,
+{"schema":"robot_state.v1","source":"sim","seq":812,"t":27.0333,"clock":"sim","reset_seq":2,"t_host":986921.5531,
  "model_version":"59b6e83a1fe52a4b","frame":"world","base":[0.8525,0.7738,-0.00015,0.0001,0.0001,0.6812,0.7321],
  "joints":{"base_FL_steer":0.2341,"base_FL_wheel_joint":31.07,"...":0,"arm_joint1":0.0,"arm_joint2":-0.3,
            "arm_finger_left":0.012,"arm_finger_right":0.012},

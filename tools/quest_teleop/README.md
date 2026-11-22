@@ -90,6 +90,8 @@ All of this only while armed (Y, above).
 | Right stick X | base yaw, directly | adds to the hint's heading offset |
 | Head walk / turn | nothing | moves the base hint (the robot mirrors the operator) |
 | A (both grips released) | headset realignment: a new revision; the next engagement needs a release first | |
+| A (right), the teleop node | start an episode (armed only; in the sim stack: the sim reset first, leaving it disarmed) | the same |
+| B tap (right, < 2 s), the teleop node | stop the episode (kept); held 2 s: the headset stops telemetry, the episode is aborted | the same |
 
 Stick scaling is the stream's own (`control_intent.base_velocity`: 18 % dead zone, 0.45 m/s and 0.8 rad/s full
 scale). Stick clicks are not mapped (left click was the Quest app's automove; the WBC replaces it).

@@ -423,3 +423,17 @@ def test_the_riding_pose_is_captured_afresh_after_a_disarm():
     assert rig.latch.armed and rig.latch.arm_seq == 2
     c = rig.last("target")
     np.testing.assert_allclose(c["ees"]["arm"]["pos"], [1.2, 2.4, 0.5], atol=1e-9)   # not the stale riding pose
+
+
+def test_an_inhibit_cancels_a_pending_arm():
+    """The teleop node's sim reset sets the latch's inhibit and re-enables the WBC itself: a Y press made just
+    before must never complete during the reset (the merge of the pending-arm fix with the episodes' inhibit)."""
+    rig = Rig()
+    slow_enable(rig, 10)
+    x_then_y(rig, 3)
+    assert rig.latch.pending_arm
+    rig.latch.inhibit = "sim reset in progress"
+    rig.run(IDLE, 20)                                           # the row turns enabled meanwhile
+    assert rig.stream.row["state"] == 2.0
+    assert not rig.latch.armed and not rig.latch.pending_arm
+    assert rig.latch.reason == "arm cancelled: sim reset in progress"

@@ -198,6 +198,7 @@ class SimState(BaseModel):
     t: float = Field(description="s, sim clock.")
     running: bool = Field(description="Real-time mode.")
     rtf: float = Field(description="Target real-time factor.")
+    reset_seq: int = Field(description="Resets since start (`POST /scene/reset`), as in every robot_state.v1 record.")
     rtf_measured: float = Field(description="Achieved real-time factor over the last second.")
     step_rate: float = Field(description="Physics steps per wall second over the last second.")
     steps: int = Field(description="Physics steps since start.")
@@ -215,6 +216,7 @@ class TimeOut(BaseModel):
     t: float = Field(description="s, sim clock.")
     running: bool = Field(description="Real-time mode.")
     rtf: float = Field(description="Target real-time factor.")
+    reset_seq: int = Field(description="Resets since start (`POST /scene/reset` increments it).")
 
 
 class SceneOut(BaseModel):
@@ -324,6 +326,8 @@ class RobotState(BaseModel):
     seq: int = Field(description="Record counter (per server).")
     t: float = Field(description="s, the publisher's clock (`clock`): sim time here.")
     clock: str = Field(description="What `t` is: sim (sim seconds) | monotonic (the Pi's clock, on the robot).")
+    reset_seq: int = Field(description="Resets of the world since start (`POST /scene/reset`): the headset re-anchors "
+                                       "its AR scene when it changes.")
     t_host: float = Field(description="s, the server's monotonic clock when the record was made.")
     model_version: Optional[str] = Field(description="The description node's model_version of the model simulated "
                                                      "(GET /model/tree?... gives that tree).")
@@ -377,7 +381,7 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
     def time_out():
         w = node.world
         node.hub.state_changed()
-        return {"t": w.t, "running": w.running, "rtf": w.rtf}
+        return {"t": w.t, "running": w.running, "rtf": w.rtf, "reset_seq": w.reset_seq}
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def index():
@@ -448,8 +452,8 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
               summary="Time 0: robot at its start pose, objects where added (or the start scene), commands dropped")
     async def reset(body: Optional[ResetIn] = None):
         start = bool(body and body.start)
-        await call(node.world.reset, start)
-        node.events.add("reset" + (" to the start scene" if start else ""))
+        seq = await call(node.world.reset, start)
+        node.events.add("reset" + (" to the start scene" if start else "") + f" (reset_seq {seq})")
         return time_out()
 
     @app.post("/scene/save", response_model=SavedScene, tags=["scene"], summary="Save the objects (current poses)")
