@@ -17,9 +17,53 @@ tools/quest_teleop/quest_down          # stop the headset's telemetry
 
 `teleop.py` options: `--hand left|right` (the hand that drives the arm, default right), `--ee` (default `arm`),
 `--no-head-walk` (engaged: the base hint follows only the stick offset), `--stale-ms` (default 200),
-`--no-gripper`, `--udp-host`. Ctrl-C stops sending, disables and releases the lease. The status line shows the
-engagement state, whether datagrams are going out, the age of the newest WBC row, the stick offset `(x, y, yaw)`
-and the base hint sent `(x, y, heading)`, and the last reason an engagement ended or was refused.
+`--max-latency-ms` (default 150), `--min-rate` (default 30 Hz), `--no-gripper`, `--udp-host`. Ctrl-C stops
+sending, disables and releases the lease. The status line shows ARMED / disarmed, the engagement state, whether
+datagrams are going out, the headset latency and rate, the age of the newest WBC row, the stick offset
+`(x, y, yaw)` and the base hint sent `(x, y, heading)`, and the last reason (a disarm, or an engagement ended or
+refused).
+
+## Arming: Y and X (the left controller)
+
+**Start is not live.** `teleop.py` (and the node's Start) only leases, enables and opens the session: nothing
+moves until **Y** arms. Until then, and whenever disarmed, the client sends keep-alives with `armed: false`; the
+WBC holds (docs/wbc.md "The armed latch").
+
+- **Y arms** (`hands.left.buttons.secondary`), and enables first when the WBC is disabled (`POST /enable`, then arms
+  if Y is still held), only on a deliberate press: Y seen released in a valid frame since the last disarm, disable
+  or discontinuity, then held for **3 consecutive fresh valid frames** with X up, both grips < 0.4, both sticks
+  inside the native dead zone (0.18), and a fresh WBC row (< 0.3 s) showing it enabled (or our enable just
+  succeeded) without a fault. Anything failing during the press spoils it: release Y and press again. **One arm per
+  press**: `arm_seq` += 1 (numbered above the WBC's floor from `POST /session`); the arming datagram is a target.
+- **X disables** (`hands.left.buttons.primary`), LEVEL-triggered: any accepted frame with X down (focused or not)
+  sends `armed: false` at once and `POST /disable` (again every 1 s while X is held and the WBC still shows
+  enabled). The arm then floats with gravity compensation, the gripper goes into damping, the base coasts (the
+  owner's decision). The session stays open, disabled; Y re-enables and arms.
+- **Disarm** (`armed: false` at once, and in every datagram after): X; any discontinuity (reconnect, session or
+  revision change, gap); an invalid frame (unfocused, ...); stale input (no valid frame for 200 ms); **late or slow
+  input** (below); the **left controller inactive** (X / Y gone); nothing to send (the arm hand invalid); the WBC's
+  own row (once it processed our arming datagram) showing it disarmed (an overrun, a fault, ...) or not enabled. If
+  the link is gone the WBC's `hold_timeout` (0.25 s) disarms anyway.
+- **Nothing re-arms on its own**: recovery from stale, late, unfocused, a reconnect or a new session, a lease renew,
+  an estimator reset: all need a new Y press.
+- **After arming** the grip needs its release first (as always: an engagement counts only from a release), the
+  sticks give no base velocity until both are seen neutral, and no gripper value is sent (the WBC keeps its gap)
+  until the trigger moved (more than 0.05 from where it was at arming). A disarm drops the engagement and the riding
+  pose: the next arm captures the current command (no jump back to a stale pose).
+
+**Headset latency detection** (`QuestGate`): per frame, latency = arrival (our clock) − `sample_time_ns` (the
+headset's), over the running minimum of that difference in the session (the clock offset cancels). A frame more
+than 150 ms over that baseline, or fewer than 30 frames/s over the last 0.5 s, makes the input **stale**
+(disarm). After that it counts as fresh again only after 0.5 s of good frames, and that never re-arms.
+
+### Stop paths
+
+| Operator / event | Client | WBC | Arm | Base | Gripper |
+| --- | --- | --- | --- | --- | --- |
+| X | `armed: false`, `POST /disable` | disarmed, disabled | floats (gravity compensation) | coasts | damping |
+| Stale / late / slow / unfocused input, a discontinuity, left controller off | `armed: false` (or silence) | disarmed (or `hold_timeout`) | held at its commanded joints | brakes to zero within its rate limit, held | keeps its goal |
+| The WBC disarms itself (overrun, estimator reset, arm pause, fault, `POST /disarm`) | disarms when its row shows it | disarmed (fault: latched) | held | brakes to zero (a lost base: coasts) | keeps its goal |
+| E-STOP (node page) | teleop stops | e-stopped, disabled | its own e-stop: latched, off | its own e-stop: latched, coasts (no braking command) | off |
 
 **The rule:** the robot never moves when the clutch is released and re-engaged, however the operator moved in
 between. Every anchor is the WBC's *commanded* state, and every head or stick contribution restarts at zero on each
@@ -27,8 +71,12 @@ engagement (tested directly: `test_release_and_reengage_never_moves_the_robot`).
 
 ## Controls
 
+All of this only while armed (Y, above).
+
 | Input | Released (no engagement) | Engaged |
 | --- | --- | --- |
+| Y (left) | arm (enable first if disabled) | — (already armed) |
+| X (left) | disarm and disable | the same |
 | Grip (`--hand`) | engage: the arm follows the controller (body-frozen) | release: the arm rides with the base |
 | Trigger (`--hand`) | gripper 0 open – 1 closed | the same (independent of the clutch) |
 | Left stick | base forward/left, directly (`commanded`) | adds to the base hint's offset (robot frame) |
@@ -94,8 +142,8 @@ and session (older or repeated frames are dropped; native restarts it per sessio
 discontinuity; `input_focused` and `action_sync_result == 0`, else the frame is invalid. Per control step: no valid
 frame for 200 ms on our clock = **stale**.
 
-- Stale, unfocused, or the arm hand's intent `valid=false`: **stop sending**. The WBC holds the last world pose;
-  the stick velocity's ttl and the WBC's staleness stop the base.
+- Stale (also late or slow, "Arming"), unfocused, or the arm hand's intent `valid=false`: **disarm** (one
+  `armed: false`), then stop sending. The WBC holds; nothing resumes without a new Y press.
 - Any discontinuity, invalid frame, staleness, an engagement id change we did not see released, an estimator reset
   (`est_reset` changes in the WBC stream) or a refused capture ends the engagement and **requires a release**: an
   engagement counts only if this client saw the hand released (valid, not engaged) since. So attaching or
@@ -117,13 +165,14 @@ target was computed against (an engagement's own for world targets):
 
 | State | `ees.arm` | `base` |
 | --- | --- | --- |
-| released / waiting for a release | `frame: world`, base pose ∘ the command at release, + `twist` | stick velocity (`commanded`) or `locked` |
-| engaged | `frame: world`, the body-frozen target | `hint`: pose + heading |
-| input fine, no WBC row yet | — | `{"type": "alive"}` instead |
-| stale / unfocused / hand invalid | nothing sent | |
+| disarmed (input fresh) | — | `{"type": "alive", "armed": false}` instead |
+| armed, released / waiting for a release | `frame: world`, base pose ∘ the command at release, + `twist` | stick velocity (`commanded`) or `locked` |
+| armed, engaged | `frame: world`, the body-frozen target | `hint`: pose + heading |
+| armed, input fine, no WBC row yet | — | `{"type": "alive"}` instead |
+| stale / unfocused / hand invalid | one `armed: false`, then nothing | |
 
-All targets are `frame: "world"`. `gripper` is in every target while the hand is valid. The full `base` state goes
-in every datagram.
+Every datagram carries `armed` and `arm_seq`. All targets are `frame: "world"`. `gripper` is in every target while
+the hand is valid, once the trigger moved after arming. The full `base` state goes in every datagram.
 
 ## Headset control: `quest_up`, `quest_down`, `quest_status`
 
@@ -176,3 +225,6 @@ offset restart, the release/re-engage rule across operator motions, `est_reset`,
 `test_quest_teleop_e2e.py`: the client against the fake headset and a fake WBC peer (`tests/quest_teleop_fakes.py`:
 HTTP, a rows stream, UDP) through engagement, stick, release, a network outage and a reconnect (about 5 s).
 `test_quest_ctl.py`: `quest_up/down/status` against a fake SSH runner and the fake headset stream.
+`test_quest_buttons.py` (Y / X, every client disarm trigger, no recovery re-arms, the gates after arming) and
+`test_quest_latency.py` (late, slow, recovery), pure on `tests/quest_latch_fakes.py`; `test_quest_stick_offset.py`
+(the target and the hint share this frame's stick offset).
