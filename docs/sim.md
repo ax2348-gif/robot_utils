@@ -242,6 +242,20 @@ parent = T(pos, quat) · motion(axis, q): a rotation about `axis` by q (revolute
 it (prismatic); a mimic joint's q = multiplier · q(joint) + offset. `description/tree.py` `fk()` is the reference
 (tested equal to pinocchio's FK of the same URDF). Metres, radians, quaternions [x, y, z, w].
 
+`variant=boxes` draws the robot as the description node's page does, boxes only, with the same links, joints and
+`movable` as `simple` (and the same `model_version`: the options are in `options`): each arm link's visuals are its
+`ARM_BOXES` boxes (`nodes/arm/geometry.py`), axis-aligned in the link frame (`quat` identity, `size` full extents),
+named `<link>_<part>` (`arm_link3_forearm`, `arm_end_link_gripper_rail`, ...); the jaw boxes ride on
+`arm_finger_left_link` / `arm_finger_right_link` (mirrored in y), so `arm_finger_left` = gap / 2 opens them as the
+page does; `arm_link6` and each `_wheel` link have no visuals; each module's steer link carries its wheel as a box
+(it steers, it does not spin); the chassis and cameras are boxes as in `simple`. For example the forearm:
+
+```json
+"arm_link3": {"visuals": [
+  {"type": "box", "name": "arm_link3_elbow_hub", "pos": [0.0065, 0.0026, -0.0311], "quat": [0, 0, 0, 1], "rgba": [0.7, 0.72, 0.74, 1], "size": [0.0578, 0.0399, 0.0802]},
+  {"type": "box", "name": "arm_link3_forearm", "pos": [0.1222, -0.052, -0.0311], "quat": [0, 0, 0, 1], "rgba": [0.7, 0.72, 0.74, 1], "size": [0.2978, 0.0609, 0.0802]}]}
+```
+
 **State**: `GET /nodes/sim/robot_state` (one record) and `GET /nodes/sim/robot_state/stream?format=jsonl&hz=30`:
 one JSON object per line (`application/x-ndjson`, never ends):
 
