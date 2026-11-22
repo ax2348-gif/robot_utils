@@ -88,8 +88,8 @@ A timestamped trajectory in the world frame: samples `(t, pose[, twist][, grippe
 - **Chunk:** a sequence; replaces the buffer from its first timestamp on; the stale prefix is dropped; blended into the
   old trajectory with a decaying weight; every replacement is anchored at the *commanded* state (pose and velocity),
   never the measured one; `t0` bounded against the Pi clock (a wrong clock is a 422, not a hold).
-- **Frames accepted:** `world` (canonical), `base` (converted to world at the command's timestamp), `ee` deltas are
-  resolved client-side. World targets carry the estimator's reset id; across an estimator reset they are aborted.
+- **Frame:** world only (see the interfaces section); base-relative targets, `ee` deltas and "relative to the robot
+  at time t" are resolved client-side from the stream. World targets carry the estimator's reset id; across an estimator reset they are aborted.
 - **Staleness, two stages:** past `ff_timeout` the feedforward fades to zero and the pose holds; past `hold_timeout`
   (≈ 2.5 × the expected command period) the base stops and the arm holds.
 
@@ -200,11 +200,22 @@ model; names come from the model so a second arm adds a key).
 **3. WBC target datagrams (the external fast path).** UDP on the robot LAN address (the Mac's loopback in the sim) and
 a Unix datagram socket; JSON v0 (binary later if a measurement asks):
 - reactive: `{"type": "target", "session": u32, "seq": u32, "t": null | <Pi monotonic s>, "ees": {"arm": {"frame":
-  "world" | "base", "pos": [x, y, z], "quat": [x, y, z, w], "twist": [vx, vy, vz, wx, wy, wz] (optional), "gripper":
+  "world", "pos": [x, y, z], "quat": [x, y, z, w], "twist": [vx, vy, vz, wx, wy, wz] (optional), "gripper":
   0..1 (optional)}}, "base": {<hint overrides, same keys as /hints base>} (optional)}`; `t: null` = now.
 - chunk: `{"type": "chunk", "session", "seq", "ees": {"arm": {"frame", "t": [...], "pos": [[...]], "quat": [[...]],
   "twist": [[...]] (optional), "gripper": [...] (optional)}}}`.
 - keep-alive: `{"type": "alive", "session", "seq"}`. Older `seq` dropped; unknown session dropped (counted).
+- frames (settled 2026-11-21): **world only.** The WBC tracks world-frame targets and nothing else. Anything
+  base-relative is client-side math from the stream: a released teleop arm is sent as world targets that follow the
+  base (its pose relative to the base, fixed at release, re-expressed each frame with the stream's base pose, the
+  base's velocity as twist feedforward); "relative to the robot at time t" likewise. A network hiccup is covered by
+  the two-stage staleness (the pose holds in the world, the base stops).
+- `est_reset` (optional, added 2026-11-21): the estimator reset id the world-frame targets were computed against;
+  mismatching datagrams are dropped, and world targets are aborted across a reset.
+- Re-engagement never moves the robot: a client-side property (the client anchors to `arm_cmd_*` and the current
+  base pose; the stick offset restarts at every engagement). Separately, secondary objectives (posture,
+  manipulability, heading) may move a satisfied robot slowly: small, tunable weights, watched in the sim; the default
+  heading term is off unless a hint asks for it.
 
 **4. WBC stream (rows, the arm's convention, append-only).** `t_tick`, `seq` in force, `state`, `base_mode`, `solve_ms`,
 `status`; the base pose used (`base_x`, `base_y`, `base_yaw`, world) and `est_reset`; the base twist commanded
