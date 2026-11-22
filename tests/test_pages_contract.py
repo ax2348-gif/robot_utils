@@ -35,6 +35,7 @@ PAGES = {
     "3d_perception": lambda: node_page("perception3d"),
     "power": lambda: node_page("power"),
     "arm": lambda: node_page("arm"),
+    "wbc": lambda: node_page("wbc"),
 }
 
 
@@ -53,7 +54,7 @@ def has(pattern: str, text: str) -> bool:
 
 # -- every page that can move the robot has a working e-stop ----------------------------------------
 
-@pytest.mark.parametrize("page", ["swerve", "pose_servo", "description", "arm"])
+@pytest.mark.parametrize("page", ["swerve", "pose_servo", "description", "arm", "wbc"])
 def test_node_pages_with_actuation_use_the_shared_estop_button(page):
     html = PAGES[page]()
     assert has(r'id="estop"', html), "the e-stop element is gone"

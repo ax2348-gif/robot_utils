@@ -40,6 +40,10 @@ nodes:
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: description, kind: description, start: {module: robot_utils.nodes.description}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
+  # wbc: whole-body control (docs/wbc.md): arm + base to EE targets; holds the arm and swerve leases while enabled
+  # (so it and pose_servo never run together). Target datagrams: UDP on --udp-host (loopback until the robot's LAN
+  # address is set here) and <runtime>/robot/wbc.target.sock.
+  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d}}
   # agent_interface: Agent MoMa, the node agents use for mobile manipulation (docs/agent_interface.md).
   # Its predecessor agent_nav was retired on 2026-11-21 (code at the git tag agent-nav-final; docs/agent_nav.md).

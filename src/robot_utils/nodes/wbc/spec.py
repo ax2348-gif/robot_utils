@@ -176,7 +176,7 @@ class EEHint:
     position: float = 1.0
     orientation: float = 0.3
     orientation_mask: tuple = (1.0, 1.0, 1.0)
-    posture: object = "home"          # a named posture or a joint vector (rad)
+    posture: object = "ready"         # a named posture or a joint vector (rad)
     posture_weight: float = 1e-4
 
 
@@ -192,7 +192,7 @@ class Hints:
     ees: dict = field(default_factory=dict)        # name -> EEHint
 
     def ee(self, name: str, cfg: Config) -> EEHint:
-        return self.ees.get(name) or EEHint(cfg.w_position, cfg.w_orientation, (1.0, 1.0, 1.0), "home",
+        return self.ees.get(name) or EEHint(cfg.w_position, cfg.w_orientation, (1.0, 1.0, 1.0), "ready",
                                             cfg.posture_weight)
 
 
@@ -313,7 +313,7 @@ def parse_ee(name: str, e: dict, cfg: Config, postures: dict, n_joints: int) -> 
     if not (isinstance(mask, (list, tuple)) and len(mask) == 3 and all(isinstance(m, (int, float)) and 0 <= m <= 1
                                                                        for m in mask)):
         raise ValueError(f"ees.{name}.orientation_mask must be three numbers in [0, 1]")
-    posture = e.get("posture", "home")
+    posture = e.get("posture", "ready")
     if isinstance(posture, str):
         if posture not in postures:
             raise ValueError(f"ees.{name}.posture: unknown named posture {posture!r} (have {', '.join(postures)})")
