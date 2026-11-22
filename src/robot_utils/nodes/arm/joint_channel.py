@@ -35,13 +35,27 @@ class JointChannel:
         self.handler_errors = 0
         self.send_errors = 0
 
-    def start(self) -> None:
+    def start(self, thread: bool = True) -> None:
+        """``thread`` False: no receiver thread; the owner calls ``poll`` when ``fileno`` is readable (the arm's
+        control process: its one thread waits on this socket with its command socket)."""
         self.sock = bind_dgram(self.path)
+        self._buf = bytearray(RECV_MAX)
+        self._view = memoryview(self._buf)
+        if not thread:
+            return
         self._wake_r, self._wake_w = socket.socketpair()
         self._wake_r.setblocking(False)
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="arm-joint-channel", daemon=True)
         self._thread.start()
+
+    def fileno(self) -> int:
+        return self.sock.fileno()
+
+    def poll(self) -> None:
+        """Every queued datagram to the handler, now (no thread; never blocks)."""
+        if self.sock is not None:
+            self._drain(self._buf, self._view)
 
     def close(self) -> None:
         self._stop.set()

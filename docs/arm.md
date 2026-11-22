@@ -104,6 +104,80 @@ check) are only ever run with every motor off; the bus refuses them otherwise. T
 heartbeat is 3 s (a browser shares 6 connections across all its tabs on the robot). Planning, IK checks and kinematics lookups run in a separate planner process (one job at a
 time): in the node's own interpreter they starve the control loop.
 
+### Processes
+
+The control loop and the bus run **in their own process** (`--control process`, the default; `--control thread`
+keeps the old structure: the loop a SCHED_FIFO thread of the server process). Measured on the Pi (2026-11-22, the
+full stack plus a recorder, ~93% CPU busy) with the loop as a thread: it shared the process's GIL with uvicorn, SSE,
+the stream clients and the request threads, and while a normal-priority thread holding the GIL was descheduled the
+real-time tick waited for it (priority inversion): `loop_hz` 64–87, 1,706 overruns in ~4 min, reply latency p50
+9.5 ms / p99 20.5 ms (5–7 ms quiet), feedback-refresh fallbacks, a 793 ms late tick during an enable. The WBC had the
+same structure and symptoms; its own process fixed them (docs/wbc.md "Processes").
+
+- **Control process** (`arm/control_proc.py`, spawned by the node at start; SCHED_FIFO 40 on its one thread):
+  `ControlCore`, the very same `ArmNode` with its surroundings swapped. It owns the bus (`RebotArm`, the serial port;
+  or `SimBus` / `WorldArmBus`), connects and checks it, runs the tick (read, chocks, cut / engage, servo / track /
+  stream / hold, the gripper loop, jam detection, faults), the enable (the gripper check, the MIT mode switches) and
+  the **joint channel** (`<name>.joint.sock`: no receiver thread; the loop waits for its tick on the command socket
+  and the joint socket together, handles each datagram as it arrives, and polls once more right before the command
+  for goals that arrived during the bus read). No HTTP, no planning, no other Python threads; `gc.freeze()` after
+  the setup.
+- **Server process** (`arm/proc_node.py`, `ProcNode`: the same request API as `ArmNode`, server.py serves either):
+  HTTP and the page, SSE, `/stream` (the tick and Jacobian rows from two rings), the **lease** (its holder and a
+  digest of its token published to the control process for the joint channel's hello; renewed for every
+  joint-channel datagram the control process counts; its end sent as `lease_ended`), the e-stop latch, the chocks'
+  check at enable, the **track IK and the planning** (`arm/requests.py` `ArmRequests`, the same code as in-process,
+  on the latest snapshot; the planner process is this process's), the lookups (kinematics, geometry, IK checks:
+  this side's model, kept at the control process's TCP offset). Everything that changes the control state is a
+  command answered by the control process: enable, disable, float, the solved track, the planned motion (re-checked
+  there: enabled, the drift since planning), gripper, cancel, reset, stow, profile, TCP, limits, jam, the e-stop.
+- **IPC** (`common/ipc.py`, shared with the WBC): one shared-memory file (a private 0700 directory on tmpfs,
+  `$XDG_RUNTIME_DIR` on the robot; every page allocated at creation, so the loop never page-faults on it): heartbeats,
+  a seqlocked, CRC-checked snapshot slot (`ArmNode.core_state` plus the reading, the command, the soft limits, the
+  setpoint limits; every 2nd tick and after every command, with the events it explains sent after it) and the lease
+  slot; drop-oldest rings for the rows. Commands on two Unix datagram sockets (pickled), the e-stop first; a command
+  over 32 KB (a long planned motion: Linux caps a datagram at 208 KiB) goes through a bulk slot, one at a time. The server
+  is **event-driven**: the control process sends a `t` message after every tick and the server's one IPC thread
+  publishes the rows, renews the lease and checks the heartbeat then (no polling of shared memory faster than the
+  loop: the WBC's 500 Hz pump cost CPU and GIL hand-offs).
+- **The e-stop** goes out at once (the HTTP handler never waits; the confirmation is awaited in the background) and
+  the control process switches the motors off **on receipt**, between ticks, not at the next tick. A stow's motors-off
+  likewise.
+- **Blocking steps.** Connecting (the bus's checks), enabling (the gripper check, the mode switches) and closing the
+  bus block the control loop as before (no rows, no joint-channel state packets meanwhile: ~1 s for the first
+  enable). The control process announces each (`/state.process.busy`) with a deadline (connect 30 s, enable 10 s);
+  its heartbeat is excused until then. The server stays responsive throughout.
+- **Failures.** The control process watches the server's heartbeat: missing for 0.5 s → it **holds** (servoing: at
+  its command; the planned motion, track and stream dropped, an event; the gripper keeps its goal) and accepts no new
+  motion (joint-channel goals dropped as `server`) until the heartbeat is back (then accepted again). The server's
+  process gone → the joint channel's bye, the motors off (damping), the process ends. The server watches the control
+  process's heartbeat: missing for 0.25 s outside an announced blocking step, or the process gone → **fault**
+  (latched; an event; `/state` `state: fault`, `error` the reason, the motors reported off; every request needing
+  the control process answers 503 "restart the node"; the e-stop still latches). The motors go to damping by their
+  own 100 ms CAN watchdog; a control process that was only stalled is told to fault (motors off) and, still silent
+  1 s later, killed (the serial port released). **Nothing restarts automatically: the operator restarts the node.**
+  Node shutdown stops it cleanly (bye, motors off, port released).
+- `/state.process` (added; also in thread mode, `mode: thread`): `mode`, `pid`, `alive`, `fault`, `heartbeat_age`,
+  `snapshot_age` (≤ 20 ms), `busy`, `rows_dropped`, `commands_dropped`, `service_max_ms`, and `tick_time`: per tick
+  over the last 500, wall time, the control thread's CPU time and the rest ("off CPU": waiting for the GIL, for the
+  bus, or preempted), p50 / p99 / max. Everything else is unchanged for clients: the routes, the stream fields, the
+  states, the joint-channel protocol; `/state` is built from the snapshot (≤ 20 ms old; a track's `age` is brought
+  to now).
+- **Measured** (`tests/test_arm_proc.py`, MacBook, no SCHED_FIFO; the server hammered by 6 `/state` and 2
+  `/kinematics` pollers, 3 SSE and 3 `/stream` clients and three threads of Python work every 10 ms; a joint-channel
+  client in its own process at ~97 Hz): process vs thread, tick period p99 11.7 vs 12.4–12.9 ms, max 11.8–12.1 vs
+  13.7–18.2 ms; off-CPU per tick p99 0.05 vs 0.9 ms, max 0.1 vs 1.4–12.9 ms (the thread's GIL waits); joint channel
+  goal → state packet p50 15.0 vs 15.4 ms, p99 20.9 vs 21.2 ms; the server answered ~60% more `/state` requests. With
+  every core also busy (normal-priority burners: the robot's situation, but here nothing is real time, so both are
+  preempted): tick period p99 12.1 vs 14.7 ms, max 22 vs 38 ms, overruns 4 vs 10, joint channel p99 22 vs 28 ms.
+  On the robot, compare `/state` `loop_hz`, `overruns`, `process.tick_time` and `reply_latency` between the modes.
+- **Not fixed by the split:** motorbridge (the native `libmotor_abi`) starts a polling worker thread of its own when
+  the bus opens; it is created by the control thread, so SCHED_RESET_ON_FORK makes it a normal thread. It holds no
+  GIL, but under load it is likely scheduled late (replies are then stamped when the control thread's own
+  `poll_feedback_once` drains them: the reply latency reads about one tick), and the control thread may wait for a
+  lock it holds (not verified: an inference from thread listings on the robot). Raising it to real time is a
+  separate change.
+
 ## Motion layers
 
 Exactly one source owns `q_goal`. A new command of any layer replaces the one in force (the old

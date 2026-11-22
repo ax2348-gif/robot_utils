@@ -1,8 +1,8 @@
 """HTTP API of the arm node (FastAPI). Design: docs/arm.md; conventions: docs/nodes.md.
 
 Controlling requests carry the lease token (``X-Lease-Token``). Handlers only touch the node's
-locked state; the bus belongs to the control thread. Blocking work (enable's gripper check,
-planning) runs in a worker thread. Poses are in the arm frame (the arm's URDF ``base_link``; ``GET
+locked state; the bus belongs to the control loop. Anything that waits (enable's gripper check,
+planning, the control process's answer: docs/arm.md "Processes") runs in a worker thread. Poses are in the arm frame (the arm's URDF ``base_link``; ``GET
 /geometry`` gives its pose in the robot base frame): a position [x, y, z] m plus either ``quat``
 [x, y, z, w] or ``rpy`` [roll, pitch, yaw] rad.
 """
@@ -206,6 +206,8 @@ class JamIn(BaseModel):
 
 
 def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
+    """``node``: an ``ArmNode`` (the control loop a thread of this process) or a ``proc_node.ProcNode`` (in its own
+    process); the same request API."""
     @asynccontextmanager
     async def lifespan(app):
         node.hub.attach(asyncio.get_running_loop())
@@ -306,7 +308,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def set_jam(body: JamIn, x_operator: Optional[str] = Header(None)):
         if (x_operator or "").lower() != "human":
             raise RequestError(403, "jam detection is the human operator's to change (X-Operator: human)")
-        return node.set_jam(body.model_dump(exclude_none=True))
+        return await asyncio.to_thread(node.set_jam, body.model_dump(exclude_none=True))
 
     @app.get("/gains", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="The gain profile in force")
     async def gains():
@@ -348,11 +350,11 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/disable", response_model=M.DisableOut, response_model_exclude_unset=True, tags=["control"], summary="Disable: the arm floats, the gripper goes into damping, commands refused (holder)")
     async def disable(token: LeaseToken = None):
-        return node.disable(token)
+        return await asyncio.to_thread(node.disable, token)
 
     @app.post("/float", response_model=M.StateWord, response_model_exclude_unset=True, tags=["control"], summary="Float the arm: stays enabled, servoing off, gravity on (holder); the gripper is untouched")
     async def float_arm(token: LeaseToken = None):
-        return node.float_arm(token)
+        return await asyncio.to_thread(node.float_arm, token)
 
     @app.post("/stow", response_model=M.StowOut, response_model_exclude_unset=True, tags=["control"], summary="Safe homing, then motors off (damping) at home; at once if already within 3° of home (holder)")
     async def stow(token: LeaseToken = None):
@@ -362,17 +364,17 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
     async def estop(request: Request, body: Optional[EStopIn] = None):
         body = body or EStopIn()
         src = body.source or (request.client.host if request.client else "")
-        info = node.trigger_estop(body.reason, src)
+        info = node.trigger_estop(body.reason, src)      # never waits: the e-stop goes out at once
         return {"latched": True, "reason": info.reason, "source": info.source}
 
     @app.post("/estop/clear", response_model=EStopCleared, response_model_exclude_unset=True, tags=["control"], summary="Clear the e-stop (holder; stays disabled)")
     async def clear_estop(token: LeaseToken = None):
-        node.clear_estop(token)
+        await asyncio.to_thread(node.clear_estop, token)
         return {"latched": False}
 
     @app.post("/reset", response_model=M.ResetOut, response_model_exclude_unset=True, tags=["control"], summary="Reconnect after a fault (holder; ends uninitialized)")
     async def reset(token: LeaseToken = None):
-        node.reset(token)
+        await asyncio.to_thread(node.reset, token)
         return {"state": node.state}
 
     # -- motion -----------------------------------------------------------------------------------------
@@ -403,11 +405,11 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/cancel", response_model=M.CancelOut, response_model_exclude_unset=True, tags=["motion"], summary="End the planned motion or track: hold the current command")
     async def cancel(token: LeaseToken = None):
-        return node.cancel(token)
+        return await asyncio.to_thread(node.cancel, token)
 
     @app.post("/gripper", response_model=M.GripperOut, response_model_exclude_unset=True, tags=["motion"], summary="Gripper gap (mm) with a force limit: makes it hold")
     async def gripper(body: GripperIn, token: LeaseToken = None):
-        return node.gripper_cmd(token, body.gap_mm, body.max_force_n)
+        return await asyncio.to_thread(node.gripper_cmd, token, body.gap_mm, body.max_force_n)
 
     # -- kinematics ---------------------------------------------------------------------------------
 
@@ -468,7 +470,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/profile", response_model=M.GainsOut, response_model_exclude_unset=True, tags=["settings"], summary="Switch the gain profile (holder; only while nothing is servoing)")
     async def profile(body: ProfileIn, token: LeaseToken = None):
-        return node.set_profile(token, body.name)
+        return await asyncio.to_thread(node.set_profile, token, body.name)
 
     @app.get("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="TCP offset in end_link (m)")
     async def get_tcp():
@@ -476,7 +478,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/tcp", response_model=M.TcpOut, response_model_exclude_unset=True, tags=["settings"], summary="Set the TCP offset (holder; only while the arm is not servoing)")
     async def set_tcp(body: TcpIn, token: LeaseToken = None):
-        return node.set_tcp(token, body.offset)
+        return await asyncio.to_thread(node.set_tcp, token, body.offset)
 
     @app.get("/limits", response_model=M.LimitsOut, response_model_exclude_unset=True, tags=["settings"], summary="Hard and soft speed limits")
     async def get_limits():
@@ -484,6 +486,6 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.post("/limits", response_model=M.LimitsOut, response_model_exclude_unset=True, tags=["settings"], summary="Soft limits within the hard ones (holder; reset when the lease ends)")
     async def set_limits(body: LimitsIn, token: LeaseToken = None):
-        return node.set_limits(token, **body.model_dump())
+        return await asyncio.to_thread(lambda: node.set_limits(token, **body.model_dump()))
 
     return app
