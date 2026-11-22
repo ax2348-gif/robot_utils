@@ -15,6 +15,7 @@ origin: `http://<robot>/nodes/<instance>/` (Routing, below).
 | pose_servo (pose goals → jerk-limited swerve twists, from the estimator's pose) | `robot_utils.nodes.pose_servo` | `pose_servo` → `/nodes/pose_servo/` | yes (via the swerve lease) | [pose_servo_node.md](pose_servo_node.md) |
 | description (frames + calibration; yaw routine drives the base) | `robot_utils.nodes.description` | `description` → `/nodes/description/` | yes | [description_node.md](description_node.md) |
 | 3d_perception (colour + registered depth, motion-compensated; pixel → 3D point) | `robot_utils.nodes.perception3d` | `3d_perception` → `/nodes/3d_perception/` | no | [perception3d_node.md](perception3d_node.md) |
+| quest_teleop (Quest whole-body teleop through the WBC: the tools/quest_teleop client run as a node; headset up / down over ssh) | `robot_utils.nodes.quest_teleop` | `quest_teleop` → `/nodes/quest_teleop/` | yes (via the WBC lease) | [quest_teleop_node.md](quest_teleop_node.md) |
 | agent_interface (Agent MoMa: the agent ↔ robot boundary for mobile manipulation; agents read `/nodes/agent_interface/guide.md`) | `robot_utils.nodes.agent_interface` | `agent_interface` → `/nodes/agent_interface/` | yes (via pose_servo and the arm lease) | [agent_interface.md](agent_interface.md) |
 
 ## Routing: one origin on port 80
