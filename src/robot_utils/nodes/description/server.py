@@ -556,8 +556,9 @@ class ModelComponent(BaseModel):
     file: Optional[str] = Field(description="URDF file as `<package>:<path>`; null for a procedural component.")
     root_link: str = Field(description="The component's root link (hangs from `parent` at `mount`).")
     parent: Optional[str] = Field(description="Parent link; null for the root component (base_link).")
-    variant: Literal["full", "simple"] = Field(description="Variant used: full (meshes) or simple (a bounding "
-                                                           "capsule per link; procedural parts are the same).")
+    variant: Literal["full", "simple", "boxes"] = Field(
+        description="Variant used: full (meshes), simple (a bounding capsule per link; procedural parts are the "
+                    "same) or boxes (the arm as the pages' ARM_BOXES, the swerve wheels as boxes).")
     links: list[str] = Field(description="Links of the component.")
     joints: list[str] = Field(description="Its movable joints.")
     mass: float = Field(description="kg, total mass of its links.")
@@ -599,7 +600,7 @@ class ModelJoint(BaseModel):
 
 class ModelOptionsOut(BaseModel):
     """The assembly options used."""
-    variant: str = Field(description="full | simple, then per-component overrides (`simple,arm=full`).")
+    variant: str = Field(description="full | simple | boxes, then per-component overrides (`simple,arm=full`).")
     base: Literal["fixed", "planar", "swerve"] = Field(description="fixed to the world; planar x / y / yaw joints "
                                                                    "(root `odom`); swerve: the modules' steer and "
                                                                    "wheel joints movable (base_link floats in a "
@@ -743,7 +744,7 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
             "**Frames**: `GET /description` (all frames, each with its parent; camera poses composed from the "
             "nominal pose and the active calibrations), `GET /transform?from=&to=`.\n\n"
             "**Model**: `GET /model` (components, frame tree, joints, model_version), `GET /model/urdf` "
-            "(`variant=full|simple`, `base=fixed|planar|swerve`, `mounts=nominal|calibrated`, "
+            "(`variant=full|simple|boxes`, `base=fixed|planar|swerve`, `mounts=nominal|calibrated`, "
             "`mesh_uri=package|http|relative|file`), `GET /model/meshes/{component}/{path}`, `GET /model/bundle.zip`.\n\n"
             "**Calibration** (jobs; one at a time): `POST /calibrate/ground` (depth plane fit: roll, pitch, height; "
             "never moves), `POST /calibrate/yaw` (**drives the base** back and forth along given vectors: yaw; needs "
@@ -801,7 +802,8 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
         except ModelError as e:
             raise bad(e)
 
-    _q = {"variant": Query("full", description="full | simple, optionally per component: `simple,arm=full`."),
+    _q = {"variant": Query("full", description="full | simple | boxes, optionally per component: "
+                                                       "`simple,arm=full`."),
           "base": Query("fixed", description="fixed | planar | swerve."),
           "mounts": Query("calibrated", description="Camera mounts: nominal | calibrated."),
           "mesh_uri": Query("package", description="package (`package://<component>/<path>`) | http (this node's "
@@ -835,7 +837,9 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
              summary="The kinematic tree as plain JSON (robot_tree.v1): links with visuals, joints; for clients "
                      "that compute their own kinematics (AR view)")
     async def model_tree(request: Request,
-                         variant: str = Query("simple", description="full | simple (default: primitives only)"),
+                         variant: str = Query("simple", description="full | simple (default: primitives "
+                                                                    "only) | boxes (the arm as the "
+                                                                    "description page draws it)"),
                          base: str = Query("swerve", description="fixed | planar | swerve (default: steer and wheel "
                                                                  "joints, as robot_state.v1 reports them)"),
                          mounts: str = _q["mounts"],

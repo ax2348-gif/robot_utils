@@ -106,11 +106,11 @@ def test_sim_stack_runs_and_stops_cleanly(stack):
     assert c.post("/nodes/swerve/enable", headers=H).json()["enabled"]
     end = time.monotonic() + 3.0
     while time.monotonic() < end:
-        c.post("/nodes/swerve/command", json={"twist": [0.3, 0.0, 0.0]}, headers=H)
+        c.post("/nodes/swerve/command", json={"twist": [-0.3, 0.0, 0.0]}, headers=H)   # backwards: the table is ahead
         time.sleep(0.1)
     c.post("/nodes/swerve/command", json={"twist": [0.0, 0.0, 0.0]}, headers=H)
     x = c.get("/nodes/sim/viz/frame").json()["base"]["xyz"][0]
-    assert x > 0.3, x
+    assert x < -0.3, x
     pose = c.get("/nodes/estimator/state").json()["pose"]
     assert pose["x"] == pytest.approx(x, abs=0.1)
     c.post("/nodes/swerve/disable", headers=H)
@@ -136,7 +136,9 @@ def test_sim_stack_runs_and_stops_cleanly(stack):
                 recs.append(json.loads(line))
     assert [r["schema"] for r in recs] == ["robot_state.v1"] * 4 and recs[-1]["seq"] > recs[0]["seq"]
     assert set(recs[0]["joints"]) == set(tree["movable"]) and recs[0]["model_version"] == tree["model_version"]
-    assert recs[-1]["base"][0] >= x - 0.01 and len(recs[-1]["base"]) == 7      # (it may still be coasting)
+    assert recs[-1]["base"][0] <= x + 0.01 and len(recs[-1]["base"]) == 7      # (it may still be coasting)
+    objs = recs[-1]["objects"]                                     # the default tabletop scene
+    assert objs["table"]["fixed"] and objs["table"]["geom"]["type"] == "box" and "can" in objs
     assert recs[-1]["overlays"]["markers"][0]["name"] == "t"
     # Ctrl-C: every node stops, sockets go
     proc.send_signal(signal.SIGINT)

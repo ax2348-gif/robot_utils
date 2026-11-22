@@ -212,6 +212,8 @@ one, drop an `.html` file in that folder (names: lowercase letters, digits, `_`,
   in the corner. Controls are hollow (thick coloured outlines, transparent, shadowed text) and the
   layout fits the screen without scrolling (sizes scale with the viewport; checked from 320×568 to
   1920×1080, portrait and landscape).
+- **Quest teleop** (`tools/quest_teleop.html`): a link to the `quest_teleop` node's own page (whole-body teleop from the Quest headset through the WBC: start / stop, headset up / down, link health, top-down view;
+  docs/quest_teleop_node.md). The tool is the node's page, so it has the node contract (state band, e-stop, /state) like any node; the entry here only makes it findable beside the other tools.
 - **Swerve teleop** (`tools/swerve_teleop.html`), ported from rev_ctl `examples/teleop.py`:
   move joystick, rotate slider, page speed limits (capped at the node's soft limits), Enable,
   Disable, E-STOP and Clear e-stop. It takes the swerve node's lease ("Take control" if someone
@@ -341,7 +343,7 @@ the page contracts are untouched):
 
 | Hook | What |
 |---|---|
-| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_interface`, `description`, `estimator`, `perception3d`, `camera`, `power`, `landing`, and the tools `swerve_teleop`, `remote_teleop` (which share element ids, so scope tool rules by page) |
+| `body[data-page="<kind>"]` | which page: `swerve`, `pose_servo`, `agent_interface`, `description`, `estimator`, `perception3d`, `camera`, `power`, `quest_teleop`, `landing`, and the tools `swerve_teleop`, `remote_teleop` (which share element ids, so scope tool rules by page) |
 | `.ru-head` | the header row: title, status, e-stop (every e-stop lives here, so it is above the fold on a phone) |
 | `.ru-body`, `.ru-side` | the main grid of panels, and its side column where the page has one |
 | `[data-panel="<name>"]` | one panel, unique within its page (`map`, `jog`, `events`, ...) |

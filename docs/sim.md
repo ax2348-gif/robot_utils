@@ -41,14 +41,65 @@ The robot never collides with itself; it collides with the floor and objects.
 
 | component | fidelity (v1) | model |
 |---|---|---|
-| base | hybrid (decided) | per module a steer position servo and a wheel velocity servo, each torque-capped near the motor's stall torque (45 N m steer, 18.3 N m wheel). Their references follow the SPARK setpoints through the planner's bounds: steer rate 4π rad/s, wheel speed 3 m/s, wheel acceleration 0.85 m/s² (`max_accel + max_alpha · WHEEL_R` of the planner caps). The chassis is a free body moved by wheel–floor friction; soft wheel contact (`solref 0.02 s`) is the modules' compliance (all four wheels stay loaded, tested). A disabled drive coasts (no torque), a disabled steer holds its angle; no setpoints for 0.1 s disables every module (a lost heartbeat). |
-| arm | kinematic | the reference follows each MIT position setpoint within `joint_speed_max` (6 rad/s); a joint sent kp = 0 holds where it is. A stiff servo plus a `qfrc_bias` feedforward applied as joint torque keeps the joints on it, so the chassis carries the arm's weight and reaction. No MIT frame for 0.1 s while enabled: status 0xD (the motors' CAN watchdog); a lost backend connection likewise. |
+| base | hybrid (decided) | per module a steer position servo and a wheel velocity servo, each torque-capped at what the SPARK's duty and current limits allow (9.0 N m steer, 3.5 N m wheel). Their references follow the SPARK setpoints within the robot's own limits: steer rate 7.4 rad/s, wheel speed 1.87 m/s, wheel acceleration 10.7 m/s² (see "Limits come from the robot config"). The chassis is a free body moved by wheel–floor friction; soft wheel contact (`solref 0.02 s`) is the modules' compliance (all four wheels stay loaded, tested). A disabled drive coasts (no torque), a disabled steer holds its angle; no setpoints for 0.1 s disables every module (a lost heartbeat). |
+| arm | kinematic | the reference follows each MIT position setpoint within the arm node's hard joint speed caps (2, 2, 2, 6, 6, 6 rad/s); a joint sent kp = 0 holds where it is. A stiff servo plus a `qfrc_bias` feedforward applied as joint torque keeps the joints on it, so the chassis carries the arm's weight and reaction. No MIT frame for 0.1 s while enabled: status 0xD (the motors' CAN watchdog); a lost backend connection likewise. |
 | gripper | kinematic | the motor angle follows its goal (kp > 0), or closes / opens under a torque command, at `gripper_speed`; the fingers (gap = −q · 16 mm/rad) are force-capped, so they stop on an object. |
 | cameras | rendered | head and wrist: colour (JPEG, as the camera's MJPG) and depth (Y16 mm, 0 outside `depth_range`) at the configured size / rate / field of view, rendered from the links `<camera>_color_optical` / `_depth_optical`. `t_sensor` = the host time of the rendered state, `t_capture` = `t_sensor` + the measured delay (head colour 30 ms, depth 17 ms, wrist 47 ms). No noise or exposure yet. |
 | IMU | MuJoCo sensors | the head camera's (`cameras.camera.imu`): accelerometer (specific force: +9.81 m/s² up at rest) and gyro at the link's origin, in its frame (the depth optical frame), sampled every physics step (1 kHz); `t_sensor` = the host time the sample stands for (real-time mode: the wall-clock anchor), `t_capture` = + `delay` (2 ms). No bias, noise or temperature model. The camera node's attitude filter and the estimator's fused heading run on it unchanged. The wrist camera has none (as the Gemini 305). |
 
 `dynamic` fidelity (MIT motors, backlash, friction, gripper contact law) is the next step: the config already
 has `components.arm.fidelity`; anything but `kinematic` is refused for now.
+
+## The default scene
+
+The world starts with a tabletop scene (`scene.tabletop: true` in `default_sim.yaml`; `nodes/sim/scene.py`), the base
+at the origin facing +x. Derived from the model, not guessed:
+
+- **table** (fixed, 0.6 × 1.6 m, 3 cm top, four legs): top at the arm's mount height (the base's top surface
+  `TOP_Z` = 0.222 m, where the arm's plate sits) + 0.08 m = **0.302 m**, in the band where the arm reaches farthest
+  pointing straight down (sampled from the model's joint ranges: top-down grasps reach x ≈ 0.55–0.6 m for table
+  heights 0.15–0.40 m); its front edge **4 cm in front of the base** (`FRAME`/2 + 0.04 = 0.256 m), so the first
+  ~0.3 m of the top is in reach from the start pose. It is long in y: driving sideways along it brings the rest in
+  reach (the robot cannot pass under it: the arm and camera are above its top).
+- **on it**: `cube` (4 cm, red, x 0.36 y −0.15), `can` (cylinder ⌀ 40 mm × 10 cm, blue, x 0.42 y 0.05), `block`
+  (3 × 8 × 5 cm, green, turned 0.4 rad, x 0.46 y −0.32): each narrower than 0.8 × the gripper's opening (`GAP_MAX`
+  49.6 mm) and reachable pointing down from the start pose (tested with the model's kinematics); `cube_far` (4 cm,
+  yellow, y 0.55): out of reach until the base moves ~0.5 m left.
+- **in the head camera's view**: `cube_view` (4.5 cm, white, x 0.74 y 0, near the table's far edge). On the robot the
+  head camera sits ~1.0 m up pitched ~19° down (its calibrated mount), so it sees the table top only beyond
+  x ≈ 0.68 m: the near objects are seen by the wrist camera (the gripper looking down), as on the robot.
+- **on the floor**: `crate` (0.3 m box, 3 kg, at (1.2, −1.4)) and `bin` (cylinder ⌀ 0.3 × 0.4 m, 2 kg, at (−1.0, 1.3)),
+  for walking tasks.
+
+They are in `/scene` (fixed ones with `fixed: true`), the page's 3D view, both camera renders, and `robot_state.v1`
+`objects` (`fixed` too). `scene: {tabletop: false}` in a sim config starts empty (the tests' default world does).
+
+## Limits come from the robot config
+
+The world has no actuator limits of its own: `nodes/sim/limits.py` computes them from the robot codebase at start
+(shown in `/state` `limits`), and a sim config that sets one is refused. Controllers (pose_servo, the WBC) keep
+their own, tighter settings on top, as on the robot.
+
+| limit | value now | from |
+|---|---|---|
+| wheel speed | 1.87 m/s | `swerve/constants.py` `DRIVE_MAX_OUTPUT` (0.35, the drive SPARK's closed-loop `output_range`, `setup_sparks.py`) × `DRIVE_FREE_SPEED` |
+| wheel acceleration | 10.7 m/s² | `DRIVE_FREE_SPEED / DRIVE_RAMP` (the drive SPARK's closed-loop ramp: 0.5 s from 0 to full output) |
+| wheel torque | 3.5 N m | min(`DRIVE_MAX_OUTPUT` × Vortex stall torque, `DRIVE_CURRENT_LIMIT` (40 A) × its torque per amp) × `DRIVE_REDUCTION` (the current limit governs) |
+| steer rate | 7.4 rad/s (1.18 turns/s) | `STEER_MAX_OUTPUT` (0.3, the steer SPARK's `output_range`) × `STEER_FREE_RATE` (NEO 550 free speed / `STEER_REDUCTION` 46.42) |
+| steer torque | 9.0 N m | min(`STEER_MAX_OUTPUT` × NEO 550 stall torque, `STEER_CURRENT_LIMIT` (20 A) × its torque per amp) × `STEER_REDUCTION` |
+| arm joint speeds | 2, 2, 2, 6, 6, 6 rad/s | `arm/config.py` `HARD.joint_vel`, as the arm node loads it (`load_settings()`: `~/.config/robot_utils/arm.yaml` `joint_vel_max` overrides) |
+| gripper force | 120 N per finger | `arm/config.py` `HARD_MAX_FORCE` |
+
+The motor figures (`VORTEX_STALL_TORQUE` / `_CURRENT`, `NEO550_FREE_RPM`, `NEO550_STALL_TORQUE` / `_CURRENT`,
+`STEER_REDUCTION`) are REV datasheet values, added to `swerve/constants.py` next to the existing `VORTEX_FREE_RPM`.
+The simulated SPARK is a speed clamp plus a torque cap (the two ends of the duty cap's torque–speed line, slightly
+stronger than the motor in between). Not from the robot config, so listed as estimates: `gripper_speed` (6 rad/s of
+the gripper motor: the robot sets no speed, the node sends the goal through MIT PD; ~0.5 s full stroke), the arm's
+`watchdog` (0.1 s: the Damiao motors' CAN timeout) and `reply_latency` (7 ms, measured). Sim-only keys:
+servo stiffness / damping and armatures, contact and friction.
+
+Before this (2026-11-21) the sim used the pose_servo planner's caps (4π rad/s steering, 3 m/s, 0.85 m/s²) and
+stall-torque estimates: it steered faster and pushed harder than the robot can.
 
 ## Time
 
@@ -60,9 +111,11 @@ delivers no new frames (the camera node then reports a stall after 4 s). Tests r
 
 ## Scene and privileged controls
 
-`GET /scene`; `POST /scene/objects {name, shape: box|cylinder, size | radius+length, mass, xyz, rpy|yaw}`;
+`GET /scene`; `POST /scene/objects {name, shape: box|cylinder, size | radius+length, mass, fixed, xyz, rpy|yaw}`
+(`fixed: true` welds it to the world: furniture, no mass, pushes do nothing; a teleport still moves it);
 `PUT /scene/objects/{name} {xyz, rpy|yaw}` (teleport); `DELETE /scene/objects/{name}`; `POST /scene/reset` (time
-0, robot at its start pose, objects where added, commands dropped); `POST /scene/save {name}` (current poses to
+0, robot at its start pose, objects where added, commands dropped; `{"start": true}` reloads the start scene
+instead: the default tabletop and the config's objects); `POST /scene/save {name}` (current poses to
 `<scene dir>/<name>.yaml`) and `POST /scene/load {name | objects}`. Adding or removing an object recompiles the
 model with the state kept.
 
@@ -242,6 +295,20 @@ parent = T(pos, quat) · motion(axis, q): a rotation about `axis` by q (revolute
 it (prismatic); a mimic joint's q = multiplier · q(joint) + offset. `description/tree.py` `fk()` is the reference
 (tested equal to pinocchio's FK of the same URDF). Metres, radians, quaternions [x, y, z, w].
 
+`variant=boxes` draws the robot as the description node's page does, boxes only, with the same links, joints and
+`movable` as `simple` (and the same `model_version`: the options are in `options`): each arm link's visuals are its
+`ARM_BOXES` boxes (`nodes/arm/geometry.py`), axis-aligned in the link frame (`quat` identity, `size` full extents),
+named `<link>_<part>` (`arm_link3_forearm`, `arm_end_link_gripper_rail`, ...); the jaw boxes ride on
+`arm_finger_left_link` / `arm_finger_right_link` (mirrored in y), so `arm_finger_left` = gap / 2 opens them as the
+page does; `arm_link6` and each `_wheel` link have no visuals; each module's steer link carries its wheel as a box
+(it steers, it does not spin); the chassis and cameras are boxes as in `simple`. For example the forearm:
+
+```json
+"arm_link3": {"visuals": [
+  {"type": "box", "name": "arm_link3_elbow_hub", "pos": [0.0065, 0.0026, -0.0311], "quat": [0, 0, 0, 1], "rgba": [0.7, 0.72, 0.74, 1], "size": [0.0578, 0.0399, 0.0802]},
+  {"type": "box", "name": "arm_link3_forearm", "pos": [0.1222, -0.052, -0.0311], "quat": [0, 0, 0, 1], "rgba": [0.7, 0.72, 0.74, 1], "size": [0.2978, 0.0609, 0.0802]}]}
+```
+
 **State**: `GET /nodes/sim/robot_state` (one record) and `GET /nodes/sim/robot_state/stream?format=jsonl&hz=30`:
 one JSON object per line (`application/x-ndjson`, never ends):
 
@@ -269,9 +336,8 @@ with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 
 ## Config (`default_sim.yaml`)
 
-`physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (bounds, servo gains, torque caps,
-armature, wheel contact, start pose), `components.arm` (fidelity, speeds, servo, finger force, reply latency,
-watchdog, start pose), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
+`physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (servo gains, armature, wheel contact,
+start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
 `delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene.objects`,
 `time` (`run`, `rtf`).
 

@@ -15,14 +15,12 @@ floor:
   size: 20.0                     # m, half side
 
 # The base: the decided kinematic-dynamic hybrid (docs/plans/sim_v1.md, "Decided" 3). Each module's steer and
-# wheel are stiff servos whose setpoints follow the SPARK setpoints through these bounds; the chassis is a free
-# body moved by wheel-floor friction.
+# wheel are stiff servos whose setpoints follow the SPARK setpoints; the chassis is a free body moved by wheel-floor
+# friction. Every LIMIT (steer rate, wheel speed and acceleration, torques) comes from the robot's own config
+# (swerve/constants.py as setup_sparks.py configures the SPARKs: nodes/sim/limits.py), never from this file.
 base:
-  steer_rate_max: 12.566         # rad/s: pose_servo planner STEER_RATE_MAX (4 pi)
-  wheel_speed_max: 3.0           # m/s: planner WHEEL_SPEED_MAX
-  wheel_accel_max: 0.85          # m/s^2 at a wheel: the planner caps' max_accel + max_alpha x WHEEL_R (0.5 + 1.5 x 0.234)
-  steer: {kp: 300.0, kv: 6.0, torque_max: 45.0, armature: 0.02}   # torque_max: about the NEO 550 stall through 46.42:1
-  wheel: {kv: 4.0, torque_max: 18.3, armature: 0.01}             # torque_max: about the NEO Vortex stall through 5.08:1
+  steer: {kp: 300.0, kv: 6.0, armature: 0.02}    # servo stiffness / damping (sim only)
+  wheel: {kv: 4.0, armature: 0.01}
   # Module compliance: soft wheel-floor contact so all four wheels stay loaded (solref: time constant, damping ratio)
   wheel_contact: {friction: [1.0, 0.01, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.002]}
   start: {xyz: [0.0, 0.0, 0.0], yaw: 0.0}
@@ -31,12 +29,13 @@ base:
 components:
   arm:
     fidelity: kinematic
-    joint_speed_max: 6.0         # rad/s per joint (estimate of the DM motors at the arm's load)
+    # joint speed caps and the gripper's force cap: the arm node's hard limits (arm/config.py), not set here
     servo: {kp: 800.0, kv: 30.0} # the stiff servo that makes the kinematic reference physical (loads the chassis)
-    gripper_speed: 6.0           # rad/s of the gripper motor (0 closed .. -3.1 fully open)
-    finger_force_max: 20.0       # N per finger: fingers stop on objects
+    gripper_speed: 6.0           # rad/s of the gripper motor: a PHYSICAL ESTIMATE (the robot configures none: the
+                                 # node sends the goal through MIT PD; ~0.5 s full stroke as seen on the robot)
     reply_latency: 0.007         # s, reported as the bus's reply latency (measured median on the robot)
-    watchdog: 0.1                # s without an MIT frame while enabled -> status 0xD (the motors' CAN watchdog)
+    watchdog: 0.1                # s without an MIT frame while enabled -> status 0xD (the Damiao motors' CAN timeout,
+                                 # as the arm node expects it: node.py LATE_WARN)
     start_q: [0.0, -0.3, -0.6, 0.0, 0.0, 0.0]
 
 # Cameras (rendered offscreen): link = the model link the image is taken from (optical frame: x right, y down,
@@ -64,9 +63,12 @@ render:
   shadows: true
   reflections: true
 
-# Objects in the scene at start / reset (POST /scene/objects adds more): box (size: full x, y, z) or cylinder
-# (radius, length along z); mass kg; pose xyz + yaw (or rpy).
+# The scene at start (POST /scene/reset puts the objects back where they were added; {start: true} reloads this):
+# tabletop: the default tabletop scene (scene.py: a fixed table in reach of the arm, graspable objects on it, two on
+# the floor), then objects: box (size: full x, y, z) or cylinder (radius, length along z); mass kg; pose xyz + yaw
+# (or rpy); fixed: true welds it to the world (furniture).
 scene:
+  tabletop: true
   objects: []
 
 time:

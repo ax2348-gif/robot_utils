@@ -21,7 +21,8 @@ FIELDS = ["t_tick", "seq", "state", "base_mode", "solve_ms", "status", "base_x",
 
 
 class FakeWbc:
-    def __init__(self):
+    def __init__(self, unix_path: str | None = None):
+        """``unix_path``: also receive datagrams on a unix datagram socket there (named in ``POST /session``)."""
         self.calls: list[tuple[str, dict | None]] = []
         self.datagrams: list[tuple[float, dict]] = []
         self.token = "tok-1"
@@ -35,21 +36,35 @@ class FakeWbc:
         self.udp.bind(("127.0.0.1", 0))
         self.udp.settimeout(0.2)
         self.udp_port = self.udp.getsockname()[1]
+        self.unix_path = unix_path
+        self.unix = None
+        self.via = {"udp": 0, "unix": 0}      # datagrams received per transport
+        self.enabled = False
+        self.lease_client = None              # the client holding the lease (None: free)
+        self.estops: list[dict] = []          # POST /estop bodies
         self._stop = threading.Event()
-        threading.Thread(target=self._recv, daemon=True).start()
+        threading.Thread(target=self._recv, args=(self.udp, "udp"), daemon=True).start()
+        if unix_path:
+            self.unix = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self.unix.bind(unix_path)
+            self.unix.settimeout(0.2)
+            threading.Thread(target=self._recv, args=(self.unix, "unix"), daemon=True).start()
         self.app = self._make_app()
 
-    def _recv(self):
+    def _recv(self, sock, via):
         while not self._stop.is_set():
             try:
-                data, _ = self.udp.recvfrom(65536)
+                data, _ = sock.recvfrom(65536)
             except OSError:
                 continue
+            self.via[via] += 1
             self.datagrams.append((time.monotonic(), json.loads(data)))
 
     def close(self):
         self._stop.set()
         self.udp.close()
+        if self.unix is not None:
+            self.unix.close()
 
     def _make_app(self):
         app = FastAPI()
@@ -62,6 +77,7 @@ class FakeWbc:
         @app.post("/lease")
         async def lease(body: dict):
             fake.calls.append(("lease", body))
+            fake.lease_client = body.get("client")
             return {"token": fake.token, "client": body.get("client"), "lease_id": 1, "heartbeat": 0.5}
 
         @app.post("/lease/renew")
@@ -74,18 +90,23 @@ class FakeWbc:
         async def release(x_lease_token: str = Header(None)):
             check(x_lease_token)
             fake.calls.append(("release", None))
+            fake.lease_client = None
             return {"released": True}
 
         @app.post("/enable")
         async def enable(x_lease_token: str = Header(None)):
             check(x_lease_token)
             fake.calls.append(("enable", None))
+            if fake.estops:
+                raise HTTPException(409, "e-stop latched")
+            fake.enabled = True
             return {"enabled": True}
 
         @app.post("/disable")
         async def disable(x_lease_token: str = Header(None)):
             check(x_lease_token)
             fake.calls.append(("disable", None))
+            fake.enabled = False
             return {"enabled": False}
 
         @app.post("/hints")
@@ -98,7 +119,25 @@ class FakeWbc:
         async def session(body: dict | None = None, x_lease_token: str = Header(None)):
             check(x_lease_token)
             fake.calls.append(("session", body))
-            return {"session": fake.session, "udp_port": fake.udp_port, "unix_socket": "/nonexistent"}
+            return {"session": fake.session, "udp_port": fake.udp_port, "unix_socket": fake.unix_path or "/nonexistent"}
+
+        @app.post("/estop")
+        async def estop(body: dict | None = None):
+            fake.calls.append(("estop", body))
+            fake.estops.append(body or {})
+            fake.enabled = False
+            return {"latched": True, "reason": (body or {}).get("reason", ""), "source": "", "forwarded":
+                    {"arm": True, "swerve": True}}
+
+        @app.get("/state")
+        async def state():               # the parts a teleop node reads (not recorded in calls)
+            latched = bool(fake.estops)
+            return {"state": "idle" if fake.enabled else "disabled", "enabled": fake.enabled, "fault": None,
+                    "holder": fake.lease_client if fake.enabled else None, "hold_reason": None,
+                    "disabled_reason": "e-stop" if latched else None, "limited_by": "none",
+                    "lease": {"held": fake.lease_client is not None, "holder": fake.lease_client},
+                    "estop": {"latched": latched, "reason": "e-stop" if latched else None, "source": None, "t": None},
+                    "hints": {"base": {"mode": "locked"}}, "session": {"dropped": {}}}
 
         @app.get("/stream")
         async def stream():

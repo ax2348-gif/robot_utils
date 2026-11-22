@@ -5,13 +5,13 @@
 lights and scene objects. Every physics step it first runs the per-component controllers:
 
 - **base** (the decided hybrid): per module, the steer angle and wheel speed references follow the
-  commanded SPARK setpoints through the planner's bounds (steer rate, wheel speed, wheel
-  acceleration); a stiff position servo (steer) and a velocity servo (wheel), each torque-capped near
-  the motor's stall torque, make the wheels turn; wheel-floor friction moves the free chassis. A
+  commanded SPARK setpoints within the robot's own limits (limits.py: the SPARKs' output range, ramp and
+  current limits from swerve/constants.py); a stiff position servo (steer) and a velocity servo (wheel),
+  each torque-capped at what the duty / current limits allow, make the wheels turn; wheel-floor friction moves the free chassis. A
   disabled drive coasts (no torque); a disabled steer holds its angle. Soft wheel contact is the
   modules' compliance.
 - **arm** (kinematic fidelity): the joint reference follows the MIT position setpoint within
-  ``joint_speed_max`` (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
+  arm node's hard joint speed caps (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
   (``qfrc_bias`` as a joint torque, so the chassis carries the arm's weight) keeps the joints on it.
   The gripper's reference follows its goal at ``gripper_speed``; the fingers are force-capped.
 
@@ -134,6 +134,12 @@ class Arm:
 class World:
     def __init__(self, urdf: str, assets: dict, config: Optional[dict] = None, model_info: Optional[dict] = None):
         self.cfg = config or default_config()
+        from .limits import refuse_overrides, robot_limits
+        bad = refuse_overrides(self.cfg)
+        if bad:
+            raise SimError(f"the sim config sets {', '.join(bad)}: limits come from the robot config "
+                           "(swerve/constants.py, arm/config.py; docs/sim.md)")
+        self.limits = robot_limits()
         self.model_info = model_info or {}
         self.lock = threading.RLock()
         self.objects: dict = {}           # name -> spec dict (shape, size, mass, pose at add / reset)
@@ -144,7 +150,7 @@ class World:
         self.imu_seq = 0
         self.imu_cond = threading.Condition(threading.Lock())
         self.spec = self._build_spec(urdf, assets)
-        for o in (self.cfg.get("scene") or {}).get("objects") or []:
+        for o in self.start_objects():
             self._spec_object(self._check_object(o))
         self.m = self.spec.compile()
         self.d = mujoco.MjData(self.m)
@@ -218,9 +224,10 @@ class World:
             mm = MODULE_JOINT.match(j.name or "")
             if mm:
                 s, w = bc["steer"], bc["wheel"]
-                self._servo(spec, f"steer_{mm.group(1)}", j.name, float(s["kp"]), float(s["kv"]), float(s["torque_max"]))
+                L = self.limits
+                self._servo(spec, f"steer_{mm.group(1)}", j.name, float(s["kp"]), float(s["kv"]), L["steer_torque_max"])
                 self._servo(spec, f"wheel_{mm.group(1)}", f"base_{mm.group(1)}_wheel_joint", 0.0, float(w["kv"]),
-                            float(w["torque_max"]), velocity=True)
+                            L["wheel_torque_max"], velocity=True)
         ac = self.cfg["components"]["arm"]
         if ac.get("fidelity", "kinematic") != "kinematic":
             raise SimError(f"arm fidelity {ac.get('fidelity')!r} is not built yet (kinematic only)")
@@ -229,7 +236,7 @@ class World:
             for jn in ARM_JOINTS:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
             if "arm_finger_left" in names:
-                self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, float(ac["finger_force_max"]))
+                self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, self.limits["finger_force_max"])
         # cameras: MuJoCo looks along -z with y up; the optical frame looks along +z with y down
         w_max, h_max = 640, 480
         for cam, cc in (self.cfg.get("cameras") or {}).items():
@@ -303,9 +310,21 @@ class World:
             except KeyError:
                 pass
         self.obj_idx = {}
-        for name in self.objects:
-            jj = m.joint(f"obj_{name}_free")
-            self.obj_idx[name] = (m.body(f"obj_{name}").id, int(jj.qposadr[0]), int(jj.dofadr[0]))
+        for name, o in self.objects.items():
+            if o.get("fixed"):
+                self.obj_idx[name] = (m.body(f"obj_{name}").id, None, None)
+            else:
+                jj = m.joint(f"obj_{name}_free")
+                self.obj_idx[name] = (m.body(f"obj_{name}").id, int(jj.qposadr[0]), int(jj.dofadr[0]))
+
+    def start_objects(self) -> list:
+        """The scene at start: the default tabletop (scene.py) when ``scene.tabletop``, then ``scene.objects``."""
+        sc = self.cfg.get("scene") or {}
+        out = []
+        if sc.get("tabletop"):
+            from .scene import tabletop
+            out += tabletop()
+        return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
 
@@ -326,9 +345,12 @@ class World:
             o["radius"], o["length"] = float(o.get("radius", 0.05)), float(o.get("length", 0.1))
             if o["radius"] <= 0 or o["length"] <= 0:
                 raise SimError("a cylinder needs radius and length > 0 (m)")
+        o["fixed"] = bool(o.get("fixed", False))
         o["mass"] = float(o.get("mass", 0.5))
         if not o["mass"] > 0:
             raise SimError("mass must be > 0 (kg)")
+        if not o["fixed"]:
+            o.pop("fixed")
         o["xyz"] = [float(v) for v in o.get("xyz", [0.5, 0.0, 0.2])]
         o["rpy"] = [float(v) for v in o.get("rpy", [0.0, 0.0, float(o.get("yaw", 0.0))])]
         o.pop("yaw", None)
@@ -341,8 +363,9 @@ class World:
         if o["name"] in self.objects:
             raise SimError(f"object {o['name']!r} exists")
         b = self.spec.worldbody.add_body(name=f"obj_{o['name']}", pos=o["xyz"], quat=rpy_quat(o["rpy"]))
-        fj = b.add_freejoint()
-        fj.name = f"obj_{o['name']}_free"
+        if not o.get("fixed"):                       # fixed: welded to the world (furniture)
+            fj = b.add_freejoint()
+            fj.name = f"obj_{o['name']}_free"
         if o["shape"] == "box":
             g = b.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[v / 2 for v in o["size"]], mass=o["mass"], rgba=o["rgba"])
         else:
@@ -380,7 +403,13 @@ class World:
             self._recompile()
 
     def _place(self, name: str, xyz, quat) -> None:
-        _, qa, va = self.obj_idx[name]
+        b, qa, va = self.obj_idx[name]
+        if qa is None:                                # fixed: move the body itself (model and spec, for recompiles)
+            self.m.body_pos[b], self.m.body_quat[b] = xyz, quat
+            sb = self.spec.body(f"obj_{name}")
+            sb.pos, sb.quat = list(xyz), list(quat)
+            mujoco.mj_forward(self.m, self.d)
+            return
         self.d.qpos[qa:qa + 3] = xyz
         self.d.qpos[qa + 3:qa + 7] = quat
         self.d.qvel[va:va + 6] = 0.0
@@ -397,8 +426,13 @@ class World:
 
     def object_state(self, name: str) -> dict:
         o = self.objects[name]
-        _, qa, va = self.obj_idx[name]
-        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass") if k in o}
+        b, qa, va = self.obj_idx[name]
+        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba") if k in o}
+        if qa is None:
+            out["xyz"] = [round(float(v), 6) for v in self.d.xpos[b]]
+            out["rpy"] = [round(v, 6) for v in quat_rpy(self.d.xquat[b])]
+            out["speed"] = 0.0
+            return out
         out["xyz"] = [round(float(v), 6) for v in self.d.qpos[qa:qa + 3]]
         out["rpy"] = [round(v, 6) for v in quat_rpy(self.d.qpos[qa + 3:qa + 7])]
         out["speed"] = round(float(np.linalg.norm(self.d.qvel[va:va + 3])), 6)
@@ -427,8 +461,11 @@ class World:
 
     # -- state reset -----------------------------------------------------------------------------------
 
-    def reset(self) -> None:
-        """Time 0, the robot at its start pose, objects where they were added, every command dropped."""
+    def reset(self, start_scene: bool = False) -> None:
+        """Time 0, the robot at its start pose, objects where they were added, every command dropped.
+        ``start_scene``: the scene the world started with (the default tabletop + config objects) instead."""
+        if start_scene:
+            self.load_scene(self.start_objects())
         with self.lock:
             m, d = self.m, self.d
             mujoco.mj_resetData(m, d)
@@ -441,7 +478,12 @@ class World:
                 self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
                 d.qpos[self.arm_q] = self.arm.q_ref
             for name, o in self.objects.items():
-                _, qa, _ = self.obj_idx[name]
+                b, qa, _ = self.obj_idx[name]
+                if qa is None:
+                    m.body_pos[b], m.body_quat[b] = o["xyz"], rpy_quat(o["rpy"])
+                    sb = self.spec.body(f"obj_{name}")
+                    sb.pos, sb.quat = list(o["xyz"]), list(rpy_quat(o["rpy"]))
+                    continue
                 d.qpos[qa:qa + 3] = o["xyz"]
                 d.qpos[qa + 3:qa + 7] = rpy_quat(o["rpy"])
             self.wrenches = []
@@ -466,7 +508,8 @@ class World:
         if d.time - self.swerve_last > 0.1:          # no setpoints: the SPARKs' heartbeat is gone
             for mod in self.modules:
                 mod.steer_on = mod.drive_on = False
-        rate, vmax, amax = float(bc["steer_rate_max"]), float(bc["wheel_speed_max"]), float(bc["wheel_accel_max"])
+        L = self.limits
+        rate, vmax, amax = L["steer_rate_max"], L["wheel_speed_max"], L["wheel_accel_max"]
         for mod, ix in zip(self.modules, self.mod):
             if mod.steer_on:
                 err = wrap(mod.steer_goal - wrap(mod.steer_ref))
@@ -499,7 +542,7 @@ class World:
         if a.enabled and a.cmd is not None:
             q, _, kp, _, _ = a.cmd
             target = np.where(kp > 0, q, a.q_ref)     # kp = 0 (floating): hold where it is
-            vmax = float(ac["joint_speed_max"]) * dt
+            vmax = self.limits["joint_speed_max"] * dt
             a.q_ref = a.q_ref + np.clip(target - a.q_ref, -vmax, vmax)
         d.ctrl[self.arm_a] = a.q_ref
         d.qfrc_applied[self.arm_v] = d.qfrc_bias[self.arm_v]      # gravity / bias feedforward
