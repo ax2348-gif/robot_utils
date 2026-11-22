@@ -125,6 +125,7 @@ class StreamInfo:
     xr_state: Optional[str] = None
     scheme: Optional[str] = None
     error: str = ""
+    device: Optional[dict] = None     # the newest record's ``device`` block (battery), when the headset sends one
 
     def describe(self) -> str:
         if not self.live:
@@ -168,8 +169,9 @@ def probe_stream(host: str, port: int = STREAM_PORT, seconds: float = 1.0) -> St
         return StreamInfo(False, error="connected, no frames")
     rate = (n - 1) / (t_last - t_first) if n > 1 and t_last > t_first else 0.0
     intent = last.get("control_intent") or {}
+    dev = last.get("device")
     return StreamInfo(True, n, rate, last.get("session_id"), last.get("input_focused"), last.get("xr_session_state"),
-                      intent.get("scheme"))
+                      intent.get("scheme"), device=dev if isinstance(dev, dict) else None)
 
 
 # -- commands -------------------------------------------------------------------------------------
@@ -234,11 +236,19 @@ class QuestCtl:
         word = r.out.strip().split(" ")[-1] if r.rc == 0 and r.out.strip() else ""
         return XR_STATES.get(word, f"unknown ({word or 'no log line'})")
 
-    def battery(self) -> str:
-        r = self.run("cat /sys/class/power_supply/battery/capacity 2>/dev/null || "
-                     "dumpsys battery 2>/dev/null | grep -m1 'level:'", 15)
-        digits = "".join(ch for ch in r.out if ch.isdigit())
-        return f"{digits}%" if r.rc == 0 and digits else "unknown"
+    @staticmethod
+    def battery(info: Optional[StreamInfo]) -> str:
+        """The headset battery from the telemetry stream's ``device`` block. Over SSH it cannot be read: the shell
+        runs in an Android app sandbox (sysfs power_supply and the battery service are denied), so only the
+        telemetry app (Android's battery broadcast) reports it, and only while telemetry runs."""
+        d = info.device if info is not None else None
+        if d and isinstance(d.get("battery_pct"), (int, float)):
+            extra = ", charging" if d.get("charging") else (", plugged" if d.get("plugged") else "")
+            t = d.get("temperature_c")
+            return f"{int(d['battery_pct'])}%{extra}" + (f", {t:.0f} C" if isinstance(t, (int, float)) else "")
+        if info is not None and info.live:
+            return "not reported (the headset's telemetry predates the battery field: quest pull + restart)"
+        return "unavailable while telemetry is stopped (the SSH shell cannot read it)"
 
     def wait_stream(self, wait: float) -> StreamInfo:
         deadline = self.clock() + wait
@@ -293,7 +303,7 @@ class QuestCtl:
         self.log(info.describe())
         if info.scheme and info.scheme != scheme:
             self.log(f"warning: the stream reports scheme {info.scheme!r}, wanted {scheme!r}")
-        self.log(f"battery: {self.battery()}")
+        self.log(f"battery: {self.battery(info)}")
         return 0
 
     def down(self) -> int:
@@ -311,8 +321,9 @@ class QuestCtl:
         self.log("native: " + (r.out.strip() or r.err.strip() or f"exit {r.rc}"))
         self.log(f"mode file: {self.mode() or 'unset'}")
         self.log(f"XR session: {self.xr_state()}")
-        self.log(self.probe(self.stream_host, self.port, 1.0).describe())
-        self.log(f"battery: {self.battery()}")
+        info = self.probe(self.stream_host, self.port, 1.0)
+        self.log(info.describe())
+        self.log(f"battery: {self.battery(info)}")
         return 0
 
 

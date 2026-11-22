@@ -74,8 +74,10 @@ def ctl_for(fq, live=lambda fq: fq.running, scheme="body-frozen"):
 
     def probe(host, port, seconds):
         if live(fq):
+            dev = {"battery_pct": int(fq.battery), "charging": False, "plugged": False, "temperature_c": 31.0} \
+                if fq.battery else None
             return StreamInfo(True, 72, 72.0, "1700000000000000001", True, "FOCUSED",
-                              "body-frozen" if fq.mode.endswith("body-frozen") else "standard")
+                              "body-frozen" if fq.mode.endswith("body-frozen") else "standard", device=dev)
         return StreamInfo(False, error="ConnectionRefusedError")
 
     clock = [0.0]
@@ -106,7 +108,7 @@ def test_up_already_running_and_up_to_date_does_not_restart():
     assert not fq.ran('quest" pull') and not fq.ran('quest" run')
     assert any("not restarting" in s for s in logs)
     assert any(s.startswith("stream: live, 72 Hz, session 1700000000000000001, focused") for s in logs)
-    assert "battery: 87%" in logs
+    assert "battery: 87%, 31 C" in logs                    # from the stream's device block
     assert_safe(fq)
 
 
@@ -182,7 +184,8 @@ def test_down_and_status():
     logs.clear()
     fq.battery = ""
     assert ctl.status() == 0
-    assert "XR session: not running" in logs and "battery: unknown" in logs
+    assert "XR session: not running" in logs
+    assert "battery: unavailable while telemetry is stopped (the SSH shell cannot read it)" in logs
     assert any(s.startswith("stream: not answering") for s in logs)
     assert_safe(fq)
 
@@ -255,3 +258,19 @@ def test_ar_values_resolve_to_the_url_the_headset_opens():
 def test_local_address_toward_picks_the_route_without_sending():
     from quest_teleop.quest_ctl import local_address_toward
     assert local_address_toward("127.0.0.1") == "127.0.0.1"
+
+
+def test_battery_comes_from_the_stream_never_from_ssh():
+    """The SSH shell runs in an Android app sandbox (sysfs and the battery service denied): quest_ctl reads the
+    battery only from the telemetry stream's device block, and says why when it cannot."""
+    from quest_teleop.quest_ctl import QuestCtl
+    on = StreamInfo(True, 72, 72.0, "s", True, "FOCUSED", "body-frozen",
+                    device={"battery_pct": 54, "charging": True, "plugged": True, "temperature_c": 33.4})
+    assert QuestCtl.battery(on) == "54%, charging, 33 C"
+    old = StreamInfo(True, 72, 72.0, "s", True, "FOCUSED", "body-frozen")
+    assert QuestCtl.battery(old).startswith("not reported")
+    assert QuestCtl.battery(StreamInfo(False)).startswith("unavailable while telemetry is stopped")
+    fq = FakeQuest()
+    ctl, _ = ctl_for(fq)
+    ctl.status()
+    assert not fq.ran("power_supply") and not fq.ran("dumpsys")
