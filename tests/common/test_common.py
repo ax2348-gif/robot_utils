@@ -85,6 +85,50 @@ def test_lease_lapses_once():
     assert tok2 != tok and info2.lease_id == 2
 
 
+def test_lease_renew_holder_without_token():
+    ended = []
+    clock = Clock()
+    lease = Lease(heartbeat=1.0, on_end=ended.append, clock=clock)
+    assert lease.renew_holder() is None                  # nobody holds it
+    tok, info = lease.acquire("wbc")
+    clock.t += 0.9
+    assert lease.renew_holder(info.lease_id).expires == pytest.approx(clock.t + 1.0)
+    assert lease.renew_holder(info.lease_id + 1) is None  # another lease: not renewed
+    clock.t += 0.9
+    assert not lease.expire_if_due() and lease.renew_holder().client == "wbc"
+    clock.t += 1.01                                      # lapsed: never revived
+    assert lease.renew_holder(info.lease_id) is None
+    assert lease.expire_if_due() and ended == ["lapsed"]
+    _, info2 = lease.acquire("bob")
+    assert lease.renew_holder(info.lease_id) is None and lease.renew_holder(info2.lease_id) is not None
+
+
+def test_lease_renew_checks_and_extends_atomically():
+    """A lapse (or a release and someone else's acquire) between the token check and the update must not see a
+    half-done renew: both happen under one lock, so the expiry waits for the renew."""
+    import threading
+    clock = Clock()
+    lease = Lease(heartbeat=1.0, clock=clock)
+    tok, _ = lease.acquire("alice")
+    clock.t += 0.99
+    orig = lease._check
+    seen = {}
+
+    def racing(token):
+        info = orig(token)
+        clock.t += 0.05                                  # past the old expiry right after the check ...
+        th = threading.Thread(target=lambda: seen.setdefault("ended", lease.expire_if_due()))
+        th.start()
+        th.join(0.05)
+        seen["blocked"], seen["th"] = th.is_alive(), th  # ... but the expiry has to wait for the renew
+        return info
+    lease._check = racing
+    info = lease.renew(tok)
+    seen["th"].join(1)
+    assert seen["blocked"] and seen["ended"] is False and lease.held
+    assert info.expires == pytest.approx(clock.t + 1.0)
+
+
 def test_estop_latches_and_reports_first_trigger():
     hits = []
     e = EStop(on_trigger=hits.append)

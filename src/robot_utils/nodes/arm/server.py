@@ -230,7 +230,7 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
             f"{TWIST_TIMEOUT} s, the pose holds), `POST /servo` (planned move, reports reached), `POST /chunk`, "
             "`POST /home`, `POST /gripper`. "
             f"The lease lapses after {LEASE_HEARTBEAT} s without a renew or command, which disables. "
-            "No joint-space commands yet: joint positions are readings, named poses and lookup inputs only; a joint-space fast path is planned (docs/plans/fast_path_v1.md)."),
+            "No joint-space commands: joint positions are readings, named poses and lookup inputs only."),
         version="0.1.0", lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 

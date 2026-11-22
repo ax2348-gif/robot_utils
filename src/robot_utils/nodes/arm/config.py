@@ -126,6 +126,10 @@ class NodeSettings:
     reach_rot: float = math.radians(1.0)
     reach_dwell_s: float = 0.2
     settle_timeout_s: float = 2.0
+    # the internal joint channel (stream.py): ramp to a hold after this long without a fresh goal; a goal may lead
+    # the measured pose by at most stream_max_lead (any joint)
+    stream_stale_ms: float = 30.0
+    stream_max_lead: float = math.radians(20.0)
 
 
 def config_path() -> Path:
@@ -154,4 +158,15 @@ def load_settings(path: Optional[Path] = None) -> NodeSettings:
         if v.shape != (N,) or np.any(v <= 0) or np.any(v > 20):
             raise ValueError(f"{p}: joint_vel_max must be {N} speeds in 0..20 rad/s")
         s.hard.joint_vel = v
+    jc = raw.get("joint_channel") or {}
+    if "stale_ms" in jc:
+        v = float(jc["stale_ms"])
+        if not 10.0 <= v <= 500.0:
+            raise ValueError(f"{p}: joint_channel.stale_ms must be within 10..500")
+        s.stream_stale_ms = v
+    if "max_lead_deg" in jc:
+        v = float(jc["max_lead_deg"])
+        if not 0.5 <= v <= 45.0:
+            raise ValueError(f"{p}: joint_channel.max_lead_deg must be within 0.5..45")
+        s.stream_max_lead = math.radians(v)
     return s

@@ -5,6 +5,7 @@ One client at a time holds the lease and may command the hardware; everyone else
 - ``acquire(client)`` returns a token (409-style ``LeaseError`` if someone else holds it).
 - The holder presents the token with every controlling request. ``renew(token)`` (or any
   accepted command, which calls it) pushes the expiry ``heartbeat`` seconds into the future.
+  ``renew_holder(lease_id)`` does the same without the token, for a channel that checked it once.
 - ``release(token)`` ends it; so does letting it lapse. ``expire_if_due()`` must be called
   periodically by the node (the swerve node calls it every control tick, on the control thread,
   so a lapse stops the hardware even if the web server is stuck).
@@ -75,16 +76,20 @@ class Lease:
     def check(self, token: Optional[str]) -> LeaseInfo:
         """Raise LeaseError unless ``token`` is the current, unexpired lease."""
         with self._lock:
-            if not token:
-                raise LeaseError(401, "this request needs the lease token (X-Lease-Token header)")
-            if self._info is None:
-                raise LeaseError(403, "no lease is held (acquire one first; it may have lapsed)")
-            if not secrets.compare_digest(token, self._token):
-                raise LeaseError(403, "wrong lease token (the lease is held by "
-                                      f"{self._info.client!r}, or yours lapsed)")
-            if self._clock() > self._info.expires:
-                raise LeaseError(403, "lease expired")
-            return self._info
+            return self._check(token)
+
+    def _check(self, token: Optional[str]) -> LeaseInfo:
+        """``check`` under ``_lock``."""
+        if not token:
+            raise LeaseError(401, "this request needs the lease token (X-Lease-Token header)")
+        if self._info is None:
+            raise LeaseError(403, "no lease is held (acquire one first; it may have lapsed)")
+        if not secrets.compare_digest(token, self._token):
+            raise LeaseError(403, "wrong lease token (the lease is held by "
+                                  f"{self._info.client!r}, or yours lapsed)")
+        if self._clock() > self._info.expires:
+            raise LeaseError(403, "lease expired")
+        return self._info
 
     # -- changes -------------------------------------------------------------------------------
 
@@ -100,11 +105,23 @@ class Lease:
             return self._token, self._info
 
     def renew(self, token: Optional[str]) -> LeaseInfo:
-        self.check(token)
+        """Check and push the expiry under one lock: a lease that lapsed (or was released and acquired by someone
+        else) between a separate check and update must not be extended."""
+        with self._lock:
+            info = self._check(token)
+            self._info = LeaseInfo(info.client, info.acquired, self._clock() + self.heartbeat, info.lease_id)
+            return self._info
+
+    def renew_holder(self, lease_id: Optional[int] = None) -> Optional[LeaseInfo]:
+        """Renew the current holder's lease without its token (for a channel that checked the token once, when it
+        opened, e.g. the arm's joint channel). With ``lease_id``, only that lease. Returns the renewed info, or
+        None (nothing renewed) when no lease is held, it is another lease, or it has already expired (a lapsed
+        lease is ended by ``expire_if_due``, never revived)."""
         with self._lock:
             info = self._info
-            self._info = LeaseInfo(info.client, info.acquired, self._clock() + self.heartbeat,
-                                   info.lease_id)
+            if info is None or (lease_id is not None and info.lease_id != lease_id) or self._clock() > info.expires:
+                return None
+            self._info = LeaseInfo(info.client, info.acquired, self._clock() + self.heartbeat, info.lease_id)
             return self._info
 
     def release(self, token: Optional[str]) -> None:
