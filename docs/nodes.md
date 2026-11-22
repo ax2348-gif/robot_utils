@@ -85,7 +85,8 @@ planned for now (HTTP/2 over TLS would lift the limit).
   `common.hub` (thread-safe, wakes the event loop, no polling).
 - **One uvicorn worker.** Several workers would be several processes fighting over the device.
 - **No recording on the Pi** (small, slow disk). Clients record the streams they receive; the
-  stream bytes are the recording format.
+  stream bytes are the recording format. Teleop data collection: `python -m robot_utils.collect`
+  ([collect.md](collect.md)) records a session's streams and cuts its episodes by Pi time.
 - **Processing of one device's data stays in its node** (e.g. the camera's IMU attitude filter);
   fusion across nodes (odometry + IMU, ...) belongs to an estimator node.
 - **Commands are idempotent state, not events**: the latest command wins (see the swerve
