@@ -37,9 +37,12 @@ most 0.7 of the arm's lead bound (20°).
    (`<runtime>/robot/arm.joint.sock`, hello with the arm lease token) and seeds the commanded joints from the
    arm's measured ones. Refuses with the reason (409 / 503) otherwise. The WBC and pose_servo exclude each other
    through the swerve lease.
-3. `POST /session {}` → `{session, udp_port, unix_socket}`. Send UDP **directly to the node's host** (not
-   through the proxy) or to the Unix socket on the robot.
-4. Datagrams (JSON v0; `seq` strictly increasing; older / equal and unknown sessions are dropped and counted):
+3. `POST /session {}` → `{session, udp_port, unix_socket, arm_seq}`. Send UDP **directly to the node's host** (not
+   through the proxy) or to the Unix socket on the robot. `arm_seq` is the armed latch's floor (below): number
+   arming presses above it.
+4. Datagrams (JSON v0; `seq` strictly increasing; older / equal and unknown sessions are dropped and counted). Every
+   datagram carries **`armed`** (bool) and **`arm_seq`** (int): the client's latch state, not events (a datagram
+   without them counts as `armed: false`). **Nothing moves until the WBC is armed** (below):
    - reactive: `{"type": "target", "session", "seq", "t": null | <Pi monotonic s>, "est_reset": <optional>,
      "ees": {"arm": {"frame": "world", "pos": [x, y, z], "quat": [x, y, z, w], "twist": [vx, vy, vz, wx, wy,
      wz] (optional, world axes), "gripper": 0..1 (optional; 0 closed, 1 open)}}, "base": {<hint overrides>}
@@ -52,10 +55,54 @@ most 0.7 of the arm's lead bound (20°).
    released teleop arm is sent as world targets that follow the base, with the base's velocity as feedforward.
    `est_reset`: the estimator reset id the client computed its targets against (the stream's `est_reset`); a
    different one is dropped (`est_reset`).
-5. `POST /hints` (the hint structure below), `POST /disable` (base stopped and the swerve released; a last hold
-   command to the arm, then its channel closed and its lease released: the arm node then floats it), `POST /estop`
-   (anyone; forwarded to the arm and the swerve, both latch; the WBC latches too until `POST /estop/clear`).
-   `GET /fence` answers 501 (not built).
+5. `POST /hints` (the hint structure below), `POST /disarm` (anyone, no lease: hold; arming again needs a new
+   press), `POST /disable` (no further twist: the swerve is disabled and released and coasts; a last hold command to
+   the arm, then its channel closed and its lease released: the arm node then floats it), `POST /estop` (anyone;
+   below; the WBC latches until `POST /estop/clear`). `GET /fence` answers 501 (not built).
+
+### The armed latch
+
+`armed` lives inside enabled and is **false at enable**. Disarmed = **hold**: the target buffers and the datagram's
+base override are cleared (never resumed), the base brakes to zero within its rate limit (the hold path), the arm is
+held at its commanded joints (zero velocity, at once), the gripper keeps its last goal (no gripper value is sent).
+Target and chunk datagrams are ignored while disarmed (counted in `/state.latch.ignored_disarmed`, never buffered);
+the state is `idle` with `hold_reason` `disarmed: <reason>`.
+
+- **Arms** only from a `target` or `chunk` datagram with `armed: true` and an `arm_seq` **greater than the floor**
+  (the highest `arm_seq` seen when it was last disarmed; kept for the node's life, returned by `POST /session`),
+  while enabled without a fault, an e-stop or an arm pause, and only if the datagram itself is valid (its target is
+  applied). A client still sending `armed: true` with an old `arm_seq` can never re-arm after any disarm (counted
+  `arm_refused`). An `alive` never arms or resumes anything. Datagrams queued before an enable or a new session never
+  arm.
+- **Disarms** (one `DISARMED: <reason>` event each; `/state.disarm_reason`): a datagram with `armed: false` (or
+  without `armed` / `arm_seq`, or an older `arm_seq`); `POST /disarm`; stale input (no datagram for `hold_timeout`);
+  the client lease ending; a new session; enable; disable; an estimator reset or pose jump; a planned motion pausing
+  the arm; any fault; the e-stop; a control tick later than 3 dt (below). Headset latency / staleness is the
+  client's: it sends `armed: false` or stops (then `hold_timeout`).
+- `/state`: `armed`, `disarm_reason`, `latch` (`arm_seq`, `arm_seq_seen`, `arm_floor`, `disarms`,
+  `ignored_disarmed`, `arm_refused`, `limits_ignored`, `clamped`); the stream's `armed` column.
+
+### Control tick timing
+
+Each tick's period (the clock) and compute time are measured: `overruns` (period > 1.5 dt) and `late_ticks`
+(> 3 dt) are counted (`/state.tick`, the stream's `tick_period`, `tick_compute`, `overruns`, `late_ticks`). A tick
+later than 3 dt after the previous one **disarms** (`control tick overrun: N ms`, logged). The arm command is
+integrated over the **measured** period clamped to `[dt, 3 dt]` (not the nominal dt), and the joint position damper
+uses the same step, so a long step never crosses a joint limit.
+
+### Stop paths: what the motors do
+
+| Trigger | Latch | Arm | Base | Gripper |
+| --- | --- | --- | --- | --- |
+| Disarm (any trigger above; Quest X's first effect) | disarmed | held at its commanded joints (zero velocity) | brakes to zero within `max_accel` / `max_alpha`, then held at zero | keeps its goal |
+| `POST /disable` (Quest X) | disarmed | a last hold command, then released: the arm node floats it (gravity compensation) | no further twist; the swerve is disabled and released: coasts | released with the arm (damping) |
+| `POST /estop` (WBC) | disarmed | held at its commanded joints until its own e-stop lands (latched, off) | no further command at all (no zero twist); its own e-stop: latched, coasts | with the arm |
+| Fault | disarmed | the healthy half holds its commanded joints | the healthy half gets zero; a lost base is disabled (coasts) | keeps its goal |
+
+The e-stop, in order: under the lock, stop tracking (disarm, the base twist zeroed in the WBC's own state and the
+base sender muted: nothing more is sent to the swerve; the arm's hold command); then the e-stop to the arm and the
+swerve **in parallel** (a slow one never delays the other), then disable. Neither e-stop nor disable brakes the base
+of the robot's own volition.
 
 Dropped datagrams are counted in `/state.session.dropped` by reason: `not_json`, `bad_type`, `bad_header`,
 `unknown_session`, `old_seq`, `est_reset`, `frame`, `bad_t` (|t - now| beyond `target_t_window`, a chunk longer
@@ -69,18 +116,20 @@ unknown EE; one event a second at most).
   tick (`blend_tau` 0.15 s): continuous in pose and velocity at every seam (tested). Without twists the chunk's
   velocity is its finite differences.
 - Staleness, two stages: past `ff_timeout` (0.1 s) after the sample the feedforward fades (zero at 2×) and the
-  pose holds; no datagram for `hold_timeout` (0.25 s) while a target exists → **holding**: the base brakes to zero
-  within `max_accel`, the arm decelerates within its joint limits and stops. Any datagram resumes the target in
-  force. A lapsed client lease holds the same way (the downstream leases stay until `POST /disable`).
-- Estimator: a reset (`reset_id` changes) or a pose jump aborts the target buffers (idle = hold); a stale or
-  non-finite pose holds. The base pose used is the estimator's latest, extrapolated by the commanded twist (at
+  pose holds; no datagram for `hold_timeout` (0.25 s) → **disarmed** (the targets cleared: nothing resumes; a new
+  press arms). A lapsed client lease disarms the same way (the downstream leases stay until `POST /disable`).
+- Estimator: a reset (`reset_id` changes) or a pose jump aborts the target buffers and disarms; a stale or
+  non-finite pose holds (armed: the target resumes when the pose is usable again). The base pose used is the estimator's latest, extrapolated by the commanded twist (at
   most `max_predict`).
 
 ### Hints
 
 Session defaults (`POST /hints`, replaced as a whole), overridable per datagram (`base`: any subset of the base
-keys; it stays in force until the next datagram that carries `base`, or the next `POST /hints`). Numbers are
-bounded by the caps (422 beyond them).
+keys; it stays in force until the next datagram that carries `base`, the next `POST /hints`, or a disarm). Numbers
+are bounded by the caps (`POST /hints`: 422 beyond them). In a datagram, velocities beyond `max_speed` /
+`max_omega` (`velocity.vx/vy/omega`, `target.pose.vx/vy`, `target.heading.omega`) are **clamped** to the caps
+(direction kept; counted `latch.clamped`), not dropped. A datagram's `base.limits` is **ignored while the base
+moves** (the limits in force stay; counted `limits_ignored`).
 
 ```yaml
 base:
@@ -155,7 +204,8 @@ correction would need the base). Sliding along the reach boundary under a base h
 
 - **Cross-bus:** an e-stop on either bus e-stops the other (the swerve's latched e-stop seen in its stream; the
   arm turning `off`); a fault, a lease loss, a disabled peer, failing swerve commands (> 0.25 s), a closed joint
-  channel or no arm state for `arm_stale` (0.1 s) → **fault**: latched until `POST /disable`; the healthy half
+  channel or no arm state for `arm_stale` (0.2 s: Pi arm-loop gaps of 105–121 ms were measured under camera load,
+  docs/realtime.md) → **fault** (disarms): latched until `POST /disable`; the healthy half
   holds (the arm keeps its commanded joints, the base gets zero) and a lost base is disabled and released.
 - The arm node renews its lease on every joint-channel command; the WBC renews the swerve lease with every twist
   (100 Hz).
@@ -172,8 +222,13 @@ commanded this tick, world: anchor relative targets to it), `<ee>_meas_x..qw` (t
 pose used), `<ee>_twist_vx..wz` (commanded, world axes), `<ee>_gripper`; `arm_age`, `est_age`, `target_age`.
 Appended: `limited`, `limited_by` (0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit),
 `input_age`, `hold`, `deadband`, `solves`, `wheel_max`, per EE the target (`_tgt_*`), `_err_pos`, `_err_rot`,
-`_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`. `/state` shows `limited_by`,
-`hold_reason`, `fault`, the session counters, the inputs and the latest row.
+`_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`; then `armed`, `tick_period` (ms),
+`tick_compute` (ms), `overruns`, `late_ticks`. `/state` shows `armed`, `disarm_reason`, `latch`, `tick`,
+`limited_by`, `hold_reason`, `fault`, the session counters, the inputs and the latest row.
+
+`POST /config` (runtime tuning, no lease): the base caps `max_speed`, `max_omega`, `max_accel`, `max_alpha`,
+`wheel_speed` are refused (422, the reason) unless the base is still (disabled, or a zero commanded twist: disarm
+or lock it first); a value equal to the one in force is not a change. Structural keys only while disabled.
 
 ## Performance (MacBook M5, 2026-11-21, measured)
 
@@ -197,7 +252,11 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
   HTTP + a joint-channel peer on fastpath, `tests/wbc_fakes.py`, including the pause and the arm's bye; and real
   time with the swerve node on its virtual SPARKs and the estimator), `tests/test_wbc_sim.py` (the MuJoCo world
   with the real nodes: the arm node on `WorldArmBus` with its joint channel, the swerve on world-coupled SPARKs,
-  the estimator, the WBC; the arm drops none of the WBC's goals).
+  the estimator, the WBC; the arm drops none of the WBC's goals). `tests/test_wbc_armed.py` (the armed latch: every
+  disarm trigger, no recovery re-arms, the arm_seq floor, braking / holding / gripper while disarmed, the caps while
+  moving, clamped hint velocities, the e-stop's order and parallel fan-out, no command reaching the base on e-stop
+  or disable), `tests/test_wbc_overrun.py` (tick timing: late-tick disarm, overrun counts, the measured-period
+  integration, a stalled controller in real time).
 
 ## Not done yet
 

@@ -94,6 +94,7 @@ class WbcClient:
         self.session: Optional[int] = None
         self.udp_port: Optional[int] = None
         self.seq = 0
+        self.arm_seq_floor = 0             # POST /session's arm_seq: presses are numbered above it
         self.sent = {"target": 0, "alive": 0}
         self.renew_errors = 0
         self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -136,6 +137,7 @@ class WbcClient:
         self.udp_port = int(out["udp_port"])
         self._addr = (self.udp_host, self.udp_port)
         self.seq = 0
+        self.arm_seq_floor = int(out.get("arm_seq") or 0)
         return out
 
     def release(self) -> None:
@@ -165,9 +167,11 @@ class WbcClient:
         self.sent[msg["type"]] = self.sent.get(msg["type"], 0) + 1
         return msg
 
-    def send_target(self, body: dict) -> dict:
-        """``body``: ``{"ees": {...}, "base": {...}}`` (the reactive target; ``t: null`` = now)."""
-        return self._send({"type": "target", "t": None, **body})
+    def send_target(self, body: dict, armed: bool = False, arm_seq: int = 0) -> dict:
+        """``body``: ``{"ees": {...}, "base": {...}}`` (the reactive target; ``t: null`` = now). ``armed`` /
+        ``arm_seq``: the armed latch's state, in every datagram (default: disarmed)."""
+        return self._send({"type": "target", "t": None, **body, "armed": bool(armed), "arm_seq": int(arm_seq)})
 
-    def send_alive(self) -> dict:
-        return self._send({"type": "alive"})
+    def send_alive(self, armed: bool = False, arm_seq: int = 0) -> dict:
+        """A keep-alive (never arms anything) with the latch's state."""
+        return self._send({"type": "alive", "armed": bool(armed), "arm_seq": int(arm_seq)})

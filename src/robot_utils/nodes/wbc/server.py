@@ -48,6 +48,8 @@ class SessionOut(BaseModel):
     udp_port: Optional[int] = Field(description="UDP port on the node's host (send there directly, not through "
                                                 "the proxy); null if UDP is off.")
     unix_socket: Optional[str] = Field(description="Unix datagram socket path on the robot; null if off.")
+    arm_seq: int = Field(0, description="The arm_seq floor: a datagram arms only with a greater arm_seq (number "
+                                        "presses from here).")
 
 
 def create_app(node: WbcNode, start: bool = True) -> FastAPI:
@@ -68,9 +70,12 @@ def create_app(node: WbcNode, start: bool = True) -> FastAPI:
             "(docs/wbc.md).\n\n"
             "`POST /lease`, then `POST /enable` (takes the arm and swerve leases together, opens the arm's joint "
             "channel), `POST /session` (-> session id, UDP port, unix socket) and send target / chunk / alive "
-            "datagrams (JSON). `POST /hints` says how (base free / locked / hint / commanded, weights, posture). "
-            "Stale input holds: the feedforward fades after ff_timeout, the base stops and the arm holds after "
-            "hold_timeout. `GET /stream` carries every tick, including the commanded and measured EE poses."),
+            "datagrams (JSON) carrying `armed` and `arm_seq`. Nothing moves until a target / chunk datagram ARMS the "
+            "WBC (`armed: true` with an `arm_seq` greater than at the last disarm); disarmed = hold, targets cleared "
+            "and ignored. Disarms: `armed: false`, `POST /disarm` (anyone), stale input (hold_timeout), lease end, "
+            "a new session, enable, an estimator reset, an arm pause, a fault, the e-stop, a late control tick. "
+            "`POST /hints` says how (base free / locked / hint / commanded, weights, posture). "
+            "`GET /stream` carries every tick, including the commanded and measured EE poses."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 
@@ -145,12 +150,20 @@ def create_app(node: WbcNode, start: bool = True) -> FastAPI:
     async def disable(token: LeaseToken = None):
         return await asyncio.to_thread(node.disable, "requested", token, True)
 
-    @app.post("/estop", tags=["control"], summary="E-stop: anyone; forwarded to the arm and the swerve (both latch); "
-                                                   "disables")
+    @app.post("/estop", tags=["control"], summary="E-stop: anyone; stops tracking at once (disarm, zero twist, arm "
+                                                   "hold), then forwarded to the arm and the swerve in parallel (both "
+                                                   "latch and coast); disables")
     async def estop(request: Request, body: Optional[EStopIn] = None):
         body = body or EStopIn()
         src = body.source or (request.client.host if request.client else "")
         return await asyncio.to_thread(node.trigger_estop, body.reason, src)
+
+    @app.post("/disarm", tags=["control"], summary="Disarm: anyone (no lease); hold, targets cleared and ignored "
+                                                    "until a datagram arms with a new arm_seq")
+    async def disarm(request: Request, body: Optional[EStopIn] = None):
+        body = body or EStopIn()
+        src = body.source or (request.client.host if request.client else "")
+        return node.disarm(body.reason, src)
 
     @app.post("/estop/clear", response_model=EStopCleared, tags=["control"], summary="Clear the WBC's e-stop latch "
               "(holder; the arm's and the swerve's are cleared on those nodes)")
@@ -181,7 +194,8 @@ def create_app(node: WbcNode, start: bool = True) -> FastAPI:
         return node.get_config()
 
     @app.post("/config", tags=["control"], summary="Change config keys at runtime (no lease; structural keys only while "
-                                                    "disabled; 422 with the reason when invalid)")
+                                                    "disabled; the base caps only while the base is still; 422 with "
+                                                    "the reason when invalid)")
     async def set_config(body: dict):
         try:
             return await asyncio.to_thread(node.set_config, body)

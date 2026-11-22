@@ -14,6 +14,13 @@ from ..common.serve import add_serve_args, serve
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--wbc", default="wbc", help="WBC node: instance name (its unix sockets) or URL")
+    p.add_argument("--arm", default="arm", help="arm node (instance or URL): the e-stop goes to it directly too; "
+                                                "'none' = off")
+    p.add_argument("--swerve", default="swerve", help="swerve node (instance or URL): the e-stop goes to it directly "
+                                                      "too; 'none' = off")
+    p.add_argument("--max-latency-ms", type=float, default=150.0,
+                   help="headset frames later than this over the session's best count as stale (disarm)")
+    p.add_argument("--min-rate", type=float, default=30.0, help="headset rate (over 0.5 s) below this = stale")
     p.add_argument("--ssh-host", default="quest", help="ssh host of the headset for quest up / down (this machine's "
                                                        "~/.ssh/config; default %(default)s)")
     p.add_argument("--quest", default=None, help="headset stream address (default: the ssh host's HostName, "
@@ -42,8 +49,10 @@ def main() -> None:
     from .node import QuestTeleopNode
     from .server import create_app
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, gripper=not a.no_gripper)
-    node = QuestTeleopNode(a.wbc, quest_host=a.quest, quest_port=a.quest_port, ssh_host=a.ssh_host, cfg=cfg,
-                           stale_s=a.stale_ms / 1e3, ar=a.ar, scheme=a.scheme, ctl_timeout=a.ctl_timeout,
+    off = lambda v: None if v in ("none", "") else v   # noqa: E731
+    node = QuestTeleopNode(a.wbc, arm=off(a.arm), swerve=off(a.swerve), quest_host=a.quest, quest_port=a.quest_port,
+                           ssh_host=a.ssh_host, cfg=cfg, stale_s=a.stale_ms / 1e3, max_latency=a.max_latency_ms / 1e3,
+                           min_rate=a.min_rate, ar=a.ar, scheme=a.scheme, ctl_timeout=a.ctl_timeout,
                            wait=a.wait, name=a.name)
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "
                                       f"ssh {a.ssh_host}, AR {a.ar})")

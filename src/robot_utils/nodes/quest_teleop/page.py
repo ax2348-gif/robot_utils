@@ -61,8 +61,9 @@ canvas.ru-plot{width:100%;height:70px}
       <div class="ctl"><button class="ru live" id="start">Start</button><button class="ru" id="stop">Stop</button>
         <span class="ru-muted" id="sending"></span></div>
       <div class="steps" id="steps"></div>
+      <div id="armed"></div>
       <div class="ru-muted" id="reason"></div>
-      <div class="ru-muted" style="font-size:13px">Start takes the WBC lease and enables it (arm + base). The grip clutches the arm; nothing moves until a grip is seen released and pressed again.</div>
+      <div class="ru-muted" style="font-size:13px">Start takes the WBC lease and enables it (arm + base); nothing moves until <b>Y</b> (left controller) arms it. <b>X</b> disarms and disables (the arm floats, the base coasts); Y re-enables. Armed, the grip clutches the arm after a release.</div>
     </div>
     <div class="ru-card" data-panel="headset" data-role="control"><b>Headset</b>
       <div class="kv" id="link"></div>
@@ -120,13 +121,17 @@ RU.sse("events", s => {
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");
   const why = running ? (T.reason || "") : (s.error || "");
   $("#reason").textContent = why ? "last: " + why : (running && T.transport ? "datagrams: " + T.transport.split(" ")[0] + " socket" : "");
+  $("#armed").className = "lim" + (running && T.armed ? " on" : "");
+  $("#armed").textContent = !running ? "" : T.armed ? `ARMED (press ${T.arm_seq})` : `disarmed${T.disarm_reason ? " — " + T.disarm_reason : ""}${T.disabled_by_x ? " · WBC disabled by X (Y re-enables)" : ""}`;
   $("#reason").title = T.transport || "";
   // headset link
   const age = H.age === null ? "–" : (H.age < 1 ? (H.age * 1e3).toFixed(0) + " ms" : H.age.toFixed(1) + " s");
   const link = [
     ["stream", `${esc(s.config.quest_host)}:${s.config.quest_port} · ${H.connected ? "connected" : "not connected"}`],
     ["rate", `${f(H.rate_hz, 0)} frames/s · age ${age}`],
+    ["latency", T.input ? `${T.input.latency_ms === null ? "–" : f(T.input.latency_ms, 0) + " ms"} · ${f(T.input.rate_hz, 0)} Hz (0.5 s)${T.input.fresh ? "" : " · stale: " + esc(T.input.why)}` : "–"],
     ["focus", H.focused === null ? "–" : (H.focused ? "focused" : "not focused")],
+    ["battery", esc(H.battery ? H.battery.text : "not reported")],
     ["XR session", esc(H.xr_state || "–")],
     ["session", esc(H.session_id || "–") + (H.scheme ? " · " + esc(H.scheme) : "")],
   ];

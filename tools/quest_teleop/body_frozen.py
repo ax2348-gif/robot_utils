@@ -54,6 +54,12 @@ them at zero: only frames of this engagement count, and they ramp in with the wi
 the robot). Released: unchanged (the riding target's twist is the base's own).
 
 The gripper follows the trigger whenever the hand is valid, independent of the clutch.
+
+Armed latch (``arming.py``; the client sends targets only while armed): ``on_arm`` / ``on_disarm`` drop the
+engagement (the grip needs its release first, as always) and the riding pose (``hold_base``: captured again from the
+current command, never a stale one); after arming the sticks give no base velocity until both are seen neutral. The
+gripper (the owner's rebot_ctl behaviour): no gripper command before arming (after Start, after any disarm or disable:
+the gripper stays where it is); from the arming frame on, ``1 - trigger`` in every target (a released trigger opens).
 """
 from __future__ import annotations
 
@@ -64,6 +70,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from . import frames as F
+from .arming import sticks_neutral
 
 
 
@@ -191,6 +198,7 @@ class Engagement:
     target_r0: Optional[np.ndarray] = None                             # the first target orientation (fit origin)
     hand_fit: Optional["VelocityFit"] = None                           # the target's velocity
     head_fit: Optional["VelocityFit"] = None                           # the head's (hint) velocity, world
+    captured_now: bool = False                                         # captured on the newest frame
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
@@ -274,7 +282,38 @@ class TeleopCore:
         self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
         self.hint: Optional[dict] = None          # the newest base hint target sent (status)
         self._last_ns: Optional[int] = None
+        self._tracked = False
         self.status = Status()
+        # the armed latch (README "Arming"): the sticks drive only once seen neutral after arming; the gripper is
+        # commanded only while armed. A core that is never armed (tests, tools) starts live.
+        self.sticks_live = True
+        self.gripper_live = True
+
+    # -- the armed latch -------------------------------------------------------------------------
+
+    def on_arm(self, frame: Optional[dict] = None) -> None:
+        """Armed by a Y press (after the arming frame went through ``on_frame``): the grip needs its release first
+        (as always), the sticks must be seen neutral; the gripper follows the trigger from this frame on."""
+        self.drop("armed")
+        self.hold_base = None                     # the riding target is captured from the current command
+        self.sticks_live = False
+        self.gripper_live = True
+
+    def on_disarm(self, reason: str = "disarmed") -> None:
+        """Disarmed: nothing carries over to the next arm (engagement, riding pose, sticks); no gripper command."""
+        self.drop(reason)
+        self.hold_base = None
+        self.sticks_live = False
+        self.gripper_live = False
+
+    def _gates(self, frame: dict) -> None:
+        """After arming: the sticks seen neutral (both, inside the native dead zone)."""
+        if not self.sticks_live and sticks_neutral(frame):
+            self.sticks_live = True
+
+    def stick_v(self, intent: dict) -> list:
+        """The sticks' base velocity, zero until they were seen neutral after arming."""
+        return stick_velocity(intent) if self.sticks_live else [0.0, 0.0, 0.0]
 
     # -- engagement ------------------------------------------------------------------------------
 
@@ -299,9 +338,14 @@ class TeleopCore:
             return
         if robot is not None:
             self.last_robot = robot
+        self._tracked = False
         self._engagement(frame, verdict, robot, now)
         if self.valid and self.frame is not None:
+            self._gates(frame)
             self._sticks(frame, robot)
+        if self._tracked and self.eng is not None:
+            # after the sticks: the EE target and the base hint use the same (this frame's) offset
+            self._track_offset(frame)
 
     def _sticks(self, frame: dict, robot: Optional[RobotState]) -> None:
         ns = frame.get("sample_time_ns")
@@ -309,9 +353,9 @@ class TeleopCore:
         if isinstance(ns, int) and self._last_ns is not None:
             dt = min(max(0.0, (ns - self._last_ns) * 1e-9), self.cfg.max_dt)
         self._last_ns = ns if isinstance(ns, int) else None
-        if self.eng is None or dt <= 0:
-            return
-        v = stick_velocity(frame["control_intent"])
+        if self.eng is None or dt <= 0 or self.eng.captured_now:
+            return                       # the capture frame: the offset stays zero (engaging never moves the robot)
+        v = self.stick_v(frame["control_intent"])
         yaw = robot.base_yaw if robot is not None else self.eng.robot.yaw
         self.offset[:2] += F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt
         self.offset[2] += v[2] * dt
@@ -348,6 +392,7 @@ class TeleopCore:
                 self.drop("hand pose missing")
                 return
             self.eng.target_raw = body_frozen_target(self.eng, *hp)
+            self.eng.captured_now = False
             self._track(frame)
             self.status.state = "engaged"
             return
@@ -377,6 +422,7 @@ class TeleopCore:
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
+        eng.captured_now = True
         self.eng = eng
         self._track(frame)
         self.status.engagements += 1
@@ -384,7 +430,8 @@ class TeleopCore:
         self.status.reason = ""
 
     def _track(self, frame: dict) -> None:
-        """Engaged: this frame's head contribution and the samples of the feedforward fits (sample_time_ns)."""
+        """Engaged: this frame's head contribution; the offset and the feedforward samples follow the sticks
+        (``_track_offset``, after ``_sticks`` in ``on_frame``)."""
         eng = self.eng
         if self.cfg.head_walk:
             head = head_pose(frame)
@@ -397,6 +444,11 @@ class TeleopCore:
             elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
                 eng.head_fit.reset()
             eng.head_tracked = yaw is not None
+        self._tracked = True
+
+    def _track_offset(self, frame: dict) -> None:
+        """The target with this frame's stick offset (the base hint's too) and the feedforward fits' samples."""
+        eng = self.eng
         eng.target = self._with_offset(eng.target_raw)
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
@@ -438,7 +490,7 @@ class TeleopCore:
             return np.zeros(6), np.zeros(3)
         tw = eng.hand_fit.velocity(6)
         hv = eng.head_fit.velocity(3) if self.cfg.head_walk and eng.head_tracked else np.zeros(3)
-        sv = stick_velocity(self.frame["control_intent"]) if self.frame is not None else [0.0, 0.0, 0.0]
+        sv = self.stick_v(self.frame["control_intent"]) if self.frame is not None else [0.0, 0.0, 0.0]
         yaw = self.last_robot.base_yaw if self.last_robot is not None else eng.robot.yaw
         hv = hv + np.concatenate([F.rot_z(yaw)[:2, :2] @ np.array(sv[:2]), [sv[2]]])
         n = float(np.hypot(hv[0], hv[1]))
@@ -489,7 +541,7 @@ class TeleopCore:
             reset = robot.est_reset
         intent = self.frame["control_intent"]
         ih = intent["hands"].get(cfg.hand) or {}
-        if cfg.gripper and ih.get("valid") and _finite(ih.get("gripper")):
+        if cfg.gripper and self.gripper_live and ih.get("valid") and _finite(ih.get("gripper")):
             # the headset's gripper intent follows the trigger (0 released .. 1 squeezed); the WBC's is the opening
             # (0 closed .. 1 open): squeezing closes, as in the rebot_ctl teleop
             ee["gripper"] = 1.0 - min(1.0, max(0.0, float(ih["gripper"])))
@@ -502,7 +554,7 @@ class TeleopCore:
         cfg = self.cfg
         if self.eng is None:
             self.hint = None
-            v = stick_velocity(intent)
+            v = self.stick_v(intent)
             if any(abs(x) > 1e-9 for x in v):
                 return {"mode": "commanded", "velocity": {"vx": v[0], "vy": v[1], "omega": v[2], "frame": "base",
                                                           "ttl": cfg.velocity_ttl}}
