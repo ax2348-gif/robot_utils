@@ -44,13 +44,22 @@ dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
   forward), yaw from the right stick. Standing still and driving with the sticks, walking with the robot mirroring,
   or both. Whatever the sticks achieved is in the base pose the next engagement captures.
 
+Velocity feedforward while engaged (so the robot keeps up with a walking operator instead of trailing by v / k):
+the EE target carries ``twist`` = the target's own velocity (the hand's motion mapped through the frozen frames,
+linear and angular) and the base hint carries the hint target's velocity (``vx``, ``vy``, ``omega``: the head's
+motion mapped as ``head_d`` is, plus the stick offset's rate, exact). Both are least-squares slopes over the frames
+of the last ``ff_window`` (60 ms) on ``sample_time_ns``: exact for a steady motion, about ``ff_window / 2`` (30 ms)
+behind a change of speed; clamped; zero while the head is lost (and its history restarts). Every engagement starts
+them at zero: only frames of this engagement count, and they ramp in with the window's fill (re-engaging never moves
+the robot). Released: unchanged (the riding target's twist is the base's own).
+
 The gripper follows the trigger whenever the hand is valid, independent of the clutch.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -110,6 +119,59 @@ class RobotState:
         return F.PlanarFrame(self.base_x, self.base_y, self.base_yaw)
 
 
+class VelocityFit:
+    """The velocity of a sampled signal: the least-squares slope over the samples of the last ``window`` seconds,
+    scaled by how full the window is (0 with fewer than 3 samples), clamped to ``max_norm`` per block of 3."""
+
+    def __init__(self, window: float = 0.06, max_norm: Sequence = (1.0,)):
+        self.window = window
+        self.max_norm = tuple(max_norm)
+        self.t: list = []
+        self.x: list = []
+
+    def reset(self) -> None:
+        self.t, self.x = [], []
+
+    def push(self, t: float, x) -> None:
+        if self.t and t <= self.t[-1]:
+            return
+        self.t.append(float(t))
+        self.x.append(np.asarray(x, float))
+        while self.t and self.t[0] < t - self.window:
+            self.t.pop(0)
+            self.x.pop(0)
+
+    def velocity(self, dim: int) -> np.ndarray:
+        if len(self.t) < 3:
+            return np.zeros(dim)
+        t = np.asarray(self.t)
+        x = np.asarray(self.x)
+        tc = t - t.mean()
+        span = t[-1] - t[0]
+        if span <= 1e-6:
+            return np.zeros(dim)
+        v = (tc @ (x - x.mean(axis=0))) / float(tc @ tc)
+        v = v * min(1.0, span / (0.6 * self.window))          # ramps in as the window fills
+        for k, cap in enumerate(self.max_norm):
+            blk = v[3 * k:3 * k + 3]
+            n = float(np.linalg.norm(blk))
+            if n > cap:
+                blk *= cap / n
+        return v
+
+
+def rotvec(r) -> np.ndarray:
+    """The rotation vector (axis * angle) of a rotation matrix."""
+    r = np.asarray(r, float)
+    a = F.rotation_angle(r)
+    w = np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
+    if a < 1e-9:
+        return 0.5 * w
+    if a > math.pi - 1e-6:                                    # 180 degrees: not reached between frames
+        return np.zeros(3)
+    return w * (a / (2.0 * math.sin(a)))
+
+
 @dataclass
 class Engagement:
     id: int
@@ -123,6 +185,11 @@ class Engagement:
     target: Optional[tuple] = None   # newest world target
     head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
     head_dyaw: float = 0.0                                             # last head yaw change
+    head_yaw_unwrapped: float = 0.0                                    # continuous (the velocity fit)
+    head_tracked: bool = True                                          # the newest frame had the head
+    target_r0: Optional[np.ndarray] = None                             # the first target orientation (fit origin)
+    hand_fit: Optional["VelocityFit"] = None                           # the target's velocity
+    head_fit: Optional["VelocityFit"] = None                           # the head's (hint) velocity, world
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
@@ -154,6 +221,12 @@ class Config:
     velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
     max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
+    feedforward: bool = True          # engaged: the EE twist and the hint velocity (see the module docstring)
+    ff_window: float = 0.06           # s, the velocity fit's window (adds about half of it as lag)
+    ff_max_speed: float = 1.0         # m/s, EE feedforward clamp
+    ff_max_omega: float = 3.0         # rad/s, EE feedforward clamp
+    hint_max_speed: float = 0.6       # m/s, the hint velocity clamp (the WBC refuses more than its max_speed)
+    hint_max_omega: float = 0.8       # rad/s (the WBC's max_omega)
 
 
 def head_pose(frame: dict):
@@ -272,6 +345,7 @@ class TeleopCore:
                 self.drop("hand pose missing")
                 return
             self.eng.target = body_frozen_target(self.eng, *hp)
+            self._track(frame)
             self.status.state = "engaged"
             return
         if self.needs_release:
@@ -296,11 +370,58 @@ class TeleopCore:
             self.status.state = "needs_release"
             return
         eng.target = (robot.ee_p.copy(), robot.ee_r.copy())
+        eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
+        eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
         self.eng = eng
+        self._track(frame)
         self.status.engagements += 1
         self.status.state = "engaged"
         self.status.reason = ""
+
+    def _track(self, frame: dict) -> None:
+        """Engaged: this frame's head contribution and the samples of the feedforward fits (sample_time_ns)."""
+        eng = self.eng
+        if self.cfg.head_walk:
+            head = head_pose(frame)
+            yaw = F.head_yaw(head[1]) if head is not None else None
+            if yaw is not None:
+                eng.head_d = F.rot_z(-eng.head_yaw0) @ F.C @ (head[0] - eng.head_p0)
+                dyaw = F.wrap(yaw - eng.head_yaw0)
+                eng.head_yaw_unwrapped += F.wrap(dyaw - eng.head_dyaw)
+                eng.head_dyaw = dyaw
+            elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
+                eng.head_fit.reset()
+            eng.head_tracked = yaw is not None
+        ns = frame.get("sample_time_ns")
+        if not isinstance(ns, int):
+            return
+        t = ns * 1e-9
+        p, r = eng.target
+        eng.hand_fit.push(t, np.concatenate([p, rotvec(r @ eng.target_r0.T) if eng.target_r0 is not None else
+                                             np.zeros(3)]))
+        if eng.target_r0 is None:
+            eng.target_r0 = r.copy()
+        if self.cfg.head_walk and eng.head_tracked:
+            xy = eng.robot.r[:2, :2] @ eng.head_d[:2]
+            eng.head_fit.push(t, [xy[0], xy[1], eng.head_yaw_unwrapped])
+
+    def feedforward(self) -> tuple:
+        """(EE twist [vx, vy, vz, wx, wy, wz] world, hint velocity (vx, vy, omega) world) of the engagement: the
+        fits, plus the sticks' rate for the hint; zeros when off or not engaged."""
+        eng = self.eng
+        if eng is None or not self.cfg.feedforward or eng.hand_fit is None:
+            return np.zeros(6), np.zeros(3)
+        tw = eng.hand_fit.velocity(6)
+        hv = eng.head_fit.velocity(3) if self.cfg.head_walk and eng.head_tracked else np.zeros(3)
+        sv = stick_velocity(self.frame["control_intent"]) if self.frame is not None else [0.0, 0.0, 0.0]
+        yaw = self.last_robot.base_yaw if self.last_robot is not None else eng.robot.yaw
+        hv = hv + np.concatenate([F.rot_z(yaw)[:2, :2] @ np.array(sv[:2]), [sv[2]]])
+        n = float(np.hypot(hv[0], hv[1]))
+        if n > self.cfg.hint_max_speed:
+            hv[:2] *= self.cfg.hint_max_speed / n
+        hv[2] = float(np.clip(hv[2], -self.cfg.hint_max_omega, self.cfg.hint_max_omega))
+        return tw, hv
 
     def stale(self, reason: str = "stale") -> None:
         """Input went stale (no frame for the freshness timeout): drop everything."""
@@ -323,6 +444,8 @@ class TeleopCore:
         if self.eng is not None and self.eng.target is not None:
             p, r = self.eng.target
             ee = {"frame": "world", "pos": _l(p), "quat": _l(F.quat_from_matrix(r))}
+            if cfg.feedforward:
+                ee["twist"] = _l(self.feedforward()[0])
             self.last_target = (p, r)
             reset = self.eng.est_reset            # the estimator epoch the anchor was captured in
         else:
@@ -352,18 +475,16 @@ class TeleopCore:
                                                           "ttl": cfg.velocity_ttl}}
             return {"mode": "locked"}
         eng = self.eng
-        if cfg.head_walk:
-            head = head_pose(self.frame)
-            yaw = F.head_yaw(head[1]) if head is not None else None
-            if yaw is not None:         # head lost: keep its last contribution
-                eng.head_d = F.rot_z(-eng.head_yaw0) @ F.C @ (head[0] - eng.head_p0)
-                eng.head_dyaw = F.wrap(yaw - eng.head_yaw0)
         off = self.offset
         xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + off[:2]
         hyaw = F.wrap(eng.robot.yaw + eng.head_dyaw + off[2])
         target = {"pose": {"x": float(xy[0]), "y": float(xy[1]), "frame": "world",
                            "weight": cfg.pose_weight, "tol": cfg.pose_tol},
                   "heading": {"yaw": hyaw, "frame": "world", "weight": cfg.heading_weight, "tol": cfg.heading_tol}}
+        if cfg.feedforward:
+            hv = self.feedforward()[1]
+            target["pose"].update(vx=float(hv[0]), vy=float(hv[1]))
+            target["heading"]["omega"] = float(hv[2])
         self.hint = target
         return {"mode": "hint", "target": target}
 

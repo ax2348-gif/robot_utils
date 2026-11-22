@@ -89,8 +89,9 @@ class Sim:
             if out.base_fixed not in ("rate fallback",):
                 assert math.hypot(*(tw[:2] - prev[:2])) <= cfg.max_accel * dt + tol, (t, prev, tw, out.base_fixed)
                 assert abs(tw[2] - prev[2]) <= cfg.max_alpha * dt + tol
-            assert np.all(np.abs(qd) <= np.array(cfg.joint_vel) + tol), (t, qd)
-            assert np.all(np.abs(qd - vprev) <= np.array(cfg.joint_acc) * dt + 1e-5), (t, qd - vprev)
+            vm, am = self.ctl.caps["arm"]
+            assert np.all(np.abs(qd) <= vm + tol), (t, qd)
+            assert np.all(np.abs(qd - vprev) <= am * dt + 1e-5), (t, qd - vprev)
 
 
 def test_model_planar_base_and_tcp(model):
@@ -186,7 +187,7 @@ def test_hold_brakes_the_base_and_stops_the_arm_within_limits(model):
     s = Sim(model)
     T0 = s.tcp()
     s.buf.set_reactive(0.0, T0.translation + [0.6, 0.0, 0.1], T0.rotation)
-    s.run(1.5)
+    s.run(0.6)
     assert np.linalg.norm(s.tw) > 0.05 and np.linalg.norm(s.v) > 0.05
     s.run(1.5, hold=True)
     assert np.all(s.tw == 0.0) and np.linalg.norm(s.v) < 1e-6
@@ -396,7 +397,7 @@ def test_chunk_through_the_controller_has_no_velocity_jump(model):
     s.run(2.0)
     s.check_limits()
     vs = np.array([r[4] for r in s.log])
-    assert np.max(np.abs(np.diff(vs, axis=0))) <= max(s.cfg.joint_acc) * s.cfg.dt + 1e-6
+    assert np.max(np.abs(np.diff(vs, axis=0))) <= max(s.ctl.caps["arm"][1]) * s.cfg.dt + 1e-6
 
 
 def test_staleness_fades_the_feedforward_and_holds_the_pose():
@@ -434,4 +435,63 @@ def test_hint_parsing_bounds_and_errors():
     with pytest.raises(ValueError):
         make_config({"deadband_lin_off": 0.5})
     with pytest.raises(ValueError):
-        make_config({"max_speed": 3.0})
+        make_config({"wheel_speed": 4.0})                   # the base speed caps are checked against the swerve's
+    with pytest.raises(ValueError):                         # hard limits at enable
+        make_config({"joint_vel": [1, 1, 1, 1, 1, -1]})
+    assert make_config({}).joint_vel is None                # the arm's own
+
+
+def walk(model, v, ff: bool, seconds=3.0, hint_age=0.0):
+    """The operator walks forward at v (m/s): the EE target and the base pose hint both move at v (world x), with or
+    without their velocity feedforward. Returns (EE lag, base lag) at the end (m) and the Sim."""
+    from robot_utils.nodes.wbc.spec import PoseHint
+    s = Sim(model)
+    T0 = s.tcp()
+    lag_ee, lag_base = [], []
+    for i in range(int(seconds / s.cfg.dt)):
+        t = s.t
+        p = T0.translation + [v * t, 0.0, 0.0]
+        s.buf.set_reactive(t, p, T0.rotation, v=[v, 0, 0, 0, 0, 0] if ff else None)
+        s.hints = Hints(mode="hint", target_pose=PoseHint(v * t, 0.0, weight=1.0, tol=0.0,
+                                                          vx=v if ff else 0.0))
+        tg = s.buf.sample(t)
+        snap = Snapshot(t, tuple(s.base), s.tw.copy(),
+                        {"arm": EEState(s.q.copy(), s.v.copy(), tg, s.hints.ee("arm", s.cfg), Q0)}, s.hints,
+                        hint_age=hint_age)
+        out = s.ctl.step(snap)
+        assert out.status == "ok", out.reason
+        s.log.append((t, s.tw.copy(), out.base_twist.copy(), s.v.copy(), out.qd["arm"].copy(), out))
+        s.tw = out.base_twist.copy()
+        c, sn = math.cos(s.base[2]), math.sin(s.base[2])
+        s.base += np.array([c * s.tw[0] - sn * s.tw[1], sn * s.tw[0] + c * s.tw[1], s.tw[2]]) * s.cfg.dt
+        s.q = s.q + out.dq["arm"]
+        s.v = out.qd["arm"].copy()
+        s.t += s.cfg.dt
+        lag_ee.append(float(np.linalg.norm(s.tcp().translation - (T0.translation + [v * s.t, 0, 0]))))
+        lag_base.append(float(v * s.t - s.base[0]))
+    return float(np.mean(lag_ee[-50:])), float(np.mean(lag_base[-50:])), s
+
+
+def test_velocity_feedforward_removes_the_walking_lag(model):
+    """At 0.5 m/s: without feedforward the EE trails its target by about v / k_pos and the base its hint by about
+    v / k_base_pose; with the EE twist and the hint velocity it keeps up (measured lags printed)."""
+    v = 0.5
+    ee0, base0, s0 = walk(model, v, ff=False)
+    ee1, base1, s1 = walk(model, v, ff=True)
+    print(f"\nwalking at {v} m/s: EE lag {ee0 * 1e3:.1f} -> {ee1 * 1e3:.1f} mm, base lag {base0 * 1e3:.1f} -> "
+          f"{base1 * 1e3:.1f} mm")
+    assert ee0 > 0.5 * v / s0.cfg.k_pos                    # ~v / k_pos without feedforward
+    assert ee1 < 0.01 and ee1 < 0.1 * ee0
+    assert base1 < 0.03 and base1 < 0.3 * base0
+    s1.check_limits()
+
+
+def test_stale_hint_feedforward_fades(model):
+    """The hint velocity obeys the EE twist's staleness: fresh = full, past 2 x ff_timeout = none."""
+    v = 0.5
+    _, fresh, _ = walk(model, v, ff=True, seconds=2.0, hint_age=0.0)
+    _, stale, s = walk(model, v, ff=True, seconds=2.0, hint_age=2.5 * Config().ff_timeout)
+    assert s.log[-1][5].diag["hint_ff_scale"] == 0.0
+    assert stale > fresh + 0.05                              # without the feedforward the base trails again
+
+

@@ -50,7 +50,7 @@ def phases(msgs):
     for t, m in msgs:
         e = m["ees"]["arm"]
         assert e["frame"] == "world"                             # the WBC takes world targets only
-        key = ("ride" if "twist" in e else "follow", m["base"]["mode"])
+        key = ("follow" if m["base"]["mode"] == "hint" else "ride", m["base"]["mode"])   # engaged = a base hint
         if not out or out[-1][0] != key:
             out.append([key, []])
         out[-1][1].append((t, m))

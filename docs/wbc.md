@@ -16,6 +16,17 @@ the robot set the LAN address, never `0.0.0.0`), `--config` (YAML of `spec.Confi
 Registered in `frontend/nodes.yaml` as `wbc`; page at the node root (state, base mode, EE commanded / measured /
 target, tracking error, base twist, solve time, events).
 
+### Defaults (for the first tests, the owner's)
+
+Base: `max_speed` 0.6 m/s (body), `max_omega` 0.8 rad/s, `max_accel` 1.0 m/s², `max_alpha` 1.5 rad/s², every
+wheel `wheel_speed` 1.0 m/s. Arm: `joint_vel` / `joint_acc` default to **the arm's own** (null in the config): the
+arm's joint-channel welcome `limits` (2, 2, 2, 6, 6, 6 rad/s; 10, 10, 10, 30, 30, 30 rad/s²; until a welcome, the
+arm config's soft defaults, the same numbers); a tuple in the config narrows them, never widens. Ceilings: the base
+speed and yaw rate are checked at `POST /enable` against the swerve's own `GET /limits` "hard" (beyond them: 422,
+both leases given back); the wheel speed has no swerve endpoint and is bounded by pose_servo's
+`planner.WHEEL_SPEED_MAX` (3 m/s, the steering model's limit) when the config is made. `resync` is 0.25 rad, at
+most 0.7 of the arm's lead bound (20°).
+
 ## Using it
 
 1. `POST /lease {"client": "me"}` → `{token, heartbeat, lease_id, client}`; the token goes in `X-Lease-Token`;
@@ -75,8 +86,8 @@ bounded by the caps (422 beyond them).
 base:
   mode: free            # free | locked | hint | commanded
   target:               # mode hint: soft targets for the base, each optional (no cost inside tol)
-    pose: {x: 1.2, y: 0.4, frame: world, weight: 1.0, tol: 0.05}
-    heading: {yaw: 1.57, frame: world, weight: 0.5, tol: 0.05}   # or {face: arm} / {face: [x, y]}
+    pose: {x: 1.2, y: 0.4, vx: 0.0, vy: 0.0, frame: world, weight: 1.0, tol: 0.05}
+    heading: {yaw: 1.57, omega: 0.0, frame: world, weight: 0.5, tol: 0.05}   # or {face: arm} / {face: [x, y]}
   velocity: {vx: 0.1, vy: 0.0, omega: 0.0, frame: base, ttl: 0.3}   # mode commanded
   pose: {x: 1.2, y: 0.4, yaw: 0.0, frame: world}                    # mode commanded, without velocity
   limits: {max_speed: 0.3, max_omega: 0.8, max_accel: 0.5}          # tighter than the caps only
@@ -88,6 +99,15 @@ ees:
     posture: ready                # home | ready | 6 joint angles (rad)
     posture_weight: 0.0001
 ```
+
+**Velocity feedforward on the hint targets** (`vx`, `vy` on the pose, world m/s; `omega` on the heading, rad/s;
+optional, default 0, bounded by `max_speed` / `max_omega`): the hint stage tracks `v_ff + k_base_pose · error`
+(`omega + k_heading · error` for the heading) instead of the error alone, within the caps, so a moving hint target
+(a walking operator) is followed without the `v / k` lag; with no velocity it is the position-only behaviour. The
+feedforward fades like the EE twist: full for `ff_timeout` after the hint was given (a datagram's `base.target`, or
+`POST /hints`), zero at twice that (diagnostic `hint_ff_scale`). Measured in the QP (`test_wbc_controller.py`), walking
+at 0.5 m/s with the EE target and a base pose hint moving together: the EE 142 mm behind without its twist, 0.9 mm
+with; the base 250 mm behind its hint without the velocity, 18 mm with.
 
 `locked` brakes the base to zero within its rate limit and holds it there; `commanded` follows the velocity (zero
 after `ttl`) or drives to the pose (P, capped), the arm compensating. **Base hints yield**: they are solved in a
@@ -124,7 +144,7 @@ solves for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick:
 - **Failure:** an infeasible or failed solve outputs zero velocity → the node faults and holds.
 
 Arm output: integrated from the previous **commanded** joints; resynced to the measured ones only past `resync`
-(0.12 rad, an event); q' is sent as the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
+(0.25 rad, an event); q' is sent as the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
 
 Known limits of v1 (measured in the tests): a velocity-level QP can end in a local minimum with the arm at a joint
 limit (a target behind and below the base): the error stays, reported (`limited_by` joint_limit), no yank. With
@@ -166,7 +186,7 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
 
 - `arm_channel.py`: the WBC's session on the arm's internal joint channel, on `nodes/common/fastpath.py` (packets,
   control messages, `bind_dgram`). It uses the arm's welcome: `lo` / `hi` narrow the model's joint range,
-  `joint_vel` / `joint_acc` narrow the controller's caps, `max_lead` bounds the resync threshold (at most half of
+  `joint_vel` / `joint_acc` are the controller's arm caps (the config's narrow them), `max_lead` bounds the resync (at most 0.7 of
   it: the arm drops goals beyond it), `gap_max` scales the gripper. The arm's `bye` (replaced, lease end, e-stop,
   disable, shutdown) is losing the arm: a fault. A planned motion on the arm (HTTP home / stow / servo / pose /
   chunk) pauses the session (the PAUSED flag): the WBC holds (reason `arm paused by a planned motion`), follows the

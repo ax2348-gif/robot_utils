@@ -104,6 +104,7 @@ class Snapshot:
     hold: bool = False                # stale input / no client: base brakes, arm stops
     base_available: bool = True       # False: no base (treated as locked)
     velocity_age: float = math.inf    # s since the commanded base velocity was given (mode commanded)
+    hint_age: float = 0.0             # s since the base hint in force was given (its velocity feedforward fades)
 
 
 @dataclass
@@ -144,14 +145,25 @@ class QPController(Controller):
         self.solver = solver
         self.bv = model.base_v
         self.reach = {k: (cfg.reach or r) for k, r in model.reach.items()}
-        # per arm (joint_vel, joint_acc): the config's, narrowed by the arm's own (its joint-channel welcome)
-        self.caps = {k: (np.asarray(cfg.joint_vel[:len(v)], float), np.asarray(cfg.joint_acc[:len(v)], float))
+        # per arm (joint_vel, joint_acc): the arm's own (the arm config's soft defaults until the node applies the
+        # joint-channel welcome), narrowed by the config's when it gives them
+        from ..arm.config import DEFAULT_SOFT
+        self.caps = {k: self.arm_caps(len(v), DEFAULT_SOFT.joint_vel, DEFAULT_SOFT.joint_acc)
                      for k, v in model.arm_v.items()}
         self.active = False                                   # base deadband state
         self.solves = 0
 
     def reset(self) -> None:
         self.active = False
+
+    def arm_caps(self, n: int, arm_vel, arm_acc) -> tuple:
+        """(joint_vel, joint_acc) from the arm's limits and the config's optional narrower ones."""
+        vm, a = np.asarray(arm_vel, float)[:n], np.asarray(arm_acc, float)[:n]
+        if self.cfg.joint_vel is not None:
+            vm = np.minimum(vm, np.asarray(self.cfg.joint_vel, float)[:n])
+        if self.cfg.joint_acc is not None:
+            a = np.minimum(a, np.asarray(self.cfg.joint_acc, float)[:n])
+        return vm, a
 
     # -- base helpers ----------------------------------------------------------------------------------
 
@@ -341,14 +353,18 @@ class QPController(Controller):
             if d > 0.5 * r and d > 1e-6:
                 u = d_vec / d
                 G = -(u @ Js).reshape(1, nv)                          # the shoulder's part of d'
-                gh = math.hypot(u[0], u[1])
+                # how fast the base can slow d' down: by translating (max_accel; the braking distance counts on
+                # this only: the yaw rate may be saturated) and, within one tick, also by turning (max_alpha: the
+                # shoulder sits off the base's centre); a margin for the octagons
+                a_lin = 0.7 * math.hypot(G[0, bx], G[0, by]) * accel
+                a_eff = a_lin + 0.7 * abs(G[0, bw]) * cfg.max_alpha
                 # the damper beyond d_i, and everywhere the base's braking distance to d_max
-                hr = math.sqrt(2 * 0.8 * accel * max(gh, 0.1) * max(d_max - d, 0.0))
+                hr = math.sqrt(2 * max(a_lin, 1e-3) * max(d_max - d, 0.0))
                 if d > d_i:
                     hr = min(hr, cfg.xi_reach * (d_max - d) / (d_max - d_i))
                 hr -= float(u @ tg.v[:3])
                 f_prev = float((G @ x_prev)[0])
-                floor = max(f_prev - 0.8 * gh * accel * dt, 0.0)     # stopping (within the rate limit) is allowed
+                floor = max(f_prev - a_eff * dt, 0.0)              # stopping (within the rate limits) is allowed
                 reach_rows.append((G, np.array([max(hr, floor)])))
         # base cost, scheduled by the distance to the target
         if dmax <= cfg.near_dist:
@@ -363,17 +379,27 @@ class QPController(Controller):
         H[bx, bx] += wb
         H[by, by] += wb
         H[bw, bw] += wb * cfg.base_yaw_radius ** 2
+        # stage 2 (the hints) keeps only the far (cheap) base cost: the base's share of the EE motion is settled in
+        # stage 1, and a near-target base cost there would halve a hint's velocity
+        dwb = wb - cfg.w_base_far * h.arm_vs_base
+        Hb_relief = np.zeros((nv, nv))
+        Hb_relief[bx, bx] = Hb_relief[by, by] = dwb
+        Hb_relief[bw, bw] = dwb * cfg.base_yaw_radius ** 2
         # base hints: a second, lower-priority stage (see solve_lex): they use only the EE tasks' freedom
         Hh, ch = np.zeros((nv, nv)), np.zeros(nv)
         if h.mode == "hint" and not hold:
             H0, c0 = H, c
             H, c = Hh, ch
+            # the hint targets' velocity feedforward fades like the EE twist (ff_timeout .. 2 x ff_timeout)
+            a = snap.hint_age
+            kff = 1.0 if a <= cfg.ff_timeout else max(0.0, 1.0 - (a - cfg.ff_timeout) / cfg.ff_timeout)
+            diag["hint_ff_scale"] = kff
             if h.target_pose is not None:
                 tp = h.target_pose
                 exy = shrink(np.array([tp.x - x, tp.y - y]), tp.tol)
                 H[bx, bx] += tp.weight
                 H[by, by] += tp.weight
-                c[[bx, by]] -= tp.weight * cfg.k_base_pose * exy
+                c[[bx, by]] -= tp.weight * (kff * np.array([tp.vx, tp.vy]) + cfg.k_base_pose * exy)
             if h.target_heading is not None:
                 hh = h.target_heading
                 yt = hh.yaw
@@ -385,7 +411,7 @@ class QPController(Controller):
                 if yt is not None:
                     eh = shrink(wrap(yt - yaw), hh.tol)
                     H[bw, bw] += hh.weight
-                    c[bw] -= hh.weight * cfg.k_heading * eh
+                    c[bw] -= hh.weight * (kff * hh.omega + cfg.k_heading * eh)
             if h.target_heading is None and h.target_pose is not None:
                 H[bw, bw] += cfg.w_hint_yaw          # a position hint moves the base, it does not turn it
             H, c = H0, c0
@@ -408,7 +434,7 @@ class QPController(Controller):
             hh = [g_[4 if relax else 2] for g_ in groups] + [r_[1] for r_ in manip_rows]
             Hq, cq = H, c
             if band is not None:                       # stage 2: the hints, the EE tasks' velocities kept
-                Hq, cq = H + Hh, c + ch
+                Hq, cq = H - Hb_relief + Hh, c + ch
                 G += [A_task, -A_task]
                 hh += [band + HINT_BAND, -band + HINT_BAND]
             A = b = None

@@ -16,10 +16,9 @@ import numpy as np
 
 MODES = ("free", "locked", "hint", "commanded")
 
-# Swerve hard limits (pose_servo's planner / the swerve node), the ceiling of every cap here
-WHEEL_SPEED_HARD = 3.0       # m/s, each wheel (pose_servo.planner.WHEEL_SPEED_MAX)
-BASE_SPEED_HARD = 2.0        # m/s (swerve HARD_MAX_SPEED)
-BASE_OMEGA_HARD = 4.0        # rad/s (swerve HARD_MAX_OMEGA)
+# The base speed and yaw-rate ceilings are the swerve's (its GET /limits "hard", checked at enable). The wheel speed has
+# no swerve endpoint: pose_servo's planner keeps it (the steering model's bound), so it is read from there.
+from ..pose_servo.planner import WHEEL_SPEED_MAX as WHEEL_SPEED_HARD   # noqa: E402  m/s, each wheel
 
 
 @dataclass(frozen=True)
@@ -27,11 +26,11 @@ class Config:
     """Caps, gains and timeouts (``--config`` YAML keys; the defaults below)."""
     rate_hz: float = 100.0
     # base caps (the swerve's soft limits are set to max_speed / max_omega at enable)
-    max_speed: float = 0.3          # m/s, |(vx, vy)| (inscribed octagon)
-    max_omega: float = 0.8          # rad/s
-    max_accel: float = 0.5          # m/s², |twist rate| linear (octagon)
+    max_speed: float = 0.6          # m/s, |(vx, vy)| body (inscribed octagon); <= the swerve's hard limit (at enable)
+    max_omega: float = 0.8          # rad/s; <= the swerve's hard limit (at enable)
+    max_accel: float = 1.0          # m/s², |twist rate| linear (octagon)
     max_alpha: float = 1.5          # rad/s²
-    wheel_speed: float = 0.4        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
+    wheel_speed: float = 1.0        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
     # base deadband with hysteresis: a stopped base starts only for a desired twist above *_on, a moving one
     # stops (braking within max_accel) below *_off
     deadband_lin_on: float = 0.02   # m/s
@@ -39,8 +38,10 @@ class Config:
     deadband_w_on: float = 0.06     # rad/s
     deadband_w_off: float = 0.025
     # arm caps (within the arm node's soft limits)
-    joint_vel: tuple = (1.0, 1.0, 1.0, 2.0, 2.0, 2.0)          # rad/s
-    joint_acc: tuple = (6.0, 6.0, 6.0, 15.0, 15.0, 15.0)       # rad/s²
+    # None = the arm's own (its joint-channel welcome `limits`; without one, the arm config's soft defaults
+    # 2,2,2,6,6,6 rad/s and 10,10,10,30,30,30 rad/s²); a tuple narrows them further (never widens)
+    joint_vel: Optional[tuple] = None   # rad/s
+    joint_acc: Optional[tuple] = None   # rad/s²
     limit_gain: float = 0.5         # joint position velocity damper: a step covers at most this share of the
                                     # distance to a limit (pink ConfigurationLimit)
     # yielding at the arm's limits (constraints, not costs: the base hint stops at the boundary)
@@ -52,7 +53,8 @@ class Config:
     w_influence: float = 0.002      # its damper acts below this
     xi_manip: float = 2.0           # 1/s: dw/dt >= -xi_manip w_influence (w - w_min) / (w_influence - w_min)
     lm_singular: float = 0.02       # adaptive damping on the arm, x (1 - w / w_influence)^2 below w_influence
-    resync: float = 0.12            # rad: |q_meas - q_cmd| beyond this (any joint) resyncs the integration
+    resync: float = 0.25            # rad: |q_meas - q_cmd| beyond this (any joint) resyncs the integration (at most
+                                    # 0.7 of the arm's lead bound; the world arm trails ~5 ticks: 0.1 rad at 2 rad/s)
     # tracking
     k_pos: float = 4.0              # 1/s, P on the EE position error
     k_rot: float = 4.0              # 1/s, P on the EE orientation error
@@ -108,8 +110,10 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
     for k in ("joint_vel", "joint_acc"):
-        if k in changes:
+        if changes.get(k) is not None:
             changes[k] = tuple(float(v) for v in changes[k])
+            if not all(math.isfinite(v) and v > 0 for v in changes[k]):
+                raise ValueError(f"{k} must be positive finite numbers (or null: the arm's)")
     c = replace(base or Config(), **changes)
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:
@@ -120,9 +124,8 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
         raise ValueError("reach must be >= 0 (0 = from the model)")
     if not (0 < c.reach_influence < c.reach_fraction <= 1.0) or not (0 < c.w_min < c.w_influence):
         raise ValueError("need 0 < reach_influence < reach_fraction <= 1 and 0 < w_min < w_influence")
-    if c.max_speed > BASE_SPEED_HARD or c.max_omega > BASE_OMEGA_HARD or c.wheel_speed > WHEEL_SPEED_HARD:
-        raise ValueError(f"base caps beyond the swerve's hard limits ({BASE_SPEED_HARD} m/s, {BASE_OMEGA_HARD} rad/s, "
-                         f"wheels {WHEEL_SPEED_HARD} m/s)")
+    if c.wheel_speed > WHEEL_SPEED_HARD:
+        raise ValueError(f"wheel_speed beyond the wheels' limit {WHEEL_SPEED_HARD} m/s")
     if c.deadband_lin_off >= c.deadband_lin_on or c.deadband_w_off >= c.deadband_w_on:
         raise ValueError("deadband *_off must be below *_on (the hysteresis)")
     if c.hold_timeout <= c.ff_timeout:
@@ -138,6 +141,8 @@ class PoseHint:
     y: float
     weight: float = 1.0
     tol: float = 0.05
+    vx: float = 0.0                   # m/s world: the target's velocity (feedforward; fades like the EE twist)
+    vy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,7 @@ class HeadingHint:
     point: Optional[tuple] = None     # (x, y) world: face that point
     weight: float = 0.5
     tol: float = 0.05
+    omega: float = 0.0                # rad/s: the target heading's rate (feedforward)
 
 
 @dataclass(frozen=True)
@@ -241,29 +247,34 @@ def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hint
         out["target_pose"] = out["target_heading"] = None
         if t.get("pose") is not None:
             p = t["pose"]
-            _only(p, ("x", "y", "frame", "weight", "tol"), "base.target.pose")
+            _only(p, ("x", "y", "frame", "weight", "tol", "vx", "vy"), "base.target.pose")
             x, y, _ = world(p.get("frame", "world"), _num(p, "x", -1e3, 1e3, path="base.target.pose."),
                             _num(p, "y", -1e3, 1e3, path="base.target.pose."), 0.0, "base.target.pose")
             if x is None or y is None:
                 raise ValueError("base.target.pose needs x and y")
+            if p.get("frame", "world") != "world" and (p.get("vx") or p.get("vy")):
+                raise ValueError("base.target.pose: a velocity needs frame world")
             out["target_pose"] = PoseHint(x, y, _num(p, "weight", 0, 100, 1.0, "base.target.pose."),
-                                          _num(p, "tol", 0, 10, 0.05, "base.target.pose."))
+                                          _num(p, "tol", 0, 10, 0.05, "base.target.pose."),
+                                          _num(p, "vx", -cfg.max_speed, cfg.max_speed, 0.0, "base.target.pose."),
+                                          _num(p, "vy", -cfg.max_speed, cfg.max_speed, 0.0, "base.target.pose."))
         if t.get("heading") is not None:
             h = t["heading"]
-            _only(h, ("yaw", "face", "frame", "weight", "tol"), "base.target.heading")
+            _only(h, ("yaw", "face", "frame", "weight", "tol", "omega"), "base.target.heading")
             w = _num(h, "weight", 0, 100, 0.5, "base.target.heading.")
             tol = _num(h, "tol", 0, math.pi, 0.05, "base.target.heading.")
+            om = _num(h, "omega", -cfg.max_omega, cfg.max_omega, 0.0, "base.target.heading.")
             face = h.get("face")
             if face is not None:
                 if isinstance(face, str):
                     if face not in ee_names:
                         raise ValueError(f"base.target.heading.face: no end effector {face!r} "
                                          f"(have {', '.join(ee_names)})")
-                    out["target_heading"] = HeadingHint(face=face, weight=w, tol=tol)
+                    out["target_heading"] = HeadingHint(face=face, weight=w, tol=tol, omega=om)
                 elif isinstance(face, (list, tuple)) and len(face) == 2:
                     fx, fy = (float(v) for v in face)
                     fx, fy, _ = world(h.get("frame", "world"), fx, fy, 0.0, "base.target.heading")
-                    out["target_heading"] = HeadingHint(point=(fx, fy), weight=w, tol=tol)
+                    out["target_heading"] = HeadingHint(point=(fx, fy), weight=w, tol=tol, omega=om)
                 else:
                     raise ValueError("base.target.heading.face must be an end effector name or a point [x, y]")
             else:
@@ -271,7 +282,7 @@ def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hint
                 if yaw is None:
                     raise ValueError("base.target.heading needs yaw or face")
                 _, _, yaw = world(h.get("frame", "world"), 0.0, 0.0, yaw, "base.target.heading")
-                out["target_heading"] = HeadingHint(yaw=yaw, weight=w, tol=tol)
+                out["target_heading"] = HeadingHint(yaw=yaw, weight=w, tol=tol, omega=om)
     if "velocity" in b:
         v = b["velocity"]
         if v is None:
@@ -281,9 +292,9 @@ def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hint
             fr = v.get("frame", "base")
             if fr not in ("base", "world"):
                 raise ValueError("base.velocity.frame must be base or world")
-            out["velocity"] = VelocityHint(_num(v, "vx", -BASE_SPEED_HARD, BASE_SPEED_HARD, 0.0, "base.velocity."),
-                                           _num(v, "vy", -BASE_SPEED_HARD, BASE_SPEED_HARD, 0.0, "base.velocity."),
-                                           _num(v, "omega", -BASE_OMEGA_HARD, BASE_OMEGA_HARD, 0.0, "base.velocity."),
+            out["velocity"] = VelocityHint(_num(v, "vx", -cfg.max_speed, cfg.max_speed, 0.0, "base.velocity."),
+                                           _num(v, "vy", -cfg.max_speed, cfg.max_speed, 0.0, "base.velocity."),
+                                           _num(v, "omega", -cfg.max_omega, cfg.max_omega, 0.0, "base.velocity."),
                                            fr, _num(v, "ttl", 0.0, cfg.max_ttl, 0.3, "base.velocity."))
     if "pose" in b:
         p = b["pose"]
@@ -356,7 +367,7 @@ def hints_public(h: Hints) -> dict:
         tgt["pose"] = {**asdict(h.target_pose), "frame": "world"}
     if h.target_heading:
         hh = h.target_heading
-        d = {"weight": hh.weight, "tol": hh.tol}
+        d = {"weight": hh.weight, "tol": hh.tol, "omega": hh.omega}
         if hh.face:
             d["face"] = hh.face
         elif hh.point:

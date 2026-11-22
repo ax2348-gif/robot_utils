@@ -111,6 +111,8 @@ base:
   target:
     pose: {x: 1.2, y: 0.4, frame: world, weight: 1.0, tol: 0.05}   # "stay near here"
     heading: {yaw: 1.57, frame: world, weight: 0.5, tol: 0.05}     # or {face: ee_right}: face an EE / a point
+    # optional velocity feedforward of a moving hint target (built): pose {vx, vy} world m/s, heading {omega}
+    # rad/s; tracked as v_ff + k * error, fading like the EE twist (ff_timeout)
   # mode commanded: the base follows this; the arm compensates to hold the EE targets
   velocity: {vx: 0.1, vy: 0.0, omega: 0.0, frame: base, ttl: 0.3}  # teleop stick; zero after ttl
   pose: {x: 1.2, y: 0.4, yaw: 0.0, frame: world}                   # or a base pose to drive to

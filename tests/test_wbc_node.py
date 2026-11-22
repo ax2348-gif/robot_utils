@@ -349,6 +349,14 @@ def test_whole_body_reach_with_the_real_swerve_and_estimator(stack):
     node, url, arm = stack["node"], stack["url"], stack["arm"]
     tok = httpx.post(url + "/lease", json={"client": "it"}).json()["token"]
     h = {"X-Lease-Token": tok}
+    from robot_utils.nodes.wbc.spec import make_config
+    cfg = node.cfg
+    node.cfg = make_config({"max_speed": 2.5})               # beyond the swerve's hard limit (its GET /limits)
+    r = httpx.post(url + "/enable", headers=h, timeout=10)
+    assert r.status_code == 422 and "hard limits" in r.json()["detail"], r.text
+    wait_for(lambda: arm.token is None, 3)                    # rolled back: the arm lease was given back
+    assert httpx.get(stack["swerve"] + "/state").json()["lease"]["held"] is False
+    node.cfg = cfg
     r = httpx.post(url + "/enable", headers=h, timeout=10)
     assert r.status_code == 200, r.text
     sw = httpx.get(stack["swerve"] + "/state").json()

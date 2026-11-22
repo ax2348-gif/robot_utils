@@ -206,9 +206,9 @@ def ee_of(cmd):
 
 
 def held(cmd):
-    """The released arm: a world target riding with the base (only these carry the base's twist feedforward)."""
+    """The released arm: a world target riding with the base (the base's twist as feedforward; no base hint)."""
     e = ee_of(cmd)
-    return e["frame"] == "world" and "twist" in e
+    return e["frame"] == "world" and "twist" in e and cmd["base"]["mode"] != "hint"
 
 
 def test_released_holds_then_engages_at_the_command_without_a_jump():
@@ -575,3 +575,94 @@ def test_a_live_headset_recording_drives_the_client():
     assert first_engaged is not None and core.status.engagements == 1
     assert states[-1] == "released"
     assert 0.0 <= out["ees"]["arm"]["gripper"] <= 1.0
+
+
+# -- velocity feedforward while engaged ----------------------------------------------------------------------
+
+def moving(state, k, v_hand=(0.0, 0.0, 0.0), w_hand=0.0, v_head=(0.0, 0.0, 0.0), dt=0.01):
+    """The state after k frames of the hand (and head) moving at constant velocity (operator frame)."""
+    hp = np.array(state.right.pos) + np.array(v_hand) * k * dt
+    rpy = (0.0, 0.0, w_hand * k * dt)
+    return replace(state, head_pos=tuple(np.array(state.head_pos) + np.array(v_head) * k * dt),
+                   right=replace(state.right, pos=tuple(hp), rpy=rpy))
+
+
+def test_engaged_target_carries_the_hands_velocity_starting_at_zero():
+    rig = Rig()
+    rig.run(IDLE)
+    rig.frame(GRIP)
+    c = rig.cmd()
+    assert ee_of(c)["twist"] == [0.0] * 6                       # engagement: no feedforward yet
+    h = c["base"]["target"]
+    assert (h["pose"]["vx"], h["pose"]["vy"], h["heading"]["omega"]) == (0.0, 0.0, 0.0)
+    v, w = np.array([0.5, 0.1, 0.0]), 0.8
+    ramp = []
+    for k in range(1, 20):                                     # the hand moves at 0.5 m/s and turns at 0.8 rad/s
+        rig.frame(moving(GRIP, k, v, w))
+        ramp.append(np.linalg.norm(ee_of(rig.cmd())["twist"][:3]))
+    assert ramp[0] < 0.05 and all(b >= a - 1e-9 for a, b in zip(ramp[:6], ramp[1:7]))   # ramps in
+    tw = np.array(ee_of(rig.last)["twist"])
+    # through the frozen frames: the operator's forward is the platform's (yaw 0.3 at engagement)
+    np.testing.assert_allclose(tw[:3], F.rot_z(0.3) @ v, atol=1e-6)
+    np.testing.assert_allclose(tw[3:], [0.0, 0.0, w], atol=1e-6)
+    # release and re-engage: zero again
+    rig.run(IDLE)
+    rig.frame(moving(GRIP, 20, v, w))
+    assert ee_of(rig.cmd())["twist"] == [0.0] * 6
+
+
+def test_engaged_hint_carries_the_heads_velocity_plus_the_sticks():
+    rig = Rig()
+    rig.run(IDLE)
+    rig.run(GRIP)
+    v = np.array([0.4, -0.1, 0.0])
+    for k in range(1, 15):                                     # walking forward and a little right
+        rig.frame(moving(GRIP, k, v_head=v))
+    h = rig.cmd()["base"]["target"]
+    np.testing.assert_allclose([h["pose"]["vx"], h["pose"]["vy"]], (F.rot_z(0.3) @ v)[:2], atol=1e-6)
+    assert h["heading"]["omega"] == pytest.approx(0.0, abs=1e-9)
+    s = stick(moving(GRIP, 15, v_head=v), (0.0, 1.0))           # plus the left stick forward (0.45 m/s)
+    rig.frame(s)
+    h = rig.cmd()["base"]["target"]
+    want = (F.rot_z(0.3) @ v)[:2] + F.rot_z(0.3)[:2, :2] @ [0.45, 0.0]
+    want *= min(1.0, 0.6 / np.linalg.norm(want))                # clamped to the WBC's max_speed
+    np.testing.assert_allclose([h["pose"]["vx"], h["pose"]["vy"]], want, atol=0.02)
+    # the head lost: its velocity is zero (the last contribution is kept)
+    rig.frame(replace(moving(GRIP, 16, v_head=v), head_tracked=False))
+    h = rig.cmd()["base"]["target"]
+    assert math.hypot(h["pose"]["vx"], h["pose"]["vy"]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_feedforward_reduces_the_lag_of_a_walking_target_through_the_controller():
+    """The client's target and twist for a hand moving at 0.15 m/s, fed to the WBC's QP (base locked): with the
+    twist the EE keeps up; without it, it trails by about v / k_pos."""
+    from robot_utils.nodes.swerve.constants import MODULES
+    from robot_utils.nodes.wbc.controller import EEState, QPController, Snapshot
+    from robot_utils.nodes.wbc.model import EESpec, WbcModel, arm_config_limits, fetch_urdf
+    from robot_utils.nodes.wbc.spec import Config as WConfig, Hints
+    from robot_utils.nodes.wbc.targets import TargetBuffer
+    urdf, _ = fetch_urdf("local")
+    m = WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),))
+    q0 = np.array([0.0, -0.6, -0.9, 0.0, 0.5, 0.0])
+    lags = {}
+    for ff in (False, True):
+        cfg = WConfig()
+        ctl = QPController(m, cfg, [(mm.x, mm.y) for mm in MODULES])
+        T0 = m.fk(m.config((0, 0, 0), {"arm": q0}), "arm")
+        rig = Rig(Config(feedforward=ff), rob=robot(0.0, 0.0, 0.0, ee_p=T0.translation, ee_r=T0.rotation))
+        rig.run(IDLE)
+        rig.run(GRIP)
+        q, v, buf, errs = q0.copy(), np.zeros(6), TargetBuffer("arm"), []
+        for k in range(1, 120):                                # 1.2 s at 0.15 m/s upward
+            rig.frame(moving(GRIP, k, (0.0, 0.0, 0.15)))
+            e = ee_of(rig.cmd())
+            tw = e.get("twist")
+            buf.set_reactive(rig.t, e["pos"], F.matrix_from_quat(e["quat"]), tw)
+            h = Hints(mode="locked")
+            out = ctl.step(Snapshot(rig.t, (0.0, 0.0, 0.0), np.zeros(3),
+                                    {"arm": EEState(q.copy(), v.copy(), buf.sample(rig.t), h.ee("arm", cfg), q0)}, h))
+            q, v = q + out.dq["arm"], out.qd["arm"].copy()
+            errs.append(np.linalg.norm(m.fk(m.config((0, 0, 0), {"arm": q}), "arm").translation - np.array(e["pos"])))
+        lags[ff] = float(np.mean(errs[-20:]))
+    assert lags[False] > 0.5 * 0.15 / WConfig().k_pos
+    assert lags[True] < 0.3 * lags[False], lags

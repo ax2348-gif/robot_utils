@@ -50,6 +50,10 @@ class ArmHttp(NodeClient):
         return off if isinstance(off, list) and len(off) == 3 else None
 
 
+class LimitsError(ValueError):
+    """The WBC's base caps exceed the swerve's hard limits."""
+
+
 class SwerveBase:
     """The swerve node as the WBC's base: lease + limits + enable, then one twist per tick through a sender
     thread (``send`` never blocks). ``failing_for()`` says how long commands have been failing."""
@@ -59,6 +63,7 @@ class SwerveBase:
         self.timeout = timeout
         self.client: Optional[SwerveClient] = None
         self.lease_id: Optional[int] = None
+        self.hard: dict = {}                      # the swerve's GET /limits "hard", read at open
         self._cond = threading.Condition()
         self._pending: Optional[tuple] = None
         self._stop = False
@@ -77,6 +82,12 @@ class SwerveBase:
             c.close()
             raise
         try:
+            hard = (c.get("/limits") or {}).get("hard") or {}
+            self.hard = hard
+            hs, hw = hard.get("max_speed"), hard.get("max_omega")
+            if (hs is not None and max_speed > hs) or (hw is not None and max_omega > hw):
+                raise LimitsError(f"the WBC's caps ({max_speed} m/s, {max_omega} rad/s) exceed the swerve's hard "
+                                  f"limits ({hs} m/s, {hw} rad/s): lower max_speed / max_omega")
             c.set_limits(max_speed, max_omega)
             c.enable()
         except Exception:

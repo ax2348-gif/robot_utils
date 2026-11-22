@@ -155,6 +155,7 @@ class WbcNode:
         self.hints = Hints()
         self.override: dict = {}
         self.override_t = -math.inf
+        self.hint_t = -math.inf          # when the base hint targets in force were given (their feedforward fades)
         self.velocity_t = -math.inf
         # enabled state
         self.state = "disabled"
@@ -389,6 +390,8 @@ class WbcNode:
         if "base" in msg and msg["base"] is not None:
             ov = parse_base(msg["base"], cfg, self.ees)
             self.override = ov
+            if "target" in ov:
+                self.hint_t = now
             if "velocity" in ov:
                 self.velocity_t = now
         if kind == "target":
@@ -509,7 +512,7 @@ class WbcNode:
                             {e: EEState(self.q_cmd[e].copy(), self.v_cmd[e].copy(), targets[e],
                                         hints.ee(e, self.cfg), self._posture(hints, e)) for e in self.ees},
                             hints, hold=why_hold is not None, base_available=self.base is not None,
-                            velocity_age=now - self.velocity_t)
+                            velocity_age=now - self.velocity_t, hint_age=now - self.hint_t)
             out = self.ctl.step(snap)
             if out.status != "ok":
                 self.solve_fail += 1
@@ -745,7 +748,9 @@ class WbcNode:
                     base.open(name, self.cfg.max_speed, self.cfg.max_omega)
                 except Exception as e:
                     base = None
-                    raise RequestError(getattr(e, "status", 503), f"swerve: {getattr(e, 'detail', e)}")
+                    from .links import LimitsError
+                    status = 422 if isinstance(e, LimitsError) else getattr(e, "status", 503)
+                    raise RequestError(status, f"swerve: {getattr(e, 'detail', e)}")
             q0 = None
             if arm_http is not None:
                 try:
@@ -815,14 +820,11 @@ class WbcNode:
         try:
             if lim.get("lo") is not None and lim.get("hi") is not None:
                 self.model.narrow_arm_limits("arm", lim["lo"][:n], lim["hi"][:n])
-            vm, a = self.ctl.caps["arm"]
-            if lim.get("joint_vel") is not None:
-                vm = np.minimum(vm, np.asarray(lim["joint_vel"][:n], float))
-            if lim.get("joint_acc") is not None:
-                a = np.minimum(a, np.asarray(lim["joint_acc"][:n], float))
-            self.ctl.caps["arm"] = (vm, a)
+            from ..arm.config import DEFAULT_SOFT
+            self.ctl.caps["arm"] = self.ctl.arm_caps(n, lim.get("joint_vel") or DEFAULT_SOFT.joint_vel,
+                                                     lim.get("joint_acc") or DEFAULT_SOFT.joint_acc)
             if lim.get("max_lead"):
-                self.resync = min(self.cfg.resync, 0.5 * float(lim["max_lead"]))
+                self.resync = min(self.cfg.resync, 0.7 * float(lim["max_lead"]))
             if lim.get("gap_max"):
                 self.gap_max = float(lim["gap_max"])
         except (TypeError, ValueError, IndexError) as e:
@@ -896,6 +898,7 @@ class WbcNode:
         h = parse_hints(doc, self.cfg, self.ees, POSTURES)
         with self.lock:
             self.hints, self.override = h, {}
+            self.hint_t = self.clock()
             if h.velocity is not None:
                 self.velocity_t = self.clock()
             self.events.add(f"hints: base {h.mode}")

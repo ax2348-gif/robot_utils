@@ -63,12 +63,23 @@ the current base pose ∘ that relative pose, with `twist` = the base's rigid-bo
 stream's commanded base twist `base_vx, base_vy` read as base-frame components and `base_w`), which cancels the
 ~20 ms lag.
 
+**Velocity feedforward while engaged.** Without it the WBC tracks on the error alone and trails a walking operator
+by `v / k` (measured in the QP at 0.5 m/s: the EE 142 mm behind, the base 250 mm). So the engaged EE target carries
+`twist` = the target's own velocity (the hand's motion through the frozen frames, linear and angular), and the base
+hint carries `vx, vy` (pose) and `omega` (heading) = the hint target's velocity (the head's motion mapped as the
+hint's position is, plus the stick offset's rate, exact). Both are least-squares slopes over the frames of the last
+`ff_window` = 60 ms on `sample_time_ns`: exact for a steady motion, about 30 ms (half the window) behind a change of
+speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the WBC's caps (0.6 m/s, 0.8 rad/s: it refuses more). Zero
+while the head is lost (its history restarts). **Every engagement starts them at zero**: only this engagement's
+frames count, and they ramp in as the window fills, so re-engaging never moves the robot. With it: the EE about 1 mm
+behind, the base about 18 mm (the same QP test). `Config(feedforward=False)` turns it off.
+
 ## The base
 
 - **Released:** no hint. Sticks deflected: `{mode: commanded, velocity: {vx, vy, omega, frame: base, ttl: 0.2}}`;
   idle: `{mode: locked}` (the base decelerates to a stop and holds).
-- **Engaged:** `{mode: hint, target: {pose: {x, y, frame: world, weight 0.5, tol 0.10}, heading: {yaw, frame:
-  world, weight 0.5, tol 0.05}}}` = the base pose at engagement + the head's motion since engagement (displacement in
+- **Engaged:** `{mode: hint, target: {pose: {x, y, vx, vy, frame: world, weight 0.5, tol 0.10}, heading: {yaw,
+  omega, frame: world, weight 0.5, tol 0.05}}}` (`vx, vy, omega`: the feedforward above) = the base pose at engagement + the head's motion since engagement (displacement in
   the engagement's operator frame mapped through the platform yaw at engagement; gravity-aligned yaw change) + the
   stick **offset**. The offset starts at zero on every engagement and integrates the sticks per frame: x/y along the
   robot base frame at integration time (stick forward = robot forward), yaw from the right stick. Stand still and
