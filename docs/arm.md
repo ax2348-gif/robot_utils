@@ -171,12 +171,19 @@ same structure and symptoms; its own process fixed them (docs/wbc.md "Processes"
   every core also busy (normal-priority burners: the robot's situation, but here nothing is real time, so both are
   preempted): tick period p99 12.1 vs 14.7 ms, max 22 vs 38 ms, overruns 4 vs 10, joint channel p99 22 vs 28 ms.
   On the robot, compare `/state` `loop_hz`, `overruns`, `process.tick_time` and `reply_latency` between the modes.
-- **Not fixed by the split:** motorbridge (the native `libmotor_abi`) starts a polling worker thread of its own when
-  the bus opens; it is created by the control thread, so SCHED_RESET_ON_FORK makes it a normal thread. It holds no
-  GIL, but under load it is likely scheduled late (replies are then stamped when the control thread's own
-  `poll_feedback_once` drains them: the reply latency reads about one tick), and the control thread may wait for a
-  lock it holds (not verified: an inference from thread listings on the robot). Raising it to real time is a
-  separate change.
+- **The bus's own reader thread.** motorbridge (the native `libmotor_abi`) starts a polling worker thread of its own
+  when the bus opens (`CoreController::start_polling_if_needed`; on the robot the one normal thread that appears
+  ~30 ms after the control thread starts, ~4% CPU, mostly system time). It holds no GIL, so the split does not
+  touch it, but created by the real-time control thread it starts as a normal thread (SCHED_RESET_ON_FORK): under
+  load it is scheduled late (replies are then stamped when the control thread's own `poll_feedback_once` drains
+  them, so the reply latency reads about a tick), and the control thread may wait for a lock it holds (an inference
+  from thread listings, not verified). So at every connect (a reconnect starts a new one) the node lists its thread
+  ids (`/proc/self/task`) before the bus is made and after it connected, takes the new ones that are not Python
+  threads, and gives the one it finds SCHED_FIFO 39, just below the loop's 40 (`common/realtime.py`
+  `raise_native_threads`). An event says what it found and set (tid, name, policy); `/state.realtime.bus_threads`
+  shows it. None or several new threads, or the change refused (RLIMIT_RTPRIO): a warning event and nothing changed;
+  the connect goes on regardless. Nothing on macOS (no `/proc`) or with a simulated bus; `ROBOT_UTILS_RT=0` turns it
+  off with the loop's own real time. Both modes (process: in the control process; thread: in the node).
 
 ## Motion layers
 

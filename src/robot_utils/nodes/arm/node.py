@@ -328,6 +328,7 @@ class ArmNode(JointStream, ArmRequests):
                 "off_cpu_max_ms": r(off.max())}
 
     def _connect(self) -> None:
+        before = realtime.task_ids()        # the bus driver's own threads: those that appear by the end of connect
         try:
             self.bus = self.bus_factory()
             try:
@@ -338,6 +339,7 @@ class ArmNode(JointStream, ArmRequests):
                 except Exception:  # noqa: BLE001
                     pass
                 raise
+            self._raise_bus_threads(before)
             self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
             if self.warm_planner:
                 Planner.warm(self.kin)      # start the planner process now, not on the first plan
@@ -355,6 +357,18 @@ class ArmNode(JointStream, ArmRequests):
                 self.events.add(f"{msg} (retrying every {CONNECT_RETRY_S:g} s)", "error")
             self.error = msg
             self._connect_at = self.clock() + CONNECT_RETRY_S
+
+    def _raise_bus_threads(self, before) -> None:
+        """motorbridge (libmotor_abi) starts a native polling worker when the bus opens; created by this real-time
+        thread it starts as a normal one (SCHED_RESET_ON_FORK), so under load it reads the replies late and may hold
+        a lock this thread then waits for. Raise it just below this loop (every connect: a reconnect starts a new
+        one). A simulated bus has none. Never fails the connect."""
+        if self.bus.sim or before is None:
+            self.realtime = {**self.realtime, "bus_threads": None}
+            return
+        rec = realtime.raise_native_threads(before, realtime.PRIO_BUS_IO, "bus reader")
+        self.realtime = {**self.realtime, "bus_threads": rec["threads"]}
+        self.events.add(realtime.describe_threads(rec, "bus reader"), rec["level"])
 
     # -- control tick ------------------------------------------------------------------------------
 
