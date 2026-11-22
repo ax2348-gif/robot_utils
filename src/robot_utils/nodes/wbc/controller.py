@@ -477,7 +477,7 @@ class QPController(Controller):
                 G_wh = OCT @ (Bm + np.outer([-wy, wx], Wy))
                 rows.append(("base_limit", pad(G_wh), cap_rows(G_wh, cfg.wheel_speed * C8)))
             # twist rate (hard)
-            rows.append(("base_limit", pad(np.vstack([OCT @ Bm, Wy, -Wy])),
+            rows.append(("rate", pad(np.vstack([OCT @ Bm, Wy, -Wy])),
                          np.concatenate([accel * dt * C8 + OCT @ prev[:2],
                                          [cfg.max_alpha * dt + prev[2], cfg.max_alpha * dt - prev[2]]])))
             for G_, h_ in reach_rows:
@@ -506,9 +506,10 @@ class QPController(Controller):
                 lo, hi = min(0.0, v_des[2] - cfg.band_omega), max(0.0, v_des[2] + cfg.band_omega)
                 rows.append(("base_band", pad(np.vstack([Wy, -Wy]), 1), np.array([hi, -lo])))
 
-        def solve_one(base_fixed: Optional[np.ndarray]):
-            G = np.vstack([r_[1] for r_ in rows])
-            hh = np.concatenate([np.atleast_1d(r_[2]) for r_ in rows])
+        def solve_one(base_fixed: Optional[np.ndarray], rate: bool = True):
+            use = [r_ for r_ in rows if rate or r_[0] != "rate"]
+            G = np.vstack([r_[1] for r_ in use])
+            hh = np.concatenate([np.atleast_1d(r_[2]) for r_ in use])
             A = b = None
             if base_fixed is not None:
                 A = np.zeros((3, N))
@@ -525,7 +526,26 @@ class QPController(Controller):
             return np.array([cy * xs[bx] + sy * xs[by], -sy * xs[bx] + cy * xs[by], xs[bw]])
 
         n_solves = 1
-        xs = solve_one(fixed)
+        J = lambda x_: float(0.5 * x_ @ Hx @ x_ + cx @ x_)      # noqa: E731  the QP's objective
+        at_rest = (fixed is None and cfg.base_start_charge > 0 and math.hypot(prev[0], prev[1]) < cfg.rest_lin
+                   and abs(prev[2]) < cfg.rest_ang)
+        if at_rest:
+            # the fixed charge of starting the base: held (braking to zero) vs free, the charge added to free
+            # decided on the base's DESIRED motion (free without the twist-rate rows: from rest one tick's
+            # rate-limited step is too small to ever beat a charge) against holding; then the command
+            hold_tw = self._step_toward(prev, np.zeros(3), accel, dt)
+            x_want, x_hold = solve_one(None, rate=False), solve_one(hold_tw, rate=False)
+            n_solves += 1
+            j_free = J(x_want) if x_want is not None else math.inf
+            j_hold = J(x_hold) if x_hold is not None else math.inf
+            diag.update(start_charge={"free": j_free, "hold": j_hold, "charge": cfg.base_start_charge})
+            if x_hold is not None and j_free + cfg.base_start_charge >= j_hold:
+                xs, fixed, why = solve_one(hold_tw), hold_tw, "at rest (start charge)"
+            else:
+                xs = solve_one(None)
+            n_solves += 1
+        else:
+            xs = solve_one(fixed)
         if xs is None and fixed is None:          # e.g. caps lowered while faster: brake within the rate limit
             fixed = self._limit_twist(self._step_toward(prev, self._limit_twist(prev, speed, omega), accel, dt),
                                       speed, omega)
@@ -538,7 +558,7 @@ class QPController(Controller):
         u = xs[:nv]
         # what bound the solution (by priority): a band that needed slack or binds, then the hard rows
         limited = "none"
-        for kind in ("reach", "manipulability", "joint_limit", "base_band", "base_limit"):
+        for kind in ("reach", "manipulability", "joint_limit", "base_band", "base_limit", "rate"):
             for k_, G_, h_ in rows:
                 if k_ == kind and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL):
                     limited = kind

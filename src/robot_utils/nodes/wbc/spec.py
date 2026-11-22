@@ -81,8 +81,15 @@ class Config:
     # base stays exactly still unless the pull to move (2 w_base_ref |v_des|, or the EE task) exceeds it, so tiny,
     # sign-flipping twists (swerve modules re-steering: chatter) are not worth commanding; while moving it biases the
     # speed by w_base_flat / (2 w_base_ref), which the pose correction absorbs. 0 = off
-    w_base_flat: float = 0.10       # sim, 2026-11-21: head sway (3 cm, 0.5 Hz) no longer moves the base; +4 cm walking lag
-    w_base_flat_yaw: float = 0.02
+    w_base_flat: float = 0.0        # (L1 per m/s; at 0.10 a constant +5 cm walking lag: off, superseded by the charge)
+    w_base_flat_yaw: float = 0.0
+    # the fixed charge of starting the base: at rest (below rest_lin / rest_ang) two QPs are solved, the base held
+    # (braking to zero) and free; free wins only if its cost plus base_start_charge is lower. Exact (two discrete
+    # outcomes), no bias while moving; tiny motions (sway, small EE pushes: swerve chatter) are never worth it.
+    # Objective units (1/2 |residual|^2, residuals in weighted m/s). 0 = off
+    base_start_charge: float = 0.01
+    rest_lin: float = 0.02          # m/s
+    rest_ang: float = 0.05          # rad/s
     base_yaw_radius: float = 0.3    # m: yaw is weighted like a point this far from the centre
     posture_weight: float = 1e-4    # default (hints override); 2e-3 biased the EE by ~3 mm
     k_posture: float = 1.0          # 1/s
@@ -127,7 +134,7 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
                 raise ValueError(f"{k} must be positive finite numbers (or null: the arm's)")
     c = replace(base or Config(), **changes)
     nonneg = ("w_min", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
-              "w_base_flat_yaw")   # 0 = off
+              "w_base_flat_yaw", "base_start_charge")   # 0 = off
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:
         v = getattr(c, k)
