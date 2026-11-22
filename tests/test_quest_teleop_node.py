@@ -25,8 +25,9 @@ IDLE = HeadsetState()
 GRIP = replace(IDLE, right=replace(IDLE.right, grip=1.0))
 REACH = replace(GRIP, right=replace(GRIP.right, pos=(0.45, -0.2, -0.30), trigger=0.8))
 RELEASED = replace(REACH, right=replace(REACH.right, grip=0.0))
-SCENARIO = [(0.0, IDLE), (0.4, IDLE), (0.41, GRIP), (0.8, GRIP), (1.2, REACH), (1.6, REACH), (1.61, RELEASED),
-            (2.0, RELEASED)]
+Y = replace(IDLE, left=replace(IDLE.left, secondary=True))     # the Y button (left): arms (Start is not live)
+SCENARIO = [(0.0, IDLE), (0.1, IDLE), (0.11, Y), (0.2, Y), (0.21, IDLE), (0.4, IDLE), (0.41, GRIP), (0.8, GRIP),
+            (1.2, REACH), (1.6, REACH), (1.61, RELEASED), (2.0, RELEASED)]
 
 
 class FakeSsh:
@@ -120,6 +121,7 @@ def test_meta_and_state_follow_the_node_contract(env):
 
 def test_start_teleop_stop_over_the_unix_socket_writing_nothing(env):
     fake, http, headset, ssh, node = env["fake"], env["http"], env["headset"], env["ssh"], env["node"]
+    fake.row["state"] = 2.0                                     # the WBC's stream shows it enabled (idle): Y arms
     wait_for(lambda: headset.n_clients == 1 and node.stream.latest()[0] is not None)
     r = http.post("/start")
     assert r.status_code == 200, r.text
@@ -159,6 +161,9 @@ def test_start_teleop_stop_over_the_unix_socket_writing_nothing(env):
     assert fake.names() == ["lease", "hints", "enable", "session", "disable", "release"]
     targets = [m for _, m in fake.datagrams if m["type"] == "target"]
     assert targets and fake.via == {"udp": 0, "unix": len(fake.datagrams)}    # local: the unix socket only
+    # Start is not live: keep-alives with armed:false until the Y press; targets only armed (one press)
+    assert fake.datagrams[0][1]["type"] == "alive" and fake.datagrams[0][1]["armed"] is False
+    assert all(m["armed"] is True and m["arm_seq"] == 1 for m in targets)
     assert {m["base"]["mode"] for m in targets} >= {"locked", "hint"}
     assert rows and rows[-1].dtype.names == tuple(FIELDS)
     states = {CLIENT_STATES[int(v)] for r in rows for v in r["client_state"]}
@@ -296,6 +301,7 @@ def test_with_the_real_wbc_over_its_unix_socket(tmp_path, monkeypatch):
         assert not st["session"]["dropped"], st["session"]["dropped"]
         assert node.state()["teleop"]["engagements"] == 1
         assert wbc.enabled and wbc.state in ("tracking", "holding", "idle")
+        assert any(e["msg"] == "ARMED (arm_seq 1)" for e in wbc.events.list())   # the Y press armed the real WBC
         # e-stop through this node: the WBC latches and forwards to the arm
         assert httpx.post(url + "/estop").json()["latched"] is True
         wait_for(lambda: arm.estopped is not None, 3)

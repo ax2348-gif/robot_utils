@@ -28,11 +28,23 @@ STICK = replace(WALK, left=replace(WALK.left, stick=(0.0, 1.0)))
 RELEASED = replace(WALK, right=replace(WALK.right, grip=0.0))
 REGRIP = replace(WALK, right=replace(WALK.right, grip=1.0, trigger=0.0))
 
-SCENARIO = [(0.0, IDLE), (0.5, IDLE), (0.51, GRIP), (1.0, GRIP), (1.5, REACH), (2.0, WALK), (2.01, STICK),
+
+def Y(s):
+    """The Y button (left controller) pressed: arms (README "Arming: Y and X")."""
+    return replace(s, left=replace(s.left, secondary=True))
+
+
+# Y arms at the start; the outage (a gap) and the reconnect disarm, so each is followed by a new Y press while
+# released, once the input is fresh again (0.5 s of good frames after the gap / reconnect)
+SCENARIO = [(0.0, IDLE), (0.2, IDLE), (0.21, Y(IDLE)), (0.3, Y(IDLE)), (0.31, IDLE),               # Y: armed
+            (0.5, IDLE), (0.51, GRIP), (1.0, GRIP), (1.5, REACH), (2.0, WALK), (2.01, STICK),
             (2.3, STICK), (2.31, WALK), (2.5, WALK), (2.51, RELEASED), (3.2, RELEASED), (3.21, REGRIP),  # in the outage
-            (3.6, REGRIP), (3.61, RELEASED), (3.8, RELEASED), (3.81, REGRIP), (4.6, REGRIP)]
+            (3.6, REGRIP), (3.61, RELEASED), (4.2, RELEASED), (4.21, Y(RELEASED)), (4.3, Y(RELEASED)),  # Y again
+            (4.31, RELEASED), (4.5, RELEASED), (4.51, REGRIP), (5.6, REGRIP),     # a new engagement; the reconnect
+            (5.61, RELEASED), (5.8, RELEASED), (5.81, Y(RELEASED)), (5.9, Y(RELEASED)), (5.91, RELEASED),   # Y
+            (6.3, RELEASED)]
 OUTAGE = (3.0, 3.4)
-RECONNECT = 4.2
+RECONNECT = 5.0
 
 
 @pytest.fixture
@@ -59,6 +71,7 @@ def phases(msgs):
 
 def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     fake, url = wbc_peer
+    fake.row["state"] = 2.0                                     # the WBC enabled (idle): Y arms without an enable
     headset = FakeHeadsetServer()
     reader = QuestReader("127.0.0.1", headset.port, reconnect_s=0.05).start()
     stream = WbcStream(url).start()
@@ -67,6 +80,7 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     halt = threading.Event()
     try:
         info = open_wbc(wbc, client.cfg)
+        client.session_opened(info)
         assert info["session"] == fake.session and wbc.udp_port == fake.udp_port
         wait_for(lambda: stream.latest()[0] is not None and headset.n_clients == 1)
         loop = threading.Thread(target=client.run, args=(halt,), daemon=True)
@@ -99,14 +113,20 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     seqs = [m["seq"] for _, m in dg]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert all(m["t"] is None for _, m in msgs)
+    # the armed latch: Start is not live (keep-alives with armed:false until Y); targets only while armed; three
+    # presses (start, after the outage, after the reconnect), one arm_seq each
+    assert dg[0][1]["type"] == "alive" and dg[0][1]["armed"] is False
+    assert all(m["armed"] is True for _, m in msgs)
+    assert sorted({m["arm_seq"] for _, m in msgs}) == [1, 2, 3]
+    assert all(not m["armed"] for _, m in dg if m["type"] == "alive")
 
     ph = phases(msgs)
     keys = [k for k, _ in ph]
-    assert keys == [("ride", "locked"),          # released: hold
+    assert keys == [("ride", "locked"),          # armed, released: hold
                     ("follow", "hint"),           # engaged: body-frozen targets, base hint (the stick adds to it)
-                    ("ride", "locked"),          # released; the outage (silence); re-grip unseen: hold
+                    ("ride", "locked"),          # released; the outage disarms (silence); Y again: hold
                     ("follow", "hint"),           # release + new engagement
-                    ("ride", "locked")], keys    # reconnect mid-engagement: hold until a new engagement
+                    ("ride", "locked")], keys    # reconnect mid-engagement disarms; Y again: hold
     assert all(m["est_reset"] == 0 for _, m in msgs)
 
     ee_p = np.array([1.52, 2.1, 0.8])            # the COMMANDED EE (the measured one is 2 cm behind)
