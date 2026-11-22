@@ -6,9 +6,13 @@ store data under a short lock and schedule a wake-up on the event loop with
 future, look at the data, and await the future (with a timeout for keep-alive pings). Taking the
 future *before* looking at the data means a publish can never be missed.
 
-Video is latest-frame-wins (only the newest frame per stream is kept). IMU is every-sample: each
-subscriber has its own bounded queue of batches (oldest dropped and counted if a client falls
-more than ``max_backlog_s`` behind).
+Video is latest-frame-wins by default (only the newest frame per stream is kept). A recording
+client can instead subscribe for every frame (``subscribe_frames``): a bounded per-client queue of
+references to the published frames (never copies), oldest dropped and counted when the client
+falls further behind than its bound. IMU is every-sample: each subscriber has its own bounded
+queue of batches (oldest dropped and counted if a client falls more than ``max_backlog_s`` behind).
+Both queues are filled on the event loop, so the owner thread only takes a short lock and
+schedules a callback: it never waits for a client.
 """
 from __future__ import annotations
 
@@ -51,6 +55,51 @@ class Frame:
             h["depth_scale"] = self.depth_scale
         return h
 
+    @property
+    def nbytes(self) -> int:
+        """Memory held by the pixel data (what a queued reference keeps alive)."""
+        d = self.data
+        return int(d.nbytes) if isinstance(d, np.ndarray) else len(d)
+
+
+class FrameSubscriber:
+    """An every-frame client's queue: references to published frames, in publish order.
+
+    Bounded by ``max_frames`` and ``max_bytes`` (whichever bites first; at least one frame is
+    always kept). Past the bound the OLDEST frames are dropped and counted per stream; the count
+    goes out with that stream's next record. Event-loop side only (no lock)."""
+
+    def __init__(self, streams, max_frames: int, max_bytes: int):
+        self.streams = frozenset(streams)
+        self.max_frames = max(1, int(max_frames))
+        self.max_bytes = int(max_bytes)
+        self.queue: deque = deque()      # (Frame, nbytes)
+        self.bytes = 0
+        self.dropped: dict[str, int] = {}
+        self.peak = 0                    # most frames ever queued (diagnostics / tests)
+        self.event = asyncio.Event()
+
+    def push(self, f: Frame) -> None:
+        nb = f.nbytes
+        self.queue.append((f, nb))
+        self.bytes += nb
+        q = self.queue
+        while len(q) > 1 and (len(q) > self.max_frames or self.bytes > self.max_bytes):
+            old, onb = q.popleft()
+            self.bytes -= onb
+            self.dropped[old.stream] = self.dropped.get(old.stream, 0) + 1
+        self.peak = max(self.peak, len(q))
+        self.event.set()
+
+    def take(self, n: int) -> list[tuple[Frame, int]]:
+        """Up to ``n`` oldest frames, each with the frames of its stream dropped before it."""
+        out = []
+        while self.queue and len(out) < n:
+            f, nb = self.queue.popleft()
+            self.bytes -= nb
+            out.append((f, self.dropped.pop(f.stream, 0)))
+        return out
+
 
 class ImuSubscriber:
     def __init__(self, max_samples: int):
@@ -81,6 +130,7 @@ class Hub:
         # IMU channels: "raw" = every 1 kHz sample (protocol.IMU_FIELDS), "state" = filter output
         # records (imu_filter.STATE_FIELDS)
         self._imu_subs: dict[str, set[ImuSubscriber]] = {"raw": set(), "state": set()}
+        self._frame_subs: set[FrameSubscriber] = set()     # every-frame clients
         self.imu_recent: deque = deque(maxlen=imu_history)   # raw rows, for GET /imu/latest
         self.imu_state_recent: deque = deque(maxlen=imu_history // 10)   # state rows
         self.clients = 0
@@ -103,7 +153,10 @@ class Hub:
         with self._lock:
             for f in frames:
                 self._latest[f.stream] = f
-        self._call(self._wake_frames)
+        if self._frame_subs:    # every-frame clients: queue references on the loop (no copies)
+            self._call(self._dispatch_frames, frames)
+        else:
+            self._call(self._wake_frames)
 
     def drop_frames(self, keep: tuple = ()) -> None:
         """Forget latest frames (pipeline restarted: shapes/streams may change)."""
@@ -155,6 +208,23 @@ class Hub:
         f, self._state_fut = self._state_fut, None
         if f is not None and not f.done():
             f.set_result(None)
+
+    def subscribe_frames(self, streams, max_frames: int, max_bytes: int) -> FrameSubscriber:
+        sub = FrameSubscriber(streams, max_frames, max_bytes)
+        self._frame_subs.add(sub)
+        return sub
+
+    def unsubscribe_frames(self, sub: FrameSubscriber) -> None:
+        self._frame_subs.discard(sub)
+        sub.queue.clear()               # drop the references now, not when the generator is collected
+        sub.bytes = 0
+
+    def _dispatch_frames(self, frames: list[Frame]) -> None:
+        for sub in self._frame_subs:
+            for f in frames:
+                if f.stream in sub.streams:
+                    sub.push(f)
+        self._wake_frames()
 
     def subscribe_imu(self, max_samples: int, channel: str = "state") -> ImuSubscriber:
         sub = ImuSubscriber(max_samples)

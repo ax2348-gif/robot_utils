@@ -206,12 +206,19 @@ class OrbbecClient:
                     yield Record(h, p, t, ts, decode_jpeg)
 
     def frames(self, streams: str = "color,depth", mode: str = "jpeg", compress: Optional[str] = None,
-               decode_jpeg: bool = True, **kw) -> Iterator[Record]:
+               decode_jpeg: bool = True, every: bool = False, max_backlog: Optional[int] = None,
+               **kw) -> Iterator[Record]:
         """Live frames (latest-wins). ``streams`` like ``"color,depth"`` or ``"color,depth:raw"``.
-        With decode_jpeg=False, color (and jpeg-mode depth/IR) stay as JPEG bytes in ``.data``."""
+        With decode_jpeg=False, color (and jpeg-mode depth/IR) stay as JPEG bytes in ``.data``.
+        ``every=True``: every frame in order (bounded backlog of ``max_backlog`` frames per stream on
+        the node; past it the oldest are dropped and counted in ``header["dropped"]``)."""
         params = {"streams": streams, "mode": mode}
         if compress:
             params["compress"] = compress
+        if every:
+            params["every"] = "true"
+            if max_backlog is not None:
+                params["max_backlog"] = max_backlog
         return self.records("/stream", params, decode_jpeg, **kw)
 
     def imu(self, raw: bool = False, batch_ms: float = 0.0, max_backlog: int = 20000, **kw) -> Iterator[Record]:
@@ -291,7 +298,7 @@ def record(base_url: str, out_dir: str, streams: str = "color,depth", mode: str 
     t_end = None if duration is None else time.monotonic() + duration
     try:
         with open(os.path.join(out_dir, "video.rec"), "wb") as f:
-            for rec in cam.frames(streams, mode=mode, decode_jpeg=False):
+            for rec in cam.frames(streams, mode=mode, decode_jpeg=False, every=True):
                 f.write(augment(rec, cam.clock.latest))
                 counts["frames"] += 1
                 counts["frames_dropped"] += rec.header.get("dropped", 0)

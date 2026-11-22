@@ -87,7 +87,8 @@ def episode_seqs(robot, eid):
 
 def test_stream_specs():
     s = StreamSpec.parse("camera/color")
-    assert (s.name, s.path, s.params) == ("camera.color", "camera/stream", {"streams": "color", "mode": "jpeg"})
+    assert (s.name, s.path, s.params) == ("camera.color", "camera/stream",
+                                            {"streams": "color", "mode": "jpeg", "every": "true"})
     s = StreamSpec.parse("quest_teleop/oplog/stream")
     assert (s.name, s.path, s.params) == ("quest_teleop.oplog", "quest_teleop/oplog/stream", {})
     assert StreamSpec.parse("arm/stream").url("http://bot/") == "http://bot/nodes/arm/stream"

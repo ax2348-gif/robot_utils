@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
@@ -33,6 +34,8 @@ from .protocol import IMU_FIELD_INFO, IMU_FIELDS, imu_payload, pack_record
 log = logging.getLogger("orbbec_node.api")
 
 PING_S = 1.0
+EVERY_MAX_FRAMES = 60      # /stream?every=true default backlog per stream: 2 s at 30 fps
+EVERY_MAX_MB = 64.0        # ... and in MB over all its streams (raw depth: ~0.8 MB/frame)
 
 DESCRIPTION = """
 HTTP node for the robot's **Orbbec Gemini 336L** (color, depth, left/right IR, IMU).
@@ -43,8 +46,9 @@ Full guide with curl / Python / JavaScript examples: `docs/orbbec_node.md` in ro
 Long-lived responses; each record is
 `[u32 big-endian header length][JSON header][payload of header.len bytes]`.
 Video is **latest-frame-wins** per client (a slow client skips frames, `dropped` counts them);
-IMU sends **every sample** in small batches. `mode=jpeg` is for monitoring (depth colormapped),
-`mode=raw` is lossless (depth uint16 × `depth_scale` = mm; IR as captured; color = the camera's own
+`every=true` (for recorders) queues every frame in order instead, up to a bounded backlog (oldest
+dropped and counted in `dropped` past it). IMU sends **every sample** in small batches.
+`mode=jpeg` is for monitoring (depth colormapped), `mode=raw` is lossless (depth uint16 × `depth_scale` = mm; IR as captured; color = the camera's own
 MJPEG bytes).
 
 ### Timestamps
@@ -62,12 +66,17 @@ TAGS = [
 
 
 class EncodeCache:
-    """One encode per (stream, mode, compression) and frame, shared by all clients."""
+    """One encode per (frame, mode, compression), shared by all clients.
+
+    Keyed weakly by the frame itself, so an entry lives exactly as long as some client still holds
+    that frame (the latest frame, or one queued for an every-frame client): a lagging every-frame
+    client reuses the encode a live client already paid for, and nothing outlives its frame."""
 
     def __init__(self, executor, owner: Owner):
         self.executor = executor
         self.owner = owner
-        self.entries: dict = {}
+        self.entries: "weakref.WeakKeyDictionary[Frame, dict]" = weakref.WeakKeyDictionary()
+        self.encodes = 0                 # encodes started (tests / diagnostics)
 
     def ensure(self, f: Frame, mode: str, compress: bool) -> asyncio.Future:
         loop = asyncio.get_running_loop()
@@ -77,12 +86,13 @@ class EncodeCache:
             fut.set_result((payload, extra, f.t_publish))
             return fut
         disp = self.owner.settings.display if mode == "jpeg" else None
-        key = (f.stream, mode, compress)
-        ent = self.entries.get(key)
-        if ent is None or ent[0] is not f or ent[1] is not disp:
+        per = self.entries.setdefault(f, {})
+        ent = per.get((mode, compress))
+        if ent is None or ent[0] is not disp:
             fut = loop.run_in_executor(self.executor, _encode, f, mode, disp, compress)
-            ent = self.entries[key] = (f, disp, fut)
-        return ent[2]
+            ent = per[(mode, compress)] = (disp, fut)
+            self.encodes += 1
+        return ent[1]
 
 
 def _encode(f, mode, disp, compress):
@@ -287,6 +297,21 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
 
     # -- streams -----------------------------------------------------------------------------
 
+    async def send_records(todo):
+        """Records for (frame, dropped, encode future) in order; the encodes run in parallel."""
+        for f, dropped, enc in todo:
+            try:
+                payload, extra, t_enc = await asyncio.shield(enc)   # shared: never cancel
+            except Exception as e:
+                log.warning("encode %s failed: %s", f.stream, e)
+                continue
+            h = f.header()
+            h.update(extra)
+            h["t_encoded"] = t_enc
+            h["dropped"] = dropped
+            h["t_send"] = time.monotonic()
+            yield pack_record(h, payload)
+
     async def frame_records(modes: dict[str, str], compress: bool):
         hub.clients += 1
         hub.state_changed()
@@ -302,18 +327,8 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                         dropped = f.seq - last[n] - 1 if n in last else 0
                         last[n] = f.seq
                         todo.append((f, dropped, cache.ensure(f, m, compress)))
-                for f, dropped, enc in todo:     # encodes of all streams run in parallel
-                    try:
-                        payload, extra, t_enc = await asyncio.shield(enc)   # shared: never cancel
-                    except Exception as e:
-                        log.warning("encode %s failed: %s", f.stream, e)
-                        continue
-                    h = f.header()
-                    h.update(extra)
-                    h["t_encoded"] = t_enc
-                    h["dropped"] = dropped
-                    h["t_send"] = time.monotonic()
-                    yield pack_record(h, payload)
+                async for rec in send_records(todo):
+                    yield rec
                 if not todo:
                     done, _ = await asyncio.wait({fut}, timeout=PING_S)
                     if not done:
@@ -321,6 +336,34 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
         finally:
             hub.clients -= 1
             hub.state_changed()
+
+    async def every_frame_records(modes: dict[str, str], compress: bool, max_frames: int, max_bytes: int):
+        """Every frame in publish order from a bounded per-client queue (see FrameSubscriber)."""
+        sub = hub.subscribe_frames(modes, max_frames, max_bytes)
+        hub.clients += 1
+        hub.state_changed()
+        try:
+            while True:
+                sub.event.clear()
+                # at most one frame per stream out of the queue at a time: the bound stays honest
+                batch = sub.take(len(modes))
+                if not batch:
+                    try:
+                        await asyncio.wait_for(sub.event.wait(), PING_S)
+                    except asyncio.TimeoutError:
+                        yield pack_record({"type": "ping", "t_send": time.monotonic()})
+                    continue
+                todo = [(f, d, cache.ensure(f, modes[f.stream], compress)) for f, d in batch]
+                async for rec in send_records(todo):
+                    yield rec
+        finally:
+            hub.unsubscribe_frames(sub)
+            hub.clients -= 1
+            hub.state_changed()
+
+    # the generators and the cache, for tests that drive a client without HTTP
+    app.state.frame_records, app.state.every_frame_records = frame_records, every_frame_records
+    app.state.encode_cache = cache
 
     stream_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
 
@@ -337,10 +380,23 @@ def create_app(owner: Owner, hub: Hub, encode_workers: int = 3) -> FastAPI:
                                                  "8-bit JPEG). `raw`: lossless (depth uint16, IR Y8/Y16). Color "
                                                  "is always the camera's MJPEG bytes."),
             compress: Literal["none", "zlib"] = Query("none", description="zlib (level 1) on raw payloads; "
-                                                      "about 2-3x smaller depth for slow links, costs Pi CPU.")):
+                                                      "about 2-3x smaller depth for slow links, costs Pi CPU."),
+            every: bool = Query(False, description="Every frame, in order (for recorders), from a bounded "
+                                "per-client queue, instead of latest-frame-wins. Past the bound the oldest "
+                                "queued frames are dropped and counted in `dropped`."),
+            max_backlog: int = Query(EVERY_MAX_FRAMES, ge=1, le=10_000,
+                                     description="`every=true`: frames queued per requested stream before the "
+                                                 "oldest are dropped (60 = 2 s at 30 fps)."),
+            max_backlog_mb: float = Query(EVERY_MAX_MB, gt=0, le=1024,
+                                          description="`every=true`: MB of frames queued (all streams) before "
+                                                      "the oldest are dropped.")):
         modes = _parse_streams(streams, mode)
-        return StreamingResponse(frame_records(modes, compress == "zlib"),
-                                 media_type="application/octet-stream", headers=stream_headers)
+        if every:
+            gen = every_frame_records(modes, compress == "zlib", max_backlog * len(modes),
+                                      int(max_backlog_mb * 1e6))
+        else:
+            gen = frame_records(modes, compress == "zlib")
+        return StreamingResponse(gen, media_type="application/octet-stream", headers=stream_headers)
 
     async def latest_frame(name: str, timeout: float = 3.0) -> Frame:
         if name not in STREAM_NAMES:
