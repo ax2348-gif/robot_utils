@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from ...nodes.common.server import add_page_routes
 from .dataset import Library
 from .export import Exporter, Settings, camera_frames, estimate
-from .model import arm_chain, load_description
+from .model import arm_chain, load_description, recorded_model
 from .page import PAGE_HTML
 
 MAX_ROWS = 400_000
@@ -85,7 +85,9 @@ def build_app(lib: Library, exporter: Exporter, description: Optional[str] = Non
             chain["c"] = arm_chain()
         desc, how = model_cache[key]
         c, chow = chain["c"]
-        return {"description": desc, "description_source": how, "chain": c, "chain_source": chow}
+        _, info = recorded_model(r.path)
+        return {"description": desc, "description_source": how, "chain": c, "chain_source": chow,
+                "model_version": info.get("model_version"), "model_options": info.get("options")}
 
     @app.get("/api/rows")
     def rows(key: str, stream_name: str = Query(..., alias="stream"), fields: str = "", t0: float = 0.0,

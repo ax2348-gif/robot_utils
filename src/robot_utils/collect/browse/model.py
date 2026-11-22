@@ -1,12 +1,13 @@
 """The robot model for the 3D view: the description (frames, base geometry, cameras) and the arm's kinematic chain.
 
 The recorder does not save the model (``session.json`` has no description or model version; docs/browse.md
-"Model"), so the description comes from, in order:
+"Model"), the description comes from, in order:
 
-1. ``--description`` given: a JSON file (the description node's ``GET /description``), a description node URL
-   (``http://botcore/nodes/description``: fetched once), or a description data directory (a sim's
-   ``~/.local/share/robot_utils/sim/description``: its overrides and active calibrations);
-2. ``<recording>/description.json`` (what a future recorder could save once per session);
+1. ``<session>/description.json``: saved by ``collect run`` at the start of every session since 6f5a844 (with
+   ``model.json``, ``model.urdf`` and ``session.json`` ``description.model_version``);
+2. ``--description`` (sessions recorded before that): a JSON file (the description node's ``GET /description``),
+   a description node URL (``http://botcore/nodes/description``: fetched now), or a description data directory
+   (a sim's ``~/.local/share/robot_utils/sim/description``);
 3. the package default (``default_description.yaml``, nominal mounts): labelled as such.
 
 The arm chain (``arm_chain``) is what the page needs to draw the arm from recorded joint angles: per joint its
@@ -25,26 +26,49 @@ from typing import Optional
 import numpy as np
 
 
+def recorded_model(recording_dir: Optional[Path]) -> tuple[Optional[Path], dict]:
+    """The session directory holding the recorded description (an episode dir: its session's) and what
+    ``session.json`` / ``model.json`` say about it (``model_version``, options); ``(None, {})`` if not recorded."""
+    if recording_dir is None:
+        return None, {}
+    for d in (recording_dir, recording_dir.parent.parent):        # an episode dir: <session>/episodes/<id>
+        if (d / "description.json").is_file():
+            info = {}
+            try:
+                info = dict(json.loads((d / "session.json").read_text()).get("description") or {})
+            except (OSError, ValueError):
+                pass
+            if not info.get("model_version"):
+                try:
+                    info["model_version"] = json.loads((d / "model.json").read_text()).get("model_version")
+                except (OSError, ValueError):
+                    pass
+            return d, info
+    return None, {}
+
+
 def load_description(spec: Optional[str], recording_dir: Optional[Path] = None) -> tuple[Optional[dict], str]:
-    """(description, where it came from)."""
+    """(description, where it came from). The recording's own (``description.json``, saved by ``collect run``
+    since 6f5a844) first; then ``spec`` (``--description``: the fallback for older sessions); then the package
+    default."""
+    d, info = recorded_model(recording_dir)
+    if d is not None:
+        v = info.get("model_version")
+        return json.loads((d / "description.json").read_text()), \
+            f"recorded with the session{f' (model {v})' if v else ''}"
     if spec:
         if spec.startswith(("http://", "https://")):
             url = spec.rstrip("/")
             if not url.endswith("/description"):
                 url += "/description"
             with urllib.request.urlopen(url, timeout=5) as r:
-                return json.loads(r.read()), f"fetched from {url}"
+                return json.loads(r.read()), f"fetched from {url} now (not recorded with this session)"
         p = Path(spec).expanduser()
         if p.is_file():
-            return json.loads(p.read_text()), f"file {p}"
+            return json.loads(p.read_text()), f"file {p} (not recorded with this session)"
         if p.is_dir():
-            return _from_data_dir(p), f"description data dir {p}"
+            return _from_data_dir(p), f"description data dir {p} (not recorded with this session)"
         raise ValueError(f"--description {spec!r}: not a URL, a JSON file or a directory")
-    if recording_dir is not None:
-        for d in (recording_dir, recording_dir.parent.parent):        # an episode dir: its session's
-            f = d / "description.json"
-            if f.is_file():
-                return json.loads(f.read_text()), f"recorded {f}"
     try:
         return _from_data_dir(Path(tempfile.mkdtemp(prefix="ru-browse-desc-"))), \
             "package default (nominal mounts; not saved with the recording)"

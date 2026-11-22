@@ -275,3 +275,21 @@ def test_http_api(session, cache):
     assert c.get("/api/rows", params={"key": "s1", "stream": "nope", "t0": 0, "t1": 1}).status_code == 404
     assert c.get("/api/recording", params={"key": "../x"}).status_code == 404
     assert c.post("/api/export", json={"settings": {}, "frames": 1}).status_code == 409        # no ffmpeg
+
+
+def test_recorded_description_wins(tmp_path):
+    """A session's own description.json (collect run since 6f5a844) beats --description and the package default,
+    for the session and its cut episodes; model_version comes from session.json."""
+    from robot_utils.collect.browse.model import load_description, recorded_model
+    s = tmp_path / "s"
+    (s / "episodes" / "e1").mkdir(parents=True)
+    (s / "description.json").write_text(json.dumps({"frames_in_base": {"arm": [[1, 0, 0, 0]] * 4}, "tag": "rec"}))
+    (s / "session.json").write_text(json.dumps({"description": {"model_version": "abc123", "options": {"mounts": "calibrated"}}}))
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"tag": "flag"}))
+    for d in (s, s / "episodes" / "e1"):
+        desc, how = load_description(str(other), d)
+        assert desc["tag"] == "rec" and "abc123" in how
+        assert recorded_model(d)[1]["model_version"] == "abc123"
+    desc, how = load_description(str(other), tmp_path / "old")        # not recorded: the flag
+    assert desc["tag"] == "flag" and "not recorded" in how

@@ -615,7 +615,8 @@ async function openRec(key, ep){
     S.rec = rec; S.model = model;
     const wbc = rec.streams.wbc; const m = wbc && (wbc.fields || []).map(f => f[0].match(/^(.+)_tgt_x$/)).find(Boolean); S.ee = m ? m[1] : "arm";
     S.modules = (model.description && model.description.robot && model.description.robot.modules) || [{name: "FL", x: 0.1656, y: 0.1656}, {name: "FR", x: 0.1656, y: -0.1656}, {name: "RR", x: -0.1656, y: -0.1656}, {name: "RL", x: -0.1656, y: 0.1656}];
-    $("#src").textContent = `${rec.path} · model: ${model.description_source}${model.chain ? "" : " · " + model.chain_source}`;
+    $("#src").textContent = `${rec.path} · model ${model.model_version || "version not recorded"}: ${model.description_source}${model.chain ? "" : " · " + model.chain_source}`;
+    $("#src").title = $("#src").textContent;
     const cams = $("#cams"); cams.innerHTML = "";
     for (const n of camNames()){ F[n] = new Frames(n); const el = document.createElement("div"); el.className = "panel cam"; el.dataset.name = n; el.dataset.panel = "camera";
       el.innerHTML = `<canvas></canvas><div class="lab">${n} · ${(rec.streams[n].fps || 0).toFixed(1)} fps${rec.streams[n].dropped ? " · " + rec.streams[n].dropped + " dropped" : ""}</div>`; cams.appendChild(el); }
@@ -635,7 +636,7 @@ async function openRec(key, ep){
   }
   const rec = S.rec;
   if (ep && fin(ep.t_start)){ const pad = 1.0; S.t0 = Math.max(rec.t0, ep.t_start - pad); S.t1 = Math.min(rec.t1, (fin(ep.t_stop) ? ep.t_stop : rec.t1) + pad); S.zero = ep.t_start;
-    $("#title").textContent = `Episode ${ep.id}`; $("#src").title = ep.task || ""; }
+    $("#title").textContent = `Episode ${ep.id}`; }
   else { S.t0 = rec.t0; S.t1 = rec.t1; S.zero = rec.kind === "episode" && fin(rec.meta.t_start) ? rec.meta.t_start : rec.t0; }
   S.ep = ep; S.t = S.t0; S.inT = S.outT = null; showInOut();
   document.querySelectorAll("aside .it").forEach(el => el.classList.toggle("sel", el.dataset.key === key + (ep ? "#" + ep.id : "") || (!ep && el.dataset.key === key)));

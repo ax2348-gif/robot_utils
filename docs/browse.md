@@ -117,17 +117,18 @@ record. The browser would then read the anchors from the events and keep the rec
 
 ## Model
 
-`session.json` records neither the robot description nor a model version, so the 3D view takes the description
-from, in order: `--description` (a JSON file of the description node's `GET /description`, a description node URL,
-or a description data dir such as the sim's `~/.local/share/robot_utils/sim/description`); `<session>/description.json`;
-the package default (nominal camera mounts and arm mount: labelled "package default" in the header). The arm's
-chain (joint placements and axes, `end_link`, the TCP) comes from the arm node's pinocchio model
+Sessions recorded by `collect run` since 6f5a844 carry their model: `description.json` (the description node's
+`GET /description`), `model.json` (`GET /model`: `model_version`, options such as `mounts: calibrated`, components,
+joints), `model.urdf`, and `session.json` `description: {node, model_version, options, files}`. The 3D view takes
+the description from, in order: the recording's own `description.json` (a cut episode uses its session's); else
+`--description` (for sessions recorded before that: a JSON file, a description node URL such as
+`http://botcore-desktop.local/nodes/description`, fetched now, or a description data dir); else the package default
+(nominal mounts). The header shows the model version (or "version not recorded") and where the description came
+from. The arm's chain (joint placements and axes, `end_link`, the TCP) comes from the arm node's pinocchio model
 (`arm.kin.ArmKinematics`, rebot_ctl's URDF) and the page runs the forward kinematics (tested equal to
 `ArmKinematics.frames`). Without rebot_ctl the arm is drawn as its EE poses only.
 
-**Decision for the owner:** have `collect run` save, once per session at start, `GET /nodes/description/description`
-as `<session>/description.json` (the browser already reads it) and `GET /nodes/description/model`'s `version` in
-`session.json` (so a model change between sessions is visible). Client-side only; about ten lines in `session.py`.
+Later: draw real meshes from the recorded `model.urdf` / `model.json` instead of the wireframe boxes.
 
 ## Export
 
