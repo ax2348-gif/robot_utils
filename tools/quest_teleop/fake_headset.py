@@ -183,6 +183,8 @@ class HandState:
     stick: tuple = (0.0, 0.0)            # raw joystick (x right, y up)
     tracked: bool = True
     click: bool = False                  # thumbstick click
+    primary: bool = False                # X (left) / A (right; also HeadsetState.align)
+    secondary: bool = False              # Y (left) / B (right)
 
 
 @dataclass
@@ -251,8 +253,8 @@ class Headset:
                 "orientation_valid": hs.tracked, "position_tracked": hs.tracked, "orientation_tracked": hs.tracked,
                 "pose": F.matrix16_from_pose(hi.p, hi.r) if hs.tracked else None,
                 "trigger": hs.trigger, "grip": hs.grip, "joystick": list(hs.stick),
-                "buttons": {"primary": name == "right" and s.align, "secondary": False, "thumb_rest": False,
-                            "stick": hs.click}}
+                "buttons": {"primary": (name == "right" and s.align) or hs.primary, "secondary": hs.secondary,
+                            "thumb_rest": False, "stick": hs.click}}
         self.seq += 1
         return frame
 

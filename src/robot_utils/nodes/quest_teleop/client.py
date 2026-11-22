@@ -52,4 +52,5 @@ class LocalWbcClient(WbcClient):
         self.session = int(out["session"])
         self.udp_port = None if port is None else int(port)
         self.seq = 0
+        self.arm_seq_floor = int(out.get("arm_seq") or 0)
         return out
