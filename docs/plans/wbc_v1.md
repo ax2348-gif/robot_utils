@@ -175,6 +175,26 @@ frame; the base pose and estimator reset id used; the target/chunk id and `seq` 
 
 ## Open decisions
 
+**Deferred until after the first real-robot test (noted 2026-11-21):**
+- **Explicit commands bypass the start charge** (decided approach): at rest the charge compares *free* against
+  *follow the operator's explicit command* (within the rate limit; zero when none) instead of *brake to zero*, so
+  the charge prices only motion nobody asked for (sway, EE pushes, small pose corrections). Explicit = commanded-mode
+  stick velocity; engaged, the client sends the stick rate as a separate `explicit` velocity next to the hint (the
+  head part stays charged). Today the charge also gates sticks: 0.1–0.15 m/s never starts the base from rest
+  (~35 % of stick travel). Tests: full stick from rest (released, engaged), sway still suppressed while the stick
+  drives, the charge still applying to EE-driven assistance.
+- **The base pose reference is (x, y, theta) as one unit** (the owner's design: "pose" always meant x, y, theta).
+  Replace the hint's separate `pose` {x, y} + `heading` {yaw | face} with one base pose reference; a reference
+  without theta is refused (not defaulted to the current heading); the `face` options go (never in the design).
+  Found because a pose-only band could trap the EE off target (the base turned 0.5 rad, joint 1 at its limit,
+  27 mm residual). The Quest client always sends both, so teleop is unaffected until then.
+- `PoseHint.weight` / `HeadingHint.weight` are parsed but unused (the base weight is `w_base_ref` x `arm_vs_base`).
+- Client: with the sticks moving, the engaged EE target uses the previous frame's stick offset (`_track` before
+  `_sticks` in body_frozen.py; ~4.5 mm at full stick): reorder.
+- Expected, not an issue: a horizontal 15 cm hand circle at 1 Hz starts the base (the arm at its 2 rad/s joint
+  caps cannot produce that EE speed: the base assists, as designed); the vertical circle stays within the arm.
+
+
 - The second research pass on streaming interfaces (UR `servoL` lookahead/gain, Franka's Cartesian streaming, MoveIt
   Servo timeouts and slow-downs, DROID / Open-X / LeRobot / openpi action conventions) before freezing the target
   message.

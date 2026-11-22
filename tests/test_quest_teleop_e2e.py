@@ -117,15 +117,17 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     np.testing.assert_allclose(first["pos"], ee_p, atol=1e-4)
     np.testing.assert_allclose(F.matrix_from_quat(first["quat"]), ee_r, atol=1e-4)
     last = ph[1][1][-1][1]["ees"]["arm"]
-    np.testing.assert_allclose(last["pos"], ee_p + F.rot_z(base_yaw) @ [0.6, 0.0, 0.05], atol=2e-3)
-    assert last["gripper"] == pytest.approx(0.8, abs=0.01)
+    assert last["gripper"] == pytest.approx(1.0 - 0.8, abs=0.01)     # trigger 0.8 squeezed: the opening is 0.2
     # the base hint: the base pose at engagement, then + the walk (0.5 m forward) + the stick offset (~0.3 s forward)
     h0 = ph[1][1][0][1]["base"]["target"]
     assert (h0["pose"]["x"], h0["pose"]["y"], h0["heading"]["yaw"]) == (1.0, 2.0, pytest.approx(base_yaw))
     h1 = ph[1][1][-1][1]["base"]["target"]
-    forward = (np.array([h1["pose"]["x"], h1["pose"]["y"]]) - [1.0, 2.0]) @ [np.cos(base_yaw), np.sin(base_yaw)]
-    assert 0.5 + 0.08 < forward < 0.5 + 0.2
+    fwd = np.array([np.cos(base_yaw), np.sin(base_yaw)])
+    offset = np.array([h1["pose"]["x"], h1["pose"]["y"]]) - [1.0, 2.0] - 0.5 * fwd
+    assert 0.08 < offset @ fwd < 0.2
     assert h1["heading"]["yaw"] == pytest.approx(base_yaw, abs=1e-6)
+    # the EE target: the hand's reach and walk, moved with the same stick offset as the hint (no turn: a translation)
+    np.testing.assert_allclose(last["pos"], ee_p + F.rot_z(base_yaw) @ [0.6, 0.0, 0.05] + [*offset, 0.0], atol=2e-3)
     # the outage: nothing sent for most of it
     gaps = np.diff([t for t, _ in ph[2][1]])
     assert gaps.max() > 0.3
