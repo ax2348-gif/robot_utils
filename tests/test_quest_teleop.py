@@ -546,3 +546,32 @@ def test_robot_state_from_a_stream_row():
     assert s.ee_source == "meas" and s.ee_p[0] == 1.0
     assert RobotState.from_row({**row, "arm_cmd_x": float("nan"), "arm_meas_x": float("nan")}, 5.0) is None
     assert RobotState.from_row({k: v for k, v in row.items() if k != "base_yaw"}, 5.0) is None
+
+
+def test_a_live_headset_recording_drives_the_client():
+    """53 frames recorded from the headset (body-frozen, 2026-11-21, quest_probe.py) around a left-grip
+    engagement: every frame passes the gate, the grip engages without moving the target off the commanded anchor,
+    the release holds it, and the live field types (integer gripper, null poses) parse."""
+    import gzip
+    import json
+    path = Path(__file__).parent / "data" / "quest_live_body_frozen.jsonl.gz"
+    recs = [json.loads(line) for line in gzip.open(path, "rt")]
+    gate, core = QuestGate(), TeleopCore(Config(hand="left"))
+    r = robot(ee_r=np.eye(3))
+    first_engaged, states = None, []
+    for d in recs:
+        now = d["rx"]
+        r = replace(r, t_recv=now)
+        v = gate.check(Frame(d["record"], now, 1))
+        assert v.accept and v.valid, v.reason
+        core.on_frame(d["record"], v, r, now)
+        out = core.command(now, gate.fresh(now), r)
+        assert isinstance(out, dict)
+        states.append(core.status.state)
+        if core.status.state == "engaged" and first_engaged is None:
+            first_engaged = out
+            assert np.allclose(out["ees"]["arm"]["pos"], r.ee_p)   # engaging never moves the target
+            assert out["base"]["mode"] == "hint"
+    assert first_engaged is not None and core.status.engagements == 1
+    assert states[-1] == "released"
+    assert 0.0 <= out["ees"]["arm"]["gripper"] <= 1.0
