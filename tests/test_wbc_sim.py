@@ -86,8 +86,9 @@ def test_whole_body_reach_in_the_sim_world(world):
         while time.monotonic() < t_end:
             seq += 1
             udp.sendto(json.dumps({"type": "target", "session": s["session"], "seq": seq, "t": None,
-                                   "armed": True, "arm_seq": s.get("arm_seq", 0) + 1,     # armed (one press)
-                                   "ees": {"arm": {"pos": list(goal), "quat": q0}}}).encode(),
+                                   "armed": True, "arm_seq": s.get("arm_seq", 0) + 1,     # armed (one press) at
+                                   "ees": {"arm": {"pos": list(p0 if seq <= 3 else goal),   # the commanded pose,
+                                                   "quat": q0}}}).encode(),                 # then the goal
                        ("127.0.0.1", s["udp_port"]))
             time.sleep(0.02)
             if seq % 25 == 0:

@@ -24,7 +24,7 @@ def stick(state, left=(0.0, 0.0), right_x=0.0):
 
 class Rig:
     def __init__(self):
-        self.hs, self.gate, self.core = Headset(), QuestGate(), TeleopCore(Config())
+        self.hs, self.gate, self.core = Headset(), QuestGate(rate_window=0.0, recover_s=0.0), TeleopCore(Config())
         self.t = 100.0
         self.rob = RobotState(0.0, np.array([1.5, 2.1, 0.8]), F.rot_axis((1, 1, 0), 0.7), 1.0, 2.0, 0.3, 0.0)
 

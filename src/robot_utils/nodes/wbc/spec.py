@@ -106,6 +106,10 @@ class Config:
     chunk_max_horizon: float = 10.0  # s
     blend_tau: float = 0.15         # s, the chunk cross-fade's time constant
     max_ttl: float = 1.0            # s, commanded base velocity ttl cap
+    # an ARMING datagram's target must lie this close to the commanded EE (else refused: the press does not arm), so a
+    # client holding a stale riding pose (the arm moved meanwhile, e.g. floating while disabled) can never jump it
+    arm_target_pos: float = 0.02    # m
+    arm_target_rot: float = 0.0873  # rad (5 deg)
     # estimator
     require_imu: bool = False
     est_stale: float = 0.2          # s without an estimator row -> hold

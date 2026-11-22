@@ -92,29 +92,125 @@ def test_focus_loss_mid_press_needs_a_new_press():
     rig.arm()
 
 
-def test_y_on_a_disabled_wbc_enables_then_arms_if_still_held():
+def slow_enable(rig, frames_enabling=10):
+    """The real WBC: POST /enable answers, but the rows show 'enabling' (1) for a while before 'idle' (2)."""
+    state = {"left": None}
+
+    def enable():
+        rig.wbc.calls.append("enable")
+        rig.stream.row["state"] = 1.0
+        state["left"] = frames_enabling
+        return {"enabled": True}
+    rig.wbc.enable = enable
+    orig = rig.frame
+
+    def frame(s, **kw):
+        if state["left"] is not None:
+            state["left"] -= 1
+            if state["left"] <= 0:
+                rig.stream.row["state"], state["left"] = 2.0, None
+        return orig(s, **kw)
+    rig.frame = frame
+
+
+def x_then_y(rig, y_frames):
+    """Armed, then X (disabled), then one deliberate Y press of ``y_frames`` frames, then Y released."""
+    rig.arm()
+    rig.frame(X())
+    assert rig.stream.row["state"] == 0.0 and not rig.latch.armed
+    rig.run(IDLE, 2)
+    rig.run(Y(), y_frames)
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_x_then_one_y_press_waits_through_enabling_and_arms(held):
+    """The real-robot bug: after X, Y left the client 'stuck on the WBC is enabling'. One press now waits through
+    the enabling rows and arms on the first enabled row after our enable, whether Y is still held or released."""
     rig = Rig()
-    rig.stream.row["state"] = 0.0                               # disabled (by X earlier, say)
+    slow_enable(rig, 10)
+    x_then_y(rig, 3)
+    assert rig.wbc.calls == ["disable", "enable"] and rig.latch.pending_arm
+    assert rig.latch.reason == "enabling the WBC…"
+    for _ in range(5):                                          # rows: enabling
+        rig.frame(Y() if held else IDLE)
+        assert not rig.latch.armed and rig.latch.pending_arm and rig.stream.row["state"] == 1.0
+    rig.run(Y() if held else IDLE, 8)                           # the row turns enabled: armed (one press)
+    assert rig.latch.armed and rig.latch.reason == "armed" and rig.latch.presses == 2
+    assert rig.stream.row["armed"] == 1.0 and rig.wbc.calls == ["disable", "enable"]
+
+
+def test_a_pending_arm_times_out():
+    rig = Rig()
+    slow_enable(rig, 10_000)                                    # never enabled
+    x_then_y(rig, 3)
+    rig.run(IDLE, 150)                                          # 1.5 s: still waiting
+    assert rig.latch.pending_arm and not rig.latch.armed
+    rig.run(IDLE, 60)                                           # past 2 s
+    assert not rig.latch.pending_arm and not rig.latch.armed
+    assert rig.latch.reason.startswith("arm cancelled: the WBC did not enable within 2")
+
+
+def test_x_during_a_pending_enable_cancels_and_disables():
+    rig = Rig()
+    slow_enable(rig, 30)
+    x_then_y(rig, 3)
+    rig.run(IDLE, 5)
+    rig.frame(X())
+    assert not rig.latch.pending_arm and rig.latch.reason == "arm cancelled: X: disabled"
+    assert rig.wbc.calls[-1] == "disable"
+    rig.run(IDLE, 40)
+    assert not rig.latch.armed
+
+
+def test_a_fault_row_cancels_a_pending_arm():
+    rig = Rig()
+    slow_enable(rig, 30)
+    x_then_y(rig, 3)
+    rig.run(IDLE, 3)
+    rig.stream.row["state"] = 5.0
+    rig.frame(IDLE)
+    assert not rig.latch.pending_arm and "fault" in rig.latch.reason and not rig.latch.armed
+
+
+@pytest.mark.parametrize("spoiler,why", [(GRIP, "grip"), (stick(IDLE, (0.0, 0.6)), "stick")])
+def test_preconditions_failing_at_completion_cancel(spoiler, why):
+    rig = Rig()
+    slow_enable(rig, 10)
+    x_then_y(rig, 3)
+    rig.run(spoiler, 15)                                        # enabled while a grip / stick is used
+    assert not rig.latch.armed and not rig.latch.pending_arm
+    assert rig.latch.reason.startswith("arm cancelled: ") and why in rig.latch.reason
+
+
+def test_a_disarm_condition_cancels_a_pending_arm():
+    rig = Rig()
+    slow_enable(rig, 30)
+    x_then_y(rig, 3)
+    rig.frame(replace(IDLE, session=2))                         # a discontinuity
+    assert not rig.latch.pending_arm and rig.latch.reason.startswith("arm cancelled: headset discontinuity")
+    rig.run(IDLE, 40)
+    assert not rig.latch.armed
+
+
+def test_a_refused_enable_cancels_with_the_reason():
+    rig = Rig()
+    rig.stream.row["state"] = 0.0
+    rig.wbc.refuse_enable = "e-stop is latched"
+    rig.run(IDLE, 2)
+    rig.run(Y(), 6)
+    assert not rig.latch.armed and rig.latch.reason == "arm cancelled: enable refused: e-stop is latched"
+
+
+def test_the_reason_reflects_the_state():
+    rig = Rig()
+    assert rig.latch.reason == "not armed: press Y"
+    rig.arm()
+    assert rig.latch.reason == "armed"
+    rig.frame(X())
+    assert rig.latch.reason == "X: disabled (Y re-enables and arms)"
     rig.run(IDLE, 2)
     rig.run(Y(), 3)
-    assert rig.wbc.calls == ["enable"] and not rig.latch.armed  # the press asked for the enable
-    rig.frame(Y())                                              # enabled; Y still held: armed
-    assert rig.latch.armed and rig.stream.row["armed"] == 1.0
-    # enabled and released before the arm: no arm
-    rig2 = Rig()
-    rig2.stream.row["state"] = 0.0
-    rig2.client.actions.sync = True
-    rig2.run(IDLE, 2)
-    rig2.run(Y(), 3)
-    rig2.run(IDLE, 3)
-    assert rig2.wbc.calls == ["enable"] and not rig2.latch.armed
-    # a refused enable: no arm, the reason shown
-    rig3 = Rig()
-    rig3.stream.row["state"] = 0.0
-    rig3.wbc.refuse_enable = "e-stop is latched"
-    rig3.run(IDLE, 2)
-    rig3.run(Y(), 6)
-    assert not rig3.latch.armed and "e-stop is latched" in rig3.latch.reason
+    assert rig.latch.reason == "enabling the WBC…"
 
 
 # -- X: level-triggered disable ------------------------------------------------------------------------------
@@ -219,6 +315,31 @@ def test_a_wbc_row_older_than_the_arming_datagram_never_disarms():
     old["seq"] = float(rig.wbc.seq)                             # a row after our datagrams, disabled: disarm
     rig.frame(IDLE)
     assert not rig.latch.armed and "disabled" in rig.latch.reason
+
+
+def test_a_stale_wbc_row_after_arming_disarms():
+    """Armed, the WBC rows stop arriving (the stream died): disarm once the newest row is older than 0.3 s; the
+    rows coming back never re-arm."""
+    rig = Rig()
+    rig.arm()
+    rig.stream.frozen = True
+    rig.run(IDLE, 25)                                           # 0.25 s: still within
+    assert rig.latch.armed
+    n = len(rig.wbc.msgs)
+    rig.run(IDLE, 10)                                           # 0.35 s
+    assert not rig.latch.armed and "WBC state stale" in rig.latch.reason
+    after = rig.since(n)
+    k = next(i for i, m in enumerate(after) if m["armed"] is False)      # sent at the disarm ...
+    assert all(m["armed"] is False for m in after[k:])                    # ... and from then on
+    rig.stream.frozen = False
+    rig.run(IDLE, 20)
+    assert not rig.latch.armed
+    from quest_teleop.arming import LatchConfig                 # configurable
+    rig2 = Rig(latch=LatchConfig(wbc_stale_s=0.1))
+    rig2.arm()
+    rig2.stream.frozen = True
+    rig2.run(IDLE, 15)
+    assert not rig2.latch.armed
 
 
 def test_alive_and_the_old_press_never_rearm_after_a_wbc_side_disarm():

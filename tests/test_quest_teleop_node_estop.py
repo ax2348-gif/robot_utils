@@ -114,8 +114,9 @@ def test_start_is_not_live_and_x_disables_without_stopping_teleop(env):
 
 def test_y_arms_through_the_node_and_the_estop_stops_teleop(env):
     fake, node, state = env["fake"], env["node"], env["state"]
+    fake.row["state"] = 2.0                                     # the row shows it enabled (the fake never updates it)
     node.start_teleop()
-    time.sleep(0.2)
+    time.sleep(0.8)                                             # (fresh after a full 0.5 s window)
     state["s"] = replace(IDLE, left=replace(IDLE.left, secondary=True))   # Y held
     wait_for(lambda: node.client is not None and node.client.latch.armed, 3)
     n = len(fake.datagrams)

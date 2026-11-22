@@ -148,7 +148,10 @@ class TeleopClient:
                 self.core.on_arm(frame)
         self.latch.events.clear()
         for what, ok, detail in self.actions.drain():
-            (self.latch.enable_done if what == "enable" else self.latch.disable_done)(ok, detail)
+            if what == "enable":                 # the seq sent so far: a row that reflects the enable comes later
+                self.latch.enable_done(ok, detail, seq=getattr(self.wbc, "seq", None))
+            else:
+                self.latch.disable_done(ok, detail)
 
     def step(self, wait: float = 0.05) -> Optional[dict]:
         self._latch_events(None)                 # HTTP results that arrived meanwhile

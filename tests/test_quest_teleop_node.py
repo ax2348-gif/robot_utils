@@ -26,8 +26,9 @@ GRIP = replace(IDLE, right=replace(IDLE.right, grip=1.0))
 REACH = replace(GRIP, right=replace(GRIP.right, pos=(0.45, -0.2, -0.30), trigger=0.8))
 RELEASED = replace(REACH, right=replace(REACH.right, grip=0.0))
 Y = replace(IDLE, left=replace(IDLE.left, secondary=True))     # the Y button (left): arms (Start is not live)
-SCENARIO = [(0.0, IDLE), (0.1, IDLE), (0.11, Y), (0.2, Y), (0.21, IDLE), (0.4, IDLE), (0.41, GRIP), (0.8, GRIP),
-            (1.2, REACH), (1.6, REACH), (1.61, RELEASED), (2.0, RELEASED)]
+# (input is fresh only after a full 0.5 s window after the connect: Y at 0.7 s)
+SCENARIO = [(0.0, IDLE), (0.7, IDLE), (0.71, Y), (0.8, Y), (0.81, IDLE), (0.9, IDLE), (0.91, GRIP), (1.3, GRIP),
+            (1.7, REACH), (2.1, REACH), (2.11, RELEASED), (2.5, RELEASED)]
 
 
 class FakeSsh:

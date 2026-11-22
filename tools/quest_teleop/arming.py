@@ -12,8 +12,9 @@ sockets, the clock is passed in; ``teleop.TeleopClient`` runs the HTTP requests 
   Anything failing during the press spoils it (release Y and press again).
 - **Disarm** (``armed: false`` at once, then in every datagram): X; any discontinuity (``QuestGate``: reconnect,
   session, revision, gap); an invalid frame (unfocused, ...); stale, late or slow input (``QuestGate.fresh``); the
-  LEFT controller inactive (the stop button gone); no command to send; the WBC's own row showing it disarmed after
-  it processed our arming datagram, or not enabled. Nothing re-arms on its own: every arm is a new Y press.
+  LEFT controller inactive (the stop button gone); no command to send; the WBC's rows stale (newest older than
+  ``wbc_stale_s``, 0.3 s); the WBC's own row showing it disarmed after it processed our arming datagram, or not
+  enabled. Nothing re-arms on its own: every arm is a new Y press.
 """
 from __future__ import annotations
 
@@ -74,7 +75,9 @@ class LatchConfig:
     grip_max: float = 0.4             # both grips below this to arm
     dead_zone: float = DEAD_ZONE
     robot_stale_s: float = 0.3        # the WBC row must be younger than this to arm
+    wbc_stale_s: float = 0.3          # armed: the newest WBC row older than this disarms
     disable_retry_s: float = 1.0      # X held: POST /disable again this often while the WBC still shows enabled
+    enable_timeout_s: float = 2.0     # a press on a disabled WBC: cancelled if not enabled (and armed) by then
 
 
 class ArmLatch:
@@ -86,10 +89,12 @@ class ArmLatch:
         self.cfg = cfg
         self.armed = False
         self.arm_seq = arm_seq            # the newest press's number (the WBC arms only above its floor)
-        self.reason = "not armed yet"     # why not armed (the last disarm, or why a press was refused)
+        self.reason = "not armed: press Y"  # the current state: armed, enabling, why not armed / why cancelled
         self.y_ready = False              # Y seen released in a valid frame since the last disarm / discontinuity
         self.y_count = 0
-        self.pending_arm = False          # a qualified press waits for our POST /enable
+        # a deliberate press on a disabled WBC: {"t": when, "enabled_seq": None | the datagram seq when our enable
+        # was reported done}; it waits through enabling and completes on a fresh enabled row after that seq
+        self.pending: Optional[dict] = None
         self.just_enabled = False         # our POST /enable succeeded (until a disable / fault / disarm)
         self.x_down = False
         self.disabled_by_client = False   # the WBC is disabled because of X (the teleop node keeps running)
@@ -105,12 +110,24 @@ class ArmLatch:
         """The WBC's arm_seq floor (``POST /session``): presses are numbered above it."""
         self.arm_seq = max(self.arm_seq, int(floor or 0))
 
-    def _spoil(self) -> None:
-        self.y_ready, self.y_count, self.pending_arm = False, 0, False
+    @property
+    def pending_arm(self) -> bool:
+        return self.pending is not None
+
+    def _cancel(self, why: str) -> None:
+        if self.pending is not None:
+            self.pending = None
+            self.reason = f"arm cancelled: {why}"
+
+    def _spoil(self, why: str = "") -> None:
+        """The current press is spoiled (Y must be released and pressed again); a pending arm is cancelled."""
+        self.y_ready, self.y_count = False, 0
+        self._cancel(why or "the press was interrupted")
 
     def disarm(self, reason: str) -> None:
-        """Disarm now (if armed: one ("disarmed", reason) event); every disarm needs a fresh Y release and press."""
-        self._spoil()
+        """Disarm now (if armed: one ("disarmed", reason) event); every disarm needs a fresh Y release and press. A
+        pending arm is cancelled with this reason."""
+        self._spoil(reason)
         if self.armed:
             self.armed = False
             self.arm_dgram_seq = None
@@ -120,8 +137,9 @@ class ArmLatch:
     def _arm(self) -> None:
         self.arm_seq += 1
         self.presses += 1
-        self.armed, self.reason = True, ""
+        self.armed, self.reason = True, "armed"
         self.arm_dgram_seq = None
+        self.pending = None
         self._spoil()                          # one arm per press
         self.events.append(("armed", self.arm_seq))
 
@@ -130,11 +148,16 @@ class ArmLatch:
         if self.armed and self.arm_dgram_seq is None:
             self.arm_dgram_seq = seq
 
-    def enable_done(self, ok: bool, detail: str = "") -> None:
+    def enable_done(self, ok: bool, detail: str = "", seq: Optional[int] = None) -> None:
+        """Our ``POST /enable`` answered. ``seq``: the newest datagram seq sent when the answer was seen: a pending arm
+        completes only on a WBC row that processed a later datagram (so it reflects the enable)."""
         if ok:
             self.just_enabled, self.disabled_by_client = True, False
+            if self.pending is not None:
+                self.pending["enabled_seq"] = -1 if seq is None else int(seq)
+        elif self.pending is not None:
+            self._cancel(f"enable refused: {detail}")
         else:
-            self.pending_arm = False
             self.reason = f"enable refused: {detail}"
 
     def disable_done(self, ok: bool, detail: str = "") -> None:
@@ -180,7 +203,9 @@ class ArmLatch:
         if not verdict.accept:
             return
         if x_pressed(frame):                       # level-triggered: any accepted frame, valid or not
-            self.disarm("X: disabled")
+            self.disarm("X: disabled")             # (a pending arm: "arm cancelled: X: disabled")
+            if not self.reason.startswith("arm cancelled"):
+                self.reason = "X: disabled (Y re-enables and arms)"
             self.just_enabled = False
             st, _ = self._wbc(row, row_t, now)
             if not self.x_down or (now - self._last_disable >= self.cfg.disable_retry_s and st != WBC_DISABLED):
@@ -198,21 +223,19 @@ class ArmLatch:
         if not _hand(frame, "left").get("active"):
             self.disarm("the left controller is not active (X / Y unavailable)")
             return
+        if self.pending is not None:               # a press already made: Y released or held, it waits
+            if not y_pressed(frame):
+                self.y_ready, self.y_count = True, 0
+            self._pending_step(frame, row, row_t, now, fresh)
+            return
         if not y_pressed(frame):
-            self.y_ready, self.y_count, self.pending_arm = True, 0, False
+            self.y_ready, self.y_count = True, 0
             return
         if not self.y_ready:                       # held since before a disarm, or already used for an arm
-            if self.pending_arm:                   # waiting for our enable with Y held
-                why = self._preconditions(frame, row, row_t, now, fresh)
-                if why:
-                    self.reason = f"arm refused: {why}"
-                    self._spoil()
-                elif self.just_enabled:
-                    self._arm()
             return
         why = self._preconditions(frame, row, row_t, now, fresh)
         if why:
-            self.reason = f"arm refused: {why}"
+            self.reason = f"not armed: {why} (release Y and press again)"
             self._spoil()
             return
         self.y_count += 1
@@ -220,12 +243,39 @@ class ArmLatch:
             return
         st, _ = self._wbc(row, row_t, now)
         self.y_ready, self.y_count = False, 0     # this press is used, whatever follows
-        if st in WBC_ENABLED or self.just_enabled:
+        if st in WBC_ENABLED:
             self._arm()
-        elif st == WBC_DISABLED:
-            self.pending_arm = True               # enable, then arm if Y is still held
-            self.reason = "enabling the WBC"
+        elif st == WBC_DISABLED:                  # enable, then arm when the WBC shows it enabled
+            self.pending = {"t": now, "enabled_seq": None}
+            self.reason = "enabling the WBC…"
             self._request("enable")
+
+    def _pending_step(self, frame: Optional[dict], row, row_t, now: float, fresh: bool) -> None:
+        """A pending arm: cancelled on a timeout or a fault row; completed on the first fresh row that processed a
+        datagram sent after our enable succeeded and shows the WBC enabled, if the other preconditions hold then."""
+        p = self.pending
+        if now - p["t"] > self.cfg.enable_timeout_s:
+            self._cancel(f"the WBC did not enable within {self.cfg.enable_timeout_s:g} s")
+            return
+        st, why = self._wbc(row, row_t, now)
+        if st == WBC_FAULT:
+            self._cancel("the WBC is in a fault (X disables and clears it)")
+            return
+        if p["enabled_seq"] is None or why is not None or st not in WBC_ENABLED:
+            return                                 # still enabling (or the row is not usable yet): wait
+        seq = _num(row.get("seq"))
+        if seq is not None and seq <= p["enabled_seq"]:
+            return                                 # this row predates our enable
+        if frame is None:
+            return                                 # complete on a frame: its input is checked
+        if not fresh:
+            self._cancel("headset input not fresh")
+        elif not grips_released(frame, self.cfg.grip_max):
+            self._cancel("a grip is pressed")
+        elif not sticks_neutral(frame, self.cfg.dead_zone):
+            self._cancel("a stick is deflected")
+        else:
+            self._arm()
 
     def tick(self, now: float, fresh: bool, why_stale: str, row: Optional[dict], row_t: Optional[float]) -> None:
         """Per control step: stale / late / slow input disarms; so does the WBC's own row disagreeing."""
@@ -233,9 +283,14 @@ class ArmLatch:
             if self.armed:
                 self.disarm(why_stale or "headset input stale")
             else:
-                self._spoil()
+                self._spoil(why_stale or "headset input stale")
             return
-        if row is None:
+        if self.pending is not None:               # the timeout and a fault row, between frames too
+            self._pending_step(None, row, row_t, now, fresh)
+        if row is None or row_t is None or now - row_t > self.cfg.wbc_stale_s:
+            if self.armed:                         # the WBC stream is gone or late: we cannot see what it does
+                self.disarm("WBC state stale" if row is None or row_t is None else
+                            f"WBC state stale ({now - row_t:.2f} s)")
             return
         st = _num(row.get("state"))
         if st is not None and int(st) == WBC_FAULT:
