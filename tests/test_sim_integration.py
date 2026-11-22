@@ -177,3 +177,79 @@ def test_orbbec_owner_on_the_world_camera(sim):
         assert rate > 10                                        # 30 fps configured; rendering keeps up mostly
     finally:
         o.close()
+
+
+def test_arm_joint_channel_on_the_world(sim, tmp_path):
+    """The arm node's internal joint channel driven by a 100 Hz client over its Unix socket, the arm on the world
+    (pipelined WorldArmBus): a joint trajectory is tracked, and the row's stream_lat is about one or two ticks."""
+    import os
+    import tempfile
+    from reBotArm_control_py.actuator.rebotarm import joint_limits, load_cfg
+    from robot_utils.nodes.arm import config as C
+    from robot_utils.nodes.arm.node import COL, DT, ArmNode
+    from robot_utils.nodes.common import fastpath as F
+    from robot_utils.nodes.common.locks import LockStore
+    from robot_utils.nodes.sim.backends.arm import WorldArmBus
+
+    d = tempfile.mkdtemp(prefix="rujw")                      # short: macOS limits socket paths to ~104 bytes
+    path = os.path.join(d, "arm.joint.sock")
+    limits = joint_limits(load_cfg(C.PROFILES["soft"]))
+    node = ArmNode(lambda: WorldArmBus(SIM, limits=limits), locks=LockStore(tmp_path / "locks"), joint_socket=path)
+    node.start()
+    c = None
+    try:
+        wait_for(lambda: node.state == "uninitialized", 20)
+        tok, _ = node.acquire("wbc")
+        node.enable(tok)
+        c = F.Client(path, os.path.join(d, "wbc.sock"))
+        assert c.hello(tok, "test")["type"] == "welcome"
+        st = c.latest_state(1.0)
+        q0 = np.array(st.q)
+        amp = np.array([0.15, 0.0, 0.0, 0.0, 0.2, 0.0])     # rad: joint1 and joint5, a 2 s sine
+        w = 2 * math.pi / 2.0
+        goal = lambda t: q0 + amp * np.sin(w * t)            # noqa: E731
+        goal_v = lambda t: amp * w * np.cos(w * t)           # noqa: E731
+        t0 = st.t_tick
+        errs, deliver, got = {k: [] for k in range(10)}, [], 0
+        while got < 400:                                     # 4 s, one goal per state packet (100 Hz)
+            st = c.recv(1.0)
+            if not isinstance(st, F.State):
+                continue
+            deliver.append(time.monotonic() - st.t_tick)
+            got += 1
+            t = st.t_tick - t0
+            if t > 1.0:                                      # after the first second: measured vs the goal k ticks ago
+                for k in errs:
+                    errs[k].append(np.max(np.abs(np.array(st.q) - goal(t - k * DT))))
+            tn = t + DT                                      # the goal for the next tick
+            c.send(goal(tn), goal_v(tn), t_basis=st.t_tick)
+        rows = node.hub.recent(300, "tick")
+        lat = rows[:, COL["stream_lat"]]
+        lat = lat[np.isfinite(lat)]
+        sess = node.state_dict()["joint_channel"]["session"]
+        # the command follows the goal with no lag of its own (the goal for a tick arrives before it) ...
+        tr = rows[:, COL["t_tick"]] - t0
+        q_cmd = rows[:, [COL[f"j{i}_q_cmd"] for i in range(1, 7)]]
+        cmd_err = np.max(np.abs(q_cmd - np.array([goal(t) for t in tr])))
+        # ... and the measured pose trails it: the world arm's servo plus the pipelined read
+        lag = min(errs, key=lambda k: max(errs[k]))         # the measured pose lags the goal by about this many ticks
+        err = max(errs[lag])
+        print(f"\njoint channel on the world: command vs goal max {math.degrees(cmd_err):.3f} deg; measured vs goal "
+              f"max {math.degrees(err):.2f} deg at a lag of {lag} "
+              f"ticks ({math.degrees(max(errs[0])):.2f} deg at none), "
+              f"stream_lat p50 {np.median(lat) * 1e3:.1f} ms p99 {np.percentile(lat, 99) * 1e3:.1f} ms, "
+              f"state delivery p50 {np.median(deliver) * 1e3:.2f} ms p99 {np.percentile(deliver, 99) * 1e3:.2f} ms, "
+              f"stale {sess['counts']['stale']}, dropped {sess['dropped']}, loop {node.state_dict()['loop_hz']} Hz")
+        assert cmd_err < math.radians(0.5)                  # a tick's timing jitter at up to 0.6 rad/s
+        assert err < math.radians(0.5) and lag <= 7
+        assert 0.5 * DT <= np.median(lat) <= 2.5 * DT
+        assert np.all(rows[:, COL["source"]] == rows[-1, COL["source"]])
+        assert node.state_dict()["source"] == "stream"
+        c.bye()
+        wait_for(lambda: node.stream_session is None, 2)
+        node.disable(tok)
+    finally:
+        if c is not None:
+            c.close()
+        node.close()
+        os.rmdir(d)

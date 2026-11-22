@@ -10,7 +10,7 @@ import argparse
 import logging
 import sys
 
-from ..common.serve import add_serve_args, serve
+from ..common.serve import add_serve_args, serve, socket_path
 
 DEBUG_PORT = 8106
 
@@ -42,7 +42,8 @@ def main() -> None:
     else:
         from .bus import HardwareBus
         factory = lambda: HardwareBus(C.PROFILES[args.profile], channel=args.channel)   # noqa: E731
-    node = ArmNode(factory, profile=args.profile, settings=C.load_settings())
+    node = ArmNode(factory, profile=args.profile, settings=C.load_settings(),
+                   joint_socket=socket_path(args.name + ".joint"))   # internal joint channel (docs/arm.md)
     app = create_app(node, sim=args.sim)
     serve(app, args, banner=f"arm node {args.name!r} ({'sim' if args.sim else 'hardware'}, profile {args.profile})")
 

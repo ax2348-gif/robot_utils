@@ -1,7 +1,10 @@
 # Arm fast path, v1: draft
 
-Status (2026-11-21): decided (see "Local only" below); being built as the arm's internal joint channel, first
-client the WBC (`wbc_v1.md`).
+Status (2026-11-21): decided (see "Local only" below); built as the arm's internal joint channel (docs/arm.md
+"Internal joint channel"; sim-tested, not yet on the robot), first client the WBC (`wbc_v1.md`). Where the build
+settled a point this draft left open or differs: `stale_ms` 30; the gripper is in the stream (`gap`); no keyed
+signature (the socket is owner-only); a planned motion pauses the session (never preempted by the stream); state
+packets carry no `t_meas` (the frozen 136-byte layout; it is in the row).
 
 ## Goal
 

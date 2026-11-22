@@ -44,9 +44,10 @@ def run(tmp_path, bus_cls):
     return n.hub.recent(10, "tick")
 
 
-def test_measurement_columns_are_appended_last():
-    assert FIELDS[-2:] == ["t_meas", "t_meas_mot"] and UNITS[-2:] == ["s", "s"]
-    assert COL["jam"] == len(FIELDS) - 3                # the columns before keep their positions
+def test_measurement_columns_are_appended():
+    assert FIELDS[-5:-3] == ["t_meas", "t_meas_mot"] and UNITS[-5:-3] == ["s", "s"]
+    assert COL["jam"] == len(FIELDS) - 6                # the columns before keep their positions
+    assert FIELDS[-3:] == ["stream_seq", "stream_age", "stream_lat"]    # then the joint channel's, last
 
 
 @pytest.mark.parametrize("bus_cls", [SimBus, PipelinedBus])
