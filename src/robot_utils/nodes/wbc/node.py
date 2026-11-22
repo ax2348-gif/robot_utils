@@ -35,7 +35,7 @@ import queue
 import secrets
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Callable, Optional
 
 import numpy as np
@@ -62,6 +62,8 @@ ARM_GRACE_S = 0.5        # after enable: the arm may still report its old state
 SWERVE_GRACE_S = 0.25
 CMD_FAIL_S = 0.25        # swerve commands failing this long -> fault
 POSTURES = {"home": np.zeros(6), "ready": np.radians([0.0, -40.0, -60.0, 0.0, 30.0, 0.0])}
+STRUCTURAL = ("rate_hz", "lease_heartbeat", "joint_vel", "joint_acc", "reach")   # POST /config: only while disabled
+BASE_CAPS = ("max_speed", "max_omega", "max_accel", "max_alpha", "wheel_speed")
 
 
 def stream_fields(ees) -> tuple[list, list, dict]:
@@ -399,15 +401,19 @@ class WbcNode:
     def open_session(self, token: Optional[str]) -> dict:
         self.lease.check(token)
         with self.lock:
-            sid = secrets.randbits(31) or 1
-            self.session_token = token
-            self.receiver.open_session(sid)
-            self.inbox.drain()                           # the previous session's datagrams never apply
-            self._disarm_locked("new session", note=True)
-            floor = self.arm_floor                       # kept for the node's life: arming needs a greater arm_seq
-            self.events.add(f"session {sid} opened (arm_seq floor {floor})")
+            sid, floor = self._open_session_locked(token)
         return {"session": sid, "udp_port": self.receiver.udp_port, "unix_socket": self.receiver.unix_path,
                 "arm_seq": floor}
+
+    def _open_session_locked(self, token: Optional[str]) -> tuple[int, int]:
+        sid = secrets.randbits(31) or 1
+        self.session_token = token
+        self.receiver.open_session(sid)
+        self.inbox.drain()                           # the previous session's datagrams never apply
+        self._disarm_locked("new session", note=True)
+        floor = self.arm_floor                       # kept for the node's life: arming needs a greater arm_seq
+        self.events.add(f"session {sid} opened (arm_seq floor {floor})")
+        return sid, floor
 
     # -- the armed latch -------------------------------------------------------------------------------------
 
@@ -877,20 +883,7 @@ class WbcNode:
             self.base = None
 
     def _forward_estop(self, reason: str, *, base: bool, arm: bool) -> None:
-        def go():
-            if arm and self.arm_http is not None:
-                try:
-                    self.arm_http.estop(f"wbc: {reason}")
-                except Exception as e:  # noqa: BLE001
-                    self.events.add(f"e-stop forward to the arm failed: {e}", "error")
-            if base and self.swerve_target:
-                try:
-                    from ..swerve.client import SwerveClient
-                    with SwerveClient(self.swerve_target, timeout=0.5) as c:
-                        c.estop(f"wbc: {reason}", "wbc")
-                except Exception as e:  # noqa: BLE001
-                    self.events.add(f"e-stop forward to the swerve failed: {e}", "error")
-        threading.Thread(target=go, daemon=True).start()
+        forward_estop(self.arm_http, self.swerve_target, reason, self.events, base=base, arm=arm)
 
     # -- publish -------------------------------------------------------------------------------------------
 
@@ -993,54 +986,18 @@ class WbcNode:
     def enable(self, token: Optional[str]) -> dict:
         """Take the arm and swerve leases together (rolling back on any failure), enable both, open the arm's
         joint channel and seed the commanded joints from its state. Blocking."""
-        self.lease.check(token)
-        if self.estop.active:
-            raise RequestError(409, "e-stop is latched; clear it first (POST /estop/clear)")
-        if self.model is None:
-            raise RequestError(503, f"no model ({self.model_error or 'not loaded'})")
-        with self.lock:
-            if self.enabled or self.state == "enabling":
-                raise RequestError(409, f"already {self.state}; disable first")
-            self.state = "enabling"
-            holder = self.lease.info.client if self.lease.info else "anonymous"
-        name = f"wbc ({holder})"
-        arm_http = channel = base = None
+        holder = self._enable_begin(token)
+        peers = channel = st = q0 = None
         try:
-            if self.arm_target:
-                arm_http = ArmHttpFactory(self.arm_target)
-                try:
-                    out = arm_http.acquire(name)
-                except Exception as e:
-                    raise RequestError(getattr(e, "status", 503), f"arm lease: {getattr(e, 'detail', e)}")
-                arm_lease = out.get("lease_id")
-            if self.swerve_target:
-                from .links import SwerveBase
-                base = SwerveBase(self.swerve_target)
-                try:
-                    base.open(name, self.cfg.max_speed, self.cfg.max_omega)
-                except Exception as e:
-                    base = None
-                    from .links import LimitsError
-                    status = 422 if isinstance(e, LimitsError) else getattr(e, "status", 503)
-                    raise RequestError(status, f"swerve: {getattr(e, 'detail', e)}")
-            q0 = None
-            if arm_http is not None:
-                try:
-                    arm_http.enable()
-                except Exception as e:
-                    raise RequestError(getattr(e, "status", 503), f"arm enable: {getattr(e, 'detail', e)}")
-                off = arm_http.tcp()
-                if off is not None:
-                    self.model.set_tcp("arm", off)
-                self._apply_arm_gains(arm_http)
+            peers = self._open_peers(holder)
+            if peers.arm_http is not None:
                 channel = ArmChannel(self.arm_socket)
                 try:
-                    channel.open(arm_http.token)
+                    channel.open(peers.arm_http.token)
                 except ChannelError as e:
                     channel = None
                     raise RequestError(503, f"arm joint channel: {e}")
                 t_end = time.monotonic() + 1.0
-                st = None
                 while time.monotonic() < t_end:
                     st = channel.poll(self.clock())
                     if st is not None and np.all(np.isfinite(st.q)):
@@ -1053,42 +1010,64 @@ class WbcNode:
         except BaseException:
             if channel is not None:
                 channel.close()
-            if base is not None:
-                base.close(disable=True)
-            if arm_http is not None:
-                for call in (arm_http.disable, arm_http.release):
-                    try:
-                        call()
-                    except Exception:  # noqa: BLE001
-                        pass
-                arm_http.close()
+            if peers is not None:
+                release_peers(peers.arm_http, peers.base, background=False)
             with self.lock:
                 self.state = "disabled"
             raise
         with self.lock:
-            self.arm_http, self.channel, self.base = arm_http, channel, base
-            self.arm_lease_id = arm_lease if arm_http is not None else None
-            self.arm_state = st if arm_http is not None else None
-            n = len(self.model.arm_q["arm"])
-            self.q_cmd = {e: (q0.copy() if q0 is not None else self._posture(self.hints, e)) for e in self.ees}
-            self.v_cmd = {e: np.zeros(n) for e in self.ees}
-            self.base_twist = np.zeros(3)
-            self.cmd_twist = {e: np.zeros(6) for e in self.ees}
-            # disarmed at enable: datagrams queued before it never arm (their arm_seq counts as seen)
-            for msg, _ in self.inbox.drain():
-                a = msg.get("arm_seq")
-                if isinstance(a, int) and not isinstance(a, bool) and msg.get("session") == self.receiver.session:
-                    self.arm_seq_seen = max(self.arm_seq_seen, a)
-            self._disarm_locked("enable", note=True)
-            self.ctl.reset()
-            self.enabled, self.fault, self.disabled_reason = True, None, None
-            self._paused = False
-            self.enabled_at = self.clock()
-            self.holder = holder
-            self.state = "idle"
-            self.events.add(f"enabled by {holder} (arm lease {self.arm_lease_id}, swerve lease "
-                            f"{base.lease_id if base else None})")
+            self._enable_finish_locked(peers.arm_http is not None, peers.arm_lease, channel, peers.base, st, q0,
+                                       holder, arm_http=peers.arm_http)
         return self.status()
+
+    def _enable_begin(self, token: Optional[str]) -> str:
+        """The enable's checks; the state becomes ``enabling``. Returns the holder."""
+        self.lease.check(token)
+        if self.estop.active:
+            raise RequestError(409, "e-stop is latched; clear it first (POST /estop/clear)")
+        if self.model is None:
+            raise RequestError(503, f"no model ({self.model_error or 'not loaded'})")
+        with self.lock:
+            if self.enabled or self.state == "enabling":
+                raise RequestError(409, f"already {self.state}; disable first")
+            self.state = "enabling"
+            return self.lease.info.client if self.lease.info else "anonymous"
+
+    def _open_peers(self, holder: str) -> "Peers":
+        """The arm's and the swerve's leases, limits, enables, the arm's TCP and gains (applied here)."""
+        peers = open_peers(self.arm_target, self.swerve_target, self.cfg, f"wbc ({holder})",
+                           len(self.model.arm_q["arm"]), self.events, self.ctl.kp_source)
+        if peers.tcp is not None:
+            self.model.set_tcp("arm", peers.tcp)
+        if peers.kp is not None:
+            self.ctl.kp["arm"], self.ctl.kp_source = peers.kp.copy(), peers.kp_source
+        return peers
+
+    def _enable_finish_locked(self, has_arm: bool, arm_lease, channel, base, st, q0, holder: str,
+                              arm_http=None) -> None:
+        """Under ``self.lock``: the peers are up; seed the commands, disarmed, state idle."""
+        self.arm_http, self.channel, self.base = arm_http, channel, base
+        self.arm_lease_id = arm_lease if has_arm else None
+        self.arm_state = st if has_arm else None
+        n = len(self.model.arm_q["arm"])
+        self.q_cmd = {e: (q0.copy() if q0 is not None else self._posture(self.hints, e)) for e in self.ees}
+        self.v_cmd = {e: np.zeros(n) for e in self.ees}
+        self.base_twist = np.zeros(3)
+        self.cmd_twist = {e: np.zeros(6) for e in self.ees}
+        # disarmed at enable: datagrams queued before it never arm (their arm_seq counts as seen)
+        for msg, _ in self.inbox.drain():
+            a = msg.get("arm_seq")
+            if isinstance(a, int) and not isinstance(a, bool) and msg.get("session") == self.receiver.session:
+                self.arm_seq_seen = max(self.arm_seq_seen, a)
+        self._disarm_locked("enable", note=True)
+        self.ctl.reset()
+        self.enabled, self.fault, self.disabled_reason = True, None, None
+        self._paused = False
+        self.enabled_at = self.clock()
+        self.holder = holder
+        self.state = "idle"
+        self.events.add(f"enabled by {holder} (arm lease {self.arm_lease_id}, swerve lease "
+                        f"{base.lease_id if base else None})")
 
     def _apply_arm_limits(self, lim: dict) -> None:
         """The arm's own limits from its welcome: joint range, joint speed and acceleration, lead bound, gap."""
@@ -1107,58 +1086,44 @@ class WbcNode:
         except (TypeError, ValueError, IndexError) as e:
             self.events.add(f"arm limits in the welcome not usable ({e}); keeping the WBC's", "warn")
 
-    def _apply_arm_gains(self, arm_http) -> None:
-        """The servo's kp for the lead bound: the arm's gain profile in force (its GET /gains). Without it the
-        arm's default profile file stays (an event)."""
-        try:
-            g = arm_http.get("/gains")
-            kp = np.asarray(g["kp"], float)
-            n = len(self.model.arm_q["arm"])
-            if kp.shape[0] < n or not np.all(np.isfinite(kp[:n])) or np.any(kp[:n] <= 0):
-                raise ValueError(f"kp {g['kp']}")
-            self.ctl.kp["arm"] = kp[:n].copy()
-            self.ctl.kp_source = f"arm GET /gains (profile {g.get('name')})"
-        except Exception as e:  # noqa: BLE001 - optional: keep the default profile's
-            self.events.add(f"arm gains not readable ({type(e).__name__}: {e}); the lead bound uses "
-                            f"{self.ctl.kp_source}", "warn")
-
     def disable(self, reason: str = "requested", token: Optional[str] = None, check: bool = False) -> dict:
         if check:
             self.lease.check(token)
         with self.lock:
-            was = self.enabled
-            if not was and self.state != "fault":
-                return {"enabled": False, "was_enabled": False}
-            channel, base, arm_http = self.channel, self.base, self.arm_http
-            if base is not None:
-                base.mute()               # disable coasts: no further twist (no zero twist), then the swerve disables
-            # a last hold command, then close: the arm holds its command (stale = hold) until its lease ends
-            if channel is not None and "arm" in self.q_cmd:
-                channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
-            self.channel = self.base = self.arm_http = None
-            self._disarm_locked(f"disabled: {reason}")
-            self.enabled, self.fault, self.state = False, None, "disabled"
-            self.disabled_reason = reason
-            self.base_twist = np.zeros(3)
-            # the arm floats while disabled: no commanded / measured EE pose from the old command (the rows carry NaN)
-            # that a client could capture as a riding pose; enable seeds them again from the measured joints
-            self.q_cmd, self.v_cmd, self.cmd_twist = {}, {}, {}
-            self.arm_state = None
-            self.events.add(f"disabled: {reason}")
+            r = self._disable_locked(reason)
+        if r is None:
+            return {"enabled": False, "was_enabled": False}
+        was, channel, base, arm_http = r
         if base is not None:
             base.close(disable=True)
         if channel is not None:
             channel.close()
-        if arm_http is not None:
-            def release():
-                for call in (arm_http.disable, arm_http.release):
-                    try:
-                        call()
-                    except Exception:  # noqa: BLE001
-                        pass
-                arm_http.close()
-            threading.Thread(target=release, daemon=True).start()
+        release_peers(arm_http, None, background=True)
         return {"enabled": False, "was_enabled": was}
+
+    def _disable_locked(self, reason: str):
+        """Under ``self.lock``: the base muted, a last hold to the arm, the state disabled. Returns (was enabled,
+        the channel, the base, the arm's HTTP) for the caller to close outside the lock, or None (nothing to do)."""
+        was = self.enabled
+        if not was and self.state != "fault":
+            return None
+        channel, base, arm_http = self.channel, self.base, self.arm_http
+        if base is not None:
+            base.mute()               # disable coasts: no further twist (no zero twist), then the swerve disables
+        # a last hold command, then close: the arm holds its command (stale = hold) until its lease ends
+        if channel is not None and "arm" in self.q_cmd:
+            channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
+        self.channel = self.base = self.arm_http = None
+        self._disarm_locked(f"disabled: {reason}")
+        self.enabled, self.fault, self.state = False, None, "disabled"
+        self.disabled_reason = reason
+        self.base_twist = np.zeros(3)
+        # the arm floats while disabled: no commanded / measured EE pose from the old command (the rows carry NaN)
+        # that a client could capture as a riding pose; enable seeds them again from the measured joints
+        self.q_cmd, self.v_cmd, self.cmd_twist = {}, {}, {}
+        self.arm_state = None
+        self.events.add(f"disabled: {reason}")
+        return was, channel, base, arm_http
 
     ESTOP_JOIN_S = 2.5          # the fan-out waits this long for the arm's and the swerve's answers
 
@@ -1168,46 +1133,20 @@ class WbcNode:
         (both latch and coast: no braking by the robot), then disable."""
         info = self.estop.trigger(reason, source)
         with self.lock:
-            self._disarm_locked(f"e-stop ({reason or 'no reason'})")
-            if self.base is not None:
-                self.base.mute()                         # the base gets NOTHING more (no zero twist: it coasts)
-            if self.enabled:
-                self._send_hold(arm=True, base=False)    # the arm at its commanded joints until its e-stop lands
-        fw: dict = {}
-        msg = f"wbc: {reason}" if reason else "wbc"
-
-        def to_arm():
-            h = self.arm_http or ArmHttpFactory(self.arm_target)
-            h.estop(msg, source or "wbc")
-
-        def to_swerve():
-            from ..swerve.client import SwerveClient
-            with SwerveClient(self.swerve_target, timeout=0.5) as c:
-                c.estop(msg, source or "wbc")
-
-        def run(name, fn):
-            try:
-                fn()
-                fw[name] = True
-            except Exception as e:  # noqa: BLE001
-                fw[name] = False
-                self.events.add(f"e-stop forward to the {name} failed: {e}", "error")
-
-        threads = [threading.Thread(target=run, args=(n, f), name=f"wbc-estop-{n}", daemon=True)
-                   for n, f, t in (("arm", to_arm, self.arm_target), ("swerve", to_swerve, self.swerve_target)) if t]
-        for t in threads:
-            t.start()
-        deadline = time.monotonic() + self.ESTOP_JOIN_S
-        for t in threads:
-            t.join(max(0.0, deadline - time.monotonic()))
-        out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": {}}
-        for n, t in (("arm", self.arm_target), ("swerve", self.swerve_target)):
-            if t:
-                out["forwarded"][n] = bool(fw.get(n, False))
-                if n not in fw:
-                    self.events.add(f"e-stop forward to the {n}: no answer within {self.ESTOP_JOIN_S} s", "error")
+            self._estop_stop_locked(reason)
+        fw = estop_fanout(self.arm_http, self.arm_target, self.swerve_target, reason, source, self.events,
+                          self.ESTOP_JOIN_S)
+        out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": fw}
         self.disable(f"e-stop ({reason or 'no reason'})")
         return out
+
+    def _estop_stop_locked(self, reason: str) -> None:
+        """Under ``self.lock``: stop tracking at once (the e-stop's first step)."""
+        self._disarm_locked(f"e-stop ({reason or 'no reason'})")
+        if self.base is not None:
+            self.base.mute()                         # the base gets NOTHING more (no zero twist: it coasts)
+        if self.enabled:
+            self._send_hold(arm=True, base=False)    # the arm at its commanded joints until its e-stop lands
 
     def clear_estop(self, token: Optional[str]) -> None:
         self.lease.check(token)
@@ -1218,17 +1157,19 @@ class WbcNode:
         self.lease.check(token)
         h = parse_hints(doc, self.cfg, self.ees, POSTURES)
         with self.lock:
-            self.hints, self.override = h, {}
-            self.hint_t = self.clock()
-            if h.velocity is not None:
-                self.velocity_t = self.clock()
-            self.events.add(f"hints: base {h.mode}")
+            self._set_hints_locked(h)
         return self.get_hints()
+
+    def _set_hints_locked(self, h: Hints) -> None:
+        self.hints, self.override = h, {}
+        self.hint_t = self.clock()
+        if h.velocity is not None:
+            self.velocity_t = self.clock()
+        self.events.add(f"hints: base {h.mode}")
 
     def get_hints(self) -> dict:
         with self.lock:
-            return {"hints": hints_public(self.hints), "in_force": hints_public(self.effective_hints()),
-                    "postures": {k: [round(float(x), 6) for x in v] for k, v in POSTURES.items()}}
+            return hints_doc(self.hints, self.effective_hints())
 
     # -- state ---------------------------------------------------------------------------------------------
 
@@ -1242,116 +1183,74 @@ class WbcNode:
         the tick."""
         now = self.clock()
         with self.lock:
-            sn = dict(state=self.state, enabled=self.enabled, armed=self.armed, disarm_reason=self.disarm_reason,
-                      latch={"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
-                             "disarms": self.disarms, **self.latch_counts},
-                      tick=dict(self.tick), holder=self.holder, fault=self.fault,
-                      hold_reason=getattr(self, "_hold_reason", None), disabled_reason=self.disabled_reason,
-                      out=self._last.get("out"), limited_counts=dict(self.limited_counts), st=self.arm_state,
-                      channel=self.channel, arm_lease_id=self.arm_lease_id, base=self.base, sw=self.sw,
-                      hints=self.effective_hints(), cfg=self.cfg, resyncs=self.resyncs, solve_fail=self.solve_fail,
-                      tick_times=list(self._tick_times), lead_binds=self.lead_binds,
-                      kp=None if self.ctl is None else self.ctl.kp.get("arm"),
-                      max_lead=None if self.ctl is None else self.ctl.max_lead.get("arm"),
-                      kp_source=None if self.ctl is None else self.ctl.kp_source,
-                      lead=None if self.ctl is None or "arm" not in self.ctl.kp else self.ctl.lead("arm"),
-                      reset_id=self.est.reset_id, jumps=self.est.jumps,
-                      est_age=None if self.est.row is None else round(now - self.est.row["t"], 4),
-                      est_health=self.estimator_health(now) or "ok")
+            sn = self._snapshot_locked(now)
+        base = self.base
+        return state_document(sn, now, self._server_parts(base))
+
+    def _server_parts(self, base) -> dict:
+        """What the /state document takes from the HTTP side (the server process in the process mode)."""
         last = self.hub.recent(1, "tick") if self.hub else []
-        latest = ({k: (v if math.isfinite(v) else None) for k, v in zip(self.fields, last[0].tolist())}
-                  if len(last) else None)
-        ts = sn["tick_times"]
-        rate = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None
-        info, e = self.lease.info, self.estop.info
-        out, st, channel, base, sw = sn["out"], sn["st"], sn["channel"], sn["base"], sn["sw"]
-        lim = out.limited_by if out is not None else "none"
-        r6 = lambda v: None if v is None else [round(float(x), 6) for x in v]   # noqa: E731
+        return {"estop": self.estop.info, "lease": self.lease.info, "arm_target": self.arm_target,
+                "swerve_target": self.swerve_target, "model": model_doc(self.model, self.model_info, self.model_error),
+                "base": None if base is None else {"lease_id": base.lease_id, "sent": base.sent, "errors": base.errors},
+                "inputs": {k: u.status() for k, u in self.inputs.items()},
+                "latest": ({k: (v if math.isfinite(v) else None) for k, v in zip(self.fields, last[0].tolist())}
+                           if len(last) else None),
+                "events": self.events.list()[-30:]}
+
+    def _snapshot_locked(self, now: float) -> dict:
+        """Under ``self.lock``: the control state as plain data (scalars, lists, dicts, the Config and Hints
+        dataclasses): /state's input, and what the control process publishes to the server process."""
+        out = self._last.get("out")
         ld = (out.diag.get("lead") or {}).get("arm") if out is not None else None
-        return {
-            "state": sn["state"],
-            "enabled": sn["enabled"],
-            "armed": sn["armed"],
-            "disarm_reason": None if sn["armed"] else sn["disarm_reason"],
-            "latch": sn["latch"],
-            "tick": {k: (round(v, 3) if isinstance(v, float) and math.isfinite(v) else
-                         None if isinstance(v, float) else v) for k, v in sn["tick"].items()},
-            "holder": sn["holder"] if sn["enabled"] else None,
-            "fault": sn["fault"],
-            "hold_reason": sn["hold_reason"] if sn["enabled"] else None,
-            "disabled_reason": sn["disabled_reason"],
-            "limited_by": lim,
-            "limited_counts": sn["limited_counts"],
-            "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source,
-                      "t": e and e.t},
-            "lease": {"held": info is not None, "holder": info and info.client,
-                      "lease_id": info and info.lease_id,
-                      "expires_in": None if info is None else round(info.expires - now, 3)},
-            "session": {"session": self.receiver.session, "udp_port": self.receiver.udp_port,
-                        "unix_socket": self.receiver.unix_path, "seq": self.receiver.seq,
-                        "accepted": self.receiver.counts["accepted"],
-                        "dropped": dict(self.receiver.counts["dropped"]),
-                        "last_source": self.receiver.last_source,
-                        "input_age": None if self.last_rx == -math.inf else round(now - self.last_rx, 4)},
-            "model": {"source": self.model_info, "error": self.model_error,
-                      "ees": {k: {"link": v.link, "tcp": list(v.tcp), "reach": round(self.model.reach[k], 4)}
-                              for k, v in self.model.ees.items()} if self.model else {}},
-            "arm": {"target": self.arm_target, "lease_id": sn["arm_lease_id"] if sn["enabled"] else None,
-                    "channel": None if channel is None else {
-                        "session": channel.session, "stale_ms": channel.stale_ms,
-                        **channel.counts, "last_error": channel.last_error},
-                    "state": None if st is None else st.state_name,
-                    "paused": bool(st is not None and st.paused),
-                    "limits": None if channel is None else channel.limits,
-                    "age": None if st is None else round(now - st.t_rx, 4),
-                    "resyncs": sn["resyncs"],
-                    # the lead bound: per joint the bound (rad) = lead_torque / kp (at most max_lead), the command's
-                    # deviation beyond the measured window this tick (rad) and its torque, how often it bound
-                    "lead": {"lead_torque": list(sn["cfg"].lead_torque), "kp": r6(sn["kp"]),
-                             "kp_source": sn["kp_source"], "max_lead": sn["max_lead"], "lead_delay": sn["cfg"].lead_delay,
-                             "bound": r6(sn["lead"]), "dev": r6(ld["dev"]) if ld else None,
-                             "torque": (r6(np.asarray(sn["kp"]) * np.asarray(ld["dev"]))
-                                        if ld and sn["kp"] is not None else None),
-                             "binding": bool(out is not None and out.diag.get("lead_binding")),
-                             "binds": sn["lead_binds"]}},
-            "swerve": {"target": self.swerve_target,
-                       "lease_id": base.lease_id if base else None,
-                       "sent": base.sent if base else None,
-                       "errors": base.errors if base else None,
-                       "telemetry": sw and {k: v for k, v in sw.items() if k != "rx"}},
-            "estimator": {"health": sn["est_health"], "reset_id": sn["reset_id"],
-                          "pose_jumps": sn["jumps"], "age": sn["est_age"]},
-            "inputs": {k: u.status() for k, u in self.inputs.items()},
-            "hints": hints_public(sn["hints"]),
-            "config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(sn["cfg"]).items()},
-            "solve_failures": sn["solve_fail"],
-            "loop_hz": None if rate is None else round(rate, 1),
-            "realtime": dict(self.realtime),
-            "latest": latest,
-            "events": self.events.list()[-30:],
-        }
+        st, ch, rx = self.arm_state, self.channel, self.receiver
+        ts = self._tick_times
+        ctl = self.ctl
+        kp = None if ctl is None or ctl.kp.get("arm") is None else [float(x) for x in ctl.kp["arm"]]
+        return dict(
+            t=now, state=self.state, enabled=self.enabled, armed=self.armed, disarm_reason=self.disarm_reason,
+            latch={"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
+                   "disarms": self.disarms, **self.latch_counts},
+            tick=dict(self.tick), holder=self.holder, fault=self.fault,
+            hold_reason=getattr(self, "_hold_reason", None), disabled_reason=self.disabled_reason,
+            limited_by=out.limited_by if out is not None else "none",
+            lead_dev=None if ld is None else [float(x) for x in ld["dev"]],
+            lead_binding=bool(out is not None and out.diag.get("lead_binding")),
+            limited_counts=dict(self.limited_counts),
+            arm=None if st is None else {"state": st.state_name, "paused": bool(st.paused), "t_rx": float(st.t_rx)},
+            channel=None if ch is None else {"session": ch.session, "stale_ms": ch.stale_ms, **ch.counts,
+                                             "last_error": ch.last_error},
+            limits=None if ch is None else dict(ch.limits),
+            arm_lease_id=self.arm_lease_id, sw=None if self.sw is None else dict(self.sw),
+            hints=self.hints, in_force=self.effective_hints(), cfg=self.cfg, resyncs=self.resyncs,
+            solve_fail=self.solve_fail,
+            loop_hz=(len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None,
+            lead_binds=self.lead_binds, kp=kp,
+            max_lead=None if ctl is None else ctl.max_lead.get("arm"),
+            kp_source=None if ctl is None else ctl.kp_source,
+            lead=None if ctl is None or "arm" not in ctl.kp else [float(x) for x in ctl.lead("arm")],
+            reset_id=self.est.reset_id, jumps=self.est.jumps,
+            est_age=None if self.est.row is None else round(now - self.est.row["t"], 4),
+            est_health=self.estimator_health(now) or "ok",
+            session={"session": rx.session, "udp_port": rx.udp_port, "unix_socket": rx.unix_path, "seq": rx.seq,
+                     "accepted": rx.counts["accepted"], "dropped": dict(rx.counts["dropped"]),
+                     "last_source": rx.last_source,
+                     "input_age": None if self.last_rx == -math.inf else round(now - self.last_rx, 4)},
+            realtime=dict(self.realtime), base_twist=[float(v) for v in self.base_twist],
+        )
 
     # -- runtime config ------------------------------------------------------------------------------
 
-    STRUCTURAL = ("rate_hz", "lease_heartbeat", "joint_vel", "joint_acc", "reach")
+    STRUCTURAL = STRUCTURAL
 
     def get_config(self) -> dict:
-        from dataclasses import asdict as _asdict
-        from .spec import Config as _C
-        js = lambda d: {k: (list(v) if isinstance(v, tuple) else v) for k, v in d.items()}   # noqa: E731
-        hard = dict(self.base.hard) if self.base is not None and getattr(self.base, "hard", None) else {}
-        return {"config": js(_asdict(self.cfg)), "defaults": js(_asdict(_C())), "hard": hard,
-                "structural": list(self.STRUCTURAL)}
+        return config_doc(self.cfg, self.base)
 
-    BASE_CAPS = ("max_speed", "max_omega", "max_accel", "max_alpha", "wheel_speed")
+    BASE_CAPS = BASE_CAPS
 
     def _caps_check_locked(self, changes: dict) -> None:
         """The base caps change only while the base is still (disabled, or a zero commanded twist)."""
-        changed = [k for k in self.BASE_CAPS if k in changes and changes[k] != getattr(self.cfg, k)]
-        if changed and self.enabled and self._base_moving():
-            tw = ", ".join(f"{v:.3f}" for v in self.base_twist)
-            raise ValueError(f"{changed}: the base caps cannot change while the base moves (commanded twist {tw}); "
-                             "stop it first (disarm, or base mode locked)")
+        caps_check(self.cfg, changes, self.enabled, self.base_twist)
 
     def set_config(self, changes: dict) -> dict:
         """Change config keys at runtime (any time; no lease: the operator tunes while a client drives). Validated
@@ -1359,16 +1258,10 @@ class WbcNode:
         keys only while disabled."""
         changes = dict(changes or {})
         with self.lock:
-            if self.enabled and any(k in changes for k in self.STRUCTURAL):
-                raise ValueError(f"{sorted(set(changes) & set(self.STRUCTURAL))}: only while disabled")
-            self._caps_check_locked(changes)
-            new = make_config(changes, base=self.cfg)
-            if "lead_torque" in changes and self.ctl is not None:
-                check_lead_torque(new.lead_torque, self.ctl.kp["arm"], self.ctl.max_lead["arm"])
             hard = getattr(self.base, "hard", None) or {} if self.base is not None else {}
-            hs, hw = hard.get("max_speed"), hard.get("max_omega")
-            if (hs is not None and new.max_speed > hs) or (hw is not None and new.max_omega > hw):
-                raise ValueError(f"max_speed / max_omega beyond the swerve's hard limits ({hs} m/s, {hw} rad/s)")
+            new = validate_config(self.cfg, changes, self.enabled, self.base_twist,
+                                  None if self.ctl is None else self.ctl.kp.get("arm"),
+                                  None if self.ctl is None else self.ctl.max_lead.get("arm"), hard)
             old = self.cfg
             push = self.enabled and self.base is not None and (new.max_speed, new.max_omega) != (old.max_speed,
                                                                                                 old.max_omega)
@@ -1382,11 +1275,7 @@ class WbcNode:
                 moved = e
             base = self.base
             if moved is None:
-                self.cfg = new
-                self.ctl.cfg = new
-                for b in self.buffers.values():
-                    b.ff_timeout, b.blend_tau = new.ff_timeout, new.blend_tau
-                self.events.add("config: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+                self._apply_config_locked(changes, new)
         if moved is not None:
             if push and base is not None and base.client is not None:
                 try:
@@ -1395,6 +1284,251 @@ class WbcNode:
                     pass
             raise moved
         return self.get_config()
+
+    def _apply_config_locked(self, changes: dict, new: Config) -> None:
+        self.cfg = new
+        self.ctl.cfg = new
+        for b in self.buffers.values():
+            b.ff_timeout, b.blend_tau = new.ff_timeout, new.blend_tau
+        self.events.add("config: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+
+
+
+def caps_check(cfg: Config, changes: dict, enabled: bool, base_twist) -> None:
+    """The base caps change only while the base is still (disabled, or a zero commanded twist): ValueError."""
+    changed = [k for k in BASE_CAPS if k in changes and changes[k] != getattr(cfg, k)]
+    if changed and enabled and bool(np.any(np.asarray(base_twist) != 0.0)):
+        tw = ", ".join(f"{v:.3f}" for v in base_twist)
+        raise ValueError(f"{changed}: the base caps cannot change while the base moves (commanded twist {tw}); "
+                         "stop it first (disarm, or base mode locked)")
+
+
+def validate_config(cfg: Config, changes: dict, enabled: bool, base_twist, kp, max_lead, hard: dict) -> Config:
+    """``POST /config``'s checks; the new Config (ValueError with the reason otherwise)."""
+    if enabled and any(k in changes for k in STRUCTURAL):
+        raise ValueError(f"{sorted(set(changes) & set(STRUCTURAL))}: only while disabled")
+    caps_check(cfg, changes, enabled, base_twist)
+    new = make_config(changes, base=cfg)
+    if "lead_torque" in changes and kp is not None:
+        check_lead_torque(new.lead_torque, np.asarray(kp, float), max_lead)
+    hs, hw = (hard or {}).get("max_speed"), (hard or {}).get("max_omega")
+    if (hs is not None and new.max_speed > hs) or (hw is not None and new.max_omega > hw):
+        raise ValueError(f"max_speed / max_omega beyond the swerve's hard limits ({hs} m/s, {hw} rad/s)")
+    return new
+
+
+def config_doc(cfg: Config, base) -> dict:
+    """``GET /config``."""
+    from .spec import Config as _C
+    js = lambda d: {k: (list(v) if isinstance(v, tuple) else v) for k, v in d.items()}   # noqa: E731
+    hard = dict(base.hard) if base is not None and getattr(base, "hard", None) else {}
+    return {"config": js(asdict(cfg)), "defaults": js(asdict(_C())), "hard": hard, "structural": list(STRUCTURAL)}
+
+
+def hints_doc(hints: Hints, in_force: Hints) -> dict:
+    """``GET /hints``."""
+    return {"hints": hints_public(hints), "in_force": hints_public(in_force),
+            "postures": {k: [round(float(x), 6) for x in v] for k, v in POSTURES.items()}}
+
+
+def model_doc(model, info, error) -> dict:
+    return {"source": info, "error": error,
+            "ees": {k: {"link": v.link, "tcp": list(v.tcp), "reach": round(model.reach[k], 4)}
+                    for k, v in model.ees.items()} if model else {}}
+
+
+def state_document(sn: dict, now: float, srv: dict) -> dict:
+    """The /state document from a control snapshot (``WbcNode._snapshot_locked``) and the HTTP side's parts
+    (``WbcNode._server_parts``)."""
+    info, e = srv["lease"], srv["estop"]
+    st, channel, base, sw = sn["arm"], sn["channel"], srv["base"], sn["sw"]
+    r6 = lambda v: None if v is None else [round(float(x), 6) for x in v]   # noqa: E731
+    dev = sn["lead_dev"]
+    return {
+        "state": sn["state"],
+        "enabled": sn["enabled"],
+        "armed": sn["armed"],
+        "disarm_reason": None if sn["armed"] else sn["disarm_reason"],
+        "latch": sn["latch"],
+        "tick": {k: (round(v, 3) if isinstance(v, float) and math.isfinite(v) else
+                     None if isinstance(v, float) else v) for k, v in sn["tick"].items()},
+        "holder": sn["holder"] if sn["enabled"] else None,
+        "fault": sn["fault"],
+        "hold_reason": sn["hold_reason"] if sn["enabled"] else None,
+        "disabled_reason": sn["disabled_reason"],
+        "limited_by": sn["limited_by"],
+        "limited_counts": sn["limited_counts"],
+        "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source,
+                  "t": e and e.t},
+        "lease": {"held": info is not None, "holder": info and info.client,
+                  "lease_id": info and info.lease_id,
+                  "expires_in": None if info is None else round(info.expires - now, 3)},
+        "session": sn["session"],
+        "model": srv["model"],
+        "arm": {"target": srv["arm_target"], "lease_id": sn["arm_lease_id"] if sn["enabled"] else None,
+                "channel": channel,
+                "state": None if st is None else st["state"],
+                "paused": bool(st is not None and st["paused"]),
+                "limits": sn["limits"],
+                "age": None if st is None else round(now - st["t_rx"], 4),
+                "resyncs": sn["resyncs"],
+                # the lead bound: per joint the bound (rad) = lead_torque / kp (at most max_lead), the command's
+                # deviation beyond the measured window this tick (rad) and its torque, how often it bound
+                "lead": {"lead_torque": list(sn["cfg"].lead_torque), "kp": r6(sn["kp"]),
+                         "kp_source": sn["kp_source"], "max_lead": sn["max_lead"], "lead_delay": sn["cfg"].lead_delay,
+                         "bound": r6(sn["lead"]), "dev": r6(dev),
+                         "torque": (r6(np.asarray(sn["kp"]) * np.asarray(dev))
+                                    if dev is not None and sn["kp"] is not None else None),
+                         "binding": sn["lead_binding"],
+                         "binds": sn["lead_binds"]}},
+        "swerve": {"target": srv["swerve_target"],
+                   "lease_id": base["lease_id"] if base else None,
+                   "sent": base["sent"] if base else None,
+                   "errors": base["errors"] if base else None,
+                   "telemetry": sw and {k: v for k, v in sw.items() if k != "rx"}},
+        "estimator": {"health": sn["est_health"], "reset_id": sn["reset_id"],
+                      "pose_jumps": sn["jumps"], "age": sn["est_age"]},
+        "inputs": srv["inputs"],
+        "hints": hints_public(sn["in_force"]),
+        "config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(sn["cfg"]).items()},
+        "solve_failures": sn["solve_fail"],
+        "loop_hz": None if sn["loop_hz"] is None else round(sn["loop_hz"], 1),
+        "realtime": sn["realtime"],
+        "latest": srv["latest"],
+        "events": srv["events"],
+    }
+
+
+@dataclass
+class Peers:
+    """The enable's HTTP side: the arm's control plane (its lease), the swerve base, the arm's TCP and gains."""
+    arm_http: object = None
+    arm_lease: Optional[int] = None
+    base: object = None
+    tcp: Optional[list] = None
+    kp: Optional[np.ndarray] = None
+    kp_source: Optional[str] = None
+
+
+def open_peers(arm_target, swerve_target, cfg: Config, name: str, n_arm: int, events, kp_source: str) -> Peers:
+    """Take the arm and swerve leases together, set the swerve's soft limits, enable both, read the arm's TCP and
+    its gains (the lead bound's kp). Rolls everything back on a failure (RequestError with the reason)."""
+    p = Peers()
+    try:
+        if arm_target:
+            p.arm_http = ArmHttpFactory(arm_target)
+            try:
+                out = p.arm_http.acquire(name)
+            except Exception as e:
+                raise RequestError(getattr(e, "status", 503), f"arm lease: {getattr(e, 'detail', e)}")
+            p.arm_lease = out.get("lease_id")
+        if swerve_target:
+            from .links import SwerveBase
+            base = SwerveBase(swerve_target)
+            try:
+                base.open(name, cfg.max_speed, cfg.max_omega)
+            except Exception as e:
+                from .links import LimitsError
+                status = 422 if isinstance(e, LimitsError) else getattr(e, "status", 503)
+                raise RequestError(status, f"swerve: {getattr(e, 'detail', e)}")
+            p.base = base
+        if p.arm_http is not None:
+            try:
+                p.arm_http.enable()
+            except Exception as e:
+                raise RequestError(getattr(e, "status", 503), f"arm enable: {getattr(e, 'detail', e)}")
+            p.tcp = p.arm_http.tcp()
+            # the servo's kp for the lead bound: the arm's gain profile in force (its GET /gains); without it the
+            # arm's default profile file stays (an event)
+            try:
+                g = p.arm_http.get("/gains")
+                kp = np.asarray(g["kp"], float)
+                if kp.shape[0] < n_arm or not np.all(np.isfinite(kp[:n_arm])) or np.any(kp[:n_arm] <= 0):
+                    raise ValueError(f"kp {g['kp']}")
+                p.kp, p.kp_source = kp[:n_arm].copy(), f"arm GET /gains (profile {g.get('name')})"
+            except Exception as e:  # noqa: BLE001 - optional: keep the default profile's
+                events.add(f"arm gains not readable ({type(e).__name__}: {e}); the lead bound uses {kp_source}", "warn")
+    except BaseException:
+        release_peers(p.arm_http, p.base, background=False)
+        raise
+    return p
+
+
+def release_peers(arm_http, base, background: bool = True) -> None:
+    """Disable and release the swerve (its own background thread) and the arm (``background``: in a thread)."""
+    if base is not None:
+        base.close(disable=True)
+    if arm_http is None:
+        return
+
+    def release():
+        for call in (arm_http.disable, arm_http.release):
+            try:
+                call()
+            except Exception:  # noqa: BLE001
+                pass
+        arm_http.close()
+    if background:
+        threading.Thread(target=release, daemon=True).start()
+    else:
+        release()
+
+
+def estop_fanout(arm_http, arm_target, swerve_target, reason: str, source: str, events, join_s: float) -> dict:
+    """The e-stop to the arm and the swerve IN PARALLEL (a slow one never delays the other); waits at most
+    ``join_s``. Returns ``forwarded``: per peer whether it answered."""
+    fw: dict = {}
+    msg = f"wbc: {reason}" if reason else "wbc"
+
+    def to_arm():
+        h = arm_http or ArmHttpFactory(arm_target)
+        h.estop(msg, source or "wbc")
+
+    def to_swerve():
+        from ..swerve.client import SwerveClient
+        with SwerveClient(swerve_target, timeout=0.5) as c:
+            c.estop(msg, source or "wbc")
+
+    def run(name, fn):
+        try:
+            fn()
+            fw[name] = True
+        except Exception as e:  # noqa: BLE001
+            fw[name] = False
+            events.add(f"e-stop forward to the {name} failed: {e}", "error")
+
+    threads = [threading.Thread(target=run, args=(n, f), name=f"wbc-estop-{n}", daemon=True)
+               for n, f, t in (("arm", to_arm, arm_target), ("swerve", to_swerve, swerve_target)) if t]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + join_s
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    out = {}
+    for n, t in (("arm", arm_target), ("swerve", swerve_target)):
+        if t:
+            out[n] = bool(fw.get(n, False))
+            if n not in fw:
+                events.add(f"e-stop forward to the {n}: no answer within {join_s} s", "error")
+    return out
+
+
+def forward_estop(arm_http, swerve_target, reason: str, events, *, base: bool, arm: bool) -> None:
+    """A cross-bus e-stop (one bus's e-stop e-stops the other), in the background."""
+    def go():
+        if arm and arm_http is not None:
+            try:
+                arm_http.estop(f"wbc: {reason}")
+            except Exception as e:  # noqa: BLE001
+                events.add(f"e-stop forward to the arm failed: {e}", "error")
+        if base and swerve_target:
+            try:
+                from ..swerve.client import SwerveClient
+                with SwerveClient(swerve_target, timeout=0.5) as c:
+                    c.estop(f"wbc: {reason}", "wbc")
+            except Exception as e:  # noqa: BLE001
+                events.add(f"e-stop forward to the swerve failed: {e}", "error")
+    threading.Thread(target=go, daemon=True).start()
 
 
 def ArmHttpFactory(target: str):

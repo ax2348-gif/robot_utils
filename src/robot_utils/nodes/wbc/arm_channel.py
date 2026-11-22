@@ -100,7 +100,19 @@ class ArmChannel:
         self.last_error: Optional[str] = None
 
     def open(self, token: str, timeout: float = 1.0) -> dict:
-        """hello -> welcome; ChannelError with the reason otherwise."""
+        """hello -> welcome; ChannelError with the reason otherwise. Blocking (up to ``timeout``)."""
+        self.begin_open(token)
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            m = self.poll_open()
+            if m is not None:
+                return m
+            time.sleep(0.001)
+        self.close(send_bye=False)
+        raise ChannelError(f"no welcome from the arm joint channel within {timeout:g} s")
+
+    def begin_open(self, token: str) -> None:
+        """Bind and send the hello; ``poll_open`` then reads the answer (the control process never blocks on it)."""
         if not os.path.exists(self.path):
             raise ChannelError(f"no arm joint channel at {self.path} (an arm node without the joint channel?)")
         self.sock = F.bind_dgram(self.local)
@@ -109,13 +121,14 @@ class ArmChannel:
         except OSError as e:
             self.close(send_bye=False)
             raise ChannelError(f"hello: {e}") from e
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
+
+    def poll_open(self) -> Optional[dict]:
+        """The welcome (the session is open), None (nothing yet); ChannelError if refused."""
+        while True:
             try:
                 data = self.sock.recv(65536)
-            except BlockingIOError:
-                time.sleep(0.001)
-                continue
+            except (BlockingIOError, InterruptedError):
+                return None
             if not F.is_control(data):
                 continue                              # a state packet of an older session
             try:
@@ -133,8 +146,6 @@ class ArmChannel:
             if m["type"] == "refused":
                 self.close(send_bye=False)
                 raise ChannelError(f"refused: {m.get('reason')}")
-        self.close(send_bye=False)
-        raise ChannelError(f"no welcome from the arm joint channel within {timeout:g} s")
 
     def close(self, send_bye: bool = True) -> None:
         if self.sock is not None:
