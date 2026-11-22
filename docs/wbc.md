@@ -12,13 +12,55 @@ python -m robot_utils.nodes.wbc --swerve none --estimator none   # arm only (bas
 
 Options: `--model` (description instance / URL, `local`, or a `.urdf` with `base=planar`), `--arm`, `--swerve`,
 `--estimator` (instance names or URLs; `none` = off), `--udp-host` / `--udp-port` (default `127.0.0.1:9410`; on
-the robot set the LAN address, never `0.0.0.0`), `--config` (YAML of `spec.Config` keys), `--switch-interval`
-(Python's GIL switch interval for the process, default 0.0005 s, env `WBC_SWITCH_INTERVAL`; Python's own is
-0.005 s: the SCHED_FIFO control thread shares the GIL with normal-priority HTTP / SSE / stream-reader threads, and a
-descheduled thread holding the GIL blocks it — measured on the robot as `control tick overrun: 35 ms` and
-`estimator stream stale` disarms), `--name`, `--port`.
+the robot set the LAN address, never `0.0.0.0`), `--config` (YAML of `spec.Config` keys), `--control`
+(`process`, the default: the control loop in its own process, below; `thread`: the old single-process structure, for
+comparison and debugging), `--switch-interval` (Python's GIL switch interval of the server process, default 0.005 s =
+Python's own, env `WBC_SWITCH_INTERVAL`; with `--control thread` it is the control thread's too: 0.0005 s made the
+robot's tick overruns much worse), `--name`, `--port`.
 Registered in `frontend/nodes.yaml` as `wbc`; page at the node root (state, base mode, EE commanded / measured /
 target, tracking error, base twist, solve time, events).
+
+### Processes
+
+The 100 Hz control loop runs **in its own process**, alone with its GIL. Measured on the Pi (2026-11-21/22) with the
+loop as a SCHED_FIFO thread of the server process: that process ran many normal-priority threads (uvicorn, the
+page's SSE, the estimator and swerve stream readers at 100 Hz, the joint-channel and datagram receivers, the swerve
+sender) and the control tick regularly waited 30–250 ms for the GIL held by a descheduled normal thread (priority
+inversion): `control tick overrun` disarms every few seconds, `estimator stream stale`, the client's `WBC state
+stale`. Neither a shorter switch interval nor higher thresholds fixed it: the GIL is per process.
+
+- **Control process** (`control_proc.py`, spawned by the node at start; SCHED_FIFO 20 on its one thread, on macOS
+  the QoS / App Nap path): ONE thread. Each tick it polls its non-blocking sockets (the arm's joint channel: it owns
+  the arm session; the target datagrams, UDP and Unix: it parses and applies them, so the armed latch is exactly as
+  below), reads the estimator and swerve rows from shared memory, runs the tick (the latch, staleness, holds, the QP,
+  integration, the outputs: the same `WbcNode` code), sends the arm command, and writes the base twist, the stream
+  row and (every 2nd tick and after every command) a `/state` snapshot to shared memory. No HTTP, no JSON documents,
+  no other threads; `gc.freeze()` after the setup.
+- **Server process** (the FastAPI node, `proc_node.py`): HTTP and the page, SSE, `/stream` (the rows from the
+  shared ring), the estimator and swerve stream readers (their rows into rings for the control process), the swerve
+  sender (posting the twist slot; muted on e-stop / disable as before), the client lease (renewed for every
+  datagram the control process counts), the arm and swerve leases, enable / disable, `/config`, `/hints`,
+  `/session`, `/disarm`, `/estop` with the parallel fan-out.
+- **IPC** (`ipc.py`): one shared-memory file (mmap, a private 0700 directory on tmpfs: `$XDG_RUNTIME_DIR` on the
+  robot) with heartbeats, seqlocked latest-value slots (the twist, the server's lease / sender status, the snapshot;
+  CRC-checked) and single-producer rings (stream rows, estimator rows, swerve rows; drop-oldest, counted); commands on
+  two Unix datagram sockets (pickled; non-blocking on the control side). The control loop waits for its tick on the
+  command socket, so a command is applied at once between ticks: the e-stop first (it disarms and holds the arm on
+  receipt). Requests that need an answer (enable, disable, session, hints, config, disarm, e-stop) wait for the
+  control process's.
+- **Failures.** The control process watches the server's heartbeat: missing for `srv_heartbeat` (0.5 s) → disarm and
+  hold (arm at its commanded joints, base braking to zero), the arm channel kept alive (the arm's own watchdog
+  semantics), no arming until it is back (then still disarmed: a new press). The server watches the control
+  process's: missing for `ctl_heartbeat` (0.2 s), or the process gone → **fault** (an event; the base muted; the
+  swerve and the arm disabled and released; `/state` `state: fault`, `fault: <reason>`; every request needing the
+  control process answers 503). **Nothing restarts automatically: the operator restarts the node.** The server's
+  process gone → the control process ends (the joint channel's bye). Node shutdown stops it cleanly.
+- `/state.process` (added): `mode`, `pid`, `alive`, `fault`, `heartbeat_age`, `snapshot_age`, `rows_dropped`,
+  `commands_dropped`, `pump_max_ms`. `/state` is the snapshot (≤ 20 ms old); everything else is unchanged: the
+  routes, the stream fields, the datagram formats, the latch, the stop paths.
+- Measured (`tests/test_wbc_proc.py`, MacBook, no SCHED_FIFO; the server hammered by 6 `/state` pollers, 3 SSE
+  and 3 `/stream` clients and three simulated 100 Hz readers while tracking a moving target): tick period p99
+  13.3 ms, max 13.7 ms, 0 overruns with the process; 17.4 ms p99, 20.1 ms max, 40 overruns as a thread.
 
 ### Defaults (for the first tests, the owner's)
 
@@ -154,7 +196,8 @@ the state is `idle` with `hold_reason` `disarmed: <reason>`.
   without `armed` / `arm_seq`, or an older `arm_seq`); `POST /disarm`; stale input (no datagram for `hold_timeout`);
   the client lease ending; a new session; enable; disable; an estimator reset, pose jump or unusable pose; a
   planned motion pausing
-  the arm; any fault; the e-stop; a control tick later than 3 dt (below). Headset latency / staleness is the
+  the arm; any fault; the e-stop; a control tick later than `late_tick` (below); the server process's heartbeat
+  lost ("Processes"). Headset latency / staleness is the
   client's: it sends `armed: false` or stops (then `hold_timeout`).
 - `/state`: `armed`, `disarm_reason`, `latch` (`arm_seq`, `arm_seq_seen`, `arm_floor`, `disarms`,
   `ignored_disarmed`, `arm_refused`, `limits_ignored`, `clamped`); the stream's `armed` column.
@@ -162,8 +205,10 @@ the state is `idle` with `hold_reason` `disarmed: <reason>`.
 ### Control tick timing
 
 Each tick's period (the clock) and compute time are measured: `overruns` (period > 1.5 dt) and `late_ticks`
-(> 3 dt) are counted (`/state.tick`, the stream's `tick_period`, `tick_compute`, `overruns`, `late_ticks`). A tick
-later than 3 dt after the previous one **disarms** (`control tick overrun: N ms`, logged). The arm command is
+(> `late_tick`, 0.1 s) are counted (`/state.tick`, the stream's `tick_period`, `tick_compute`, `overruns`,
+`late_ticks`). A tick later than `late_tick` after the previous one **disarms** (`control tick overrun: N ms`,
+logged); one between 3 dt and `late_tick` is an overrun only (`late_tick` was 3 dt before the GIL stalls; with the
+control process it can come down again once the robot shows no overruns). The arm command is
 integrated over the **measured** period clamped to `[dt, 3 dt]` (not the nominal dt), and the joint position damper
 uses the same step, so a long step never crosses a joint limit.
 
@@ -333,10 +378,14 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
   measured joints and sends keep-alives; when it ends, the commands restart from the measured joints. RUS1's `seq`
   is the goal the previous arm tick applied; in the world sim the measured arm trails the command by about 5 ticks
   (well inside the resync threshold).
-- Tests: `tests/test_wbc_controller.py` (pinocchio only), `tests/test_wbc_node.py` (lockstep against a fake arm:
+- Tests: `tests/test_wbc_proc.py` (the control process: spawn, enable / arm / tracking with the rows through
+  the ring, config / hints / session / disarm / e-stop through the command channel, the lease renewed by datagrams
+  and its lapse, heartbeat loss both ways, a stalled or killed control process, a clean shutdown, the IPC slot and
+  ring, and the load test against the thread structure; the other node tests step `WbcNode` in-process, the same
+  tick code), `tests/test_wbc_controller.py` (pinocchio only), `tests/test_wbc_node.py` (lockstep against a fake arm:
   HTTP + a joint-channel peer on fastpath, `tests/wbc_fakes.py`, including the pause and the arm's bye; and real
   time with the swerve node on its virtual SPARKs and the estimator), `tests/test_wbc_sim.py` (the MuJoCo world
-  with the real nodes: the arm node on `WorldArmBus` with its joint channel, the swerve on world-coupled SPARKs,
+  with the real nodes, the WBC in its control process: the arm node on `WorldArmBus` with its joint channel, the swerve on world-coupled SPARKs,
   the estimator, the WBC; the arm drops none of the WBC's goals). `tests/test_wbc_armed.py` (the armed latch: every
   disarm trigger, no recovery re-arms, the arm_seq floor, braking / holding / gripper while disarmed, the caps while
   moving, clamped hint velocities, the e-stop's order and parallel fan-out, no command reaching the base on e-stop

@@ -97,6 +97,23 @@ class Receiver:
                     src = "udp" if sock is self.udp else "unix"
                     self.handle(data, f"{src}:{addr}" if addr else src)
 
+    def poll(self, limit: int = 256) -> int:
+        """Read the pending datagrams without blocking (at most ``limit``): the control process calls it every tick
+        instead of running the thread. Returns how many were read."""
+        n = 0
+        for sock in (self.udp, self.unix):
+            while sock is not None and n < limit:
+                try:
+                    data, addr = sock.recvfrom(MAX_DATAGRAM)
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError:
+                    break
+                n += 1
+                src = "udp" if sock is self.udp else "unix"
+                self.handle(data, f"{src}:{addr}" if addr else src)
+        return n
+
     def handle(self, data: bytes, source: str = "test") -> Optional[str]:
         """Check one datagram; returns the drop reason or None (delivered)."""
         try:

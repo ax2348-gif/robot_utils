@@ -1,6 +1,6 @@
 """The WBC on the MuJoCo world, in real time, with the real nodes: the arm node on ``WorldArmBus`` (its HTTP API
 and its internal joint channel), the swerve node on world-coupled SPARKs (its full CAN path), the estimator on the
-swerve stream, and the WBC. docs/wbc.md, docs/sim.md."""
+swerve stream, and the WBC with its control loop in its own process (as on the robot). docs/wbc.md, docs/sim.md."""
 import json
 import math
 import os
@@ -37,7 +37,7 @@ def test_whole_body_reach_in_the_sim_world(world):
     from robot_utils.nodes.swerve.node import SwerveNode
     from robot_utils.nodes.swerve.server import create_app as swerve_app
     from robot_utils.nodes.wbc.model import EESpec, WbcModel, arm_config_limits, fetch_urdf
-    from robot_utils.nodes.wbc.node import WbcNode
+    from robot_utils.nodes.wbc.proc_node import ProcNode
     from robot_utils.nodes.wbc.server import create_app as wbc_app
     sims, iface, coupler = start_world_sim(SIM)
     sw = SwerveNode(iface)
@@ -56,16 +56,16 @@ def test_whole_body_reach_in_the_sim_world(world):
                   joint_socket=os.path.join(d, "arm.joint.sock"))
     arm_url, arm_srv, arm_t = serve(arm_app(arm))
     urdf, _ = fetch_urdf("local")
-    node = WbcNode(WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),)), arm=arm_url, swerve=sw_url,
-                   estimator=est_url, udp_host="127.0.0.1", udp_port=0, unix_socket=d + "/t.sock",
-                   arm_socket=d + "/arm.joint.sock",
-                   # one process (one GIL) for the 1 kHz world and every node, often beside other test runs: the
-                   # arm's state packets arrive less regularly than from its own process on the Pi
-                   config={"arm_stale": 0.3})
+    node = ProcNode(WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),)), arm=arm_url, swerve=sw_url,
+                    estimator=est_url, udp_host="127.0.0.1", udp_port=0, unix_socket=d + "/t.sock",
+                    arm_socket=d + "/arm.joint.sock",
+                    # one process (one GIL) for the 1 kHz world and the other nodes, often beside other test runs:
+                    # the arm's state packets arrive less regularly than from its own process on the Pi
+                    config={"arm_stale": 0.3})
     url, srv, t = serve(wbc_app(node))
     try:
         wait_for(lambda: arm.state == "uninitialized")
-        wait_for(lambda: sw.status == "running" and node.estimator_health(time.monotonic()) is None)
+        wait_for(lambda: sw.status == "running" and httpx.get(url + "/state").json()["estimator"]["health"] == "ok")
         tok = httpx.post(url + "/lease", json={"client": "sim"}).json()["token"]
         h = {"X-Lease-Token": tok}
         r = httpx.post(url + "/enable", headers=h, timeout=15)
@@ -99,7 +99,7 @@ def test_whole_body_reach_in_the_sim_world(world):
                     break
         L = latest()
         st = httpx.get(url + "/state").json()
-        assert st["fault"] is None, (st["events"][-3:], [e["msg"] for e in arm.events.list()[-4:]])
+        assert st["fault"] is None, ([e["msg"] for e in st["events"][-6:]], [e["msg"] for e in arm.events.list()[-8:]])
         b1 = world.world.base_state()
         moved = math.hypot(b1["xyz"][0] - b0["xyz"][0], b1["xyz"][1] - b0["xyz"][1])
         assert moved > 0.10, moved                               # the base drove in the world
