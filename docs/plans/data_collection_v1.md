@@ -49,8 +49,16 @@ policy and to diagnose the run afterwards. The same client, recorder and episode
   "Streams"), JSON in the header, no payload, three types: `headset` (`t_rx` Pi monotonic, `frame`: the raw
   teleop.quest_state.v1 record), `sent` (`t_send`, `datagram`: exactly what went to the WBC), `event` (the event
   line). Every record in order of occurrence.
-- **API:** `POST /task {"text"}` (the task of the next episodes), `GET /eventlog?since_seq=N` (JSON lines after N,
-  from the log files), `GET /eventlog/files` (`[{name, bytes, first_seq, last_seq}]`); start / stop as today.
+- **API:** `POST /task {"text"}` (the task of the next episodes), `GET /eventlog?since_seq=N&limit=M` (JSON lines
+  after N, from the log files, at most M (default 1000): the caller repeats from the last seq until fewer than M
+  come back), `GET /eventlog/files` (`[{name, bytes, first_seq, last_seq}]`); start / stop as today. `/state`
+  carries the open episode, if any: `episode: {id, task, t_start, start_seq}` (a recorder starting mid-episode can
+  index it).
+- **Clarified (2026-11-21, from the recorder build):** an `event` record's fields are FLAT in the record header
+  (`{"type": "event", "seq": ..., "t": ..., "wall": ..., "kind": ..., "episode": ..., "detail": {...}}`); A while
+  an episode is open emits `episode_stop` (kept) for it, then `episode_start` for the next, in that order. Video
+  stays latest-frame-wins until the every-frame camera mode exists (a separate item; dropped frames are counted per
+  episode).
 
 **Recommendations standing (2026-11-21):** raw stream bytes + an episode index, converted offline (e.g. LeRobot);
 MJPG as sent with an every-frame camera stream mode for recorders (gaps counted per episode); the Pi clock as the
