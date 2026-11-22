@@ -43,7 +43,9 @@ nodes:
   # wbc: whole-body control (docs/wbc.md): arm + base to EE targets; holds the arm and swerve leases while enabled
   # (so it and pose_servo never run together). Target datagrams: UDP on --udp-host (loopback until the robot's LAN
   # address is set here) and <runtime>/robot/wbc.target.sock.
-  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc}}
+  # --udp-host: the Pi's robot-LAN address (eth0, the onboard router; 2026-11-21) for off-robot clients (the Mac's
+  # teleop.py); never 0.0.0.0 or Tailscale. Keep it DHCP-reserved on the router, or update it here.
+  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc, args: [--udp-host, 192.168.8.209]}}
   # quest_teleop: whole-body teleop from the Quest headset through the wbc above (docs/quest_teleop_node.md): its
   # datagrams go to wbc.target.sock. The headset by `ssh quest` (this machine's ~/.ssh/config); --ar :80 = the robot
   # AR view at this frontend, at the robot's address toward the headset. Starting it moves nothing (Start on its page).
