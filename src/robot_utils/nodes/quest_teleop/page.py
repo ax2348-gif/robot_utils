@@ -65,6 +65,10 @@ canvas.ru-plot{width:100%;height:70px}
       <div class="ru-muted" id="reason"></div>
       <div class="ru-muted" style="font-size:13px">Start takes the WBC lease and enables it (arm + base); nothing moves until <b>Y</b> (left controller) arms it. <b>X</b> disarms and disables (the arm floats, the base coasts); Y re-enables. Armed, the grip clutches the arm after a release.</div>
     </div>
+    <div class="ru-card" data-panel="episode" data-role="telemetry"><b>Episode</b> <span class="ru-muted">A starts, a B tap stops (right controller)</span>
+      <div class="lim" id="epline"></div>
+      <div class="kv" id="episode"></div>
+    </div>
     <div class="ru-card" data-panel="headset" data-role="control"><b>Headset</b>
       <div class="kv" id="link"></div>
       <canvas class="ru-plot" id="prate"></canvas>
@@ -163,6 +167,22 @@ RU.sse("events", s => {
   ] : [["error", esc(W.error)]];
   if (s.estop.latched) wkv.push(["e-stop", "latched: clear it on the WBC, arm and swerve pages"]);
   $("#wbc").innerHTML = wkv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
+  // episode: the open one, the task, the last outcome and event (recording is the client-side script's job)
+  const E = s.episodes || {}, ev = s.last_event, L = s.eventlog || {};
+  $("#epline").className = "lim" + (E.state === "recording" ? " on" : "");
+  $("#epline").textContent = E.state === "recording" ? `episode ${E.id} · ${f(E.elapsed, 0)} s` : E.state === "resetting" ? `resetting the sim for ${E.pending}` : "no episode";
+  const d = (ev && ev.detail) || {};
+  const what = [d.button ? d.button + (d.pressed ? " down" : " up") : "", d.action || "", d.reason || ""].filter(Boolean).join(" ");
+  const evText = ev ? `#${ev.seq} ${ev.kind}${ev.episode ? " (" + ev.episode + ")" : ""}${what ? " · " + what : ""}` : "–";
+  const ekv = [
+    ["task", esc(E.task || "–")],
+    ["last", E.last ? esc(`${E.last.id} ${E.last.outcome}${E.last.reason ? ": " + E.last.reason : ""}`) : "–"],
+    ["counts", `${E.counts ? E.counts.kept : 0} kept · ${E.counts ? E.counts.aborted : 0} aborted`],
+    ["last event", esc(evText)],
+    ["event log", `${L.dir ? "on disk" : "memory only"} · seq ${L.seq}` + (L.dropped || L.write_errors ? ` · ${L.dropped} lost, ${L.write_errors} write errors` : "")],
+  ];
+  if (E.refused && E.state !== "recording") ekv.push(["A refused", esc(E.refused)]);
+  $("#episode").innerHTML = ekv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
   $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${esc(e.msg)}</div>`).join("");
 });
 

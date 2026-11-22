@@ -257,9 +257,10 @@ def test_the_landing_page_lists_the_tool_and_the_registries_the_node():
     from robot_utils.nodes.sim.stack import DEFAULT_NODES, registry_path
     tool = next(t for t in list_tools() if t["name"] == "quest_teleop")
     assert tool["title"] == "Quest teleop"
-    for cfg, port in ((None, ":80"), (registry_path(), ":8080")):      # the robot's registry, the sim stack's
+    # the robot's registry (no sim: A never resets), the sim stack's (A resets the sim first)
+    for cfg, args in ((None, ["--ar", ":80"]), (registry_path(), ["--ar", ":8080", "--sim", "sim"])):
         n = next(n for n in load_config(cfg) if n.name == "quest_teleop")
-        assert n.start.module == "robot_utils.nodes.quest_teleop" and list(n.start.args) == ["--ar", port]
+        assert n.start.module == "robot_utils.nodes.quest_teleop" and list(n.start.args) == args
     assert "quest_teleop" not in DEFAULT_NODES.split(",")          # the sim stack: a Start button
 
 

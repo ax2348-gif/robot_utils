@@ -26,7 +26,9 @@ nodes:
   # Quest whole-body teleop through the wbc above (docs/quest_teleop_node.md; Start button, not started by default).
   # The headset by `ssh quest` (this machine's ~/.ssh/config); --ar :8080 = the robot AR view at this stack's landing
   # page, at this machine's address toward the headset (start the stack with --host 0.0.0.0 so the headset reaches it).
-  - {name: quest_teleop, kind: quest_teleop, start: {module: robot_utils.nodes.quest_teleop, args: [--ar, ":8080"]}}
+  # --sim sim: the A button resets this sim before an episode (docs/quest_teleop_node.md, "Episodes").
+  - {name: quest_teleop, kind: quest_teleop, start: {module: robot_utils.nodes.quest_teleop,
+                                                     args: [--ar, ":8080", --sim, sim]}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d, args: [--allow-nominal]}}
   - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface,
                                                            args: [--no-require-imu]}}

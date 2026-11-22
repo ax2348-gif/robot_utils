@@ -1,6 +1,8 @@
 """The Quest teleop node's core: the teleop client loop (tools/quest_teleop, through ``client.py``) against the local
 WBC, the headset link monitor, the WBC echo, and the headset control (quest_ctl up / down over this machine's ssh).
-No web code here (server.py); nothing is written to disk (only log lines, to the journal).
+No web code here (server.py). On disk: only the event log (``eventlog.py``, ``--data-dir``); log lines go to the
+journal. Episodes (``episodes.py``): A / B on the right controller; every event also goes to the operator stream
+(``oplog.py``) with each headset frame and each datagram sent.
 
 Threads:
 - ``quest-teleop`` (the loop): while teleop runs, ``TeleopClient.step()`` (headset frames in, one datagram per batch
@@ -24,8 +26,11 @@ from ..common.client import NodeClient
 from ..common.hub import RowHub
 from ..common.lease import RequestError
 from ..common.server import EventLog
-from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, LocalWbcClient, QuestReader,
-                     TeleopClient, WbcStream, close_wbc, open_wbc, quest_ctl)
+from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, EpisodeButtons, LocalWbcClient,
+                     QuestReader, TeleopClient, WbcStream, close_wbc, open_wbc, quest_ctl, x_pressed)
+from .episodes import RESET_TIMEOUT, Episodes
+from .eventlog import CAP_BYTES, TeleopEventLog
+from .oplog import OpLog
 
 log = logging.getLogger("quest_teleop")
 
@@ -112,6 +117,7 @@ class HeadsetMonitor:
         self.last: Optional[dict] = None
         self.last_t: Optional[float] = None
         self.frames = 0
+        self.on_frame: Optional[Callable] = None     # (t_rx, frame) for every frame (the operator stream)
         self._lock = threading.Lock()
 
     def _seen(self, f) -> None:
@@ -121,6 +127,8 @@ class HeadsetMonitor:
             self.arrivals.append(f.arrived)
             self.last, self.last_t = f.data, f.arrived
             self.frames += 1
+        if self.on_frame is not None:
+            self.on_frame(f.arrived, f.data)
 
     def get(self, timeout=None):
         f = self.reader.get(timeout=timeout)
@@ -197,7 +205,10 @@ class QuestTeleopNode:
                  ar: str = ":80", scheme: str = "body-frozen", ctl_timeout: float = 240.0, wait: float = 30.0,
                  runner_factory: Optional[Callable] = None, probe: Optional[Callable] = None,
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
+                 log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT):
+        """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
+        keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it."""
         self.name = name
         self.wbc_target = wbc
         self.arm_target, self.swerve_target = arm, swerve     # the e-stop goes to these directly too
@@ -218,6 +229,22 @@ class QuestTeleopNode:
         self.events = EventLog(50, on_add=self.hub.state_changed)
         self.reader = QuestReader(self.quest_host, quest_port)
         self.monitor = HeadsetMonitor(self.reader, clock)
+        self.oplog = OpLog()
+        self.monitor.on_frame = self.oplog.headset
+        self.data_dir = data_dir
+        self.eventlog = TeleopEventLog(data_dir, log_cap_bytes, clock=clock)
+        self.eventlog.listeners.append(self.oplog.event)
+        self.eventlog.listeners.append(lambda line: self.hub.state_changed())
+        self.episodes = Episodes(self, sim, reset_timeout)
+        self.sim = sim
+        self.buttons: Optional[EpisodeButtons] = None
+        self.wbc_enabled: Optional[bool] = None   # as this node knows it (its own requests, the 1 Hz poll)
+        self._known_lock = threading.Lock()
+        self._fresh_prev: Optional[bool] = None
+        self._connected_prev: Optional[bool] = None
+        self._fault_known = False
+        self._estop_known = False
+        self._poll_prev: dict = {}
         self.stream = WbcStream(wbc)
         self.lock = threading.RLock()
         self.step_lock = threading.Lock()
@@ -257,6 +284,105 @@ class QuestTeleopNode:
             t.join(2)
         self.reader.close()
         self.stream.close()
+        self.eventlog.close()               # everything queued is written first
+
+    # -- events ----------------------------------------------------------------------------------------------
+
+    _NO_EPISODE = object()
+
+    def emit(self, kind: str, detail: Optional[dict] = None, episode=_NO_EPISODE) -> dict:
+        """One event (the contract's line) to the log and the operator stream; ``episode`` defaults to the open
+        one."""
+        if episode is self._NO_EPISODE:
+            episode = self.episodes.episode_id
+        return self.eventlog.emit(kind, detail, episode)
+
+    def set_enabled(self, enabled: bool, reason: str) -> None:
+        """The WBC became enabled / disabled (our request succeeded, or the poll saw it): one event per change; a
+        disable aborts the open episode."""
+        with self._known_lock:
+            if self.wbc_enabled is enabled:
+                return
+            self.wbc_enabled = enabled
+        if enabled:
+            self.emit("enabled", {"by": reason})
+        else:
+            self.emit("disabled", {"reason": reason})
+            self.episodes.abort("disabled", reason)
+
+    def wbc_disabled(self) -> bool:
+        """The WBC is disabled (its stream row's state, else what this node knows)."""
+        row, _ = self.stream.latest()
+        st = (row or {}).get("state")
+        if st is not None and math.isfinite(st):
+            return int(st) == 0
+        return self.wbc_enabled is False
+
+    def set_task(self, text: str) -> dict:
+        return self.episodes.set_task(text)
+
+    # -- the client's observers (the loop's thread) ----------------------------------------------------------
+
+    def _hook(self, client: TeleopClient) -> None:
+        self.buttons = EpisodeButtons()
+        self._fresh_prev = None
+        self._connected_prev = None
+        client.on_frame = lambda *a: self._on_frame(client, *a)
+        client.on_step = self._on_step
+        client.on_event = self._on_client_event
+
+    def _on_frame(self, client: TeleopClient, frame: dict, verdict, now: float, fresh: bool) -> None:
+        b = self.buttons
+        b.on_frame(frame, verdict, now, fresh)
+        for name, pressed in b.edges:
+            self.emit("button", {"button": name, "pressed": pressed})
+        b.edges.clear()
+        if verdict.accept and x_pressed(frame):
+            self.episodes.abort("x", "X: disabled")
+        evs, b.events = b.events, []
+        for ev in evs:
+            self.episodes.on_button(ev, client)
+
+    def _on_step(self, now: float, fresh: bool, why: str) -> None:
+        c = self.client
+        if fresh:
+            self._fresh_prev = True
+        elif self._fresh_prev and c is not None:
+            self._fresh_prev = False
+            g = c.gate
+            if g.last_valid is None or now - g.last_valid > g.stale_s:
+                kind = "staleness"
+            elif "rate" in (g.timing_reason or ""):
+                kind = "rate"
+            else:
+                kind = "latency"
+            self.emit("stale", {"reason": kind, "why": why})
+            self.episodes.abort("stale", why)
+        connected = bool(getattr(self.reader, "connected", False))
+        if self._connected_prev and not connected:
+            self.episodes.abort("telemetry_loss", "the headset stream closed")
+        self._connected_prev = connected
+        row, _ = self.stream.latest()
+        st = (row or {}).get("state")
+        if st is not None and math.isfinite(st) and int(st) == 5:
+            self._fault("the WBC stream shows a fault")
+
+    def _on_client_event(self, ev: tuple) -> None:
+        if ev[0] == "armed":
+            self.emit("armed", {"arm_seq": ev[1]})
+        elif ev[0] == "disarmed":
+            self.emit("disarmed", {"reason": ev[1]})
+            self.episodes.abort("x" if str(ev[1]).startswith("X:") else "disarm", ev[1])
+        elif ev[0] in ("enable", "disable") and ev[1]:
+            self.set_enabled(ev[0] == "enable", "Y" if ev[0] == "enable" else "X")
+
+    def _fault(self, reason: str) -> None:
+        with self._known_lock:
+            if self._fault_known:
+                return
+            self._fault_known = True
+        self.emit("fault", {"reason": reason})
+        self.episodes.abort("fault", reason)
 
     # -- teleop ----------------------------------------------------------------------------------------------
 
@@ -281,11 +407,15 @@ class QuestTeleopNode:
         client = TeleopClient(self.cfg, self.monitor, self.stream, wbc, stale_s=self.stale_s, clock=self.clock,
                               max_latency=self.max_latency, min_rate=self.min_rate)
         client.session_opened(info)
+        self._hook(client)
+        wbc.on_sent = self.oplog.sent
         self.monitor.drain()            # frames from before the start are not this client's
         with self.lock:
             self.wbc, self.client = wbc, client
             self.phase, self.started_at = "running", self.clock()
             self.last_msg = None
+        self.emit("teleop_start", {"session": info.get("session"), "transport": getattr(wbc, "transport", None)})
+        self.set_enabled(True, "teleop start")
         self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; nothing moves until "
                         f"Y (left) arms, X disables; the {self.cfg.hand} grip clutches the arm")
         return self.teleop_info()
@@ -297,6 +427,7 @@ class QuestTeleopNode:
             self.phase = "stopping"
             client, wbc = self.client, self.wbc
             self.client = None
+        self.episodes.abort("teleop_stop", reason)
         self.hub.state_changed()
         with self.step_lock:            # the loop's current step finishes; nothing is sent after this
             pass
@@ -309,6 +440,8 @@ class QuestTeleopNode:
             self.wbc, self.phase, self.stop_reason = None, "stopped", reason
             if problems:
                 self.error = "stop: " + "; ".join(p.strip() for p in problems)
+        self.set_enabled(False, "teleop stop")
+        self.emit("teleop_stop", {"reason": reason})
         self.events.add(f"teleop stopped ({reason})" + (f": {'; '.join(problems)}" if problems else ""),
                         "warn" if reason != "requested" else "info")
         return {"stopped": True, "reason": reason, "engagements": client.core.status.engagements}
@@ -338,6 +471,10 @@ class QuestTeleopNode:
         threads = [threading.Thread(target=post, args=nt, name=f"quest-estop-{nt[0]}", daemon=True) for nt in targets]
         for t in threads:
             t.start()
+        with self._known_lock:
+            self._estop_known = True
+        self.emit("estop", {"reason": why, "source": src})
+        self.episodes.abort("estop", why)
         deadline = time.monotonic() + max(self.ESTOP_TIMEOUTS.values()) + 0.5
         for t in threads:
             t.join(max(0.0, deadline - time.monotonic()))
@@ -553,6 +690,7 @@ class QuestTeleopNode:
                     "lease": {"held": bool(lease.get("held")), "holder": lease.get("holder")},
                     "estop": {"latched": bool(e.get("latched")), "reason": e.get("reason"), "source": e.get("source")},
                     "dropped": (s.get("session") or {}).get("dropped")}
+                self._poll_events(self.wbc_state)
             except Exception as ex:  # noqa: BLE001
                 self.wbc_state = {"reachable": False, "error": f"{type(ex).__name__}: {ex}"[:200]}
                 if c is not None:
@@ -579,6 +717,34 @@ class QuestTeleopNode:
             self.hub.state_changed()
         if c is not None:
             c.close()
+
+    def _poll_events(self, w: dict) -> None:
+        """Events from what the 1 Hz poll sees change (between two polls, so a poll that raced our own request is not
+        mistaken for someone else's): an e-stop or a fault not seen yet, a hold, an enable / disable."""
+        prev = self._poll_prev
+        cur = self._poll_prev = {"latched": w["estop"]["latched"], "fault": w.get("fault"),
+                                 "hold": w.get("hold_reason"), "enabled": bool(w.get("enabled"))}
+        if cur["latched"] and not prev.get("latched"):
+            with self._known_lock:
+                new, self._estop_known = not self._estop_known, True
+            if new:
+                e = w["estop"]
+                self.emit("estop", {"reason": e.get("reason") or "", "source": e.get("source") or "wbc"})
+                self.episodes.abort("estop", e.get("reason") or "the WBC e-stop is latched")
+        elif not cur["latched"]:
+            self._estop_known = False
+        if cur["fault"]:
+            self._fault(str(cur["fault"]))
+        else:
+            row, _ = self.stream.latest()
+            st = (row or {}).get("state")
+            if st is None or not math.isfinite(st) or int(st) != 5:
+                self._fault_known = False
+        if cur["hold"] and cur["hold"] != prev.get("hold"):
+            self.emit("hold", {"reason": cur["hold"]})
+        if prev and cur["enabled"] != prev.get("enabled") and self.phase == "running":
+            self.set_enabled(cur["enabled"], "seen enabled" if cur["enabled"]
+                             else (w.get("disabled_reason") or "seen disabled"))
 
     def _disabled_by_x(self) -> bool:
         c = self.client
@@ -633,7 +799,14 @@ class QuestTeleopNode:
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
                        "head_walk": cfg.head_walk, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
-                       "ctl_timeout": self.ctl_timeout},
+                       "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
+                       "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,
+            "episode": self.episodes.open_episode(),
+            "episodes": self.episodes.info(),
+            "task": self.episodes.task,
+            "last_event": self.eventlog.last,
+            "eventlog": self.eventlog.info(),
+            "oplog": {"subscribers": self.oplog.subscribers, "records": dict(self.oplog.counts)},
             "events": self.events.list()[-30:],
         }
