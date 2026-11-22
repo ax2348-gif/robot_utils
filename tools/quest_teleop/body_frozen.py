@@ -191,6 +191,7 @@ class Engagement:
     target_r0: Optional[np.ndarray] = None                             # the first target orientation (fit origin)
     hand_fit: Optional["VelocityFit"] = None                           # the target's velocity
     head_fit: Optional["VelocityFit"] = None                           # the head's (hint) velocity, world
+    captured_now: bool = False                                         # captured on the newest frame
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
@@ -274,6 +275,7 @@ class TeleopCore:
         self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
         self.hint: Optional[dict] = None          # the newest base hint target sent (status)
         self._last_ns: Optional[int] = None
+        self._tracked = False
         self.status = Status()
 
     # -- engagement ------------------------------------------------------------------------------
@@ -299,9 +301,13 @@ class TeleopCore:
             return
         if robot is not None:
             self.last_robot = robot
+        self._tracked = False
         self._engagement(frame, verdict, robot, now)
         if self.valid and self.frame is not None:
             self._sticks(frame, robot)
+        if self._tracked and self.eng is not None:
+            # after the sticks: the EE target and the base hint use the same (this frame's) offset
+            self._track_offset(frame)
 
     def _sticks(self, frame: dict, robot: Optional[RobotState]) -> None:
         ns = frame.get("sample_time_ns")
@@ -309,8 +315,8 @@ class TeleopCore:
         if isinstance(ns, int) and self._last_ns is not None:
             dt = min(max(0.0, (ns - self._last_ns) * 1e-9), self.cfg.max_dt)
         self._last_ns = ns if isinstance(ns, int) else None
-        if self.eng is None or dt <= 0:
-            return
+        if self.eng is None or dt <= 0 or self.eng.captured_now:
+            return                       # the capture frame: the offset stays zero (engaging never moves the robot)
         v = stick_velocity(frame["control_intent"])
         yaw = robot.base_yaw if robot is not None else self.eng.robot.yaw
         self.offset[:2] += F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt
@@ -348,6 +354,7 @@ class TeleopCore:
                 self.drop("hand pose missing")
                 return
             self.eng.target_raw = body_frozen_target(self.eng, *hp)
+            self.eng.captured_now = False
             self._track(frame)
             self.status.state = "engaged"
             return
@@ -377,6 +384,7 @@ class TeleopCore:
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
+        eng.captured_now = True
         self.eng = eng
         self._track(frame)
         self.status.engagements += 1
@@ -384,7 +392,8 @@ class TeleopCore:
         self.status.reason = ""
 
     def _track(self, frame: dict) -> None:
-        """Engaged: this frame's head contribution and the samples of the feedforward fits (sample_time_ns)."""
+        """Engaged: this frame's head contribution; the offset and the feedforward samples follow the sticks
+        (``_track_offset``, after ``_sticks`` in ``on_frame``)."""
         eng = self.eng
         if self.cfg.head_walk:
             head = head_pose(frame)
@@ -397,6 +406,11 @@ class TeleopCore:
             elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
                 eng.head_fit.reset()
             eng.head_tracked = yaw is not None
+        self._tracked = True
+
+    def _track_offset(self, frame: dict) -> None:
+        """The target with this frame's stick offset (the base hint's too) and the feedforward fits' samples."""
+        eng = self.eng
         eng.target = self._with_offset(eng.target_raw)
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
