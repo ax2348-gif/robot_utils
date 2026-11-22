@@ -22,7 +22,7 @@ python -m robot_utils.collect browse ~/data/20261122-143000 --export-camera came
 | `--host` / `--port` | `127.0.0.1` / `8770` | where the page is served |
 | `--description` | (below) | robot description: JSON file, description node URL, or description data dir |
 | `--ffmpeg` | (below) | the ffmpeg binary for export |
-| `--export-dir` | `<path>/exports` | where videos are written |
+| `--export-dir` | `~/robot_utils_exports/<path name>` | where videos are written (never inside the data: the browser only reads it) |
 | `--cache` | `~/.cache/robot_utils/browse` | the index cache (`$ROBOT_UTILS_BROWSE_CACHE` too) |
 | `--open` | off | open the page in the default browser |
 | `--export-camera STREAM` | | headless export of one camera (with `--episode`, `--out`, `--rate`, `--fps`, `--size`, `--preset`, `--crf`, `--target-mb`), then exit |

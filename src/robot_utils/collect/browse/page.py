@@ -387,10 +387,12 @@ function drawOperator(g, W, H, t, view){
   g.clearRect(0, 0, W, H); g.fillStyle = C.panel; g.fillRect(0, 0, W, H); g.font = "11px " + C.font;
   if (!have("oplog.headset")){ g.fillStyle = C.muted; g.fillText("no operator stream in this recording", 10, H - 10); return; }
   const o = rows("oplog.headset"), head = pose("oplog.headset", "head_", t);
-  const focus = view.focus || (head ? [head.p[0] + 0.3, head.p[1], head.p[2] - 0.5] : [0.3, 0, -0.5]);
-  if (head && !view.focus) view.focus = focus;
+  // follows the operator: centred a little ahead of and below the head (they walk with the robot)
+  const hy = head ? Math.atan2(-head.R[1][2], -head.R[0][2]) : 0;           // OpenXR -z = forward
+  const focus = head ? [head.p[0] + 0.25 * Math.cos(hy), head.p[1] + 0.25 * Math.sin(hy), head.p[2] - 0.45] : (view.focus || [0.3, 0, -0.5]);
+  view.focus = focus;
   const P = view.proj(W, H, focus), D = pen(g, P), floor = (view.floor = view.floor || (head ? head.p[2] - 1.55 : -1.55));
-  grid(D, Math.round(focus[0]), Math.round(focus[1]), floor, 2.5, 0.5);
+  grid(D, Math.round(focus[0] * 2) / 2, Math.round(focus[1] * 2) / 2, floor, 2.5, 0.5);
   triad(D, [0, 0, floor], [[1,0,0],[0,1,0],[0,0,1]], 0.2, 1.2);
   const [ts, xs] = o.series("head_x", t - 4, t, 2), [, ys] = o.series("head_y", t - 4, t, 2);
   D.path(ts.map((_, i) => fin(xs[i]) ? [xs[i], ys[i], floor] : null), C.muted, 1.2);
@@ -476,7 +478,7 @@ function drawPlot(g, W, H, t, p, win, opts){
   g.fillStyle = C.muted; g.font = "10px " + C.mono; g.textAlign = "right"; g.fillText(fmtNum(hi), W - 4, top + 8); g.fillText(fmtNum(lo), W - 4, H - bot - 2);
   g.textAlign = "left"; g.fillText(`${win.toFixed(win < 10 ? 1 : 0)} s`, 4, H - 2);
   let y = top + 10;                                         // the values at the playhead, beside it
-  p.series.forEach((s, k) => { const v = rows(s.stream).at(s.field, t); g.fillStyle = C.p[k % 5]; g.fillText(fin(v) ? fmtNum(v) : "-", W / 2 + 5, y); y += 11; });
+  p.series.forEach((s, k) => { const v = rows(s.stream).at(s.field, t); g.fillStyle = C.p[k % 5]; g.fillText(fin(v) ? fmtNum(v) : "-", W / 2 + 5, y); y += 12; });
   if (opts.legend){ let x = 6; g.font = "11px " + C.font; p.series.forEach((s, k) => { g.fillStyle = C.p[k % 5]; const txt = "— " + s.field; g.fillText(txt, x, 13); x += g.measureText(txt).width + 10; }); }
 }
 const fmtNum = v => { const a = Math.abs(v); return a >= 1000 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : a >= 1 ? v.toFixed(2) : v.toFixed(3); };
@@ -540,7 +542,7 @@ document.addEventListener("keydown", e => {
 });
 
 // ---- views ------------------------------------------------------------------------------------------------
-const robotView = new View($("#robot canvas"), {half: 0.95}), opView = new View($("#operator canvas"), {half: 0.9, az: -2.6, el: 0.45});
+const robotView = new View($("#robot canvas"), {half: 0.95}), opView = new View($("#operator canvas"), {half: 0.6, az: -2.6, el: 0.45});
 let follow = true;
 document.querySelectorAll("#robot .tools button").forEach(b => b.onclick = () => { const v = b.dataset.v;
   if (v === "follow"){ follow = !follow; b.classList.toggle("on", follow); if (!follow) robotView.focus = robotView.focus || [0, 0, 0.35]; S.dirty = true; } else robotView.set(v); });
@@ -683,7 +685,7 @@ async function xEstimate(){
 }
 // render the replay at time t into an export canvas: robot 3D left, cameras and the operator right, plots below
 const xcv = document.createElement("canvas");
-const xRobot = new View(document.createElement("canvas"), {half: 0.95}), xOp = new View(document.createElement("canvas"), {half: 0.9, az: -2.6, el: 0.45});
+const xRobot = new View(document.createElement("canvas"), {half: 0.95}), xOp = new View(document.createElement("canvas"), {half: 0.6, az: -2.6, el: 0.45});
 function composeLayout(W, H){
   const cams = camNames().filter(n => vis["cam:" + n] !== false), op = vis.operator !== false && have("oplog.headset"), pl = vis.plots !== false ? plots.slice(0, 3) : [];
   const head = 24, plotH = pl.length ? Math.round(H * 0.24) : 0, mainH = H - head - plotH, rightW = (cams.length || op) ? Math.round(W * 0.36) : 0, L = [];

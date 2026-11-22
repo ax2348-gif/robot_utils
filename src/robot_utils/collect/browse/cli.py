@@ -15,7 +15,7 @@ def add_parser(sub) -> argparse.ArgumentParser:
     b.add_argument("--description", help="robot description: a JSON file, a description node URL or a description "
                                          "data dir (default: <session>/description.json, else the package default)")
     b.add_argument("--ffmpeg", help="ffmpeg binary (default: $FFMPEG, PATH, or imageio-ffmpeg's)")
-    b.add_argument("--export-dir", help="where videos go (default: <path>/exports)")
+    b.add_argument("--export-dir", help="where videos go (default: ~/robot_utils_exports/<path name>; never inside the data)")
     b.add_argument("--cache", help="index cache directory (default ~/.cache/robot_utils/browse)")
     b.add_argument("--open", action="store_true", help="open the page in the default browser")
     x = b.add_argument_group("headless export of one camera (no server)")
@@ -40,7 +40,7 @@ def run(a) -> int:
         return 1
     cache = Path(a.cache).expanduser() if a.cache else None
     lib = Library(path, cache)
-    out_dir = Path(a.export_dir).expanduser() if a.export_dir else path / "exports"
+    out_dir = Path(a.export_dir).expanduser() if a.export_dir else Path.home() / "robot_utils_exports" / path.name
     ffmpeg = find_ffmpeg(a.ffmpeg)
     if a.export_camera:
         if not ffmpeg:
