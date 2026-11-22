@@ -75,6 +75,11 @@ def test_arm_node_on_the_world(sim, tmp_path):
             # the gripper follows the node's gap goal
             node.gripper_cmd(tok, gap_mm=30.0)
             wait_for(lambda: abs(sim.world.snapshot()["arm"]["gap_mm"] - 30.0) < 1.0, 10)
+            # commanded closed, the world's jaws close; commanded open, they open (arm node -> WorldArmBus -> world)
+            node.gripper_cmd(tok, gap_mm=0.0)
+            wait_for(lambda: sim.world.snapshot()["arm"]["gap_mm"] < 1.0 and sim.world.arm.g_ref > -0.05, 10)
+            node.gripper_cmd(tok, gap_mm=45.0)
+            wait_for(lambda: abs(sim.world.snapshot()["arm"]["gap_mm"] - 45.0) < 1.5, 10)
         finally:
             stop.set()
             th.join()

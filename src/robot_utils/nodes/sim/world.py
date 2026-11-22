@@ -205,6 +205,11 @@ class World:
                     g.solref = [float(v) for v in wc["solref"]]
                     g.solimp = [float(v) for v in wc["solimp"]][:3] + [0.5, 2.0]
                     g.priority = 1
+        self._jaws(spec)
+        cc = self.cfg.get("contact") or {}
+        spec.option.cone = {"pyramidal": mujoco.mjtCone.mjCONE_PYRAMIDAL,
+                            "elliptic": mujoco.mjtCone.mjCONE_ELLIPTIC}[cc.get("cone", "elliptic")]
+        spec.option.noslip_iterations = int(cc.get("noslip_iterations", 0))
         # floor, light
         fl = self.cfg["floor"]
         tex = spec.add_texture(name="floor_grid", type=mujoco.mjtTexture.mjTEXTURE_2D,
@@ -261,6 +266,35 @@ class World:
         spec.visual.global_.offwidth, spec.visual.global_.offheight = w_max, h_max
         spec.visual.map.znear = 0.01          # x the model extent: near clip ~ cm (depth precision)
         return spec
+
+    def _jaws(self, spec: mujoco.MjSpec) -> None:
+        """The fingers collide as the real jaws, in every model variant: the jaw boxes (arm/geometry.py ARM_BOXES:
+        the carriage and the prong, bounded from the visual meshes) replace whatever collision geometry the finger
+        links have (the full variant's convex hull fills the space between the pads). Visual geoms stay. The
+        mimic coupling of the right finger is stiffened (``contact.fingers.mimic_solref``): one pinion drives both."""
+        from ..description.model import arm_box_geometry
+        fc = (self.cfg.get("contact") or {}).get("fingers") or {}
+        boxes = arm_box_geometry()
+        for link in ("finger_left_link", "finger_right_link"):
+            body = spec.body(f"arm_{link}")
+            if body is None:
+                continue
+            for g in list(body.geoms):
+                if g.contype or g.conaffinity:
+                    spec.delete(g)
+            for name, c, size in boxes.get(link, []):
+                g = body.add_geom(name=f"arm_{link}_{name}_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
+                                  pos=c, size=[v / 2 for v in size], group=3)
+                g.contype, g.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
+                g.condim = int(fc.get("condim", 3))
+                g.friction = [float(v) for v in fc.get("friction", [1.0, 0.005, 0.0001])]
+                if fc.get("solref"):
+                    g.solref = [float(v) for v in fc["solref"]]
+                if fc.get("solimp"):
+                    g.solimp = [float(v) for v in fc["solimp"]][:3] + [0.5, 2.0]
+        if fc.get("mimic_solref"):
+            for e in spec.equalities:
+                e.solref = [float(v) for v in fc["mimic_solref"]]
 
     @staticmethod
     def _servo(spec, name: str, joint: str, kp: float, kv: float, force: Optional[float], velocity: bool = False):
@@ -355,7 +389,8 @@ class World:
         o["rpy"] = [float(v) for v in o.get("rpy", [0.0, 0.0, float(o.get("yaw", 0.0))])]
         o.pop("yaw", None)
         o["rgba"] = [float(v) for v in o.get("rgba", [0.85, 0.55, 0.2, 1.0])]
-        o["friction"] = [float(v) for v in o.get("friction", [0.8, 0.005, 0.0001])]
+        oc = (self.cfg.get("contact") or {}).get("objects") or {}
+        o["friction"] = [float(v) for v in o.get("friction", oc.get("friction", [0.8, 0.005, 0.0001]))]
         o["name"], o["shape"] = name, shape
         return o
 
@@ -372,6 +407,7 @@ class World:
             g = b.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[o["radius"], o["length"] / 2, 0],
                            mass=o["mass"], rgba=o["rgba"])
         g.contype, g.conaffinity, g.friction = WORLD_CONTYPE, WORLD_CONAFFINITY, o["friction"]
+        g.condim = int(((self.cfg.get("contact") or {}).get("objects") or {}).get("condim", 3))
         self.objects[o["name"]] = o
 
     def _recompile(self) -> None:
