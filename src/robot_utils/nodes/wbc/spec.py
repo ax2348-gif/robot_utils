@@ -94,6 +94,7 @@ class Config:
     jump_pos: float = 0.15          # m between consecutive poses: a jump (targets aborted)
     jump_theta: float = 0.30        # rad
     lease_heartbeat: float = 1.0    # s, the WBC's own client lease
+    arm_stale: float = 0.1          # s without an arm joint-channel state while enabled -> fault
 
     @property
     def dt(self) -> float:

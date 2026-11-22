@@ -46,7 +46,6 @@ log = logging.getLogger("wbc")
 
 STATES = ["disabled", "enabling", "idle", "tracking", "holding", "fault"]
 SOLVE = ["none", "ok", "infeasible", "error"]
-ARM_STALE_S = 0.1        # no RUS1 state for this long while enabled -> fault
 ARM_GRACE_S = 0.5        # after enable: the arm may still report its old state
 SWERVE_GRACE_S = 0.25
 CMD_FAIL_S = 0.25        # swerve commands failing this long -> fault
@@ -571,7 +570,7 @@ class WbcNode:
                 self._fault_locked(f"arm joint channel closed: {self.channel.closed_reason}", False, True)
                 return
             if now - self.enabled_at > ARM_GRACE_S:
-                if st is None or now - st.t_rx > ARM_STALE_S:
+                if st is None or now - st.t_rx > self.cfg.arm_stale:
                     self._fault_locked("arm state stale (no joint-channel state)", False, True)
                     return
                 if st.state_name in ("off", "fault"):

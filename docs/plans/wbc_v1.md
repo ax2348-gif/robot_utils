@@ -1,7 +1,10 @@
 # Whole-body control (WBC), v1: draft
 
-Status (2026-11-21): draft for discussion. Nothing built. Built after the fast path (`fast_path_v1.md`) and
-validated in the MuJoCo sim (`sim_v1.md`) before the robot.
+Status (2026-11-21): v1 built (docs/wbc.md): the QP controller, target buffers, the node with leases, the datagram
+session, the stream and cross-bus faults; tested against a fake arm joint-channel peer, the swerve sim and the
+MuJoCo world. Decided while building: world-frame targets only (no `base` frame), `est_reset` in datagrams, reach and
+manipulability limits as constraints, base hints in a lower-priority stage. Not yet: the fence, the MPC, the real
+arm side of the joint channel (parallel branch).
 
 ## Goal
 

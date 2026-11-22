@@ -35,6 +35,7 @@ class FakeArm:
         self.commands = []          # (t, q, qd, gap)
         self.gap = math.nan
         self.refuse = None          # a reason to refuse hellos
+        self.kinematic = True       # the joints jump to each command (False: a subclass moves them)
         self.period = period
         self.lock = threading.Lock()
         if os.path.exists(sock_path):
@@ -90,7 +91,9 @@ class FakeArm:
                 self.seq = c.seq
                 if c.mode == MODE_GOAL and self.state in ("floating", "servoing"):
                     self.q_cmd = c.q.copy()
-                    self.q = c.q.copy()
+                    self.qd_cmd = c.qd.copy()
+                    if self.kinematic:
+                        self.q = c.q.copy()
                     self.state = "servoing"
                     if math.isfinite(c.gap):
                         self.gap = c.gap
