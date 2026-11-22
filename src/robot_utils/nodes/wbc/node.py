@@ -177,6 +177,10 @@ class WbcNode:
         self.seq_in_force = 0
         self.last_rx = -math.inf
         self.resyncs = 0
+        self.resync = self.cfg.resync
+        from ..arm.config import GAP_MAX
+        self.gap_max = GAP_MAX
+        self._paused = False
         self.solve_fail = 0
         self.limited_counts: dict = {}
         self._tick_times: list = []
@@ -446,9 +450,8 @@ class WbcNode:
             return
         now = self.clock()
         self._drain_inputs(now)
-        st = self.channel.poll() if self.channel is not None else None
+        st = self.channel.poll(now) if self.channel is not None else None
         if st is not None:
-            st.t_rx = now
             self.arm_state = st
         self.lease.expire_if_due()
         with self.lock:
@@ -477,10 +480,20 @@ class WbcNode:
                 self._last["reset_id"], self._last["jumps"] = self.est.reset_id, self.est.jumps
             self._apply_messages(now)
             hints = self.effective_hints()
-            # resync the integration to the measured joints past a threshold
+            # a planned motion on the arm (HTTP) paused the session: hold, follow the measured joints, send
+            # keep-alives; when it ends, resume from the measured joints
             st = self.arm_state
-            if st is not None and "arm" in self.q_cmd and np.all(np.isfinite(st.q)):
-                if np.max(np.abs(st.q - self.q_cmd["arm"])) > self.cfg.resync:
+            paused = st is not None and st.paused
+            if paused != self._paused:
+                self._paused = paused
+                self.events.add("arm session paused by a planned motion: holding" if paused else
+                                "arm session resumed: commands resynced to the measured joints", "warn")
+                if not paused and st is not None and np.all(np.isfinite(st.q)):
+                    self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
+                    self.ctl.reset()
+            # resync the integration to the measured joints past a threshold (well inside the arm's lead bound)
+            if st is not None and "arm" in self.q_cmd and np.all(np.isfinite(st.q)) and not paused:
+                if np.max(np.abs(st.q - self.q_cmd["arm"])) > self.resync:
                     self.resyncs += 1
                     self.events.add(f"arm command resynced to the measured joints (off by "
                                     f"{np.degrees(np.max(np.abs(st.q - self.q_cmd['arm']))):.1f}°)", "warn")
@@ -488,8 +501,8 @@ class WbcNode:
                     self.v_cmd["arm"] = np.zeros(len(st.q))
             stale = now - self.last_rx > self.cfg.hold_timeout and any(b.kind for b in self.buffers.values())
             no_client = not self.lease.held
-            why_hold = ("estimator: " + health) if health else ("no client lease" if no_client else
-                                                                ("input stale" if stale else None))
+            why_hold = ("arm paused by a planned motion" if paused else ("estimator: " + health) if health else
+                        ("no client lease" if no_client else ("input stale" if stale else None)))
             base, est_age = self.base_pose(now)
             targets = {e: (None if why_hold else self.buffers[e].sample(now)) for e in self.ees}
             snap = Snapshot(now, base, self.base_twist.copy(),
@@ -507,6 +520,8 @@ class WbcNode:
             for e in self.ees:
                 self.q_cmd[e] = self.q_cmd[e] + out.dq[e]
                 self.v_cmd[e] = out.qd[e].copy()
+            if paused and np.all(np.isfinite(st.q)):         # the planned motion moves the arm, not the WBC
+                self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
             self.base_twist = np.asarray(out.base_twist, float)
             self._cmd_twists(base)
             if out.limited_by != "none":
@@ -517,9 +532,8 @@ class WbcNode:
             gr = targets.get("arm")
             gap = math.nan
             if gr is not None and gr.gripper is not None:
-                from ..arm.config import GAP_MAX
-                gap = gr.gripper * GAP_MAX
-            self._send(now, gap)
+                gap = gr.gripper * self.gap_max
+            self._send(now, gap, keepalive=paused)
             self._publish(now, out, hold=why_hold is not None, targets=targets, base=base, est_age=est_age)
 
     def _posture(self, hints: Hints, ee: str) -> np.ndarray:
@@ -541,11 +555,11 @@ class WbcNode:
         for e in self.ees:
             self.cmd_twist[e] = m.jacobian(q, e) @ v
 
-    def _send(self, now: float, gap: float) -> None:
+    def _send(self, now: float, gap: float, keepalive: bool = False) -> None:
         st = self.arm_state
         if self.channel is not None and "arm" in self.q_cmd:
             self.channel.send(self.q_cmd["arm"], self.v_cmd["arm"], gap,
-                              t_basis=st.t_tick if st is not None else math.nan)
+                              t_basis=st.t_tick if st is not None else math.nan, keepalive=keepalive)
         if self.base is not None:
             self.base.send(self.base_twist)
 
@@ -555,7 +569,9 @@ class WbcNode:
         for e in self.v_cmd:
             self.v_cmd[e] = np.zeros_like(self.v_cmd[e])
         if self.fault_arm_ok and self.channel is not None and "arm" in self.q_cmd:
-            self.channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
+            st = self.arm_state
+            self.channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])),
+                              keepalive=st is not None and st.paused)
         if self.fault_base_ok and self.base is not None:
             self.base.send((0.0, 0.0, 0.0))
 
@@ -566,8 +582,8 @@ class WbcNode:
             return
         st = self.arm_state
         if self.channel is not None:
-            if self.channel.closed_reason:
-                self._fault_locked(f"arm joint channel closed: {self.channel.closed_reason}", False, True)
+            if self.channel.closed_reason:                    # the arm's bye: lease end, e-stop, disable, replaced
+                self._fault_locked(f"arm joint channel closed by the arm: {self.channel.closed_reason}", False, True)
                 return
             if now - self.enabled_at > ARM_GRACE_S:
                 if st is None or now - st.t_rx > self.cfg.arm_stale:
@@ -748,14 +764,14 @@ class WbcNode:
                 t_end = time.monotonic() + 1.0
                 st = None
                 while time.monotonic() < t_end:
-                    st = channel.poll()
+                    st = channel.poll(self.clock())
                     if st is not None and np.all(np.isfinite(st.q)):
                         break
                     time.sleep(0.005)
                 if st is None or not np.all(np.isfinite(st.q)):
                     raise RequestError(503, "no state from the arm joint channel within 1 s")
                 q0 = st.q.copy()
-                st.t_rx = self.clock()
+                self._apply_arm_limits(channel.limits)
         except BaseException:
             if channel is not None:
                 channel.close()
@@ -785,12 +801,32 @@ class WbcNode:
             self.override = {}
             self.ctl.reset()
             self.enabled, self.fault, self.disabled_reason = True, None, None
+            self._paused = False
             self.enabled_at = self.clock()
             self.holder = holder
             self.state = "idle"
             self.events.add(f"enabled by {holder} (arm lease {self.arm_lease_id}, swerve lease "
                             f"{base.lease_id if base else None})")
         return self.status()
+
+    def _apply_arm_limits(self, lim: dict) -> None:
+        """The arm's own limits from its welcome: joint range, joint speed and acceleration, lead bound, gap."""
+        n = len(self.model.arm_q["arm"])
+        try:
+            if lim.get("lo") is not None and lim.get("hi") is not None:
+                self.model.narrow_arm_limits("arm", lim["lo"][:n], lim["hi"][:n])
+            vm, a = self.ctl.caps["arm"]
+            if lim.get("joint_vel") is not None:
+                vm = np.minimum(vm, np.asarray(lim["joint_vel"][:n], float))
+            if lim.get("joint_acc") is not None:
+                a = np.minimum(a, np.asarray(lim["joint_acc"][:n], float))
+            self.ctl.caps["arm"] = (vm, a)
+            if lim.get("max_lead"):
+                self.resync = min(self.cfg.resync, 0.5 * float(lim["max_lead"]))
+            if lim.get("gap_max"):
+                self.gap_max = float(lim["gap_max"])
+        except (TypeError, ValueError, IndexError) as e:
+            self.events.add(f"arm limits in the welcome not usable ({e}); keeping the WBC's", "warn")
 
     def disable(self, reason: str = "requested", token: Optional[str] = None, check: bool = False) -> dict:
         if check:
@@ -916,6 +952,8 @@ class WbcNode:
                             "session": self.channel.session, "stale_ms": self.channel.stale_ms,
                             **self.channel.counts, "last_error": self.channel.last_error},
                         "state": None if st is None else st.state_name,
+                        "paused": bool(st is not None and st.paused),
+                        "limits": None if self.channel is None else self.channel.limits,
                         "age": None if st is None else round(now - st.t_rx, 4),
                         "resyncs": self.resyncs},
                 "swerve": {"target": self.swerve_target,

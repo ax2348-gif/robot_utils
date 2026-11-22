@@ -164,17 +164,22 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
 
 ## Internal interfaces and tests
 
-- `arm_channel.py`: the joint channel client (RUC1 / RUS1 structs, hello / welcome / bye), written against
-  `fast_path_v1.md` "Protocol (v1)"; the shared `nodes/common/fastpath.py` (parallel branch) replaces it at the
-  merge. Assumed here: the state's flag bits (servoing 1, stale 2, jam 4, limited 8) and `stream` appended to the
-  arm's `SOURCES`.
+- `arm_channel.py`: the WBC's session on the arm's internal joint channel, on `nodes/common/fastpath.py` (packets,
+  control messages, `bind_dgram`). It uses the arm's welcome: `lo` / `hi` narrow the model's joint range,
+  `joint_vel` / `joint_acc` narrow the controller's caps, `max_lead` bounds the resync threshold (at most half of
+  it: the arm drops goals beyond it), `gap_max` scales the gripper. The arm's `bye` (replaced, lease end, e-stop,
+  disable, shutdown) is losing the arm: a fault. A planned motion on the arm (HTTP home / stow / servo / pose /
+  chunk) pauses the session (the PAUSED flag): the WBC holds (reason `arm paused by a planned motion`), follows the
+  measured joints and sends keep-alives; when it ends, the commands restart from the measured joints. RUS1's `seq`
+  is the goal the previous arm tick applied; in the world sim the measured arm trails the command by about 5 ticks
+  (well inside the resync threshold).
 - Tests: `tests/test_wbc_controller.py` (pinocchio only), `tests/test_wbc_node.py` (lockstep against a fake arm:
-  HTTP + joint-channel peer, `tests/wbc_fakes.py`; and real time with the swerve node on its virtual SPARKs and
-  the estimator), `tests/test_wbc_sim.py` (the MuJoCo world: the swerve on world-coupled SPARKs, the estimator,
-  and a joint-channel peer driving the world's arm through `WorldArmBus`; switch it to the real `ArmNode` once
-  the arm side of the joint channel is merged).
+  HTTP + a joint-channel peer on fastpath, `tests/wbc_fakes.py`, including the pause and the arm's bye; and real
+  time with the swerve node on its virtual SPARKs and the estimator), `tests/test_wbc_sim.py` (the MuJoCo world
+  with the real nodes: the arm node on `WorldArmBus` with its joint channel, the swerve on world-coupled SPARKs,
+  the estimator, the WBC; the arm drops none of the WBC's goals).
 
 ## Not done yet
 
-The base fence; the MPC; a measured `ff_timeout` / `hold_timeout` / deadband from teleop sessions; the real arm
-node behind the joint channel (parallel branch); `--udp-host` on the robot (the LAN address in `nodes.yaml`).
+The base fence; the MPC; a measured `ff_timeout` / `hold_timeout` / deadband from teleop sessions; `--udp-host` on
+the robot (the LAN address in `nodes.yaml`).

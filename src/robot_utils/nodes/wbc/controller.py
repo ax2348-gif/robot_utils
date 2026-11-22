@@ -144,6 +144,9 @@ class QPController(Controller):
         self.solver = solver
         self.bv = model.base_v
         self.reach = {k: (cfg.reach or r) for k, r in model.reach.items()}
+        # per arm (joint_vel, joint_acc): the config's, narrowed by the arm's own (its joint-channel welcome)
+        self.caps = {k: (np.asarray(cfg.joint_vel[:len(v)], float), np.asarray(cfg.joint_acc[:len(v)], float))
+                     for k, v in model.arm_v.items()}
         self.active = False                                   # base deadband state
         self.solves = 0
 
@@ -216,8 +219,7 @@ class QPController(Controller):
         cfg, dt = self.cfg, self.cfg.dt
         n = len(q)
         lo, hi = self.m.arm_limits(ee)
-        vm = np.asarray(cfg.joint_vel[:n], float)
-        a = np.asarray(cfg.joint_acc[:n], float)
+        vm, a = self.caps[ee]
         dh, dl = hi - q, q - lo
         # within the limits: the damper and the braking distance; beyond one: back toward it (same law)
         U_pos = np.sign(dh) * np.minimum(cfg.limit_gain * np.abs(dh) / dt, np.sqrt(2 * a * np.abs(dh)))

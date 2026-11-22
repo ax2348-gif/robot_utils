@@ -136,6 +136,13 @@ class WbcModel:
         iq = self.arm_q[ee]
         return np.array(self.model.lowerPositionLimit[iq]), np.array(self.model.upperPositionLimit[iq])
 
+    def narrow_arm_limits(self, ee: str, lo, hi, margin: float = LIMIT_MARGIN) -> None:
+        """Narrow an arm's joint limits to [lo + margin, hi - margin] (the arm node's own, from its welcome)."""
+        iq = self.arm_q[ee]
+        m = self.model
+        m.lowerPositionLimit[iq] = np.maximum(m.lowerPositionLimit[iq], np.asarray(lo, float) + margin)
+        m.upperPositionLimit[iq] = np.minimum(m.upperPositionLimit[iq], np.asarray(hi, float) - margin)
+
     def config(self, base, arms: dict) -> np.ndarray:
         """q from the base pose (x, y, yaw) and the arms' joint vectors."""
         q = pin.neutral(self.model)

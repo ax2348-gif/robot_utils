@@ -3,8 +3,8 @@
 Status (2026-11-21): v1 built (docs/wbc.md): the QP controller, target buffers, the node with leases, the datagram
 session, the stream and cross-bus faults; tested against a fake arm joint-channel peer, the swerve sim and the
 MuJoCo world. Decided while building: world-frame targets only (no `base` frame), `est_reset` in datagrams, reach and
-manipulability limits as constraints, base hints in a lower-priority stage. Not yet: the fence, the MPC, the real
-arm side of the joint channel (parallel branch).
+manipulability limits as constraints, base hints in a lower-priority stage. Integrated with the arm's joint channel
+(tested in the MuJoCo world with the real arm node). Not yet: the fence, the MPC.
 
 ## Goal
 

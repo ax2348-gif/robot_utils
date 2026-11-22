@@ -13,7 +13,8 @@ import time
 import numpy as np
 from fastapi import FastAPI, Header, HTTPException
 
-from robot_utils.nodes.wbc.arm_channel import (ARM_STATES, MODE_GOAL, STATE_SIZE, pack_state, unpack_command)
+from robot_utils.nodes.common import fastpath as F
+from robot_utils.nodes.wbc.arm_channel import ARM_STATES
 
 Q0 = (0.0, -0.6, -0.9, 0.0, 0.5, 0.0)
 
@@ -36,6 +37,7 @@ class FakeArm:
         self.gap = math.nan
         self.refuse = None          # a reason to refuse hellos
         self.kinematic = True       # the joints jump to each command (False: a subclass moves them)
+        self.paused = False         # a planned motion pauses the session: goals dropped
         self.period = period
         self.lock = threading.Lock()
         if os.path.exists(sock_path):
@@ -55,9 +57,9 @@ class FakeArm:
         if self.session is None or self.client_addr is None:
             return
         st = ARM_STATES.index(self.state)
-        flags = 1 if self.state == "servoing" else 0
-        pkt = pack_state(self.session, self.tick, time.monotonic(), self.seq, 8, st, self.q, np.zeros(6),
-                         np.zeros(6), self.q_cmd, self.gap, 0.0, flags)
+        flags = (F.STATE_SERVOING if self.state == "servoing" else 0) | (F.STATE_PAUSED if self.paused else 0)
+        pkt = F.pack_state(F.State(flags, self.session, self.tick, time.monotonic(), self.seq, 8, st,
+                                   tuple(self.q), (0.0,) * 6, (0.0,) * 6, tuple(self.q_cmd), self.gap, 0.0))
         try:
             self.sock.sendto(pkt, self.client_addr)
         except OSError:
@@ -85,19 +87,22 @@ class FakeArm:
                     elif m.get("type") == "bye":
                         self.session = None
                     continue
-                c = unpack_command(data)
-                if c is None or c.session != self.session or c.seq <= self.seq:
+                try:
+                    c = F.unpack_command(data)
+                except F.PacketError:
+                    continue
+                if c.session != self.session or c.seq <= self.seq:
                     continue
                 self.seq = c.seq
-                if c.mode == MODE_GOAL and self.state in ("floating", "servoing"):
-                    self.q_cmd = c.q.copy()
-                    self.qd_cmd = c.qd.copy()
+                if c.mode == F.MODE_GOAL and self.state in ("floating", "servoing") and not self.paused:
+                    self.q_cmd = np.array(c.q)
+                    self.qd_cmd = np.array(c.qd)
                     if self.kinematic:
-                        self.q = c.q.copy()
+                        self.q = np.array(c.q)
                     self.state = "servoing"
                     if math.isfinite(c.gap):
                         self.gap = c.gap
-                    self.commands.append((time.monotonic(), c.q.copy(), c.qd.copy(), c.gap))
+                    self.commands.append((time.monotonic(), np.array(c.q), np.array(c.qd), c.gap))
                 self._send_state()
 
     def _tx(self):

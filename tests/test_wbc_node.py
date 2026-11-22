@@ -263,6 +263,35 @@ def test_cross_bus_fault_and_estop_fan_out(rig):
     node.clear_estop(rig.tok)
 
 
+def test_arm_pause_holds_then_resumes_from_the_measured_joints_and_bye_faults(rig):
+    """A planned motion on the arm pauses the session: the WBC holds and sends keep-alives; when it ends the
+    commands restart from the measured joints. The arm's bye (lease end, e-stop, disable) is losing the arm."""
+    node, arm = rig.node, rig.arm
+    rig.lease_enable()
+    p0, q0 = rig.cmd_pose()
+    rig.target(p0, q0)
+    rig.step(5)
+    n_goals = len(arm.commands)
+    with arm.lock:
+        arm.paused = True
+    rig.step(3)
+    assert node.state == "holding" and node.state_dict()["hold_reason"] == "arm paused by a planned motion"
+    with arm.lock:
+        arm.q = arm.q + np.radians([5, -5, 0, 0, 0, 0])          # the planned motion moved the arm
+    rig.send({"type": "alive"})
+    rig.step(5)
+    assert len(arm.commands) == n_goals                       # only keep-alives while paused
+    with arm.lock:
+        arm.paused = False
+    rig.step(2)
+    assert np.allclose(node.q_cmd["arm"], arm.q, atol=1e-6)   # resumed from the measured joints
+    assert node.resyncs == 0 and len(arm.commands) > n_goals
+    with arm.lock:                                            # the arm closes the session
+        arm.sock.sendto(json.dumps({"type": "bye", "reason": "lease ended"}).encode(), arm.client_addr)
+    rig.step(2)
+    assert node.state == "fault" and "closed by the arm: lease ended" in node.fault
+
+
 def test_http_api_and_page(rig):
     from fastapi.testclient import TestClient
     from robot_utils.nodes.wbc.server import create_app
