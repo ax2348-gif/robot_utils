@@ -115,8 +115,19 @@ def rows_times(payload: bytes, fields, dtype: str = ROW_DTYPE) -> Optional[np.nd
     return t
 
 
+def event_line(header: dict) -> dict:
+    """The event line of an ``event`` record: its header fields (the contract's reading), or a nested
+    ``event`` object if the node sends it that way."""
+    nested = header.get("event")
+    if isinstance(nested, dict):
+        return nested
+    return {k: v for k, v in header.items() if k not in ("type", "len")}
+
+
 def header_time(header: dict) -> Optional[float]:
     """The Pi time of a non-rows record (see the module table), or None."""
+    if header.get("type") == "event":
+        return _first_time(event_line(header), ("t",))
     names = HEADER_TIME_FIELDS.get(header.get("type"))
     return _first_time(header, names) if names else None
 

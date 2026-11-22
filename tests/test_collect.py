@@ -18,7 +18,7 @@ from collect_fakes import FakeRobot
 from helpers import serve, stop, waiter
 from robot_utils.collect.cut import cut_session
 from robot_utils.collect.episodes import EpisodeIndex, read_episodes
-from robot_utils.collect.records import header_time, iter_raw, rows_times
+from robot_utils.collect.records import event_line, header_time
 from robot_utils.collect.session import Session
 from robot_utils.collect.streams import StreamSpec, rotated_files
 from robot_utils.nodes.common.protocol import iter_records, iter_rows
@@ -335,3 +335,11 @@ def test_ctrl_c_stops_cleanly(robot, tmp_path):
     assert (ep["id"], ep["outcome"], ep["reason"]) == (e1, "aborted", "session ended")
     for name in ("arm", "quest_teleop.oplog"):              # whole records only: no truncated tail
         assert len(records(d, name)) > 10
+
+
+def test_event_record_shapes():
+    line = {"seq": 7, "t": 12.5, "wall": 1e9, "kind": "hold", "episode": None, "detail": {"reason": "x"}}
+    flat = {"type": "event", "len": 0, **line}
+    nested = {"type": "event", "len": 0, "event": line}
+    assert event_line(flat) == line and event_line(nested) == line
+    assert header_time(flat) == header_time(nested) == 12.5

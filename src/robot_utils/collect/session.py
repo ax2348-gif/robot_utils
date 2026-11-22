@@ -21,6 +21,7 @@ from typing import Optional, Sequence
 import httpx
 
 from .episodes import EpisodeIndex
+from .records import event_line
 from .streams import DEFAULT_STREAMS, OPLOG_SPEC, StreamRecorder, StreamSpec
 
 log = logging.getLogger("collect")
@@ -139,8 +140,7 @@ class Session:
 
     def _on_oplog_record(self, h: dict):
         if h.get("type") == "event":
-            ev = {k: v for k, v in h.items() if k not in ("type", "len")}
-            if self.index.add(ev, "stream"):
+            if self.index.add(event_line(h), "stream"):
                 self._reconcile.set()
 
     def _on_oplog_connect(self):
