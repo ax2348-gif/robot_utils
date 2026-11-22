@@ -176,8 +176,16 @@ def create_app(node: WbcNode, start: bool = True) -> FastAPI:
     async def fence():
         return JSONResponse(status_code=501, content={"detail": "the base fence is not built yet (wbc_v1.md)"})
 
-    @app.get("/config", tags=["state"], summary="Caps, gains and timeouts in force")
+    @app.get("/config", tags=["state"], summary="The config in force, the defaults and the hard limits checked against")
     async def config():
-        return node.state_dict()["config"]
+        return node.get_config()
+
+    @app.post("/config", tags=["control"], summary="Change config keys at runtime (no lease; structural keys only while "
+                                                    "disabled; 422 with the reason when invalid)")
+    async def set_config(body: dict):
+        try:
+            return await asyncio.to_thread(node.set_config, body)
+        except ValueError as e:
+            return JSONResponse(status_code=422, content={"detail": str(e)})
 
     return app

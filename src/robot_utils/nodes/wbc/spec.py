@@ -31,12 +31,6 @@ class Config:
     max_accel: float = 1.0          # m/s², |twist rate| linear (octagon)
     max_alpha: float = 1.5          # rad/s²
     wheel_speed: float = 1.0        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
-    # base deadband with hysteresis: a stopped base starts only for a desired twist above *_on, a moving one
-    # stops (braking within max_accel) below *_off
-    deadband_lin_on: float = 0.02   # m/s
-    deadband_lin_off: float = 0.008
-    deadband_w_on: float = 0.06     # rad/s
-    deadband_w_off: float = 0.025
     # arm caps (within the arm node's soft limits)
     # None = the arm's own (its joint-channel welcome `limits`; without one, the arm config's soft defaults
     # 2,2,2,6,6,6 rad/s and 10,10,10,30,30,30 rad/s²); a tuple narrows them further (never widens)
@@ -65,13 +59,21 @@ class Config:
     lm_damping: float = 1e-3        # Levenberg-Marquardt damping on the EE task
     damping: float = 1e-6           # Tikhonov regularisation on everything
     w_arm: float = 2e-3             # arm joint regularisation (per rad²)
-    # base cost scheduled by the EE's distance to its target: w_base_far beyond far_dist, w_base_near within
-    # near_dist (geometric in between); times hints.arm_vs_base
-    w_base_near: float = 1.0
-    w_base_far: float = 1e-3
-    near_dist: float = 0.05         # m
-    far_dist: float = 0.40          # m
-    w_hint_yaw: float = 1.0         # stage 2 (hints): yaw velocity cost under a position-only base hint
+    # base references (one QP; docs/plans/wbc_v1.md "Formulation"): the base twist is pulled toward
+    # v_ref + k (pose_ref - pose) with weight w_base_ref (x hints.arm_vs_base), toward zero with w_base_free when no
+    # reference is given; the arm/base split of EE motion follows from w_base_* against the EE task weights
+    w_base_ref: float = 1.0
+    w_base_free: float = 1e-3
+    # allowed deviation from the references (hard bands with an L1 slack penalised by w_slack, so always feasible):
+    # pose band: |pose - pose_ref| <= band_pos / band_yaw, approached with gain k_band, never forced back faster;
+    # twist band: the base twist stays in conv{0, ball(v_ref, band_twist)} (may lag the reference down to zero, may
+    # not exceed it by more than band_twist): fast EE motion goes to the arm
+    band_pos: float = 0.15          # m
+    band_yaw: float = 0.349         # rad (20 deg)
+    band_twist: float = 0.1         # m/s
+    band_omega: float = 0.3         # rad/s
+    k_band: float = 2.0             # 1/s
+    w_slack: float = 1e3            # per unit of band violation (velocity units)
     base_yaw_radius: float = 0.3    # m: yaw is weighted like a point this far from the centre
     posture_weight: float = 1e-4    # default (hints override); 2e-3 biased the EE by ~3 mm
     k_posture: float = 1.0          # 1/s
@@ -126,8 +128,6 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
         raise ValueError("need 0 < reach_influence < reach_fraction <= 1 and 0 < w_min < w_influence")
     if c.wheel_speed > WHEEL_SPEED_HARD:
         raise ValueError(f"wheel_speed beyond the wheels' limit {WHEEL_SPEED_HARD} m/s")
-    if c.deadband_lin_off >= c.deadband_lin_on or c.deadband_w_off >= c.deadband_w_on:
-        raise ValueError("deadband *_off must be below *_on (the hysteresis)")
     if c.hold_timeout <= c.ff_timeout:
         raise ValueError("hold_timeout must exceed ff_timeout")
     return c

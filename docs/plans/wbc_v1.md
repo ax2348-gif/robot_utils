@@ -1,6 +1,12 @@
 # Whole-body control (WBC), v1: draft
 
-Status (2026-11-21): v1 built (docs/wbc.md): the QP controller, target buffers, the node with leases, the datagram
+Status (2026-11-21, later): **prototype of the single-QP formulation on branch `wbc-one-qp`** (the staged hint
+solve, the distance schedule and the deadband removed; base references with pose/twist bands and an L1 slack; every
+weight, gain, band and cap settable at runtime via `POST /config` and the WBC page). To be validated by the owner in
+AR before the spec below is rewritten to match. Possible later addition (owner, 2026-11-21): a configurable flat (L1)
+cost on base twist above its reference, if deadband-like behaviour is needed.
+
+Earlier status: v1 built (docs/wbc.md): the QP controller, target buffers, the node with leases, the datagram
 session, the stream and cross-bus faults; tested against a fake arm joint-channel peer, the swerve sim and the
 MuJoCo world. Decided while building: world-frame targets only (no `base` frame), `est_reset` in datagrams, reach and
 manipulability limits as constraints, base hints in a lower-priority stage. Integrated with the arm's joint channel

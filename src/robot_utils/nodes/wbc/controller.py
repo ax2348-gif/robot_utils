@@ -58,9 +58,8 @@ from .targets import Target
 
 C8 = math.cos(math.pi / 8)
 OCT = np.array([[math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)] for k in range(8)])   # 8 unit normals
-LIMITED = ["none", "reach", "manipulability", "fence", "joint_limit", "base_limit"]
+LIMITED = ["none", "reach", "manipulability", "fence", "joint_limit", "base_limit", "base_band"]
 BIND_TOL = 1e-6          # velocity units: a row this close to its bound is binding
-HINT_BAND = 1e-5         # weighted task velocity units: how far stage 2 (the hints) may move the EE tasks
 
 
 def oct_norm(u) -> float:
@@ -78,6 +77,33 @@ def shrink(e, tol: float):
         return math.copysign(max(0.0, abs(e) - tol), e)
     n = float(np.linalg.norm(e))
     return e * (max(0.0, n - tol) / n) if n > 0 else e
+
+
+def hull_halfplanes(points) -> list:
+    """The convex hull of 2D points as half-planes [(n, h)]: n . v <= h (n outward unit normals)."""
+    pts = sorted({(round(float(p[0]), 12), round(float(p[1]), 12)) for p in points})
+    if len(pts) < 3:
+        return []
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]                 # counter-clockwise
+    out = []
+    for i, a in enumerate(hull):
+        b = hull[(i + 1) % len(hull)]
+        d = np.array([b[0] - a[0], b[1] - a[1]])
+        n = np.array([d[1], -d[0]]) / np.linalg.norm(d)
+        out.append((n, float(n @ np.array(a))))
+    return out
 
 
 def clip_norm(e: np.ndarray, m: float) -> np.ndarray:
@@ -194,37 +220,55 @@ class QPController(Controller):
         return np.asarray(prev, float) + d
 
     def _fixed_twist(self, snap: Snapshot, dt: float) -> tuple[Optional[np.ndarray], Optional[str]]:
-        """The base twist when the mode (or a hold) fixes it, else (None, None)."""
+        """The base twist when safety fixes it (a hold, mode ``locked``, no base): braking to zero within the rate
+        limit. Everything else is the QP's (the references and their bands)."""
         h = snap.hints
-        speed, omega, accel = effective_limits(h, self.cfg)
+        _, _, accel = effective_limits(h, self.cfg)
         prev = snap.base_prev
         if snap.hold:
             return self._step_toward(prev, np.zeros(3), accel, dt), "hold"
         if not snap.base_available or h.mode == "locked":
             return self._step_toward(prev, np.zeros(3), accel, dt), "locked" if snap.base_available else "no base"
-        if h.mode == "commanded":
-            goal = np.zeros(3)
-            why = "commanded (nothing given)"
-            x, y, yaw = snap.base
-            if h.velocity is not None and snap.velocity_age <= h.velocity.ttl:
-                v = h.velocity
-                goal = np.array([v.vx, v.vy, v.omega])
-                if v.frame == "world":
-                    c, s = math.cos(yaw), math.sin(yaw)
-                    goal[:2] = [c * v.vx + s * v.vy, -s * v.vx + c * v.vy]
-                why = "commanded velocity"
-            elif h.velocity is not None:
-                why = "commanded velocity (ttl expired)"
-            elif h.pose is not None:
-                p = h.pose
-                ex, ey = p.x - x, p.y - y
-                c, s = math.cos(yaw), math.sin(yaw)
-                k = self.cfg.k_base_pose
-                goal = np.array([k * (c * ex + s * ey), k * (-s * ex + c * ey), k * wrap(p.yaw - yaw)])
-                why = "commanded pose"
-            goal = self._limit_twist(goal, speed, omega)
-            return self._limit_twist(self._step_toward(prev, goal, accel, dt), speed, omega), why
         return None, None
+
+    def _base_refs(self, snap: Snapshot):
+        """The base references in world axes: (pose_ref (x, y) | None, yaw_ref | None, twist_ref (vx, vy, w) | None,
+        pose tolerance, yaw tolerance). From mode ``hint`` (target pose/heading with their velocities, the velocity
+        fading like the EE twist), ``commanded`` (a velocity while fresh, or a pose); ``free``: none."""
+        h, cfg, m = snap.hints, self.cfg, self.m
+        x, y, yaw = snap.base
+        p_ref = yaw_ref = v_ref = None
+        tol_p = tol_y = 0.0
+        if h.mode == "hint":
+            a = snap.hint_age
+            kff = 1.0 if a <= cfg.ff_timeout else max(0.0, 1.0 - (a - cfg.ff_timeout) / cfg.ff_timeout)
+            v_ref = np.zeros(3)
+            if h.target_pose is not None:
+                tp = h.target_pose
+                p_ref, tol_p = np.array([tp.x, tp.y]), tp.tol
+                v_ref[:2] = kff * np.array([tp.vx, tp.vy])
+            if h.target_heading is not None:
+                hh = h.target_heading
+                yt = hh.yaw
+                if hh.face is not None:
+                    tgt = snap.ees[hh.face].target if hh.face in snap.ees else None
+                    yt = None if tgt is None else math.atan2(tgt.p[1] - y, tgt.p[0] - x) - m.mount_yaw.get(hh.face, 0.0)
+                elif hh.point is not None:
+                    yt = math.atan2(hh.point[1] - y, hh.point[0] - x) - next(iter(m.mount_yaw.values()), 0.0)
+                yaw_ref, tol_y = yt, hh.tol
+                v_ref[2] = kff * hh.omega
+        elif h.mode == "commanded":
+            if h.velocity is not None:
+                v_ref = np.zeros(3)
+                if snap.velocity_age <= h.velocity.ttl:
+                    v = h.velocity
+                    v_ref = np.array([v.vx, v.vy, v.omega], float)
+                    if v.frame != "world":
+                        c, s_ = math.cos(yaw), math.sin(yaw)
+                        v_ref[:2] = [c * v.vx - s_ * v.vy, s_ * v.vx + c * v.vy]
+            elif h.pose is not None:
+                p_ref, yaw_ref, v_ref = np.array([h.pose.x, h.pose.y]), h.pose.yaw, np.zeros(3)
+        return p_ref, yaw_ref, v_ref, tol_p, tol_y
 
     def _joint_box(self, ee: str, q: np.ndarray, v_prev: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(L, U, position-bound mask) velocity bounds of an arm's joints this tick (always L <= U)."""
@@ -366,170 +410,133 @@ class QPController(Controller):
                 f_prev = float((G @ x_prev)[0])
                 floor = max(f_prev - a_eff * dt, 0.0)              # stopping (within the rate limits) is allowed
                 reach_rows.append((G, np.array([max(hr, floor)])))
-        # base cost, scheduled by the distance to the target
-        if dmax <= cfg.near_dist:
-            wb = cfg.w_base_near
-        elif dmax >= cfg.far_dist:
-            wb = cfg.w_base_far
-        else:
-            a = (dmax - cfg.near_dist) / (cfg.far_dist - cfg.near_dist)
-            wb = cfg.w_base_near * (cfg.w_base_far / cfg.w_base_near) ** a
-        wb *= h.arm_vs_base
-        diag["w_base"] = wb
-        H[bx, bx] += wb
-        H[by, by] += wb
-        H[bw, bw] += wb * cfg.base_yaw_radius ** 2
-        # stage 2 (the hints) keeps only the far (cheap) base cost: the base's share of the EE motion is settled in
-        # stage 1, and a near-target base cost there would halve a hint's velocity
-        dwb = wb - cfg.w_base_far * h.arm_vs_base
-        Hb_relief = np.zeros((nv, nv))
-        Hb_relief[bx, bx] = Hb_relief[by, by] = dwb
-        Hb_relief[bw, bw] = dwb * cfg.base_yaw_radius ** 2
-        # base hints: a second, lower-priority stage (see solve_lex): they use only the EE tasks' freedom
-        Hh, ch = np.zeros((nv, nv)), np.zeros(nv)
-        if h.mode == "hint" and not hold:
-            H0, c0 = H, c
-            H, c = Hh, ch
-            # the hint targets' velocity feedforward fades like the EE twist (ff_timeout .. 2 x ff_timeout)
-            a = snap.hint_age
-            kff = 1.0 if a <= cfg.ff_timeout else max(0.0, 1.0 - (a - cfg.ff_timeout) / cfg.ff_timeout)
-            diag["hint_ff_scale"] = kff
-            if h.target_pose is not None:
-                tp = h.target_pose
-                exy = shrink(np.array([tp.x - x, tp.y - y]), tp.tol)
-                H[bx, bx] += tp.weight
-                H[by, by] += tp.weight
-                c[[bx, by]] -= tp.weight * (kff * np.array([tp.vx, tp.vy]) + cfg.k_base_pose * exy)
-            if h.target_heading is not None:
-                hh = h.target_heading
-                yt = hh.yaw
-                if hh.face is not None:
-                    tgt = snap.ees[hh.face].target if hh.face in snap.ees else None
-                    yt = None if tgt is None else math.atan2(tgt.p[1] - y, tgt.p[0] - x) - m.mount_yaw.get(hh.face, 0.0)
-                elif hh.point is not None:
-                    yt = math.atan2(hh.point[1] - y, hh.point[0] - x) - next(iter(m.mount_yaw.values()), 0.0)
-                if yt is not None:
-                    eh = shrink(wrap(yt - yaw), hh.tol)
-                    H[bw, bw] += hh.weight
-                    c[bw] -= hh.weight * (kff * hh.omega + cfg.k_heading * eh)
-            if h.target_heading is None and h.target_pose is not None:
-                H[bw, bw] += cfg.w_hint_yaw          # a position hint moves the base, it does not turn it
-            H, c = H0, c0
-        has_hint = bool(np.any(Hh) or np.any(ch))
-        A_task = np.vstack(task_rows) if task_rows else None
-        # base rows (velocity units)
+        # -- the base: references, bands, caps (one QP; docs/plans/wbc_v1.md "Formulation") ----------------
+        fixed, why = self._fixed_twist(snap, dt)
+        p_ref, yaw_ref, v_ref, tol_p, tol_y = self._base_refs(snap)
+        has_ref = p_ref is not None or yaw_ref is not None or v_ref is not None
+        v_des = np.zeros(3)
+        if v_ref is not None:
+            v_des += v_ref
+        if p_ref is not None:
+            v_des[:2] += cfg.k_base_pose * shrink(p_ref - np.array([x, y]), tol_p)
+        if yaw_ref is not None:
+            v_des[2] += cfg.k_heading * shrink(wrap(yaw_ref - yaw), tol_y)
+        wb = (cfg.w_base_ref if has_ref else cfg.w_base_free) * h.arm_vs_base
+        diag.update(w_base=wb, v_des=[float(v) for v in v_des])
+        for i, (k, r2) in enumerate(((bx, 1.0), (by, 1.0), (bw, cfg.base_yaw_radius ** 2))):
+            H[k, k] += wb * r2
+            c[k] -= wb * r2 * v_des[i]
+        # slack variables: [s_pose, s_twist] >= 0, L1 penalty (and a tiny quadratic: H stays positive definite)
+        ns = 2
+        N = nv + ns
+        Hx = np.zeros((N, N))
+        Hx[:nv, :nv] = H
+        Hx[nv:, nv:] = 1e-6 * np.eye(ns)
+        cx = np.concatenate([c, np.full(ns, cfg.w_slack)])
+
+        def pad(G_, slack: Optional[int] = None):
+            G_ = np.atleast_2d(G_)
+            out = np.zeros((G_.shape[0], N))
+            out[:, :nv] = G_
+            if slack is not None:
+                out[:, nv + slack] = -1.0
+            return out
+
         Bm = np.zeros((2, nv))                     # body linear velocity = Bm x
         Bm[0, bx], Bm[0, by], Bm[1, bx], Bm[1, by] = cy, sy, -sy, cy
+        Wxy = np.zeros((2, nv))                    # world linear velocity
+        Wxy[0, bx], Wxy[1, by] = 1.0, 1.0
         Wy = np.zeros(nv)
         Wy[bw] = 1.0
-        base_G = [OCT @ Bm] + [OCT @ (Bm + np.outer([-wy, wx], Wy)) for wx, wy in self.wheels] + [np.vstack([Wy, -Wy])]
-        base_h = [np.full(8, speed * C8)] + [np.full(8, cfg.wheel_speed * C8)] * len(self.wheels) + \
-                 [np.array([omega, omega])]
-        rate_G = np.vstack([OCT @ Bm, Wy, -Wy])
-        rate_h = np.concatenate([accel * dt * C8 + OCT @ prev[:2],
-                                 [cfg.max_alpha * dt + prev[2], cfg.max_alpha * dt - prev[2]]])
+        rows: list = []                            # (kind, G (N cols), h)
+        for _, G_, h_, pm, _r in groups:           # the arm joint boxes (hard); position bounds report joint_limit
+            rows.append(("joint_limit", pad(G_[pm]), h_[pm]))
+            rows.append(("joint_cap", pad(G_[~pm]), h_[~pm]))
+        for G_, h_ in manip_rows:
+            rows.append(("manipulability", pad(G_), h_))
+        rows.append(("slack", np.hstack([np.zeros((ns, nv)), -np.eye(ns)]), np.zeros(ns)))
+        if fixed is None:
+            # caps (hard), relaxed to the previous twist so braking into a lowered cap stays feasible
+            def cap_rows(G_, bound):
+                return np.maximum(bound, G_ @ x_prev - 1e-9)
+            G_sp = OCT @ Bm
+            rows.append(("base_limit", pad(G_sp), cap_rows(G_sp, speed * C8)))
+            G_w = np.vstack([Wy, -Wy])
+            rows.append(("base_limit", pad(G_w), cap_rows(G_w, omega)))
+            for wx, wy in self.wheels:
+                G_wh = OCT @ (Bm + np.outer([-wy, wx], Wy))
+                rows.append(("base_limit", pad(G_wh), cap_rows(G_wh, cfg.wheel_speed * C8)))
+            # twist rate (hard)
+            rows.append(("base_limit", pad(np.vstack([OCT @ Bm, Wy, -Wy])),
+                         np.concatenate([accel * dt * C8 + OCT @ prev[:2],
+                                         [cfg.max_alpha * dt + prev[2], cfg.max_alpha * dt - prev[2]]])))
+            for G_, h_ in reach_rows:
+                rows.append(("reach", pad(G_), h_))
+            # pose band: the deviation from the pose reference grows at most at k_band (band - deviation), never
+            # forced back faster than that (outside the band: it may only shrink); slack 0
+            vr = v_ref if v_ref is not None else np.zeros(3)
+            if p_ref is not None:
+                e = np.array([x, y]) - p_ref
+                rows.append(("base_band", pad(OCT @ Wxy, 0),
+                             OCT @ vr[:2] + np.maximum(cfg.k_band * (cfg.band_pos - OCT @ e), 0.0)))
+            if yaw_ref is not None:
+                ey = wrap(yaw - yaw_ref)
+                rows.append(("base_band", pad(np.vstack([Wy, -Wy]), 0),
+                             np.array([vr[2] + max(cfg.k_band * (cfg.band_yaw - ey), 0.0),
+                                       -vr[2] + max(cfg.k_band * (cfg.band_yaw + ey), 0.0)])))
+            # twist band: conv{0, octagon(v_ref, band_twist)} (may lag down to zero, not exceed by more); slack 1
+            if v_ref is not None:
+                verts = [np.zeros(2)] + [vr[:2] + cfg.band_twist / C8 * np.array([math.cos((k + 0.5) * math.pi / 4),
+                                                                                  math.sin((k + 0.5) * math.pi / 4)])
+                                         for k in range(8)]
+                for n_, h0 in hull_halfplanes(verts):
+                    rows.append(("base_band", pad((n_ @ Wxy).reshape(1, nv), 1), np.array([h0])))
+                lo, hi = min(0.0, vr[2] - cfg.band_omega), max(0.0, vr[2] + cfg.band_omega)
+                rows.append(("base_band", pad(np.vstack([Wy, -Wy]), 1), np.array([hi, -lo])))
 
-        def solve_one(base_fixed: Optional[np.ndarray], with_rate: bool, band=None, relax=False):
-            G = [g_[1] for g_ in groups] + [r_[0] for r_ in manip_rows]
-            hh = [g_[4 if relax else 2] for g_ in groups] + [r_[1] for r_ in manip_rows]
-            Hq, cq = H, c
-            if band is not None:                       # stage 2: the hints, the EE tasks' velocities kept
-                Hq, cq = H - Hb_relief + Hh, c + ch
-                G += [A_task, -A_task]
-                hh += [band + HINT_BAND, -band + HINT_BAND]
+        def solve_one(base_fixed: Optional[np.ndarray]):
+            G = np.vstack([r_[1] for r_ in rows])
+            hh = np.concatenate([np.atleast_1d(r_[2]) for r_ in rows])
             A = b = None
-            if base_fixed is None:
-                G += base_G + [r_[0] for r_ in reach_rows]
-                hh += base_h + [r_[1] for r_ in reach_rows]
-                if with_rate:
-                    G.append(rate_G)
-                    hh.append(rate_h)
-            else:
-                A = np.zeros((3, nv))
+            if base_fixed is not None:
+                A = np.zeros((3, N))
                 A[0, bx] = A[1, by] = A[2, bw] = 1.0
                 vb = base_fixed
                 b = np.array([cy * vb[0] - sy * vb[1], sy * vb[0] + cy * vb[1], vb[2]])
-            prob = qpsolvers.Problem(Hq, cq, np.vstack(G), np.concatenate(hh), A, b)
-            sol = qpsolvers.solve_problem(prob, solver=self.solver)
+            sol = qpsolvers.solve_problem(qpsolvers.Problem(Hx, cx, G, hh, A, b), solver=self.solver)
             self.solves += 1
             if not sol.found or sol.x is None or not np.all(np.isfinite(sol.x)):
                 return None
             return np.asarray(sol.x)
 
-        def solve(base_fixed: Optional[np.ndarray], with_rate: bool, relax: bool = False):
-            """Lexicographic: the EE tasks (with every constraint) first; then, if base hints are given and the
-            base is free, the hints within what keeps the EE tasks' velocities (so a hint never costs tracking:
-            it yields at the arm's limits). Stage 2 failing keeps stage 1."""
-            x1 = solve_one(base_fixed, with_rate, relax=relax)
-            if x1 is None or not has_hint or base_fixed is not None:
-                return x1
-            if A_task is None:
-                return x1
-            x2 = solve_one(None, with_rate, band=A_task @ x1, relax=relax)
-            return x1 if x2 is None else x2
-
         def twist_of(xs):
             return np.array([cy * xs[bx] + sy * xs[by], -sy * xs[bx] + cy * xs[by], xs[bw]])
 
-        def limited_of(xs, base_free: bool) -> str:
-            """What bound the solution (the first binding kind, by priority)."""
-            if base_free and any(float((G @ xs)[0]) >= float(hr[0]) - BIND_TOL for G, hr in reach_rows):
-                return "reach"
-            if any(float((G @ xs)[0]) >= float(hr[0]) - BIND_TOL for G, hr in manip_rows):
-                return "manipulability"
-            if any(np.any((G @ xs >= hr - BIND_TOL) & pm) for _, G, hr, pm, _r in groups):
-                return "joint_limit"
-            if base_free and any(np.any(G @ xs >= hr - BIND_TOL) for G, hr in zip(base_G, base_h)):
-                return "base_limit"
-            return "none"
-
-        fixed, why = self._fixed_twist(snap, dt)
-        deadband = False
-        limited_free = "none"
         n_solves = 1
-        if fixed is not None:
-            self.active = bool(np.any(np.abs(fixed) > 1e-9))
-            xs = solve(fixed, False)
-        else:
-            # the base's desired twist, without the acceleration limits (from rest the arm could not yet
-            # compensate the base this tick), decides the deadband
-            xd = solve(None, False, relax=True)
-            if xd is None:
-                xd = solve(None, False)
+        xs = solve_one(fixed)
+        if xs is None and fixed is None:          # e.g. caps lowered while faster: brake within the rate limit
+            fixed = self._limit_twist(self._step_toward(prev, self._limit_twist(prev, speed, omega), accel, dt),
+                                      speed, omega)
+            why = "rate fallback"
+            xs = solve_one(fixed)
             n_solves += 1
-            xs = xd
-            if xd is not None:
-                tw = twist_of(xd)
-                lin, ang = math.hypot(tw[0], tw[1]), abs(tw[2])
-                if self.active:
-                    on = lin >= cfg.deadband_lin_off or ang >= cfg.deadband_w_off
-                else:
-                    on = lin >= cfg.deadband_lin_on or ang >= cfg.deadband_w_on
-                if not on:
-                    limited_free = limited_of(xd, True)     # e.g. the base stopped at the reach boundary
-                    self.active = False
-                    fixed, why, deadband = self._step_toward(prev, np.zeros(3), accel, dt), "deadband", True
-                    xs = solve(fixed, False)
-                else:
-                    self.active = True
-                    xs = solve(None, False)
-                    if xs is not None and np.any(rate_G @ xs > rate_h + 1e-9):
-                        n_solves += 1
-                        xs2 = solve(None, True)
-                        if xs2 is None:                # e.g. the limits were lowered while faster: brake into them
-                            fixed = self._limit_twist(self._step_toward(prev, self._limit_twist(prev, speed, omega),
-                                                                        accel, dt), speed, omega)
-                            why = "rate fallback"
-                            xs2 = solve(fixed, False)
-                            n_solves += 1
-                        xs = xs2
         if xs is None:
             return self._zero(snap, "infeasible", f"QP infeasible (base {why or 'free'})")
-        tw = fixed if fixed is not None else twist_of(xs)
-        limited = limited_of(xs, fixed is None)
-        if limited == "none" or (limited == "base_limit" and limited_free != "none"):
-            limited = limited_free if limited_free != "none" else limited
-        dqs = {k: xs[m.arm_v[k]] * dt for k in snap.ees}
-        diag.update(solves=n_solves, wheel_max=self._wheel_max(tw), hold=hold)
-        return Output("ok", np.asarray(tw, float), dqs, {k: xs[m.arm_v[k]].copy() for k in snap.ees},
-                      deadband=deadband, base_fixed=why, limited_by=limited, diag=diag)
+        slack = xs[nv:]
+        u = xs[:nv]
+        # what bound the solution (by priority): a band that needed slack or binds, then the hard rows
+        limited = "none"
+        for kind in ("reach", "manipulability", "joint_limit", "base_band", "base_limit"):
+            for k_, G_, h_ in rows:
+                if k_ == kind and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL):
+                    limited = kind
+                    break
+            if limited != "none":
+                break
+        tw = fixed if fixed is not None else twist_of(u)
+        self.active = bool(np.any(np.abs(tw) > 1e-9))
+        dqs = {k: u[m.arm_v[k]] * dt for k in snap.ees}
+        diag.update(solves=n_solves, wheel_max=self._wheel_max(tw), hold=hold,
+                    slack=[float(v) for v in slack])
+        return Output("ok", np.asarray(tw, float), dqs, {k: u[m.arm_v[k]].copy() for k in snap.ees},
+                      deadband=False, base_fixed=why, limited_by=limited, diag=diag)

@@ -977,6 +977,43 @@ class WbcNode:
                 "events": self.events.list()[-30:],
             }
 
+    # -- runtime config ------------------------------------------------------------------------------
+
+    STRUCTURAL = ("rate_hz", "lease_heartbeat", "joint_vel", "joint_acc", "reach")
+
+    def get_config(self) -> dict:
+        from dataclasses import asdict as _asdict
+        from .spec import Config as _C
+        js = lambda d: {k: (list(v) if isinstance(v, tuple) else v) for k, v in d.items()}   # noqa: E731
+        hard = dict(self.base.hard) if self.base is not None and getattr(self.base, "hard", None) else {}
+        return {"config": js(_asdict(self.cfg)), "defaults": js(_asdict(_C())), "hard": hard,
+                "structural": list(self.STRUCTURAL)}
+
+    def set_config(self, changes: dict) -> dict:
+        """Change config keys at runtime (any time; no lease: the operator tunes while a client drives). Validated
+        as at start, the base caps against the swerve's hard limits; structural keys only while disabled."""
+        changes = dict(changes or {})
+        with self.lock:
+            if self.enabled and any(k in changes for k in self.STRUCTURAL):
+                raise ValueError(f"{sorted(set(changes) & set(self.STRUCTURAL))}: only while disabled")
+            new = make_config(changes, base=self.cfg)
+            hard = getattr(self.base, "hard", None) or {} if self.base is not None else {}
+            hs, hw = hard.get("max_speed"), hard.get("max_omega")
+            if (hs is not None and new.max_speed > hs) or (hw is not None and new.max_omega > hw):
+                raise ValueError(f"max_speed / max_omega beyond the swerve's hard limits ({hs} m/s, {hw} rad/s)")
+            old = self.cfg
+            push = self.enabled and self.base is not None and (new.max_speed, new.max_omega) != (old.max_speed,
+                                                                                                old.max_omega)
+        if push:
+            self.base.client.set_limits(new.max_speed, new.max_omega)
+        with self.lock:
+            self.cfg = new
+            self.ctl.cfg = new
+            for b in self.buffers.values():
+                b.ff_timeout, b.blend_tau = new.ff_timeout, new.blend_tau
+            self.events.add("config: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+        return self.get_config()
+
 
 def ArmHttpFactory(target: str):
     """The arm's HTTP client (a hook for tests)."""

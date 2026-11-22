@@ -16,6 +16,12 @@ canvas.ru-plot{width:100%;height:110px}
 table.ee{border-collapse:collapse;font-variant-numeric:tabular-nums;width:100%}
 table.ee td,table.ee th{padding:1px 6px;text-align:right;border-bottom:1px solid var(--line)}
 table.ee th:first-child,table.ee td:first-child{text-align:left;color:var(--muted);font-weight:normal}
+.cfg{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 14px;font-size:12px}
+.cfg label{display:flex;justify-content:space-between;gap:6px;align-items:center}
+.cfg label span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg input{width:92px;font:inherit;font-variant-numeric:tabular-nums}
+.cfg input.dirty{outline:1px solid var(--accent, currentColor)}
+.cfg h4{grid-column:1/-1;margin:8px 0 2px;font-size:12px;font-weight:600}
 </style><script src="../../themes/theme.js"></script>
 </head><body data-page="wbc"><div id="band"></div><div class="ru-wrap">
 <div class="ru-row ru-head">
@@ -43,6 +49,12 @@ table.ee th:first-child,table.ee td:first-child{text-align:left;color:var(--mute
     <div class="ru-card" data-panel="state" data-role="telemetry"><b>State</b><div class="kv" id="kv"></div></div>
   </div>
 </div>
+<div class="ru-card" data-panel="config" data-role="config"><b>Config</b>
+  <span class="ru-muted">applies at once (no lease); structural keys only while disabled; hard limits: <span id="hard">–</span></span>
+  <div class="ctl"><button class="ru" id="apply">Apply changed</button><button class="ru" id="revert">Revert edits</button>
+    <span class="ru-muted" id="cfgmsg"></span></div>
+  <div class="cfg" id="cfg"></div>
+</div>
 <div class="ru-card" data-panel="events" data-role="log"><b>Events</b><div id="events"></div></div>
 </div>
 <script src="common/ui.js"></script>
@@ -56,6 +68,42 @@ const band = RU.stateBand($("#band"));
 $("#enable").onclick = () => call("enable");
 $("#disable").onclick = () => call("disable");
 $("#setmode").onclick = () => call("hints", {base: {mode: $("#mode").value}});
+// config: every key, grouped by prefix-free sections in declaration order
+const GROUPS = [["Base caps", /^(max_speed|max_omega|max_accel|max_alpha|wheel_speed)$/],
+  ["Base references and bands", /^(w_base|band_|k_band|w_slack|k_base_pose|k_heading|base_yaw_radius)/],
+  ["EE tracking", /^(k_pos|k_rot|max_err|w_position|w_orientation|lm_|damping|w_arm|posture|k_posture|tie_|w_manip)/],
+  ["Arm limits and yielding", /^(joint_|limit_gain|reach|xi_|w_min|w_influence|resync)/],
+  ["Timeouts and inputs", /./]];
+let cfgCur = {};
+function cfgRender(r){
+  cfgCur = r.config;
+  $("#hard").textContent = Object.keys(r.hard || {}).length ? Object.entries(r.hard).map(([k, v]) => `${k} ${v}`).join(", ") : "(read at enable)";
+  const keys = Object.keys(r.config), used = new Set(), parts = [];
+  for (const [name, re] of GROUPS){
+    const ks = keys.filter(k => !used.has(k) && re.test(k)); ks.forEach(k => used.add(k));
+    if (!ks.length) continue;
+    parts.push(`<h4>${name}</h4>`);
+    for (const k of ks){ const v = r.config[k], d = r.defaults[k];
+      const val = Array.isArray(v) ? v.join(",") : (v === null ? "" : v);
+      const st = r.structural.includes(k) ? " (disabled only)" : "";
+      parts.push(`<label title="${k}${st}; default ${d === null ? "–" : d}"><span>${k}${st ? " *" : ""}</span><input data-k="${k}" value="${val}"></label>`); }
+  }
+  $("#cfg").innerHTML = parts.join("");
+  $("#cfg").querySelectorAll("input").forEach(i => i.oninput = () => i.classList.toggle("dirty", i.value !== String(Array.isArray(cfgCur[i.dataset.k]) ? cfgCur[i.dataset.k].join(",") : (cfgCur[i.dataset.k] ?? ""))));
+}
+const parseVal = (k, txt) => { const cur = cfgCur[k];
+  if (txt.trim() === "") return null;
+  if (Array.isArray(cur) || txt.includes(",")) return txt.split(",").map(Number);
+  if (typeof cur === "boolean") return txt === "true";
+  const n = Number(txt); return isFinite(n) ? n : txt; };
+$("#apply").onclick = async () => {
+  const ch = {}; $("#cfg").querySelectorAll("input.dirty").forEach(i => ch[i.dataset.k] = parseVal(i.dataset.k, i.value));
+  if (!Object.keys(ch).length){ $("#cfgmsg").textContent = "nothing changed"; return; }
+  try { err(""); cfgRender(await RU.api("config", {method: "POST", body: ch})); $("#cfgmsg").textContent = "applied: " + Object.keys(ch).join(", "); }
+  catch(e){ err(e.message); }
+};
+$("#revert").onclick = () => RU.api("config").then(cfgRender);
+RU.api("config").then(cfgRender).catch(e => err(e.message));
 const plots = {
   e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "pos"}, {name: "rot×0.1"}]}),
   b: new RU.Plot($("#pb"), {seconds: 20, series: [{name: "vx"}, {name: "vy"}, {name: "w"}]}),
