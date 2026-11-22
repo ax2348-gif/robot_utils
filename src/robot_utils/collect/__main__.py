@@ -8,7 +8,7 @@ import sys
 
 from .cut import cut_session
 from .session import Session
-from .streams import DEFAULT_STREAMS
+from .streams import DEFAULT_STREAMS, OPLOG_SPEC
 
 
 def _size(s: str) -> int:
@@ -28,6 +28,9 @@ def main(argv=None) -> int:
     r.add_argument("--out", required=True, help="parent directory; the session is <out>/<YYYYMMDD-HHMMSS>")
     r.add_argument("--task", required=True, help="task text of the next episodes (POST quest_teleop/task)")
     r.add_argument("--streams", default=",".join(DEFAULT_STREAMS), help="comma-separated stream specs")
+    r.add_argument("--teleop", default="quest_teleop",
+                   help="the quest_teleop node instance (its /task, /start, /stop, /eventlog; the default streams' "
+                        "operator stream becomes <teleop>/oplog/stream)")
     r.add_argument("--start-teleop", action="store_true", help="POST quest_teleop/start after the task")
     r.add_argument("--stop-teleop", action="store_true", help="POST quest_teleop/stop on Ctrl-C")
     r.add_argument("--rotate", type=_size, default=512 << 20, help="rotate each stream's file at this size")
@@ -47,7 +50,10 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if a.cmd == "run":
-        s = Session(a.robot, a.out, a.task, [x for x in a.streams.split(",") if x.strip()],
+        streams = [x for x in a.streams.split(",") if x.strip()]
+        if a.teleop != "quest_teleop":
+            streams = [f"{a.teleop}/oplog/stream" if x.strip() == OPLOG_SPEC else x for x in streams]
+        s = Session(a.robot, a.out, a.task, streams, teleop=a.teleop,
                     start_teleop=a.start_teleop, stop_teleop=a.stop_teleop, rotate_bytes=a.rotate,
                     read_timeout=a.read_timeout, status_every=a.status_every, settle=a.settle,
                     session_name=a.name)

@@ -22,7 +22,7 @@ import httpx
 
 from .episodes import EpisodeIndex
 from .records import event_line
-from .streams import DEFAULT_STREAMS, OPLOG_SPEC, StreamRecorder, StreamSpec
+from .streams import DEFAULT_STREAMS, StreamRecorder, StreamSpec
 
 log = logging.getLogger("collect")
 
@@ -43,8 +43,11 @@ class Session:
     def __init__(self, robot: str, out: str | Path, task: str, streams: Sequence[str] = DEFAULT_STREAMS, *,
                  start_teleop: bool = False, stop_teleop: bool = False, rotate_bytes: int = 512 << 20,
                  read_timeout: float = 10.0, status_every: float = 5.0, settle: float = 1.0,
-                 session_name: Optional[str] = None, status_stream=None, event_page: int = 1000):
+                 session_name: Optional[str] = None, status_stream=None, event_page: int = 1000,
+                 teleop: str = TELEOP):
         self.robot = robot.rstrip("/")
+        self.teleop = teleop                      # the quest_teleop node instance (its /task, /start, oplog)
+        self.oplog_spec = f"{teleop}/oplog/stream"
         self.task = task
         self.specs = [StreamSpec.parse(s) for s in streams]
         names = [s.name for s in self.specs]
@@ -77,7 +80,7 @@ class Session:
             self._loop.call_soon_threadsafe(self._stop.set)
 
     def _teleop_url(self, path: str) -> str:
-        return f"{self.robot}/nodes/{TELEOP}{path}"
+        return f"{self.robot}/nodes/{self.teleop}{path}"
 
     async def _post(self, client: httpx.AsyncClient, path: str, body=None):
         r = await client.post(self._teleop_url(path), json=body, timeout=10.0)
@@ -202,7 +205,7 @@ class Session:
 
     def _oplog(self) -> Optional[StreamRecorder]:
         for r in self.recorders:
-            if r.spec.spec == OPLOG_SPEC or r.spec.path == OPLOG_SPEC:
+            if r.spec.spec == self.oplog_spec or r.spec.path == self.oplog_spec:
                 return r
         return None
 
@@ -251,7 +254,7 @@ class Session:
                 if self.index.open is None and not any(e["id"] == open_ep["id"] for e in self.index.finished):
                     self.index.open_from_state(open_ep)      # the log no longer has its start
             for spec in self.specs:
-                is_oplog = spec.path == OPLOG_SPEC
+                is_oplog = spec.path == self.oplog_spec
                 self.recorders.append(StreamRecorder(
                     spec, self.robot, self.dir, rotate_bytes=self.rotate_bytes, read_timeout=self.read_timeout,
                     on_record=self._on_oplog_record if is_oplog else None,
