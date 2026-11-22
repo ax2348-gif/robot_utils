@@ -113,6 +113,14 @@ class TeleopClient:
         self.clock = clock
         self.sending = False
         self.sent_log: Optional[list] = None   # tests: every datagram sent
+        # observers (the teleop node's event log and episodes; all called on the loop's thread):
+        # on_frame(frame, verdict, now, fresh) after the latch and the core saw a frame, before its latch events;
+        # on_step(now, fresh, why_stale) once per step before the latch's tick;
+        # on_event(event) for each latch event (("armed", arm_seq) / ("disarmed", reason)) and HTTP result
+        # (("enable" | "disable", ok, detail))
+        self.on_frame: Optional[Callable] = None
+        self.on_step: Optional[Callable] = None
+        self.on_event: Optional[Callable] = None
 
     def session_opened(self, info: dict) -> None:
         """After ``POST /session``: number presses above the WBC's arm_seq floor."""
@@ -146,9 +154,13 @@ class TeleopClient:
                 self._send("alive")
             else:
                 self.core.on_arm(frame)
+            if self.on_event is not None:
+                self.on_event(ev)
         self.latch.events.clear()
         for what, ok, detail in self.actions.drain():
             (self.latch.enable_done if what == "enable" else self.latch.disable_done)(ok, detail)
+            if self.on_event is not None:
+                self.on_event((what, ok, detail))
 
     def step(self, wait: float = 0.05) -> Optional[dict]:
         self._latch_events(None)                 # HTTP results that arrived meanwhile
@@ -161,9 +173,13 @@ class TeleopClient:
             now = self.clock()
             self.latch.on_frame(f.data, v, row, t_row, now, self.gate.fresh(now))
             self.core.on_frame(f.data, v, robot, now)
+            if self.on_frame is not None:
+                self.on_frame(f.data, v, now, self.gate.fresh(now))
             self._latch_events(f.data)
         now = self.clock()
         fresh = self.gate.fresh(now)
+        if self.on_step is not None:
+            self.on_step(now, fresh, "" if fresh else self.gate.why_stale(now))
         self.latch.tick(now, fresh, self.gate.why_stale(now), row, t_row)
         self._latch_events(None)
         msg = None
