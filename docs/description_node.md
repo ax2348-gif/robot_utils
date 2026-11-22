@@ -141,9 +141,20 @@ and cameras are estimates (marked in the YAML).
 
 Options (query parameters of every `/model*` route):
 
-- `variant=full|simple`, per component overridable (`simple,arm=full`). `simple`: each URDF link's geometry is one
-  capsule bounding its collision meshes (principal axis, then the shortest segment that keeps every vertex inside),
-  written as a cylinder plus two spheres (URDF has no capsule); masses and inertias stay the full model's.
+- `variant=full|simple|boxes`, per component overridable (`simple,arm=full`, `full,arm=boxes`). `simple`: each URDF
+  link's geometry is one capsule bounding its collision meshes (principal axis, then the shortest segment that keeps
+  every vertex inside), written as a cylinder plus two spheres (URDF has no capsule); masses and inertias stay the
+  full model's. `boxes`: the robot as this page draws it. The arm's geometry (visual and collision) is exactly
+  `ARM_BOXES` (`nodes/arm/geometry.py`, the boxes the description and arm pages draw), each box axis-aligned in its
+  link's frame: `base` -> `arm_base_link`, `link1`..`link5` -> `arm_link1`..`arm_link5` (`arm_link6` has none: its
+  motor is in the gripper motor block), `end` -> `arm_end_link`, the two finger boxes on `arm_finger_left_link` and,
+  mirrored in y, on `arm_finger_right_link` (so the finger joints move them: `arm_finger_left` = gap / 2). The arm
+  node's `GET links` frames are pinocchio's joint placements, which are the URDF link frames, so there is no
+  offset. Each swerve wheel is the page's box (diameter x width x diameter) on its module's steer link (it steers
+  but does not spin; the wheel link keeps only its collision cylinder) and the module housings are not drawn (the
+  page does not draw them; they sit inside the frame). The chassis boxes and the cameras are as in `simple` (the
+  page's camera body is the same size, its centre 12 mm along x and 3 mm along z from the model's). Masses and
+  inertias stay the full model's. A URDF component other than the reBot arm gets `simple`'s capsules.
 - `base=fixed|planar|swerve`: modules rigid; a root `odom` with `base_x`, `base_y` (prismatic) and `base_yaw`
   joints; or the steer and wheel joints movable (a simulator adds the floating joint: URDF has none).
 - `mounts=nominal|calibrated` (default calibrated).
@@ -157,7 +168,9 @@ zero joint positions, the movable joints with their limits, `description_frames`
 `GET /model/bundle.zip` (robot.urdf with relative mesh paths, the meshes it uses, model.json).
 `GET /model/tree` (`robot_tree.v1`): the URDF's kinematic tree as plain JSON (links with visuals, joints with
 origin / axis / limits / mimic), defaults `variant=simple`, `base=swerve`, `mesh_uri=http`; for clients that do
-their own kinematics with `robot_state.v1` (docs/sim.md, "Robot state stream").
+their own kinematics with `robot_state.v1` (docs/sim.md, "Robot state stream"). `variant=boxes` gives the same
+links and joints with the robot drawn as this page draws it (boxes only; tested box for box against the page's
+`armSegments` on the arm node's kinematics).
 `model_version` hashes the YAML, the active calibrations, the camera nodes' factory frames and every component
 file; it changes when a calibration is activated, not with the options. `/description` and `/transform` agree
 with the model at zero joint positions (tested for every frame both have).

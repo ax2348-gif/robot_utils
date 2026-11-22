@@ -5,11 +5,15 @@ The description YAML's ``components:`` map names each part of the robot and wher
 - ``source: urdf``: a URDF file with its meshes (``file: <package>:<path>``), every link and joint
   prefixed (``prefix:``). Its ``simple`` variant replaces each link's geometry with one bounding
   capsule fitted to the link's collision meshes (``fit_capsule``), keeping the full model's masses and
-  inertias.
+  inertias. Its ``boxes`` variant draws the reBot arm as the description and arm pages do: each link's
+  ``ARM_BOXES`` (arm/geometry.py) as box visuals and collisions in that link's frame (``arm_box_geometry``),
+  masses and inertias again the full model's; a URDF that is not the reBot arm gets ``simple``'s capsules.
 - ``source: procedural``: generated from dimensions: ``box``, ``cylinder``, ``capsule``, ``sphere``,
   ``swerve_base`` (frame + four modules, each a steer joint and a wheel joint) and ``camera`` (a box
   body with the Orbbec frame names ``<name>_depth_optical``, ``<name>_color_optical``, ...). Mass is
-  given (``mass``) or ``density`` x volume; the inertia is the primitive's.
+  given (``mass``) or ``density`` x volume; the inertia is the primitive's. In the ``boxes`` variant a
+  ``swerve_base`` draws each wheel as the description page does, a box (diameter x width x diameter) on its
+  module's steer link (so it steers but does not spin), and no module housing; the rest is unchanged.
 
 Each component hangs from a ``parent`` link at a ``mount`` pose: explicit (``xyz``/``rpy``), a frame of
 the description (``{frame: arm}``) or a camera's composed pose (``{camera: camera}``: the active
@@ -38,7 +42,7 @@ import numpy as np
 
 from .frames import FrameTree, frame_T, make_T, matrix_to_rpy
 
-VARIANTS = ("full", "simple")
+VARIANTS = ("full", "simple", "boxes")
 BASES = ("fixed", "planar", "swerve")
 MOUNTS = ("nominal", "calibrated")
 MESH_URIS = ("package", "http", "relative", "file")
@@ -215,7 +219,7 @@ def resolve_file(ref: str) -> Path:
 
 @dataclass
 class Options:
-    """How to assemble: ``variant`` full | simple, per component overridable (``variant="simple,arm=full"``);
+    """How to assemble: ``variant`` full | simple | boxes, per component overridable (``variant="simple,arm=full"``);
     ``base`` fixed | planar | swerve; ``mounts`` nominal | calibrated; ``mesh_uri`` package | http |
     relative | file (``http_base``: the URL the http meshes are under)."""
     variant: str = "full"
@@ -238,7 +242,7 @@ class Options:
             elif part in VARIANTS:
                 o.variant = part
             else:
-                raise ModelError(f"variant must be full | simple, optionally per component (arm=full), got {part!r}")
+                raise ModelError(f"variant must be full | simple | boxes, optionally per component (arm=full), got {part!r}")
         for name, val, allowed in (("base", base, BASES), ("mounts", mounts, MOUNTS), ("mesh_uri", mesh_uri, MESH_URIS)):
             if val not in allowed:
                 raise ModelError(f"{name} must be one of {', '.join(allowed)}, got {val!r}")
@@ -322,7 +326,36 @@ def fixed_joint(robot: ET.Element, name: str, parent: str, child: str, T: np.nda
 
 
 MATERIALS = {"ru_chassis": "0.55 0.57 0.6 1", "ru_module": "0.25 0.27 0.3 1", "ru_wheel": "0.08 0.08 0.08 1",
-             "ru_camera": "0.12 0.12 0.14 1", "ru_part": "0.6 0.6 0.62 1", "ru_capsule": "0.7 0.72 0.74 1"}
+             "ru_camera": "0.12 0.12 0.14 1", "ru_part": "0.6 0.6 0.62 1", "ru_capsule": "0.7 0.72 0.74 1",
+             "ru_arm_box": "0.7 0.72 0.74 1"}
+
+
+# -- the reBot arm as boxes (the boxes variant) ----------------------------------------------------------
+
+# ARM_BOXES frame -> the arm URDF's link. The arm node's GET links frames (what the pages draw the boxes on)
+# are pinocchio's joint placements (oMi) and end_link's frame; a URDF joint's frame is its child link's
+# frame, so joint i's frame is link i's and the boxes sit in the link frames with no offset.
+ARM_BOX_LINKS = {"base": "base_link", "link1": "link1", "link2": "link2", "link3": "link3", "link4": "link4",
+                 "link5": "link5", "link6": "link6", "end": "end_link"}
+# The finger boxes: finger_left moves along end_link +y (q = gap / 2), finger_right is its mimic (-1) and
+# its boxes are mirrored in y, as the pages draw the second jaw.
+ARM_FINGER_LINKS = {"finger_left_link": 1.0, "finger_right_link": -1.0}
+
+
+def arm_box_geometry() -> dict:
+    """{arm URDF link (unprefixed): [(name, centre xyz m, size xyz m)]}: ARM_BOXES in each link's frame
+    (axis-aligned; the finger boxes on each finger link, mirrored in y on the right one)."""
+    from ..arm.geometry import ARM_BOX_NAMES, ARM_BOXES
+    out: dict = {}
+    for b, nm in zip(ARM_BOXES, ARM_BOX_NAMES):
+        slug = nm.replace(" ", "_")
+        c, s = [v / 1000 for v in b[1:4]], [v / 1000 for v in b[4:7]]
+        if b[0] == "finger":
+            for link, sy in ARM_FINGER_LINKS.items():
+                out.setdefault(link, []).append((slug, [c[0], sy * c[1], c[2]], s))
+        else:
+            out.setdefault(ARM_BOX_LINKS[b[0]], []).append((slug, c, s))
+    return out
 
 
 # -- the assembly -----------------------------------------------------------------------------------
@@ -544,6 +577,10 @@ class ModelBuilder:
         tree = ET.fromstring(path.read_text(encoding="utf-8-sig"))
         mesh_root = Path(c["mesh_root"]).resolve() if c.get("mesh_root") else path.parent.parent
         joints = {j.find("child").get("link"): j for j in tree.findall("joint")}
+        boxes = None
+        if variant == "boxes" and (set(ARM_BOX_LINKS.values()) | set(ARM_FINGER_LINKS)) <= {
+                lk.get("name") for lk in tree.findall("link")}:
+            boxes = arm_box_geometry()          # the reBot arm; any other URDF: simple's capsules
         root = None
         for el in tree:
             if el.tag == "material":
@@ -555,7 +592,9 @@ class ModelBuilder:
                 lk.set("name", prefix + lname)
                 for mesh in lk.iter("mesh"):
                     mesh.set("filename", self._mesh_uri(name, mesh.get("filename"), path, mesh_root, opts))
-                if variant == "simple":
+                if boxes is not None:
+                    self._arm_boxes(lk, boxes.get(lname, []))
+                elif variant in ("simple", "boxes"):
                     self._simplify(name, lk, el, path, mesh_root)
                 self._robot.append(lk)
                 if lname not in joints:
@@ -629,6 +668,17 @@ class ModelBuilder:
         if pts:
             p0, p1, r = fit_capsule(np.vstack(pts))
             capsule_els(lk, p0, p1, r, "ru_capsule", f"{lk.get('name')}_capsule")
+
+    @staticmethod
+    def _arm_boxes(lk: ET.Element, boxes: list) -> None:
+        """Replace a link's geometry with its ARM_BOXES boxes (link frame), as visual and collision."""
+        for tag in ("visual", "collision"):
+            for e in lk.findall(tag):
+                lk.remove(e)
+        for tag in ("visual", "collision"):
+            for slug, c, s in boxes:
+                geom_el(lk, tag, "box", {"size": s}, make_T(np.eye(3), c), "ru_arm_box",
+                        f"{lk.get('name')}_{slug}" if tag == "visual" else None)
 
     # -- procedural components ----------------------------------------------------------------------
 
@@ -724,6 +774,7 @@ class ModelBuilder:
                 geom_el(lk, tag, "box", g, T, "ru_chassis")
         self._add_link(root, name, None, None, None, np.eye(4), mass=m)
         movable = opts.base == "swerve"
+        boxes = opts.variant_of(name) == "boxes"
         mm = self._mass(name, c, 0.0, "module_mass", "_none")
         mw = self._mass(name, c, 0.0, "wheel_mass", "_none")
         housing = {"size": [float(c.get("module_size", 0.1006)), float(c.get("module_size", 0.1006)), 0.04]}
@@ -734,7 +785,10 @@ class ModelBuilder:
             mod_link, wheel_link = f"{name}_{mod}_module", f"{name}_{mod}_wheel"
             ml = ET.SubElement(self._robot, "link", name=mod_link)
             inertial_el(ml, mm, housing_T[:3, 3], primitive_inertia("box", mm, housing))
-            geom_el(ml, "visual", "box", housing, housing_T, "ru_module")
+            if boxes:                # the page's wheel: a box on the steer link (steers, does not spin)
+                geom_el(ml, "visual", "box", {"size": [2 * R, W, 2 * R]}, np.eye(4), "ru_wheel", f"{mod_link}_wheel")
+            else:
+                geom_el(ml, "visual", "box", housing, housing_T, "ru_module")
             T = make_T(np.eye(3), (float(x), float(y), R))
             el = fixed_joint(self._robot, f"{name}_{mod}_steer", root, mod_link, T,
                              "continuous" if movable else "fixed", axis=(0, 0, 1) if movable else None,
@@ -744,7 +798,7 @@ class ModelBuilder:
             self._add_joint(name, el)
             wl = ET.SubElement(self._robot, "link", name=wheel_link)
             inertial_el(wl, mw, (0, 0, 0), wheel_T[:3, :3] @ primitive_inertia("cylinder", mw, wheel) @ wheel_T[:3, :3].T)
-            for tag in ("visual", "collision"):
+            for tag in ("collision",) if boxes else ("visual", "collision"):
                 geom_el(wl, tag, "cylinder", wheel, wheel_T, "ru_wheel")
             el = fixed_joint(self._robot, f"{name}_{mod}_wheel_joint", mod_link, wheel_link, np.eye(4),
                              "continuous" if movable else "fixed", axis=(0, 1, 0) if movable else None,

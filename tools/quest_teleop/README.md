@@ -1,7 +1,7 @@
 # Quest whole-body teleop client
 
 Drives the WBC node (`nodes/wbc`, design and frozen contract in `docs/plans/wbc_v1.md`, "Interfaces for the first
-build", items 2–5) from the Quest headset's `teleop.quest_state.v1` stream. Runs on the Mac or erid, **never the Pi**.
+build", items 2–5) from the Quest headset's `teleop.quest_state.v1` stream. The CLI runs on the Mac or erid; on the machine that runs the WBC (the robot, or the sim stack) the same client runs as the `quest_teleop` node, with a page (docs/quest_teleop_node.md).
 
 ```bash
 tools/quest_teleop/quest_up            # headset side: wake check, update if behind, telemetry headless, stream up
