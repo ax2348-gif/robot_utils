@@ -125,7 +125,7 @@ class EpisodeIndex:
             "outcome": outcome, "reason": reason,
             "seq_start": o["seq_start"], "seq_stop": stop["seq"] if stop else None,
             "events": o["events"],
-            "reconciled": "eventlog" in o["via"],
+            "reconciled": "eventlog" in o["via"] or "state" in o["via"],
         }
         self.finished.append(episode)
         with open(self.episodes_path, "a") as f:
@@ -134,6 +134,12 @@ class EpisodeIndex:
             os.fsync(f.fileno())
         if self.on_episode is not None:
             self.on_episode(episode)
+
+    def open_from_state(self, ep: dict):
+        """Open an episode from the node's ``/state`` (``{id, task, t_start, start_seq}``) when its start
+        event is not available."""
+        self.open = {"id": ep["id"], "task": ep.get("task"), "t_start": ep.get("t_start"), "wall_start": None,
+                     "seq_start": ep.get("start_seq"), "events": [], "via": ["state"]}
 
     def close_open(self, reason: str, t: Optional[float], wall: float):
         """End of session: the open episode (if any) -> aborted with ``reason``, stopped at ``t``."""

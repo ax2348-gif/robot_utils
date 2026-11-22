@@ -42,8 +42,10 @@ python -m robot_utils.collect cut ~/data/20261121-143000 --pre-roll 0.5 --post-r
 re-encoding anywhere); a spec with `?` is used verbatim (`camera/stream?streams=depth&mode=raw`).
 
 **Startup:** the task is set (failure = exit 1), the Pi event log's newest seq is read
-(`GET /eventlog/files`, the max `last_seq`): events after it are this session's. Then every stream is opened,
-and teleop is started if asked.
+(`GET /eventlog/files`, the max `last_seq`): events after it are this session's. If the node's `/state` shows
+an open `episode` (`{id, task, t_start, start_seq}`), the index starts at its `start_seq` instead and its events
+are fetched from the Pi log, so it is indexed from its start (if the log no longer has the start, it is opened
+from `/state`'s fields). Then every stream is opened, and teleop is started if asked.
 
 **Status** (stderr, every `--status-every` s, and at the end):
 
@@ -65,7 +67,7 @@ seen on the operator stream), and `session.json` gets the stop time, reason and 
 ```
 <out>/<YYYYMMDD-HHMMSS>/
   session.json                    robot, task, streams (spec, name, url, params), started / stopped wall,
-                                  stop_reason, eventlog_baseline_seq, files per stream, totals, skipped seqs
+                                  stop_reason, eventlog_baseline_seq, open_episode_at_start, files per stream, totals, skipped seqs
   episodes.jsonl                  one line per finished episode (below), appended + fsynced as it finishes
   events.jsonl                    every event of the session in seq order, with "via": stream | eventlog;
                                   {"missing": [seqs], "why"} where the Pi log did not have them either
@@ -92,7 +94,7 @@ session ended first; `retry_errors` (the failed attempts). The gap spans Pi time
 `t_start`, `t_stop` (Pi monotonic: the `episode_start` and `episode_stop` / `episode_abort` events' `t`),
 `wall` `{start, stop}`, `outcome` `kept` | `aborted`, `reason` (the abort's `detail.reason`; `session ended`;
 null when kept), `seq_start`, `seq_stop` (null when closed by the session), `events` (the seqs of every event
-while it was open, its start and stop included), `reconciled` (some of its events came from the Pi log).
+while it was open, its start and stop included), `reconciled` (some of its events came from the Pi log or `/state`).
 
 ## Episodes from events; reconciliation
 
@@ -101,14 +103,17 @@ The operator stream's `event` records (the contract's event line) are applied st
 its reason. The Pi log is authoritative:
 
 - **A seq gap on the stream** (an event arrives ahead of a missing seq): the later events are held, and the
-  script fetches `GET /nodes/quest_teleop/eventlog?since_seq=<newest applied>`; what it returns is applied in
-  order, duplicates ignored.
+  script fetches `GET /nodes/quest_teleop/eventlog?since_seq=<newest applied>&limit=1000`, paging on from each
+  page's last seq until a page comes back short; what it returns is applied in order, duplicates ignored.
 - **A reconnect of the operator stream**: the same fetch, always (the events during the outage never come on
   the stream).
 - A seq the log does not have either (pruned) is skipped and noted (`events.jsonl`, `session.json`
   `skipped_event_seqs`); a fetch that fails is retried with backoff and once more at shutdown.
 - Episode times are the events' own Pi times, so a late or recovered event cuts exactly where the Pi says.
-- An `episode_stop` / `abort` for an episode that started before the session is not indexed (logged).
+- A while an episode is open: the node emits `episode_stop` (kept) for it, then `episode_start` for the next.
+  An `episode_start` with no stop before it (not expected) closes the open one `aborted` / `no stop event before
+  the next episode_start`.
+- `event` records carry the event line flat in the header (the contract); a nested `event` object is accepted.
 
 ## `cut`
 
@@ -141,5 +146,3 @@ clock are offline steps on these files, not part of the cut.
 - Video is latest-frame-wins on the node: a slow link skips frames, counted in the frames' `dropped` and in
   `episode.json` (there is no every-frame recorder mode on the camera node yet).
 - Pi time is the Pi's monotonic clock: a Pi reboot inside a session breaks the time base of the cut.
-- The index starts at the event log's newest seq when the session starts: an episode already open then is
-  not indexed (start the session before the operator presses A).

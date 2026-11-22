@@ -43,7 +43,7 @@ class Session:
     def __init__(self, robot: str, out: str | Path, task: str, streams: Sequence[str] = DEFAULT_STREAMS, *,
                  start_teleop: bool = False, stop_teleop: bool = False, rotate_bytes: int = 512 << 20,
                  read_timeout: float = 10.0, status_every: float = 5.0, settle: float = 1.0,
-                 session_name: Optional[str] = None, status_stream=None):
+                 session_name: Optional[str] = None, status_stream=None, event_page: int = 1000):
         self.robot = robot.rstrip("/")
         self.task = task
         self.specs = [StreamSpec.parse(s) for s in streams]
@@ -56,6 +56,7 @@ class Session:
         self.read_timeout = read_timeout
         self.status_every = status_every
         self.settle = settle
+        self.event_page = event_page
         self.status_stream = status_stream if status_stream is not None else sys.stderr
         name = session_name or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.dir = Path(out) / name
@@ -100,9 +101,28 @@ class Session:
             return None
 
     async def _fetch_events(self, client: httpx.AsyncClient, since: int) -> list[dict]:
-        r = await client.get(self._teleop_url("/eventlog"), params={"since_seq": since}, timeout=10.0)
-        r.raise_for_status()
-        return parse_event_lines(r)
+        """Every event after ``since``, paged: ``limit`` at a time from the last seq until a page comes
+        back short (the contract)."""
+        out: list[dict] = []
+        while True:
+            r = await client.get(self._teleop_url("/eventlog"), params={"since_seq": since, "limit": self.event_page},
+                                 timeout=10.0)
+            r.raise_for_status()
+            page = parse_event_lines(r)
+            out += page
+            if len(page) < self.event_page:
+                return out
+            since = max(int(e["seq"]) for e in page)
+
+    async def _open_episode(self, client: httpx.AsyncClient) -> Optional[dict]:
+        """The node's open episode now (``/state`` ``episode``: {id, task, t_start, start_seq}), or None."""
+        try:
+            r = await client.get(self._teleop_url("/state"), timeout=5.0)
+            r.raise_for_status()
+            return r.json().get("episode")
+        except Exception as e:     # noqa: BLE001
+            log.warning("teleop /state unavailable (%s): an episode open now would not be indexed", e)
+            return None
 
     async def reconcile(self, client: httpx.AsyncClient) -> bool:
         """Fetch the events after the newest applied seq from the Pi log and apply them; skip the
@@ -217,9 +237,19 @@ class Session:
         async with httpx.AsyncClient(limits=limits) as client:
             await self._post(client, "/task", {"text": self.task})
             baseline = await self._baseline_seq(client)
+            open_ep = await self._open_episode(client)
+            if open_ep is not None and open_ep.get("start_seq") is not None:
+                # index it from its start: the events since then come from the Pi log
+                start = int(open_ep["start_seq"]) - 1
+                baseline = start if baseline is None else min(baseline, start)
             self.meta["eventlog_baseline_seq"] = baseline
+            self.meta["open_episode_at_start"] = open_ep
             self.index = EpisodeIndex(self.dir / "episodes.jsonl", self.dir / "events.jsonl", baseline,
                                       on_episode=self._on_episode)
+            if open_ep is not None:
+                await self.reconcile(client)
+                if self.index.open is None and not any(e["id"] == open_ep["id"] for e in self.index.finished):
+                    self.index.open_from_state(open_ep)      # the log no longer has its start
             for spec in self.specs:
                 is_oplog = spec.path == OPLOG_SPEC
                 self.recorders.append(StreamRecorder(

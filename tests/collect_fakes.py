@@ -8,12 +8,13 @@ docs/plans/data_collection_v1.md on the paths the script uses (``/nodes/<node>/.
   ``t_capture``, ``seq``, ``dropped``) at ``cam_fps``.
 - ``/nodes/quest_teleop/oplog/stream``: ``headset`` (``t_rx``, ``frame``), ``sent`` (``t_send``, ``datagram``)
   and ``event`` records in order of occurrence.
-- ``/nodes/quest_teleop``: ``POST /task``, ``/start``, ``/stop``; ``GET /eventlog?since_seq=N`` (JSON lines),
-  ``GET /eventlog/files``.
+- ``/nodes/quest_teleop``: ``POST /task``, ``/start``, ``/stop``; ``GET /state`` (``episode``: the open one or
+  null); ``GET /eventlog?since_seq=N&limit=M`` (JSON lines, at most M, default 1000), ``GET /eventlog/files``.
 
 Test controls: ``emit`` / ``start_episode`` / ``stop_episode`` / ``abort_episode`` (events go to the log and,
 unless their seq is in ``skip_on_stream``, to every open operator stream), ``drop(key)`` (every open
-connection of that stream ends after half a record), ``refuse`` (keys whose new connections get 503).
+connection of that stream ends after half a record), ``refuse`` (keys whose new connections get 503),
+``pruned_below`` (the log no longer has the seqs below it).
 Pi time is this process's ``time.monotonic()``.
 """
 import asyncio
@@ -49,9 +50,11 @@ class FakeRobot:
         self.teleop = False
         self.start_status = 200
         self.open_episode = None
+        self.open_info = None
         self.counter = itertools.count(1)
         self.connections: dict[str, int] = {}
-        self.eventlog_calls: list[int] = []
+        self.eventlog_calls: list[tuple[int, int]] = []
+        self.pruned_below = 0
         for _ in range(prior_events):
             self.emit("button", button="Y", pressed=True)
         self.app = self._build()
@@ -68,9 +71,12 @@ class FakeRobot:
 
     def start_episode(self) -> str:
         self.emit("button", button="A", pressed=True)
+        if self.open_episode is not None:                      # A while open: stop (kept), then start
+            self.emit("episode_stop", self.open_episode)
         eid = f"20261121-{next(self.counter):04d}"
         self.open_episode = eid
-        self.emit("episode_start", eid, task=self.task)
+        ev = self.emit("episode_start", eid, task=self.task)
+        self.open_info = {"id": eid, "task": self.task, "t_start": ev["t"], "start_seq": ev["seq"]}
         return eid
 
     def stop_episode(self) -> dict:
@@ -200,11 +206,16 @@ class FakeRobot:
             self.emit("teleop_stop", reason="request")
             return {"teleop": False}
 
+        @app.get("/nodes/quest_teleop/state")
+        def state():
+            return {"teleop": self.teleop, "episode": self.open_info if self.open_episode is not None else None}
+
         @app.get("/nodes/quest_teleop/eventlog")
-        def eventlog(since_seq: int = -1):
-            self.eventlog_calls.append(since_seq)
+        def eventlog(since_seq: int = -1, limit: int = 1000):
+            self.eventlog_calls.append((since_seq, limit))
             with self.lock:
-                lines = [json.dumps(e) for e in self.events if e["seq"] > since_seq]
+                lines = [json.dumps(e) for e in self.events
+                         if e["seq"] > since_seq and e["seq"] >= self.pruned_below][:limit]
             return PlainTextResponse("".join(line + "\n" for line in lines), media_type="application/x-ndjson")
 
         @app.get("/nodes/quest_teleop/eventlog/files")

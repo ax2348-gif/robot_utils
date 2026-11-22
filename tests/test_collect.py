@@ -200,7 +200,7 @@ def test_event_skipped_on_stream_is_fetched(robot, tmp_path):
     d = run.stop()
     ep = read_episodes(d / "episodes.jsonl")[0]
     assert (ep["id"], ep["outcome"], ep["seq_stop"]) == (e1, "kept", robot.seq - 1) and ep["reconciled"]
-    assert any(s >= 45 for s in robot.eventlog_calls)
+    assert any(s >= 45 for s, _ in robot.eventlog_calls)
 
 
 def test_open_episode_closed_at_session_end(robot, tmp_path):
@@ -343,3 +343,69 @@ def test_event_record_shapes():
     nested = {"type": "event", "len": 0, "event": line}
     assert event_line(flat) == line and event_line(nested) == line
     assert header_time(flat) == header_time(nested) == 12.5
+
+
+def test_eventlog_paged_after_outage(robot, tmp_path):
+    run = Running(robot, tmp_path, event_page=4)
+    e1 = robot.start_episode()
+    robot.refuse.add("oplog")
+    robot.drop("oplog")
+    wait(lambda: not run.session._oplog().stats.connected)
+    for i in range(9):
+        robot.emit("hold", e1, reason=f"h{i}")
+    robot.stop_episode()                                     # 11 missed events: 3 pages of 4 (the last short)
+    robot.refuse.discard("oplog")
+    wait(lambda: len(run.session.index.finished) == 1)
+    d = run.stop()
+    ep = read_episodes(d / "episodes.jsonl")[0]
+    s1, p1 = episode_seqs(robot, e1)
+    assert (ep["id"], ep["outcome"], ep["seq_stop"]) == (e1, "kept", p1)
+    assert ep["events"] == [e["seq"] for e in robot.events if s1 <= e["seq"] <= p1]
+    calls = [c for c in robot.eventlog_calls if c[0] >= s1]
+    assert all(limit == 4 for _, limit in calls)
+    since = {c[0] for c in calls}
+    assert any({x + 4, x + 8} <= since for x in since)       # paged on from each page's last seq
+    seqs, _ = event_seqs(d)
+    assert seqs == list(range(45, robot.seq + 1))
+
+
+def test_a_while_open_is_stop_then_start(robot, tmp_path):
+    run = Running(robot, tmp_path)
+    e1 = robot.start_episode()
+    time.sleep(0.1)
+    e2 = robot.start_episode()                               # the node: episode_stop (kept) for e1, then start e2
+    robot.stop_episode()
+    wait(lambda: len(run.session.index.finished) == 2)
+    d = run.stop()
+    assert [(e["id"], e["outcome"]) for e in read_episodes(d / "episodes.jsonl")] == [(e1, "kept"), (e2, "kept")]
+
+
+def test_open_episode_at_session_start(robot, tmp_path):
+    e0 = robot.start_episode()
+    robot.emit("hold", e0, reason="before the session")
+    run = Running(robot, tmp_path)
+    robot.stop_episode()
+    wait(lambda: len(run.session.index.finished) == 1)
+    d = run.stop()
+    ep = read_episodes(d / "episodes.jsonl")[0]
+    s0, p0 = episode_seqs(robot, e0)
+    assert (ep["id"], ep["outcome"], ep["seq_start"], ep["seq_stop"]) == (e0, "kept", s0, p0)
+    assert ep["events"] == list(range(s0, p0 + 1)) and ep["wall"]["start"] is not None
+    assert ep["t_start"] == robot.events[s0 - 42]["t"]
+    meta = json.loads((d / "session.json").read_text())
+    assert meta["open_episode_at_start"]["id"] == e0 and meta["eventlog_baseline_seq"] == s0 - 1
+
+
+def test_open_episode_at_start_without_its_log(robot, tmp_path):
+    e0 = robot.start_episode()
+    robot.emit("hold", e0, reason="x")
+    robot.pruned_below = robot.seq                           # the log lost the episode's start
+    run = Running(robot, tmp_path)
+    time.sleep(0.2)
+    robot.abort_episode("estop")
+    wait(lambda: len(run.session.index.finished) == 1)
+    d = run.stop()
+    ep = read_episodes(d / "episodes.jsonl")[0]
+    s0 = robot.open_info["start_seq"]
+    assert (ep["id"], ep["outcome"], ep["reason"], ep["seq_start"]) == (e0, "aborted", "estop", s0)
+    assert ep["t_start"] == robot.open_info["t_start"] and ep["reconciled"]
