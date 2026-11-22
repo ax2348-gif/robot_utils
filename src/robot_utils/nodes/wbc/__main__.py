@@ -25,10 +25,10 @@ def main() -> None:
     p.add_argument("--udp-port", type=int, default=9410)
     p.add_argument("--config", help="YAML of Config keys (caps, gains, timeouts) over the defaults")
     p.add_argument("--switch-interval", type=float,
-                   default=float(os.environ.get("WBC_SWITCH_INTERVAL", "0.0005")),
+                   default=float(os.environ.get("WBC_SWITCH_INTERVAL", "0.005")),
                    help="Python's GIL switch interval (s; sys.setswitchinterval) for this process: the real-time "
                         "control thread waits at most about this long for the GIL held by a normal-priority thread "
-                        "(HTTP, SSE, stream readers). Default 0.0005 (env WBC_SWITCH_INTERVAL; Python's own: 0.005)")
+                        "(HTTP, SSE, stream readers). Default 0.005 = Python's own (env WBC_SWITCH_INTERVAL); 0.0005 made the robot's tick overruns much worse on 2026-11-21 (more GIL handoffs, more priority inversion)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "wbc")
     a = p.parse_args()
