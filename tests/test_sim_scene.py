@@ -21,10 +21,12 @@ def w():
     return make_world(scene={"tabletop": True})
 
 
-def reach_down(world, p, base_xy=(0.0, 0.0), tries=12):
-    """Is world point ``p`` reachable by the grasp point with the gripper pointing straight down, the base at
-    ``base_xy`` (start yaw)? Damped least squares on the model's arm joints, several seeds. Returns the joint
-    angles, or None."""
+def reach_down(world, p, base_xy=(0.0, 0.0), tries=12, offset=GRASP, jaw=None, seed=None, pos_tol=0.004,
+               ang_tol_deg=10.0, iters=300):
+    """Is world point ``p`` reachable by the grasp point (``offset`` in arm_end_link) with the gripper pointing
+    straight down, the base at ``base_xy`` (start yaw)? ``jaw``: a horizontal world direction the jaws must close
+    along (end_link y, either sign). Accepted within ``pos_tol`` m and ``ang_tol_deg``. Damped least squares on the model's arm joints from ``seed`` (else the start
+    pose), then random seeds. Returns the joint angles, or None."""
     m = world.m
     d = mujoco.MjData(m)
     d.qpos[:] = world.d.qpos
@@ -35,17 +37,20 @@ def reach_down(world, p, base_xy=(0.0, 0.0), tries=12):
     dofs = world.arm_v
     rng = np.random.default_rng(0)
     for t in range(tries):
-        q = world.cfg["components"]["arm"]["start_q"] if t == 0 else rng.uniform(lo, hi)
+        q = (seed if seed is not None else world.cfg["components"]["arm"]["start_q"]) if t == 0 else rng.uniform(lo, hi)
         q = np.array(q, float)
-        for _ in range(300):
+        for _ in range(iters):
             d.qpos[world.arm_q] = q
             mujoco.mj_kinematics(m, d)
             mujoco.mj_comPos(m, d)
             R = d.xmat[e].reshape(3, 3)
-            g = d.xpos[e] + R @ GRASP
+            g = d.xpos[e] + R @ offset
             ep = p - g
             er = np.cross(R[:, 0], [0.0, 0.0, -1.0])            # tool axis onto straight down
-            if np.linalg.norm(ep) < 0.004 and np.linalg.norm(er) < math.sin(math.radians(10)):
+            if jaw is not None:                                  # jaw travel onto the given direction
+                j = np.asarray(jaw, float) * (1.0 if R[:, 1] @ jaw >= 0 else -1.0)
+                er = er + np.cross(R[:, 1], j)
+            if np.linalg.norm(ep) < pos_tol and np.linalg.norm(er) < math.sin(math.radians(ang_tol_deg)):
                 return q
             jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
             mujoco.mj_jac(m, d, jp, jr, g, e)

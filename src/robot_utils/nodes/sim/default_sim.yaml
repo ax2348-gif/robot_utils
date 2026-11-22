@@ -6,6 +6,21 @@ physics:
   integrator: implicitfast       # implicitfast | implicit | euler | rk4
   gravity: [0.0, 0.0, -9.81]
 
+# Contact for grasping (sim-only physics; docs/sim.md "Grasping"). The fingers collide as the jaw boxes (the
+# carriage and the prong, arm/geometry.py) in every model variant; these set how they and the objects touch.
+contact:
+  cone: elliptic                 # friction cone: elliptic | pyramidal
+  noslip_iterations: 5           # post-solve iterations that remove creep in held objects
+  fingers:
+    condim: 4                    # sliding + torsional friction (an object doesn't spin out of the jaws)
+    friction: [1.5, 0.02, 0.0001]   # sliding, torsional, rolling (MuJoCo takes the larger of the two geoms')
+    solref: [0.004, 1.0]         # stiff jaw contact (time constant s, damping ratio)
+    solimp: [0.95, 0.99, 0.001]
+    mimic_solref: [0.002, 1.0]   # the right finger's coupling to the left (one pinion drives both)
+  objects:
+    condim: 4
+    friction: [0.8, 0.005, 0.0001]
+
 # The model from the description node: GET /model/bundle.zip with these options (base is always swerve)
 model:
   variant: full                  # full: mesh collisions and visuals; simple: one capsule per arm link

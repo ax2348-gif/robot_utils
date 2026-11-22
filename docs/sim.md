@@ -61,8 +61,9 @@ at the origin facing +x. Derived from the model, not guessed:
   heights 0.15–0.40 m); its front edge **4 cm in front of the base** (`FRAME`/2 + 0.04 = 0.256 m), so the first
   ~0.3 m of the top is in reach from the start pose. It is long in y: driving sideways along it brings the rest in
   reach (the robot cannot pass under it: the arm and camera are above its top).
-- **on it**: `cube` (4 cm, red, x 0.36 y −0.15), `can` (cylinder ⌀ 40 mm × 10 cm, blue, x 0.42 y 0.05), `block`
-  (3 × 8 × 5 cm, green, turned 0.4 rad, x 0.46 y −0.32): each narrower than 0.8 × the gripper's opening (`GAP_MAX`
+- **on it**: `cube` (4 cm, red, x 0.36 y −0.15), `can` (cylinder ⌀ 40 mm × 8 cm, blue, x 0.38 y 0), `block`
+  (3 × 8 × 5 cm, green, turned 0.4 rad, x 0.40 y −0.30), placed so a top-down grasp and a 10 cm lift are in reach
+  (docs: "Grasping"): each narrower than 0.8 × the gripper's opening (`GAP_MAX`
   49.6 mm) and reachable pointing down from the start pose (tested with the model's kinematics); `cube_far` (4 cm,
   yellow, y 0.55): out of reach until the base moves ~0.5 m left.
 - **in the head camera's view**: `cube_view` (4.5 cm, white, x 0.74 y 0, near the table's far edge). On the robot the
@@ -73,6 +74,30 @@ at the origin facing +x. Derived from the model, not guessed:
 
 They are in `/scene` (fixed ones with `fixed: true`), the page's 3D view, both camera renders, and `robot_state.v1`
 `objects` (`fixed` too). `scene: {tabletop: false}` in a sim config starts empty (the tests' default world does).
+
+## Grasping
+
+- **Jaw collision**: in every model variant the finger links collide as the **jaw boxes** (`arm/geometry.py`
+  `ARM_BOXES`: the carriage and the prong, bounded from the visual meshes; the same boxes the arm pages draw), not
+  their CAD meshes: MuJoCo collides a mesh as its convex hull, and the finger mesh's hull filled the space between
+  the pads, so the jaws closed through objects. Visual meshes stay. The right finger follows the left through the
+  URDF's mimic (a joint equality), stiffened to `contact.fingers.mimic_solref`.
+- **Contact** (`default_sim.yaml` `contact:`, sim-only physics): elliptic friction cones, `noslip_iterations: 5`;
+  fingers `condim 4` (torsional friction), friction 1.5, stiff `solref [0.004, 1]`; objects `condim 4`, friction 0.8
+  (MuJoCo takes the larger friction of the two geoms). Without them (pyramidal, condim 3, default solref) the jaws
+  sank ~4 mm into the objects and they slipped 4–10 mm in 2 s.
+- **A top-down grasp that works** (`tests/test_sim_grasp.py`, measured: cube / can / block lifted 97 / 97 / 96 mm of
+  100, the gripper itself 99 mm, slip 0.0 mm over 2 s, in the full, boxes and simple variants): fingertips (the
+  end_link origin) 6 mm above the table, or higher when the object is taller than the rail's face behind the tips
+  (73 mm) so the rail stays above its top; the jaws closing along a box's narrow side; a straight vertical approach
+  (IK in 1 cm steps: a joint-space move between two poses swings the open jaws sideways through the object); the
+  base held (zero twist: an idle base coasts, and the arm's reaction moved it 12 mm, enough to land the 4.8 mm
+  per-side clearance of the open jaws on the cube). The top-down reach ends about 10 cm above the table near the
+  front: the lift lets the wrist tilt.
+- **Grip force**: the sim's finger servo pushes 2000 N/m × the jaw's position error, capped at `HARD_MAX_FORCE`
+  (120 N): on a 40 mm cube closed to 0, ~39 N. The arm node's own force limit (`max_force_n`) acts on the command it
+  sends, as on the robot. Commanded closed through the arm node (`POST /gripper {gap_mm: 0}`), the world's jaws close
+  (tested); the world's `g_ref` runs from 0 (closed) to `GRIPPER_OPEN_RAD` (open).
 
 ## Limits come from the robot config
 

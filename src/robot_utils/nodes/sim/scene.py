@@ -47,9 +47,9 @@ def tabletop() -> list[dict]:
 
     objs += [
         on_top("cube", 0.10, -0.15, 0.04, shape="box", size=[0.04, 0.04, 0.04], mass=0.06, rgba=[0.85, 0.20, 0.15, 1]),
-        on_top("can", 0.16, 0.05, 0.10, shape="cylinder", radius=w / 2, length=0.10, mass=0.15,
+        on_top("can", 0.12, 0.0, 0.08, shape="cylinder", radius=w / 2, length=0.08, mass=0.12,
                rgba=[0.20, 0.45, 0.85, 1]),
-        on_top("block", 0.20, -0.32, 0.05, shape="box", size=[0.03, 0.08, 0.05], mass=0.08, yaw=0.4,
+        on_top("block", 0.14, -0.30, 0.05, shape="box", size=[0.03, 0.08, 0.05], mass=0.08, yaw=0.4,
                rgba=[0.25, 0.65, 0.30, 1]),
         on_top("cube_far", 0.14, 0.55, 0.04, shape="box", size=[0.04, 0.04, 0.04], mass=0.06,
                rgba=[0.90, 0.75, 0.15, 1]),                    # drive left along the table to reach it
