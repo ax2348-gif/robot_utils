@@ -390,7 +390,7 @@ class WbcNode:
         if "base" in msg and msg["base"] is not None:
             ov = parse_base(msg["base"], cfg, self.ees)
             self.override = ov
-            if "target" in ov:
+            if "target_pose" in ov or "target_heading" in ov:   # parse_base's keys (a "target" key never exists)
                 self.hint_t = now
             if "velocity" in ov:
                 self.velocity_t = now
