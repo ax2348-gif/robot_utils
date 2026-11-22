@@ -2,6 +2,7 @@
 description node, the sim world and the nodes in --sim world mode; they work together (the swerve node moves
 the world's base, the arm node connects, the estimator integrates the odometry); Ctrl-C stops everything.
 docs/sim.md, "The sim stack"."""
+import json
 import os
 import signal
 import socket
@@ -107,6 +108,25 @@ def test_sim_stack_runs_and_stops_cleanly(stack):
     assert arm["state"] in ("uninitialized", "ready"), arm["state"]
     # markers through the landing page's proxy
     assert c.post("/nodes/sim/markers", json={"markers": [{"name": "t", "pos": [1, 0, 0.5]}]}).status_code == 200
+    # robot_state.v1 as JSON lines, read by a raw TCP client through the landing page;
+    # its joints are exactly the description tree's movable joints
+    tree = c.get("/nodes/description/model/tree").json()
+    port = int(base.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+        s.sendall(b"GET /nodes/sim/robot_state/stream?format=jsonl&hz=30 HTTP/1.0\r\nHost: x\r\n\r\n")
+        f = s.makefile("rb")
+        assert b" 200 " in f.readline()
+        while f.readline() not in (b"\r\n", b"\n"):
+            pass
+        recs = []
+        while len(recs) < 4:                       # uvicorn chunks even HTTP/1.0: a record per chunk, skip the sizes
+            line = f.readline()
+            if line.startswith(b"{"):
+                recs.append(json.loads(line))
+    assert [r["schema"] for r in recs] == ["robot_state.v1"] * 4 and recs[-1]["seq"] > recs[0]["seq"]
+    assert set(recs[0]["joints"]) == set(tree["movable"]) and recs[0]["model_version"] == tree["model_version"]
+    assert recs[-1]["base"][0] >= x - 0.01 and len(recs[-1]["base"]) == 7      # (it may still be coasting)
+    assert recs[-1]["overlays"]["markers"][0]["name"] == "t"
     # Ctrl-C: every node stops, sockets go
     proc.send_signal(signal.SIGINT)
     out, _ = proc.communicate(timeout=60)

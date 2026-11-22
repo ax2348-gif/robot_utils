@@ -290,6 +290,35 @@ class VizFrame(BaseModel):
     markers: Optional[list[Marker]] = Field(None, description="Every live marker (in the stream: only when changed).")
 
 
+class StateObject(BaseModel):
+    pose: list[float] = Field(description="World pose [x, y, z, qx, qy, qz, qw] of its centre.")
+    geom: dict = Field(description="{type: box | cylinder, size (box full extents) | radius + length (along z), rgba}.")
+
+
+class RobotStateOverlays(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    markers: list[Marker] = Field(description="Every live marker (POST /markers): the WBC's targets, commanded poses...")
+    sim: dict = Field(description="{running, rtf}.")
+    arm: Optional[dict] = Field(None, description="{enabled, fault}: the arm motors as the world sees them.")
+
+
+class RobotState(BaseModel):
+    schema_: str = Field(alias="schema", serialization_alias="schema", description="robot_state.v1.")
+    source: str = Field(description="Who publishes it: sim (the robot: later).")
+    seq: int = Field(description="Record counter (per server).")
+    t: float = Field(description="s, the publisher's clock (`clock`): sim time here.")
+    clock: str = Field(description="What `t` is: sim (sim seconds) | monotonic (the Pi's clock, on the robot).")
+    t_host: float = Field(description="s, the server's monotonic clock when the record was made.")
+    model_version: Optional[str] = Field(description="The description node's model_version of the model simulated "
+                                                     "(GET /model/tree?... gives that tree).")
+    frame: str = Field(description="Frame of `base` and object poses: world (z up, m).")
+    base: list[float] = Field(description="base_link's world pose [x, y, z, qx, qy, qz, qw].")
+    joints: dict[str, float] = Field(description="Every movable joint by its model name: rad or m (arm joints, "
+                                                 "fingers, each module's steer and wheel).")
+    objects: dict[str, StateObject] = Field(description="Scene objects (not the robot).")
+    overlays: RobotStateOverlays
+
+
 class WrenchOut(BaseModel):
     body: str = Field(description="The model body the wrench acts on.")
     until: float = Field(description="s, sim time it ends.")
@@ -486,6 +515,27 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
                 yield f"data: {json.dumps(f, separators=(',', ':'))}\n\n"
                 await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+    # -- robot_state.v1 ------------------------------------------------------------------------------
+
+    @app.get("/robot_state", response_model=RobotState, response_model_exclude_unset=True, tags=["view"],
+             summary="robot_state.v1: base pose, every joint, objects, overlays (one record)")
+    async def robot_state():
+        return node.robot_state()
+
+    @app.get("/robot_state/stream", tags=["view"], response_class=StreamingResponse,
+             summary="robot_state.v1 records as JSON lines at `hz` (plain chunked HTTP: a TCP client reads lines)",
+             responses={200: {"content": {"application/x-ndjson": {}}, "description": "One JSON object per line."}})
+    async def robot_state_stream(hz: float = Query(30.0, ge=1, le=100, description="Records per second"),
+                                 format: Literal["jsonl"] = Query("jsonl", description="jsonl (one JSON per line)")):
+        async def gen():
+            period = 1.0 / hz
+            while True:
+                t0 = time.monotonic()
+                yield json.dumps(node.robot_state(), separators=(",", ":")) + "\n"
+                await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
+        return StreamingResponse(gen(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     # -- markers -------------------------------------------------------------------------------------
 

@@ -169,6 +169,18 @@ class SimNode:
             out["markers"] = mk
         return out
 
+    def robot_state(self) -> dict:
+        """One robot_state.v1 record (docs/sim.md, "Robot state stream")."""
+        s = viz.robot_state(self.world)
+        sim = s.pop("sim")
+        self._state_seq = getattr(self, "_state_seq", 0) + 1
+        arm = self.world.arm if self.world.has_arm else None
+        return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",
+                "t_host": round(time.monotonic(), 4), "model_version": s["model_version"], "frame": "world",
+                "base": s["base"], "joints": s["joints"], "objects": s["objects"],
+                "overlays": {"markers": self.markers.list(), "sim": sim,
+                             **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}}
+
     # -- state -------------------------------------------------------------------------------------------
 
     def state(self) -> dict:

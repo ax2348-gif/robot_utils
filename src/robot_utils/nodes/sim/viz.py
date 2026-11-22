@@ -117,6 +117,37 @@ def frame(world) -> dict:
                 "base": {"xyz": b["xyz"], "yaw": b["rpy"][2], "twist": b["twist"]}}
 
 
+# -- robot_state.v1 ------------------------------------------------------------------------------------------
+
+STATE_SCHEMA = "robot_state.v1"
+
+
+def _xyzw(q) -> list:
+    return [round(float(q[1]), 6), round(float(q[2]), 6), round(float(q[3]), 6), round(float(q[0]), 6)]
+
+
+def robot_state(world) -> dict:
+    """The robot's full state in the description's terms: base_link's world pose and every movable joint by its
+    model (URDF) name, plus the scene's objects. A client draws the robot from GET /model/tree with these."""
+    with world.lock:
+        m, d = world.m, world.d
+        q = d.qpos[world.base_q:world.base_q + 7]
+        joints = {}
+        for j in range(m.njnt):
+            if int(m.jnt_type[j]) in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)):
+                joints[m.joint(j).name] = round(float(d.qpos[m.jnt_qposadr[j]]), 6)
+        objects = {}
+        for name, o in world.objects.items():
+            b = world.obj_idx[name][0]
+            geom = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
+                                           else {"radius": o["radius"], "length": o["length"]}),
+                    "rgba": o.get("rgba")}
+            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]), "geom": geom}
+        return {"t": round(float(d.time), 4), "model_version": world.model_info.get("model_version"),
+                "base": [round(float(v), 6) for v in q[:3]] + _xyzw(q[3:7]), "joints": joints, "objects": objects,
+                "sim": {"running": world.running, "rtf": world.rtf}}
+
+
 # -- markers -------------------------------------------------------------------------------------------------
 
 NAME = re.compile(r"^[A-Za-z0-9_.:/-]{1,80}$")
