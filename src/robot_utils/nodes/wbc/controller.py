@@ -565,6 +565,8 @@ class QPController(Controller):
                     break
             if limited != "none":
                 break
+        if limited == "rate":
+            limited = "base_limit"                 # the base's twist-rate rows (LIMITED is the stream's enum)
         tw = fixed if fixed is not None else twist_of(u)
         self.active = bool(np.any(np.abs(tw) > 1e-9))
         dqs = {k: u[m.arm_v[k]] * dt for k in snap.ees}
