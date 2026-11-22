@@ -57,9 +57,9 @@ The gripper follows the trigger whenever the hand is valid, independent of the c
 
 Armed latch (``arming.py``; the client sends targets only while armed): ``on_arm`` / ``on_disarm`` drop the
 engagement (the grip needs its release first, as always) and the riding pose (``hold_base``: captured again from the
-current command, never a stale one); after arming the sticks give no base velocity until both are seen neutral, and
-no gripper value is sent (the WBC keeps its gap) until the trigger moved more than ``TRIGGER_MOVED`` from where it was
-at arming.
+current command, never a stale one); after arming the sticks give no base velocity until both are seen neutral. The
+gripper (the owner's rebot_ctl behaviour): no gripper command before arming (after Start, after any disarm or disable:
+the gripper stays where it is); from the arming frame on, ``1 - trigger`` in every target (a released trigger opens).
 """
 from __future__ import annotations
 
@@ -71,8 +71,6 @@ import numpy as np
 
 from . import frames as F
 from .arming import sticks_neutral
-
-TRIGGER_MOVED = 0.05     # the trigger must move this much after arming before the gripper is commanded
 
 
 
@@ -286,49 +284,32 @@ class TeleopCore:
         self._last_ns: Optional[int] = None
         self._tracked = False
         self.status = Status()
-        # after arming (README "Arming"): the sticks drive only once seen neutral, the gripper only once the trigger
-        # moved; both reset at every arm and disarm. A core that is never armed (tests, tools) starts live.
+        # the armed latch (README "Arming"): the sticks drive only once seen neutral after arming; the gripper is
+        # commanded only while armed. A core that is never armed (tests, tools) starts live.
         self.sticks_live = True
         self.gripper_live = True
-        self.trigger_ref: Optional[float] = None
 
     # -- the armed latch -------------------------------------------------------------------------
 
     def on_arm(self, frame: Optional[dict] = None) -> None:
         """Armed by a Y press (after the arming frame went through ``on_frame``): the grip needs its release first
-        (as always), the sticks must be seen neutral, the trigger must move before the gripper is commanded."""
+        (as always), the sticks must be seen neutral; the gripper follows the trigger from this frame on."""
         self.drop("armed")
         self.hold_base = None                     # the riding target is captured from the current command
         self.sticks_live = False
-        self.gripper_live = False
-        self.trigger_ref = self._trigger(frame) if frame is not None else None
+        self.gripper_live = True
 
     def on_disarm(self, reason: str = "disarmed") -> None:
-        """Disarmed: nothing carries over to the next arm (engagement, riding pose, sticks, trigger)."""
+        """Disarmed: nothing carries over to the next arm (engagement, riding pose, sticks); no gripper command."""
         self.drop(reason)
         self.hold_base = None
         self.sticks_live = False
         self.gripper_live = False
-        self.trigger_ref = None
-
-    def _trigger(self, frame: Optional[dict]) -> Optional[float]:
-        try:
-            g = frame["control_intent"]["hands"][self.cfg.hand].get("gripper")
-        except (KeyError, TypeError, AttributeError):
-            return None
-        return float(g) if _finite(g) else None
 
     def _gates(self, frame: dict) -> None:
-        """After arming: sticks seen neutral (both, inside the native dead zone); the trigger moved."""
+        """After arming: the sticks seen neutral (both, inside the native dead zone)."""
         if not self.sticks_live and sticks_neutral(frame):
             self.sticks_live = True
-        if not self.gripper_live:
-            g = self._trigger(frame)
-            if g is not None:
-                if self.trigger_ref is None:
-                    self.trigger_ref = g
-                elif abs(g - self.trigger_ref) > TRIGGER_MOVED:
-                    self.gripper_live = True
 
     def stick_v(self, intent: dict) -> list:
         """The sticks' base velocity, zero until they were seen neutral after arming."""

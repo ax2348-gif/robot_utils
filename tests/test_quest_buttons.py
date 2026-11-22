@@ -251,19 +251,32 @@ def test_sticks_need_neutral_after_arming():
     assert c["base"]["mode"] == "commanded" and c["base"]["velocity"]["vx"] > 0.3
 
 
-def test_gripper_untouched_until_the_trigger_moves_after_arming():
+def test_gripper_follows_the_trigger_from_the_arming_frame_and_never_while_disarmed():
+    """The owner's rule (rebot_ctl): no gripper command before arming (Start, after any disarm / disable: the gripper
+    stays where it is); from the arming frame on, 1 - trigger in every target (a released trigger opens)."""
     rig = Rig()
-    s = trigger(IDLE, 0.3)
-    rig.run(s, 2)
-    rig.run(Y(s), 3)
+    rig.run(trigger(IDLE, 0.8), 10)                             # after Start, the trigger squeezed: nothing
+    assert all("ees" not in m for m in rig.wbc.msgs)
+    rig.run(IDLE, 2)
+    n = len(rig.wbc.msgs)
+    rig.run(Y(), 3)                                             # armed with the trigger released
     assert rig.latch.armed
-    for _ in range(10):
-        c = rig.frame(trigger(IDLE, 0.32))                      # within 0.05 of where it was at arming
-        assert "gripper" not in c["ees"]["arm"]
+    first = targets(rig.since(n))[0]
+    assert first["armed"] and first["ees"]["arm"]["gripper"] == 1.0          # open at once
     c = rig.frame(trigger(IDLE, 0.6))
-    assert abs(c["ees"]["arm"]["gripper"] - 0.4) < 1e-9          # moved: commanded (1 - trigger)
+    assert abs(c["ees"]["arm"]["gripper"] - 0.4) < 1e-9
     c = rig.frame(trigger(IDLE, 0.3))
-    assert abs(c["ees"]["arm"]["gripper"] - 0.7) < 1e-9          # and from then on follows it
+    assert abs(c["ees"]["arm"]["gripper"] - 0.7) < 1e-9
+    rig.frame(X())                                              # disarmed and disabled: no gripper command
+    n = len(rig.wbc.msgs)
+    rig.run(trigger(IDLE, 0.0), 10)
+    assert all("ees" not in m for m in rig.since(n))
+    s = trigger(IDLE, 0.9)                                      # re-armed with the trigger squeezed: closes at once
+    rig.run(s, 2)
+    n = len(rig.wbc.msgs)
+    rig.run(Y(s), 4)
+    assert rig.latch.armed
+    assert abs(targets(rig.since(n))[0]["ees"]["arm"]["gripper"] - 0.1) < 1e-9
 
 
 def test_a_disarm_ends_the_engagement_and_the_next_needs_a_fresh_squeeze():

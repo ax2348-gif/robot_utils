@@ -46,10 +46,11 @@ WBC holds (docs/wbc.md "The armed latch").
   the link is gone the WBC's `hold_timeout` (0.25 s) disarms anyway.
 - **Nothing re-arms on its own**: recovery from stale, late, unfocused, a reconnect or a new session, a lease renew,
   an estimator reset: all need a new Y press.
-- **After arming** the grip needs its release first (as always: an engagement counts only from a release), the
-  sticks give no base velocity until both are seen neutral, and no gripper value is sent (the WBC keeps its gap)
-  until the trigger moved (more than 0.05 from where it was at arming). A disarm drops the engagement and the riding
-  pose: the next arm captures the current command (no jump back to a stale pose).
+- **After arming** the grip needs its release first (as always: an engagement counts only from a release) and the
+  sticks give no base velocity until both are seen neutral. **The gripper** (the owner's rebot_ctl behaviour): no
+  gripper command before arming (after Start, after any disarm or disable: the gripper stays where it is); from the
+  arming frame on, `1 - trigger` in every target (a released trigger opens it at once). A disarm drops the engagement
+  and the riding pose: the next arm captures the current command (no jump back to a stale pose).
 
 **Headset latency detection** (`QuestGate`): per frame, latency = arrival (our clock) − `sample_time_ns` (the
 headset's), over the running minimum of that difference in the session (the clock offset cancels). A frame more
@@ -172,7 +173,7 @@ target was computed against (an engagement's own for world targets):
 | stale / unfocused / hand invalid | one `armed: false`, then nothing | |
 
 Every datagram carries `armed` and `arm_seq`. All targets are `frame: "world"`. `gripper` is in every target while
-the hand is valid, once the trigger moved after arming. The full `base` state goes in every datagram.
+the hand is valid and the client armed (from the arming datagram on). The full `base` state goes in every datagram.
 
 ## Headset control: `quest_up`, `quest_down`, `quest_status`
 
