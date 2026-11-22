@@ -38,7 +38,7 @@ python -m robot_utils.collect cut ~/data/20261121-143000 --pre-roll 0.5 --post-r
 
 **Stream specs** (relative to `<robot>/nodes/`): `<node>/.../stream` is that endpoint (`arm/stream`,
 `quest_teleop/oplog/stream`); `<camera node>/<camera stream>` is the Orbbec node's
-`/stream?streams=<stream>&mode=jpeg` (`camera/color`: colour as the camera's MJPG bytes, untouched; no
+`/stream?streams=<stream>&mode=jpeg&every=true` (every frame in order from a bounded per-client queue; `camera/color`: colour as the camera's MJPG bytes, untouched; no
 re-encoding anywhere); a spec with `?` is used verbatim (`camera/stream?streams=depth&mode=raw`).
 
 **Startup:** the task is set (failure = exit 1), the Pi event log's newest seq is read
@@ -143,6 +143,6 @@ clock are offline steps on these files, not part of the cut.
 
 ## Known limits
 
-- Video is latest-frame-wins on the node: a slow link skips frames, counted in the frames' `dropped` and in
-  `episode.json` (there is no every-frame recorder mode on the camera node yet).
+- Video is every frame from a bounded per-client queue on the camera node (`every=true`): a stall longer than
+  the queue still skips frames, counted in the frames' `dropped` and in `episode.json`.
 - Pi time is the Pi's monotonic clock: a Pi reboot inside a session breaks the time base of the cut.
