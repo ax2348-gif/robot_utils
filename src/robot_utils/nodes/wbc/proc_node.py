@@ -39,8 +39,7 @@ from .spec import check_lead_torque, default_arm_gains, make_config, parse_hints
 
 log = logging.getLogger("wbc")
 
-PUMP_S = 0.002                  # the server's pump: the twist to the swerve sender, rows to the hub, the heartbeat
-SLOW_S = 0.01                   # lease expiry, the server slot, the control heartbeat watch
+SERVICE_S = 0.01                # the server's service runs on every control tick's "tick" message, at least this often
 
 
 class _RingFeed:
@@ -167,8 +166,7 @@ class ProcNode:
         except BaseException:
             self._cleanup()
             raise
-        self._threads = [threading.Thread(target=self._rx, name="wbc-ipc-rx", daemon=True),
-                         threading.Thread(target=self._pump, name="wbc-ipc-pump", daemon=True)]
+        self._threads = [threading.Thread(target=self._rx, name="wbc-ipc", daemon=True)]
         for t in self._threads:
             t.start()
         from ..estimator.node import Upstream
@@ -240,18 +238,29 @@ class ProcNode:
     # -- the server's threads ------------------------------------------------------------------------------
 
     def _rx(self) -> None:
-        """Messages from the control process: replies, events, the base's mute / close, cross-bus e-stops."""
+        """The server's one IPC thread. Messages from the control process (replies, events, the base's mute / close,
+        cross-bus e-stops, and a "tick" after every control tick); on each tick (and at least every SERVICE_S):
+        ``_service``. Event-driven: no polling faster than the control loop (fewer GIL hand-offs here)."""
+        last = 0.0
         while not self._stop.is_set():
             try:
-                r, _, _ = select.select([self.port.sock], [], [], 0.2)
+                r, _, _ = select.select([self.port.sock], [], [], max(0.0, last + SERVICE_S - time.monotonic()))
             except (OSError, ValueError):
                 return
+            tick = False
             if r:
                 for m in self.port.recv_all():
+                    if m[0] == "t":
+                        tick = True
+                        continue
                     try:
                         self._dispatch(m)
                     except Exception:  # noqa: BLE001
                         log.exception("control message %r", m[:1])
+            now = time.monotonic()
+            if tick or now - last >= SERVICE_S:
+                last = now
+                self._service(now)
 
     def _dispatch(self, m) -> None:
         kind = m[0]
@@ -276,50 +285,45 @@ class ProcNode:
         elif kind == "fwd_estop":
             forward_estop(self.arm_http, self.swerve_target, m[1], self.events, base=m[2], arm=m[3])
 
-    def _pump(self) -> None:
-        """Every PUMP_S: the heartbeat, the twist to the swerve sender, the rows to the hub, the lease renewals;
-        every SLOW_S: the lease's expiry, the server slot, the control process's heartbeat."""
+    _last_tw = None
+    _last_rx = 0.0
+
+    def _service(self, t0: float) -> None:
+        """The heartbeat, the twist to the swerve sender, the rows to the hub, the lease renewals and expiry, the
+        server slot, the control process's heartbeat."""
         shm = self.shm
-        last_tw = None
-        last_rx = 0.0
-        slow = 0.0
-        while not self._stop.is_set():
-            t0 = time.monotonic()
-            if not self.freeze_heartbeat:
-                shm.beats[ipc.SRV_HB] = t0
-            try:
-                tw = shm.twist.read()
-                if tw is not None and (tw["gen"], tw["seq"]) != last_tw:
-                    last_tw = (tw["gen"], tw["seq"])
-                    b = self.base
-                    if b is not None and tw["gen"] == self.gen:
-                        if tw["muted"]:
-                            b.mute()
-                        else:
-                            b.send(tw["twist"])
-                rows = shm.rows.read()
-                if len(rows):
-                    self.hub.publish_rows(rows, "tick")
-                    self._stats["rows"] += len(rows)
-                rx = shm.beats[ipc.RX_COUNT]
-                if rx != last_rx:
-                    last_rx = rx
-                    tok = self.session_token
-                    if tok is not None:
-                        try:
-                            self.lease.renew(tok)
-                        except Exception:  # noqa: BLE001 - lapsed: the control process holds
-                            pass
-                if t0 - slow >= SLOW_S:
-                    slow = t0
-                    self.lease.expire_if_due()
-                    self._write_srv()
-                    self._watch_control(t0)
-            except Exception:  # noqa: BLE001 - never let the pump die
-                log.exception("wbc pump")
-            dt = time.monotonic() - t0
-            self._stats["pump_max_ms"] = max(self._stats["pump_max_ms"], dt * 1e3)
-            time.sleep(max(0.0, PUMP_S - dt))
+        if not self.freeze_heartbeat:
+            shm.beats[ipc.SRV_HB] = t0
+        try:
+            tw = shm.twist.read()
+            if tw is not None and (tw["gen"], tw["seq"]) != self._last_tw:
+                self._last_tw = (tw["gen"], tw["seq"])
+                b = self.base
+                if b is not None and tw["gen"] == self.gen:
+                    if tw["muted"]:
+                        b.mute()
+                    else:
+                        b.send(tw["twist"])
+            rows = shm.rows.read()
+            if len(rows):
+                self.hub.publish_rows(rows, "tick")
+                self._stats["rows"] += len(rows)
+            rx = shm.beats[ipc.RX_COUNT]
+            if rx != self._last_rx:
+                self._last_rx = rx
+                tok = self.session_token
+                if tok is not None:
+                    try:
+                        self.lease.renew(tok)
+                    except Exception:  # noqa: BLE001 - lapsed: the control process holds
+                        pass
+            self.lease.expire_if_due()
+            self._write_srv()
+            self._watch_control(t0)
+        except Exception:  # noqa: BLE001 - never let the service die
+            log.exception("wbc service")
+        dt = time.monotonic() - t0
+        self._stats["pump_max_ms"] = max(self._stats["pump_max_ms"], dt * 1e3)
 
     _srv_last = None
     _srv_t = -math.inf
