@@ -121,12 +121,14 @@ class Config:
     arm_target_rot: float = 0.0873  # rad (5 deg)
     # estimator
     require_imu: bool = False
-    est_stale: float = 0.2          # s without an estimator row -> hold
+    est_stale: float = 0.35         # s without an estimator row -> hold (0.2 tripped on WBC process stalls on the Pi, 2026-11-21)
     est_pose_stale: float = 0.3     # s: a pose older than this -> hold
     max_predict: float = 0.1        # s, pose extrapolation cap
     jump_pos: float = 0.15          # m between consecutive poses: a jump (targets aborted)
     jump_theta: float = 0.30        # rad
     lease_heartbeat: float = 1.0    # s, the WBC's own client lease
+    late_tick: float = 0.1          # s: a control tick later than this disarms (stopgap: 3 dt = 30 ms tripped on Python GIL
+                                    # stalls on the Pi; the arm's own 30 ms watchdog and the swerve's 0.25 s remain the motor-level stops)
     arm_stale: float = 0.2          # s without an arm joint-channel state while enabled -> fault (Pi arm-loop gaps of
                                     # 105-121 ms were measured under camera load: docs/realtime.md)
 

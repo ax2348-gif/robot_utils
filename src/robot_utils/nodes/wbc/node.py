@@ -635,8 +635,8 @@ class WbcNode:
             t["max_compute_ms"] = max(t["max_compute_ms"], c)
 
     def _tick_timing(self, now: float) -> tuple[float, Optional[float]]:
-        """The measured period since the previous tick: counts overruns (> 1.5 dt) and late ticks (> 3 dt); returns
-        (the integration step, the measured period clamped to [dt, 3 dt]; the late period or None)."""
+        """The measured period since the previous tick: counts overruns (> 1.5 dt) and late ticks (> cfg.late_tick, which
+        disarm); returns (the integration step, the measured period clamped to [dt, 3 dt]; the late period or None)."""
         dt = self.cfg.dt
         prev, self._tick_prev = self._tick_prev, now
         if prev is None:
@@ -648,7 +648,7 @@ class WbcNode:
         if period > 1.5 * dt:
             t["overruns"] += 1
         late = None
-        if period > 3 * dt:
+        if period > max(self.cfg.late_tick, 3 * dt):
             t["late"] += 1
             late = period
             if now - self._late_log > 1.0:              # the log at most once a second (the event: on disarm)
