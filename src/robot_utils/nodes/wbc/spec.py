@@ -77,6 +77,12 @@ class Config:
     band_omega: float = 0.3         # rad/s
     k_band: float = 2.0             # 1/s
     w_slack: float = 1e3            # per unit of band violation (velocity units)
+    # flat (L1) cost of moving the base at all, per m/s (octagon norm) and per rad/s: the principled deadband. The
+    # base stays exactly still unless the pull to move (2 w_base_ref |v_des|, or the EE task) exceeds it, so tiny,
+    # sign-flipping twists (swerve modules re-steering: chatter) are not worth commanding; while moving it biases the
+    # speed by w_base_flat / (2 w_base_ref), which the pose correction absorbs. 0 = off
+    w_base_flat: float = 0.10       # sim, 2026-11-21: head sway (3 cm, 0.5 Hz) no longer moves the base; +4 cm walking lag
+    w_base_flat_yaw: float = 0.02
     base_yaw_radius: float = 0.3    # m: yaw is weighted like a point this far from the centre
     posture_weight: float = 1e-4    # default (hints override); 2e-3 biased the EE by ~3 mm
     k_posture: float = 1.0          # 1/s
@@ -120,7 +126,8 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
             if not all(math.isfinite(v) and v > 0 for v in changes[k]):
                 raise ValueError(f"{k} must be positive finite numbers (or null: the arm's)")
     c = replace(base or Config(), **changes)
-    nonneg = ("w_min", "w_manip", "w_base_free", "lm_singular", "posture_weight")   # 0 = off
+    nonneg = ("w_min", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
+              "w_base_flat_yaw")   # 0 = off
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:
         v = getattr(c, k)

@@ -426,13 +426,15 @@ class QPController(Controller):
         for i, (k, r2) in enumerate(((bx, 1.0), (by, 1.0), (bw, cfg.base_yaw_radius ** 2))):
             H[k, k] += wb * r2
             c[k] -= wb * r2 * v_des[i]
-        # slack variables: [s_pose, s_twist] >= 0, L1 penalty (and a tiny quadratic: H stays positive definite)
-        ns = 2
+        # auxiliary variables (each >= 0, a linear cost, a tiny quadratic so H stays positive definite):
+        # [s_pose, s_twist] the band slacks (w_slack); [t_lin, t_yaw] >= the base speed (octagon norm) and |yaw rate|,
+        # costed at w_base_flat / w_base_flat_yaw: the flat cost of moving the base at all
+        ns = 4
         N = nv + ns
         Hx = np.zeros((N, N))
         Hx[:nv, :nv] = H
         Hx[nv:, nv:] = 1e-6 * np.eye(ns)
-        cx = np.concatenate([c, np.full(ns, cfg.w_slack)])
+        cx = np.concatenate([c, [cfg.w_slack, cfg.w_slack, cfg.w_base_flat, cfg.w_base_flat_yaw]])
 
         def pad(G_, slack: Optional[int] = None):
             G_ = np.atleast_2d(G_)
@@ -455,6 +457,14 @@ class QPController(Controller):
         for G_, h_ in manip_rows:
             rows.append(("manipulability", pad(G_), h_))
         rows.append(("slack", np.hstack([np.zeros((ns, nv)), -np.eye(ns)]), np.zeros(ns)))
+        # t_lin >= octagon norm of the base's linear velocity, t_yaw >= |yaw rate| (world axes: the norm is rotation
+        # invariant up to the octagon)
+        Wxy0 = np.zeros((2, nv))
+        Wxy0[0, bx], Wxy0[1, by] = 1.0, 1.0
+        rows.append(("flat", pad(OCT @ Wxy0, 2) * np.concatenate([np.ones(nv), [1, 1, C8, 1]]), np.zeros(8)))
+        Wy0 = np.zeros(nv)
+        Wy0[bw] = 1.0
+        rows.append(("flat", pad(np.vstack([Wy0, -Wy0]), 3), np.zeros(2)))
         if fixed is None:
             # caps (hard), relaxed to the previous twist so braking into a lowered cap stays feasible
             def cap_rows(G_, bound):
@@ -539,6 +549,6 @@ class QPController(Controller):
         self.active = bool(np.any(np.abs(tw) > 1e-9))
         dqs = {k: u[m.arm_v[k]] * dt for k in snap.ees}
         diag.update(solves=n_solves, wheel_max=self._wheel_max(tw), hold=hold,
-                    slack=[float(v) for v in slack])
+                    slack=[float(v) for v in slack[:2]], flat=[float(v) for v in slack[2:]])
         return Output("ok", np.asarray(tw, float), dqs, {k: u[m.arm_v[k]].copy() for k in snap.ees},
                       deadband=False, base_fixed=why, limited_by=limited, diag=diag)
