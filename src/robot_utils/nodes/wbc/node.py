@@ -629,10 +629,12 @@ class WbcNode:
                 self._send_fault_hold(now)
                 self._publish(now, None, hold=True)
                 return
-            if self.estop.active:                    # e-stopped, until the disable: hold both halves, track nothing
-                self._disarm_locked("e-stop")
+            if self.estop.active:                    # e-stopped, until the disable: the arm holds, the base gets
+                self._disarm_locked("e-stop")        # nothing (no braking command: it coasts on its own e-stop)
+                if self.base is not None:
+                    self.base.mute()
                 self._apply_messages(now)
-                self._send_hold(arm=True, base=True)
+                self._send_hold(arm=True, base=False)
                 self._publish(now, None, hold=True)
                 return
             # the estimator: resets and jumps abort the world-frame targets and disarm; unusable -> hold
@@ -1022,6 +1024,8 @@ class WbcNode:
             if not was and self.state != "fault":
                 return {"enabled": False, "was_enabled": False}
             channel, base, arm_http = self.channel, self.base, self.arm_http
+            if base is not None:
+                base.mute()               # disable coasts: no further twist (no zero twist), then the swerve disables
             # a last hold command, then close: the arm holds its command (stale = hold) until its lease ends
             if channel is not None and "arm" in self.q_cmd:
                 channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
@@ -1055,8 +1059,10 @@ class WbcNode:
         info = self.estop.trigger(reason, source)
         with self.lock:
             self._disarm_locked(f"e-stop ({reason or 'no reason'})")
+            if self.base is not None:
+                self.base.mute()                         # the base gets NOTHING more (no zero twist: it coasts)
             if self.enabled:
-                self._send_hold(arm=True, base=True)    # zero twist, the arm at its commanded joints
+                self._send_hold(arm=True, base=False)    # the arm at its commanded joints until its e-stop lands
         fw: dict = {}
         msg = f"wbc: {reason}" if reason else "wbc"
 

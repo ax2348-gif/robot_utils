@@ -11,7 +11,7 @@ import time
 import numpy as np
 import pytest
 
-from helpers import Clock, serve, stop
+from helpers import Clock, serve, stop, wait_for
 from wbc_fakes import FakeArm
 from robot_utils.nodes.wbc.model import EESpec, WbcModel, arm_config_limits, fetch_urdf
 from robot_utils.nodes.wbc.node import STATES, WbcNode
@@ -43,16 +43,22 @@ class FakeBase:
         self.twists = []
         self.sent = 0
         self.client = self.Client()
+        self.muted = False
+        self.closed = None
 
-    def send(self, tw):
-        self.twists.append(tuple(float(v) for v in tw))
-        self.sent += 1
+    def send(self, tw):                       # what links.SwerveBase would put on the wire
+        if not self.muted:
+            self.twists.append(tuple(float(v) for v in tw))
+            self.sent += 1
+
+    def mute(self):
+        self.muted = True
 
     def failing_for(self):
         return 0.0
 
     def close(self, disable=True):
-        pass
+        self.closed = disable
 
 
 class Rig:
@@ -582,3 +588,75 @@ def test_estop_stops_tracking_first_then_fans_out_in_parallel(rig):
     assert np.allclose(rig.arm.commands[-1][1], q_at, atol=1e-12) and np.all(rig.arm.commands[-1][2] == 0.0)
     assert "e-stop" in node.disarm_reason
     node.clear_estop(rig.tok)
+
+
+def _driving(rig):
+    node = rig.node
+    rig.lease_enable(base=True)
+    rig.step(2)
+    p0, q0 = rig.cmd_pose()
+    vel = {"mode": "commanded", "velocity": {"vx": 0.4, "ttl": 0.5}}
+    rig.arm_now(p0, q0, base=vel)
+    for _ in range(40):
+        rig.target(p0, q0, base=vel)
+        rig.step(1)
+    assert node.base.twists[-1][0] > 0.3
+    return node.base, p0, q0, vel
+
+
+def test_estop_sends_the_base_nothing_it_coasts(rig):
+    """No zero twist (an active brake) reaches the swerve on an e-stop: not from the e-stop itself, not from the ticks
+    while the latch is set before the disable; the swerve's own e-stop coasts."""
+    node = rig.node
+    base, p0, q0, vel = _driving(rig)
+    n = len(base.twists)
+    node.estop.trigger("test", "pytest")          # the latch alone (as at the start of trigger_estop) ...
+    for _ in range(5):                           # ... and ticks before the disable runs
+        rig.target(p0, q0, base=vel)
+        rig.step(1)
+    assert len(base.twists) == n and base.muted and not node.armed
+    node.estop.clear()
+    base2, p0, q0, vel = _driving_again(rig)
+    n = len(base2.twists)
+    node.trigger_estop("test", "pytest")
+    assert len(base2.twists) == n and base2.closed is True   # nothing sent; disabled (coast) and released
+    node.clear_estop(rig.tok)
+
+
+def _driving_again(rig):
+    node = rig.node
+    node.disable("again")
+    wait_for(lambda: rig.arm.token is None, 3)       # the arm lease is given back in the background
+    node.enable(rig.tok)
+    with node.lock:
+        node.base = FakeBase()
+    rig.session = node.open_session(rig.tok)["session"]
+    rig.step(2)
+    p0, q0 = rig.cmd_pose()
+    vel = {"mode": "commanded", "velocity": {"vx": 0.4, "ttl": 0.5}}
+    rig.aseq += 1
+    rig.armed = True
+    for _ in range(40):
+        rig.target(p0, q0, base=vel)
+        rig.step(1)
+    assert node.armed and node.base.twists[-1][0] > 0.3
+    return node.base, p0, q0, vel
+
+
+def test_disable_sends_the_base_nothing_it_coasts(rig):
+    node = rig.node
+    base, p0, q0, vel = _driving(rig)
+    n = len(base.twists)
+    node.disable("X")
+    rig.step(5)
+    assert len(base.twists) == n and base.muted and base.closed is True
+
+
+def test_swerve_base_mute_drops_the_queued_twist():
+    from robot_utils.nodes.wbc.links import SwerveBase
+    b = SwerveBase("http://127.0.0.1:9")
+    b.send((0.3, 0.0, 0.0))
+    b.mute()
+    assert b._pending is None
+    b.send((0.0, 0.0, 0.0))
+    assert b._pending is None

@@ -66,6 +66,7 @@ class SwerveBase:
         self.hard: dict = {}                      # the swerve's GET /limits "hard", read at open
         self._cond = threading.Condition()
         self._pending: Optional[tuple] = None
+        self._muted = False
         self._stop = False
         self._thread: Optional[threading.Thread] = None
         self.sent = 0
@@ -105,8 +106,17 @@ class SwerveBase:
 
     def send(self, twist) -> None:
         with self._cond:
+            if self._muted:
+                return
             self._pending = tuple(float(v) for v in twist)
             self._cond.notify()
+
+    def mute(self) -> None:
+        """No further commands (the e-stop): a queued twist is dropped and ``send`` does nothing from now on. Not a
+        zero twist: the swerve's own e-stop / disable coasts, the robot never brakes of its own volition."""
+        with self._cond:
+            self._muted = True
+            self._pending = None
 
     def failing_for(self) -> float:
         f = self._fail_since
