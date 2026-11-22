@@ -161,7 +161,8 @@ class World:
         tc = self.cfg.get("time") or {}
         self.rtf = float(tc.get("rtf", 1.0))
         self.running = False
-        self.reset()
+        self.reset_seq = 0                 # resets since start (POST /scene/reset; not the initial one)
+        self.reset(count=False)
         self._anchor = (0.0, 0.0)          # (wall, sim) when running started / re-anchored
         self.behind = 0                    # re-anchors because the physics could not keep up
         self._rate = (time.monotonic(), 0, 0.0, 0.0)     # (wall, steps, sim t) at the last rate sample, rate
@@ -497,9 +498,11 @@ class World:
 
     # -- state reset -----------------------------------------------------------------------------------
 
-    def reset(self, start_scene: bool = False) -> None:
+    def reset(self, start_scene: bool = False, count: bool = True) -> int:
         """Time 0, the robot at its start pose, objects where they were added, every command dropped.
-        ``start_scene``: the scene the world started with (the default tabletop + config objects) instead."""
+        ``start_scene``: the scene the world started with (the default tabletop + config objects) instead.
+        Every reset increments ``reset_seq`` (in /state and every robot_state.v1 record: the headset re-anchors its
+        AR scene on a change; ``count=False`` only for the world's own initial reset); returns it."""
         if start_scene:
             self.load_scene(self.start_objects())
         with self.lock:
@@ -525,6 +528,9 @@ class World:
             self.wrenches = []
             mujoco.mj_forward(m, d)
             self._settle()
+            if count:
+                self.reset_seq += 1
+            return self.reset_seq
 
     def _settle(self) -> None:
         """Let the base sink onto its soft contacts (0.3 s of physics) and restart the clock at 0."""
@@ -825,6 +831,7 @@ class World:
     def snapshot(self) -> dict:
         with self.lock:
             out = {"t": round(float(self.d.time), 6), "running": self.running, "rtf": self.rtf,
+                   "reset_seq": self.reset_seq,
                    "rtf_measured": round(self.rtf_measured, 3), "step_rate": round(self.step_rate, 1),
                    "steps": self.steps, "behind": self.behind, "base": self.base_state(),
                    "modules": [{"name": mod.name, "steer_on": mod.steer_on, "drive_on": mod.drive_on,
