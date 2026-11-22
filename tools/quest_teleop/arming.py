@@ -12,8 +12,9 @@ sockets, the clock is passed in; ``teleop.TeleopClient`` runs the HTTP requests 
   Anything failing during the press spoils it (release Y and press again).
 - **Disarm** (``armed: false`` at once, then in every datagram): X; any discontinuity (``QuestGate``: reconnect,
   session, revision, gap); an invalid frame (unfocused, ...); stale, late or slow input (``QuestGate.fresh``); the
-  LEFT controller inactive (the stop button gone); no command to send; the WBC's own row showing it disarmed after
-  it processed our arming datagram, or not enabled. Nothing re-arms on its own: every arm is a new Y press.
+  LEFT controller inactive (the stop button gone); no command to send; the WBC's rows stale (newest older than
+  ``wbc_stale_s``, 0.3 s); the WBC's own row showing it disarmed after it processed our arming datagram, or not
+  enabled. Nothing re-arms on its own: every arm is a new Y press.
 """
 from __future__ import annotations
 
@@ -74,6 +75,7 @@ class LatchConfig:
     grip_max: float = 0.4             # both grips below this to arm
     dead_zone: float = DEAD_ZONE
     robot_stale_s: float = 0.3        # the WBC row must be younger than this to arm
+    wbc_stale_s: float = 0.3          # armed: the newest WBC row older than this disarms
     disable_retry_s: float = 1.0      # X held: POST /disable again this often while the WBC still shows enabled
 
 
@@ -235,7 +237,10 @@ class ArmLatch:
             else:
                 self._spoil()
             return
-        if row is None:
+        if row is None or row_t is None or now - row_t > self.cfg.wbc_stale_s:
+            if self.armed:                         # the WBC stream is gone or late: we cannot see what it does
+                self.disarm("WBC state stale" if row is None or row_t is None else
+                            f"WBC state stale ({now - row_t:.2f} s)")
             return
         st = _num(row.get("state"))
         if st is not None and int(st) == WBC_FAULT:

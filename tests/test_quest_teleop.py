@@ -18,6 +18,12 @@ from quest_teleop.quest_stream import Frame, QuestGate  # noqa: E402
 RNG = np.random.default_rng(7)
 
 
+def consumer_gate():
+    """The consumer rules without the latency / rate judgement (rate_window 0: fresh from the first frame): these
+    tests are about the rules and the scheme; the latency gate is tested in test_quest_latency.py."""
+    return QuestGate(rate_window=0.0, recover_s=0.0)
+
+
 def rand_rot():
     q = RNG.normal(size=4)
     return F.matrix_from_quat(q / np.linalg.norm(q))
@@ -171,7 +177,7 @@ class Rig:
 
     def __init__(self, cfg=Config(), rob=None):
         self.hs = Headset()
-        self.gate = QuestGate()
+        self.gate = consumer_gate()
         self.core = TeleopCore(cfg)
         self.t = 100.0
         self.conn = 1
@@ -602,7 +608,7 @@ def test_a_live_headset_recording_drives_the_client():
     import json
     path = Path(__file__).parent / "data" / "quest_live_body_frozen.jsonl.gz"
     recs = [json.loads(line) for line in gzip.open(path, "rt")]
-    gate, core = QuestGate(), TeleopCore(Config(hand="left"))
+    gate, core = consumer_gate(), TeleopCore(Config(hand="left"))
     r = robot(ee_r=np.eye(3))
     first_engaged, states = None, []
     for d in recs:

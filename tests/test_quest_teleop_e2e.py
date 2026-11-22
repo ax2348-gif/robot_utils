@@ -35,16 +35,19 @@ def Y(s):
 
 
 # Y arms at the start; the outage (a gap) and the reconnect disarm, so each is followed by a new Y press while
-# released, once the input is fresh again (0.5 s of good frames after the gap / reconnect)
-SCENARIO = [(0.0, IDLE), (0.2, IDLE), (0.21, Y(IDLE)), (0.3, Y(IDLE)), (0.31, IDLE),               # Y: armed
+# released, once the input is fresh again (0.5 s of good frames after the gap / reconnect). Input is fresh only after
+# a full 0.5 s window after the connect: the whole timeline starts 0.5 s in.
+_TIMELINE = [(0.0, IDLE), (0.2, IDLE), (0.21, Y(IDLE)), (0.3, Y(IDLE)), (0.31, IDLE),              # Y: armed
             (0.5, IDLE), (0.51, GRIP), (1.0, GRIP), (1.5, REACH), (2.0, WALK), (2.01, STICK),
             (2.3, STICK), (2.31, WALK), (2.5, WALK), (2.51, RELEASED), (3.2, RELEASED), (3.21, REGRIP),  # in the outage
             (3.6, REGRIP), (3.61, RELEASED), (4.2, RELEASED), (4.21, Y(RELEASED)), (4.3, Y(RELEASED)),  # Y again
             (4.31, RELEASED), (4.5, RELEASED), (4.51, REGRIP), (5.6, REGRIP),     # a new engagement; the reconnect
             (5.61, RELEASED), (5.8, RELEASED), (5.81, Y(RELEASED)), (5.9, Y(RELEASED)), (5.91, RELEASED),   # Y
             (6.3, RELEASED)]
-OUTAGE = (3.0, 3.4)
-RECONNECT = 5.0
+LEAD = 0.5
+SCENARIO = [(0.0, IDLE)] + [(t + LEAD, s) for t, s in _TIMELINE]
+OUTAGE = (3.0 + LEAD, 3.4 + LEAD)
+RECONNECT = 5.0 + LEAD
 
 
 @pytest.fixture

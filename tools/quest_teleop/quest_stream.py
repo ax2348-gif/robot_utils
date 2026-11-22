@@ -19,15 +19,17 @@ Freshness itself (no frame for ``stale_s`` on our clock) is checked by the calle
 per valid frame the latency estimate is its arrival (our monotonic clock) minus its ``sample_time_ns`` (the headset's
 clock), relative to the running minimum of that difference over the session (the clock offset cancels); a frame
 later than ``max_latency`` (150 ms) over that baseline, or fewer than ``min_rate`` (30 Hz) valid frames over the last
-``rate_window`` (0.5 s; judged once a full window has passed since the connection's first frame), is bad; after a
-bad frame, input counts as fresh again only after ``recover_s`` (0.5 s) of good frames (which never
-re-arms anything: the client needs a new Y press); before the first bad frame it is fresh at once. A frame without
-``sample_time_ns`` is bad.
+``rate_window`` (0.5 s), is bad. Input is fresh only once a FULL rate window has been judged after each (re)connect
+(no lenient start-up) and after ``recover_s`` (0.5 s) of good frames, at start and after any bad frame (recovery
+never re-arms anything: the client needs a new Y press). A frame without ``sample_time_ns`` is bad.
+
+Limits of the baseline (a later item: a windowed minimum or a real clock-offset estimate): the running minimum of
+arrival − sample time since the connect cannot see a latency that is already there, constant, from the connect, and
+it drifts with the two clocks' relative drift. For the first tests the headset runs on the direct LAN.
 """
 from __future__ import annotations
 
 import json
-import math
 import queue
 import socket
 import threading
@@ -172,7 +174,6 @@ class QuestGate:
         self.arrivals: deque = deque()             # valid arrivals within rate_window
         self.t_first: Optional[float] = None       # the first valid arrival of the session
         self.good_since: Optional[float] = None    # good frames continuously since (None: bad now)
-        self.ever_bad = False                      # recovery (recover_s) applies after the first bad frame
         self.timing_reason = "no frames yet"
 
     def _reset_timing(self) -> None:
@@ -180,21 +181,26 @@ class QuestGate:
         self.arrivals.clear()
 
     def rate(self, now: float) -> float:
-        """Valid frames per second over the last ``rate_window``."""
+        """Valid frames per second over the last ``rate_window`` (``rate_window`` 0: the rate check is off: inf)."""
+        if self.rate_window <= 0:
+            return float("inf")
         while self.arrivals and self.arrivals[0] <= now - self.rate_window:
             self.arrivals.popleft()
         return sum(1 for t in self.arrivals if t <= now) / self.rate_window
 
     def _rate_due(self, now: float) -> bool:
         """The rate is judged once a full window has passed since the session's (or connection's) first frame."""
-        return self.t_first is not None and now - self.t_first >= self.rate_window
+        return self.t_first is not None and now - self.t_first >= max(self.rate_window, 0.0)
 
     def timing_ok(self, now: float) -> bool:
-        """Not late or slow: good frames for ``recover_s`` (after a bad one; at start at once) and the rate still at
-        least ``min_rate`` now."""
+        """Not late or slow: a full rate window judged since the (re)connect, good frames for ``recover_s`` and the
+        rate still at least ``min_rate`` now."""
+        if not self._rate_due(now):
+            self.timing_reason = "headset rate not judged yet (a full window after the connect)"
+            return False
         if self.good_since is None or now - self.good_since < self.recover_s:
             return False
-        if self._rate_due(now) and self.rate(now) < self.min_rate:
+        if self.rate(now) < self.min_rate:
             self.timing_reason = f"headset rate {self.rate(now):.0f} Hz < {self.min_rate:g} Hz"
             return False
         return True
@@ -208,6 +214,8 @@ class QuestGate:
             return "no valid headset frame yet"
         if now - self.last_valid > self.stale_s:
             return f"headset input stale ({(now - self.last_valid) * 1e3:.0f} ms)"
+        if not self._rate_due(now):
+            return "headset rate not judged yet (a full window after the connect)"
         if self.good_since is not None and now - self.good_since < self.recover_s and self.timing_reason == "ok":
             return "headset input recovering"
         return self.timing_reason
@@ -233,11 +241,10 @@ class QuestGate:
             self.counts["slow"] += 1
             why = f"headset rate {self.rate(f.arrived):.0f} Hz < {self.min_rate:g} Hz"
         if why is not None:
-            self.good_since, self.timing_reason, self.ever_bad = None, why, True
+            self.good_since, self.timing_reason = None, why
         else:
             if self.good_since is None:
-                # never bad yet: fresh at once; after a bad frame: recover_s of good frames first
-                self.good_since = f.arrived if self.ever_bad else -math.inf
+                self.good_since = f.arrived          # fresh only after recover_s of good frames (and a full window)
             self.timing_reason = "ok"
 
     def check(self, f: Frame) -> Verdict:

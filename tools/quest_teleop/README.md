@@ -42,7 +42,9 @@ WBC holds (docs/wbc.md "The armed latch").
 - **Disarm** (`armed: false` at once, and in every datagram after): X; any discontinuity (reconnect, session or
   revision change, gap); an invalid frame (unfocused, ...); stale input (no valid frame for 200 ms); **late or slow
   input** (below); the **left controller inactive** (X / Y gone); nothing to send (the arm hand invalid); the WBC's
-  own row (once it processed our arming datagram) showing it disarmed (an overrun, a fault, ...) or not enabled. If
+  rows stale (the newest older than 0.3 s, `LatchConfig.wbc_stale_s`); the WBC's own row (once it processed our
+  arming datagram) showing it disarmed (an overrun, an estimator dropout, a fault, ...) or not enabled. The WBC also
+  refuses an arming target more than 2 cm / 5° from its commanded pose (a stale riding pose). If
   the link is gone the WBC's `hold_timeout` (0.25 s) disarms anyway.
 - **Nothing re-arms on its own**: recovery from stale, late, unfocused, a reconnect or a new session, a lease renew,
   an estimator reset: all need a new Y press.
@@ -55,7 +57,11 @@ WBC holds (docs/wbc.md "The armed latch").
 **Headset latency detection** (`QuestGate`): per frame, latency = arrival (our clock) − `sample_time_ns` (the
 headset's), over the running minimum of that difference in the session (the clock offset cancels). A frame more
 than 150 ms over that baseline, or fewer than 30 frames/s over the last 0.5 s, makes the input **stale**
-(disarm). After that it counts as fresh again only after 0.5 s of good frames, and that never re-arms.
+(disarm). Nothing is fresh before a full 0.5 s rate window has been judged after each (re)connect (no lenient
+start-up: a 10 Hz link can never arm); after a bad frame, input counts as fresh again only after 0.5 s of good frames,
+and that never re-arms. Known limits (a later item: a windowed minimum or a real clock-offset estimate): the baseline
+(the running minimum of arrival − sample time since the connect) cannot see a latency that is constant from the
+connect, and it drifts with the two clocks' relative drift; for the first tests the headset runs on the direct LAN.
 
 ### Stop paths
 

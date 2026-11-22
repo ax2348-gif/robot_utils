@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from quest_teleop.body_frozen import Config  # noqa: E402
 from quest_teleop.fake_headset import Headset, HeadsetState  # noqa: E402
-from quest_teleop.quest_stream import Frame  # noqa: E402
+from quest_teleop.quest_stream import Frame, QuestGate  # noqa: E402
 from quest_teleop.teleop import TeleopClient  # noqa: E402
 
 IDLE = HeadsetState()
@@ -119,8 +119,15 @@ class Wbc:
         return {"enabled": False}
 
 
+def no_latency_gate(stale_s=0.2):
+    """The consumer rules without the latency / rate judgement (fresh at once): for tests of other logic. The
+    latency gate itself is tested with the real one (test_quest_latency.py)."""
+    return QuestGate(stale_s, rate_window=0.0, recover_s=0.0)
+
+
 class Rig:
-    def __init__(self, cfg=Config(), **kw):
+    def __init__(self, cfg=Config(), latency=False, **kw):
+        """``latency``: the real latency gate (a full 0.5 s window before any input is fresh); otherwise off."""
         self.t = 100.0
         self.hs = Headset()
         self.reader = Reader()
@@ -128,6 +135,8 @@ class Rig:
         self.wbc = Wbc(self.stream)
         self.client = TeleopClient(cfg, self.reader, self.stream, self.wbc, clock=lambda: self.t, sync_http=True,
                                    **kw)
+        if not latency:
+            self.client.gate = no_latency_gate()
         self.client.sent_log = []
         self.conn = 1
 
