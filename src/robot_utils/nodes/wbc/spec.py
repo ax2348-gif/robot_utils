@@ -120,11 +120,13 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
             if not all(math.isfinite(v) and v > 0 for v in changes[k]):
                 raise ValueError(f"{k} must be positive finite numbers (or null: the arm's)")
     c = replace(base or Config(), **changes)
+    nonneg = ("w_min", "w_manip", "w_base_free", "lm_singular", "posture_weight")   # 0 = off
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:
         v = getattr(c, k)
-        if not (isinstance(v, (int, float)) and math.isfinite(v) and v > 0):
-            raise ValueError(f"{k} must be a positive finite number")
+        ok = isinstance(v, (int, float)) and math.isfinite(v) and (v >= 0 if k in nonneg else v > 0)
+        if not ok:
+            raise ValueError(f"{k} must be a {'non-negative' if k in nonneg else 'positive'} finite number")
     if not (math.isfinite(c.reach) and c.reach >= 0):
         raise ValueError("reach must be >= 0 (0 = from the model)")
     if not (0 < c.reach_influence < c.reach_fraction <= 1.0) or not (0 <= c.w_min < c.w_influence):
