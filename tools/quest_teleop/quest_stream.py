@@ -15,21 +15,34 @@ frame with its arrival time on *our* monotonic clock and a connection number (a 
   engagements, like native).
 
 Freshness itself (no frame for ``stale_s`` on our clock) is checked by the caller at each control step with
-``QuestGate.fresh(now)``.
+``QuestGate.fresh(now)``. ``fresh`` is also false while the stream is **late or slow** (headset latency detection):
+per valid frame the latency estimate is its arrival (our monotonic clock) minus its ``sample_time_ns`` (the headset's
+clock), relative to the running minimum of that difference over the session (the clock offset cancels); a frame
+later than ``max_latency`` (150 ms) over that baseline, or fewer than ``min_rate`` (30 Hz) valid frames over the last
+``rate_window`` (0.5 s; judged once a full window has passed since the connection's first frame), is bad; after a
+bad frame, input counts as fresh again only after ``recover_s`` (0.5 s) of good frames (which never
+re-arms anything: the client needs a new Y press); before the first bad frame it is fresh at once. A frame without
+``sample_time_ns`` is bad.
 """
 from __future__ import annotations
 
 import json
+import math
 import queue
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 SCHEMA = "teleop.quest_state.v1"
 INTENT_SCHEMA = "teleop.operator_intent.v1"
 STALE_S = 0.2           # DEMO.md: recommended freshness timeout on the consumer's clock
+MAX_LATENCY_S = 0.15    # a frame this much later than the session's best (arrival - sample time): stale
+MIN_RATE_HZ = 30.0      # fewer valid frames than this over RATE_WINDOW_S: stale
+RATE_WINDOW_S = 0.5
+RECOVER_S = 0.5         # good frames needed (continuously) before late / slow input counts as fresh again
 DEFAULT_PORT = 9391
 
 
@@ -137,10 +150,14 @@ class Verdict:
 
 
 class QuestGate:
-    """The remote-consumer rules, frame by frame (pure; the clock is the frames' arrival time)."""
+    """The remote-consumer rules, frame by frame (pure; the clock is the frames' arrival time), and the headset
+    latency / rate detection (module docstring)."""
 
-    def __init__(self, stale_s: float = STALE_S):
+    def __init__(self, stale_s: float = STALE_S, max_latency: float = MAX_LATENCY_S, min_rate: float = MIN_RATE_HZ,
+                 rate_window: float = RATE_WINDOW_S, recover_s: float = RECOVER_S):
         self.stale_s = stale_s
+        self.max_latency, self.min_rate = max_latency, min_rate
+        self.rate_window, self.recover_s = rate_window, recover_s
         self.conn: Optional[int] = None
         self.session = None
         self.intent_session = None
@@ -148,11 +165,80 @@ class QuestGate:
         self.seq: Optional[int] = None
         self.last_arrival: Optional[float] = None
         self.last_valid: Optional[float] = None    # arrival time of the newest valid frame
-        self.counts = {"dropped_order": 0, "invalid": 0, "discontinuities": 0}
+        self.counts = {"dropped_order": 0, "invalid": 0, "discontinuities": 0, "late": 0, "slow": 0}
+        # latency / rate
+        self.offset_min: Optional[float] = None    # min over the session of (arrival - sample time)
+        self.latency: Optional[float] = None       # the newest valid frame's, over that baseline (s)
+        self.arrivals: deque = deque()             # valid arrivals within rate_window
+        self.t_first: Optional[float] = None       # the first valid arrival of the session
+        self.good_since: Optional[float] = None    # good frames continuously since (None: bad now)
+        self.ever_bad = False                      # recovery (recover_s) applies after the first bad frame
+        self.timing_reason = "no frames yet"
+
+    def _reset_timing(self) -> None:
+        self.offset_min = self.latency = self.t_first = self.good_since = None
+        self.arrivals.clear()
+
+    def rate(self, now: float) -> float:
+        """Valid frames per second over the last ``rate_window``."""
+        while self.arrivals and self.arrivals[0] <= now - self.rate_window:
+            self.arrivals.popleft()
+        return sum(1 for t in self.arrivals if t <= now) / self.rate_window
+
+    def _rate_due(self, now: float) -> bool:
+        """The rate is judged once a full window has passed since the session's (or connection's) first frame."""
+        return self.t_first is not None and now - self.t_first >= self.rate_window
+
+    def timing_ok(self, now: float) -> bool:
+        """Not late or slow: good frames for ``recover_s`` (after a bad one; at start at once) and the rate still at
+        least ``min_rate`` now."""
+        if self.good_since is None or now - self.good_since < self.recover_s:
+            return False
+        if self._rate_due(now) and self.rate(now) < self.min_rate:
+            self.timing_reason = f"headset rate {self.rate(now):.0f} Hz < {self.min_rate:g} Hz"
+            return False
+        return True
 
     def fresh(self, now: float) -> bool:
-        """A valid frame arrived within ``stale_s`` (our clock)."""
-        return self.last_valid is not None and now - self.last_valid <= self.stale_s
+        """A valid frame arrived within ``stale_s`` (our clock), and the stream is neither late nor slow."""
+        return self.last_valid is not None and now - self.last_valid <= self.stale_s and self.timing_ok(now)
+
+    def why_stale(self, now: float) -> str:
+        if self.last_valid is None:
+            return "no valid headset frame yet"
+        if now - self.last_valid > self.stale_s:
+            return f"headset input stale ({(now - self.last_valid) * 1e3:.0f} ms)"
+        if self.good_since is not None and now - self.good_since < self.recover_s and self.timing_reason == "ok":
+            return "headset input recovering"
+        return self.timing_reason
+
+    def _timing(self, f: Frame) -> None:
+        """A valid frame: its latency over the session's baseline and the rate; good or bad."""
+        ns = f.data.get("sample_time_ns")
+        if self.t_first is None:
+            self.t_first = f.arrived
+        self.arrivals.append(f.arrived)
+        why = None
+        if not isinstance(ns, int) or isinstance(ns, bool):
+            self.latency = None
+            why = "no sample_time_ns"
+        else:
+            off = f.arrived - ns * 1e-9
+            self.offset_min = off if self.offset_min is None else min(self.offset_min, off)
+            self.latency = off - self.offset_min
+            if self.latency > self.max_latency:
+                self.counts["late"] += 1
+                why = f"headset latency {self.latency * 1e3:.0f} ms > {self.max_latency * 1e3:.0f} ms"
+        if why is None and self._rate_due(f.arrived) and self.rate(f.arrived) < self.min_rate:
+            self.counts["slow"] += 1
+            why = f"headset rate {self.rate(f.arrived):.0f} Hz < {self.min_rate:g} Hz"
+        if why is not None:
+            self.good_since, self.timing_reason, self.ever_bad = None, why, True
+        else:
+            if self.good_since is None:
+                # never bad yet: fresh at once; after a bad frame: recover_s of good frames first
+                self.good_since = f.arrived if self.ever_bad else -math.inf
+            self.timing_reason = "ok"
 
     def check(self, f: Frame) -> Verdict:
         d = f.data
@@ -161,6 +247,7 @@ class QuestGate:
             if self.conn is not None:
                 reasons.append("reconnect")
             self.conn, self.seq = f.conn, None
+            self._reset_timing()
         if d.get("schema") != SCHEMA:
             return self._invalid(f, "schema", reasons)
         session = d.get("session_id")
@@ -171,6 +258,7 @@ class QuestGate:
             if self.session is not None:
                 reasons.append("session")
             self.session, self.intent_session, self.seq = session, intent.get("session_id"), None
+            self._reset_timing()
         seq = d.get("frame_seq")
         if not isinstance(seq, int):
             return self._invalid(f, "no frame_seq", reasons)
@@ -190,6 +278,7 @@ class QuestGate:
             return self._invalid(f, "unfocused", reasons)
         if not isinstance(intent.get("hands"), dict) or not isinstance(d.get("hands"), dict):
             return self._invalid(f, "no hands", reasons)
+        self._timing(f)
         self.last_valid = f.arrived
         if reasons:
             self.counts["discontinuities"] += 1

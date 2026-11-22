@@ -131,6 +131,7 @@ RU.sse("events", s => {
   const L = s.latest || {}, g = (v, n) => v === null || v === undefined ? "–" : Number(v).toFixed(n);
   const kv = [
     ["enabled", s.enabled ? `yes (${s.holder})` : `no${s.disabled_reason ? " — " + s.disabled_reason : ""}`],
+    ["armed", s.armed ? `yes (arm_seq ${s.latch.arm_seq})` : `no${s.disarm_reason ? " — " + s.disarm_reason : ""}`],
     ["fault", s.fault || "–"],
     ["holding", s.hold_reason || "–"],
     ["base mode", s.hints.base.mode],
@@ -143,7 +144,7 @@ RU.sse("events", s => {
     ["session", `${s.session.session || "–"} udp ${s.session.udp_port}, accepted ${s.session.accepted}, input age ${g(s.session.input_age, 3)} s`],
     ["dropped", JSON.stringify(s.session.dropped)],
     ["lease", s.lease.held ? `${s.lease.holder} (${g(s.lease.expires_in, 2)} s)` : "free"],
-    ["loop", `${g(s.loop_hz, 1)} Hz`],
+    ["loop", `${g(s.loop_hz, 1)} Hz; tick ${g(s.tick.period_ms, 1)} ms (max ${g(s.tick.max_period_ms, 1)}), compute ${g(s.tick.compute_ms, 2)} ms (max ${g(s.tick.max_compute_ms, 2)}); overruns ${s.tick.overruns}, late ${s.tick.late}`],
   ];
   $("#kv").innerHTML = kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
   $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");

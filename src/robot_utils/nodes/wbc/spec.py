@@ -114,7 +114,8 @@ class Config:
     jump_pos: float = 0.15          # m between consecutive poses: a jump (targets aborted)
     jump_theta: float = 0.30        # rad
     lease_heartbeat: float = 1.0    # s, the WBC's own client lease
-    arm_stale: float = 0.1          # s without an arm joint-channel state while enabled -> fault
+    arm_stale: float = 0.2          # s without an arm joint-channel state while enabled -> fault (Pi arm-loop gaps of
+                                    # 105-121 ms were measured under camera load: docs/realtime.md)
 
     @property
     def dt(self) -> float:
@@ -241,9 +242,25 @@ def _only(d, keys, path):
         raise ValueError(f"{path}: unknown keys {sorted(bad)}")
 
 
-def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hints] = None) -> dict:
+def _vel(d: dict, keys: tuple, cap: float, path: str, clamp: Optional[dict]) -> list:
+    """Hint velocity components (default 0). ``clamp`` None (``POST /hints``): each component within ±``cap``, else
+    refused (422). A dict (datagrams): beyond the cap (the norm of the components) they are scaled down to it,
+    direction kept, and counted in ``clamp["n"]``: clamped, not dropped."""
+    if clamp is None:
+        return [_num(d, k, -cap, cap, 0.0, path) for k in keys]
+    v = [_num(d, k, -math.inf, math.inf, 0.0, path) for k in keys]
+    n = math.sqrt(sum(x * x for x in v))
+    if n > cap:
+        clamp["n"] = clamp.get("n", 0) + 1
+        v = [x * cap / n for x in v]
+    return v
+
+
+def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hints] = None,
+               clamp: Optional[dict] = None) -> dict:
     """The ``base`` part of a hint document (or a per-command override) -> Hints field values.
-    ``to_world(x, y, yaw) -> (x, y, yaw)`` converts base-frame poses (None: base frames refused)."""
+    ``to_world(x, y, yaw) -> (x, y, yaw)`` converts base-frame poses (None: base frames refused). ``clamp`` (a dict,
+    the datagram path): velocities beyond ``max_speed`` / ``max_omega`` are clamped to them and counted, not refused."""
     _only(b, ("mode", "target", "velocity", "pose", "limits", "arm_vs_base"), "base")
     out: dict = {}
     if "mode" in b:
@@ -273,16 +290,15 @@ def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hint
                 raise ValueError("base.target.pose needs x and y")
             if p.get("frame", "world") != "world" and (p.get("vx") or p.get("vy")):
                 raise ValueError("base.target.pose: a velocity needs frame world")
+            pvx, pvy = _vel(p, ("vx", "vy"), cfg.max_speed, "base.target.pose.", clamp)
             out["target_pose"] = PoseHint(x, y, _num(p, "weight", 0, 100, 1.0, "base.target.pose."),
-                                          _num(p, "tol", 0, 10, 0.05, "base.target.pose."),
-                                          _num(p, "vx", -cfg.max_speed, cfg.max_speed, 0.0, "base.target.pose."),
-                                          _num(p, "vy", -cfg.max_speed, cfg.max_speed, 0.0, "base.target.pose."))
+                                          _num(p, "tol", 0, 10, 0.05, "base.target.pose."), pvx, pvy)
         if t.get("heading") is not None:
             h = t["heading"]
             _only(h, ("yaw", "face", "frame", "weight", "tol", "omega"), "base.target.heading")
             w = _num(h, "weight", 0, 100, 0.5, "base.target.heading.")
             tol = _num(h, "tol", 0, math.pi, 0.05, "base.target.heading.")
-            om = _num(h, "omega", -cfg.max_omega, cfg.max_omega, 0.0, "base.target.heading.")
+            om = _vel(h, ("omega",), cfg.max_omega, "base.target.heading.", clamp)[0]
             face = h.get("face")
             if face is not None:
                 if isinstance(face, str):
@@ -311,10 +327,9 @@ def parse_base(b: dict, cfg: Config, ee_names, to_world=None, cur: Optional[Hint
             fr = v.get("frame", "base")
             if fr not in ("base", "world"):
                 raise ValueError("base.velocity.frame must be base or world")
-            out["velocity"] = VelocityHint(_num(v, "vx", -cfg.max_speed, cfg.max_speed, 0.0, "base.velocity."),
-                                           _num(v, "vy", -cfg.max_speed, cfg.max_speed, 0.0, "base.velocity."),
-                                           _num(v, "omega", -cfg.max_omega, cfg.max_omega, 0.0, "base.velocity."),
-                                           fr, _num(v, "ttl", 0.0, cfg.max_ttl, 0.3, "base.velocity."))
+            vvx, vvy = _vel(v, ("vx", "vy"), cfg.max_speed, "base.velocity.", clamp)
+            vom = _vel(v, ("omega",), cfg.max_omega, "base.velocity.", clamp)[0]
+            out["velocity"] = VelocityHint(vvx, vvy, vom, fr, _num(v, "ttl", 0.0, cfg.max_ttl, 0.3, "base.velocity."))
     if "pose" in b:
         p = b["pose"]
         if p is None:

@@ -24,7 +24,7 @@ except ImportError:
 
 from quest_teleop import quest_ctl  # noqa: E402,F401
 from quest_teleop.body_frozen import Config  # noqa: E402,F401
-from quest_teleop.quest_stream import DEFAULT_PORT, STALE_S, QuestReader  # noqa: E402,F401
+from quest_teleop.quest_stream import DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestReader  # noqa: E402,F401
 from quest_teleop.teleop import TeleopClient, close_wbc, open_wbc  # noqa: E402,F401
 from quest_teleop.wbc_client import WbcClient, WbcStream  # noqa: E402,F401
 
@@ -52,4 +52,5 @@ class LocalWbcClient(WbcClient):
         self.session = int(out["session"])
         self.udp_port = None if port is None else int(port)
         self.seq = 0
+        self.arm_seq_floor = int(out.get("arm_seq") or 0)
         return out

@@ -40,9 +40,10 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             "Whole-body teleop from the Quest headset through the local WBC node (the client of tools/quest_teleop, "
             "run on this machine; docs/quest_teleop_node.md).\n\n"
             "`POST /start` takes the WBC lease, sets the session hints, enables the WBC and opens a datagram "
-            "session on its unix socket; then every batch of headset frames becomes one target datagram. "
-            "`POST /stop` disables the WBC and releases the lease. `POST /estop` e-stops the WBC (which forwards to "
-            "the arm and the swerve) and stops teleop. `POST /quest/up` and `/quest/down` run quest_ctl's up / down "
+            "session on its unix socket: nothing moves until Y (left controller) arms; X disarms and disables. "
+            "Armed, every batch of headset frames becomes one target datagram. "
+            "`POST /stop` disables the WBC and releases the lease. `POST /estop` e-stops the arm, the swerve and the "
+            "WBC directly, in parallel, and stops teleop. `POST /quest/up` and `/quest/down` run quest_ctl's up / down "
             "on the headset over ssh, only when asked. Nothing is recorded."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
@@ -88,8 +89,9 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
     async def stop_teleop():
         return await asyncio.to_thread(node.stop_teleop, "requested")
 
-    @app.post("/estop", tags=["control"], summary="E-stop: forwarded to the WBC (it latches and forwards to the arm "
-                                                   "and the swerve); stops teleop. `latched` = the WBC latched")
+    @app.post("/estop", tags=["control"], summary="E-stop: the arm, the swerve and the WBC directly, in parallel (each "
+                                                   "latches and coasts); stops teleop. `latched` = any latched; "
+                                                   "`targets` per node")
     async def estop(request: Request, body: Optional[EStopIn] = None):
         body = body or EStopIn()
         src = body.source or (request.client.host if request.client else "")
