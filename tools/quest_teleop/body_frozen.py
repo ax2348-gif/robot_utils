@@ -490,7 +490,9 @@ class TeleopCore:
         intent = self.frame["control_intent"]
         ih = intent["hands"].get(cfg.hand) or {}
         if cfg.gripper and ih.get("valid") and _finite(ih.get("gripper")):
-            ee["gripper"] = min(1.0, max(0.0, float(ih["gripper"])))
+            # the headset's gripper intent follows the trigger (0 released .. 1 squeezed); the WBC's is the opening
+            # (0 closed .. 1 open): squeezing closes, as in the rebot_ctl teleop
+            ee["gripper"] = 1.0 - min(1.0, max(0.0, float(ih["gripper"])))
         out = {"ees": {cfg.ee: ee}, "base": self._base(intent)}
         if reset is not None:
             out["est_reset"] = int(reset) if float(reset).is_integer() else reset
