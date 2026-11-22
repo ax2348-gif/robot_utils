@@ -37,7 +37,14 @@ fixed to the braking step and the arm takes the motion). If the desired solution
 solve with the rate rows gives the command. An infeasible or failed solve returns ``status`` infeasible / error
 with zero velocity: the node holds and raises a fault.
 
-``Output.limited_by``: which hard constraint bound the solution (reach, manipulability, joint_limit,
+- **lead bound** (per arm joint): the next command within ``lead`` (= ``lead_torque / kp``, at most the arm's
+  ``max_lead``) of ``q_ref``, the measured joints extrapolated by their measured velocity over the measurement's
+  age + ``lead_delay``: ``|q_cmd + q' ds - q_ref| <= lead`` (the window is the union of the ones around the
+  measured and the extrapolated joints: the extrapolation only widens it), so in contact the servo's push
+  ``kp (q_cmd - q)`` stays within ``lead_torque``. Outside the bound (a sudden blockage) the command returns toward it, never faster than the
+  joint box allows (the joint box wins: always feasible).
+
+``Output.limited_by``: which hard constraint bound the solution (reach, manipulability, joint_limit, lead,
 base_limit; none), for operator feedback.
 """
 from __future__ import annotations
@@ -58,7 +65,7 @@ from .targets import Target
 
 C8 = math.cos(math.pi / 8)
 OCT = np.array([[math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)] for k in range(8)])   # 8 unit normals
-LIMITED = ["none", "reach", "manipulability", "fence", "joint_limit", "base_limit", "base_band"]
+LIMITED = ["none", "reach", "manipulability", "fence", "joint_limit", "base_limit", "base_band", "lead"]  # append-only
 BIND_TOL = 1e-6          # velocity units: a row this close to its bound is binding
 
 
@@ -118,6 +125,9 @@ class EEState:
     target: Optional[Target]
     hint: EEHint
     posture: np.ndarray               # the posture the null space prefers (rad)
+    q_meas: Optional[np.ndarray] = None   # the arm's measured joints (None: no lead bound this tick)
+    qd_meas: Optional[np.ndarray] = None  # its measured joint velocity (extrapolates q_meas; None = 0)
+    meas_age: float = 0.0             # s since that measurement (the arm state's t_tick to this tick)
 
 
 @dataclass
@@ -178,6 +188,12 @@ class QPController(Controller):
         from ..arm.config import DEFAULT_SOFT
         self.caps = {k: self.arm_caps(len(v), DEFAULT_SOFT.joint_vel, DEFAULT_SOFT.joint_acc)
                      for k, v in model.arm_v.items()}
+        # per arm the servo's kp (Nm/rad) and the arm's max_lead (rad): the arm's default profile until the node
+        # applies the arm's own (GET /gains, the welcome)
+        from .spec import default_arm_gains
+        kp, ml, self.kp_source = default_arm_gains()
+        self.kp = {k: kp[:len(v)].copy() for k, v in model.arm_v.items()}
+        self.max_lead = {k: ml for k in model.arm_v}
         self.active = False                                   # base deadband state
         self.solves = 0
 
@@ -192,6 +208,53 @@ class QPController(Controller):
         if self.cfg.joint_acc is not None:
             a = np.minimum(a, np.asarray(self.cfg.joint_acc, float)[:n])
         return vm, a
+
+    def lead(self, ee: str) -> np.ndarray:
+        """The lead bound per joint (rad): lead_torque / kp, at most the arm's max_lead."""
+        kp = self.kp[ee]
+        return np.minimum(np.asarray(self.cfg.lead_torque, float)[:len(kp)] / kp, self.max_lead[ee])
+
+    def lead_ref(self, ee: str, e: "EEState"):
+        """(q_ref, its velocity): the measured joints extrapolated by their measured velocity (capped at the joint
+        speed) over the measurement's age + lead_delay. None without a usable measurement."""
+        if e.q_meas is None or not np.all(np.isfinite(e.q_meas)):
+            return None
+        vm = self.caps[ee][0]
+        qd = np.zeros(len(e.q_meas)) if e.qd_meas is None else np.nan_to_num(np.asarray(e.qd_meas, float))
+        qd = np.clip(qd, -vm, vm)
+        h = max(0.0, float(e.meas_age) if math.isfinite(e.meas_age) else 0.0) + self.cfg.lead_delay
+        return np.asarray(e.q_meas, float) + qd * h, qd
+
+    def _lead_bounds(self, ee: str, e: "EEState", L: np.ndarray, U: np.ndarray, ds: float):
+        """(Ll, Ul, diag) velocity bounds of the lead bound, made feasible with the joint box [L, U] (the box
+        wins); None without a measurement."""
+        r = self.lead_ref(ee, e)
+        if r is None:
+            return None
+        q_ref, _ = r
+        lead = self.lead(ee)
+        q = np.asarray(e.q_cmd, float)
+        # the window: lead around the measured joints AND around their extrapolation (the union), so the
+        # extrapolation only ever widens it on the side the arm moves to (a too long lead_delay never drags the
+        # command along; a stopping command is always allowed); in contact (qd 0) both are the measured joints
+        qm = np.asarray(e.q_meas, float)
+        d_up = np.maximum(q_ref, qm) + lead - q       # room to the upper edge (< 0: outside, above)
+        d_lo = q - (np.minimum(q_ref, qm) - lead)     # room to the lower edge
+        # inside: up to the edge within this step; outside (a sudden blockage): back toward it, no faster than the
+        # joint box allows (the box wins, so always feasible: the joint acceleration limit). No braking-distance
+        # term: relative to a delayed measurement it cannot tell "about to follow" from "blocked" and throttled
+        # free acceleration; approaching a still edge at speed v overshoots it by at most v^2 / 2a (the box).
+        # The return from outside is no faster than it can stop at the edge (the discrete braking speed
+        # v^2 / 2a + v ds / 2 <= d), else the acceleration-limited return overshoots inward and rings.
+        # d_up + d_lo >= 2 lead > 0: the two edges never cross
+        a = self.caps[ee][1]
+        hb = 0.5 * a * ds
+
+        def toward(d):          # d < 0: the (negative) speed limit of the way back
+            return -np.minimum(-d / ds, -hb + np.sqrt(hb * hb + 2 * a * np.maximum(-d, 0.0)))
+        Ul = np.maximum(np.where(d_up >= 0, d_up / ds, toward(d_up)), L)
+        Ll = np.minimum(np.where(d_lo >= 0, -d_lo / ds, -toward(d_lo)), U)
+        return Ll, Ul, {"lead": lead, "dev": q - np.clip(q, np.minimum(q_ref, qm), np.maximum(q_ref, qm))}
 
     # -- base helpers ----------------------------------------------------------------------------------
 
@@ -333,7 +396,7 @@ class QPController(Controller):
         diag: dict = {"err_pos": {}, "err_rot": {}, "manip": {}, "reach": {}}
         groups: list = []          # (kind, G, h): G x <= h, x the velocity
         dmax = 0.0
-        manip_rows, reach_rows, task_rows = [], [], []
+        manip_rows, reach_rows, task_rows, lead_rows = [], [], [], []
         for name, e in snap.ees.items():
             iv = m.arm_v[name]
             x_prev[iv] = e.v_prev
@@ -342,6 +405,11 @@ class QPController(Controller):
             S[np.arange(len(iv)), iv] = 1.0
             groups.append(("joint_limit_box", np.vstack([S, -S]), np.concatenate([U, -L]), posmask,
                            np.concatenate([Ur, -Lr])))
+            lb = self._lead_bounds(name, e, L, U, snap.dt or dt)
+            if lb is not None:
+                Ll, Ul, ld = lb
+                lead_rows.append((np.vstack([S, -S]), np.concatenate([Ul, -Ll])))
+                diag.setdefault("lead", {})[name] = {k: [float(v) for v in vv] for k, vv in ld.items()}
             mu, g = m.manipulability_gradient(q, name)
             diag["manip"][name] = mu
             m.update(q)
@@ -461,6 +529,8 @@ class QPController(Controller):
             rows.append(("joint_cap", pad(G_[~pm]), h_[~pm]))
         for G_, h_ in manip_rows:
             rows.append(("manipulability", pad(G_), h_))
+        for G_, h_ in lead_rows:                   # the lead bound (hard; feasible with the joint box)
+            rows.append(("lead", pad(G_), h_))
         rows.append(("slack", np.hstack([np.zeros((ns, nv)), -np.eye(ns)]), np.zeros(ns)))
         # t_lin >= octagon norm of the base's linear velocity, t_yaw >= |yaw rate| (world axes: the norm is rotation
         # invariant up to the octagon)
@@ -563,7 +633,7 @@ class QPController(Controller):
         u = xs[:nv]
         # what bound the solution (by priority): a band that needed slack or binds, then the hard rows
         limited = "none"
-        for kind in ("reach", "manipulability", "joint_limit", "base_band", "base_limit", "rate"):
+        for kind in ("reach", "manipulability", "joint_limit", "lead", "base_band", "base_limit", "rate"):
             for k_, G_, h_ in rows:
                 if k_ == kind and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL):
                     limited = kind
@@ -572,6 +642,8 @@ class QPController(Controller):
                 break
         if limited == "rate":
             limited = "base_limit"                 # the base's twist-rate rows (LIMITED is the stream's enum)
+        diag["lead_binding"] = any(k_ == "lead" and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL)
+                                   for k_, G_, h_ in rows)
         tw = fixed if fixed is not None else twist_of(u)
         self.active = bool(np.any(np.abs(tw) > 1e-9))
         dqs = {k: u[m.arm_v[k]] * (snap.dt or dt) for k in snap.ees}   # integrated over the measured step

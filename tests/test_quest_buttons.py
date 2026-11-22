@@ -318,15 +318,15 @@ def test_a_wbc_row_older_than_the_arming_datagram_never_disarms():
 
 
 def test_a_stale_wbc_row_after_arming_disarms():
-    """Armed, the WBC rows stop arriving (the stream died): disarm once the newest row is older than 0.3 s; the
-    rows coming back never re-arm."""
+    """Armed, the WBC rows stop arriving (the stream died): disarm once the newest row is older than wbc_stale_s
+    (0.5 s since the stopgap ee55317); the rows coming back never re-arm."""
     rig = Rig()
     rig.arm()
     rig.stream.frozen = True
-    rig.run(IDLE, 25)                                           # 0.25 s: still within
+    rig.run(IDLE, 45)                                           # 0.45 s: still within
     assert rig.latch.armed
     n = len(rig.wbc.msgs)
-    rig.run(IDLE, 10)                                           # 0.35 s
+    rig.run(IDLE, 10)                                           # 0.55 s
     assert not rig.latch.armed and "WBC state stale" in rig.latch.reason
     after = rig.since(n)
     k = next(i for i, m in enumerate(after) if m["armed"] is False)      # sent at the disarm ...

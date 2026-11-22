@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -11,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..common.server import (EStopCleared, LeaseToken, add_base_routes, add_page_routes, node_meta, rows_stream,
-                             setup_app, sse)
+                             setup_app)
 from . import __version__
 from .node import WbcNode
 
@@ -50,6 +51,28 @@ class SessionOut(BaseModel):
     unix_socket: Optional[str] = Field(description="Unix datagram socket path on the robot; null if off.")
     arm_seq: int = Field(0, description="The arm_seq floor: a datagram arms only with a greater arm_seq (number "
                                         "presses from here).")
+
+
+SSE_MIN_PERIOD = 0.5     # s: the page's /events at most 2 Hz (state changes in between are coalesced)
+
+
+async def throttled_sse(hub, state, min_period: float = SSE_MIN_PERIOD):
+    """``text/event-stream`` chunks: the JSON state on a change, at most every ``min_period`` (changes meanwhile
+    coalesced into the next one) and at least every second. ``state`` (``WbcNode.state_dict``) holds the control
+    lock only to take a snapshot."""
+    import json
+    last = -math.inf
+    while True:
+        fut = hub.state_future()
+        wait = last + min_period - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        last = time.monotonic()
+        yield f"data: {json.dumps(state(), default=str)}\n\n"
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), 1.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 def create_app(node: WbcNode, start: bool = True) -> FastAPI:
@@ -97,9 +120,9 @@ def create_app(node: WbcNode, start: bool = True) -> FastAPI:
         return node.state_dict()
 
     @app.get("/events", tags=["state"], response_class=StreamingResponse,
-             summary="Server-Sent Events: /state on every change and every 1 s")
+             summary="Server-Sent Events: /state on a change (at most 2 Hz, changes coalesced) and every 1 s")
     async def events():
-        return StreamingResponse(sse(node.hub, node.state_dict), media_type="text/event-stream",
+        return StreamingResponse(throttled_sse(node.hub, node.state_dict), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})
 
     @app.get("/fields", tags=["stream"], summary="Columns of the tick rows (append-only)")

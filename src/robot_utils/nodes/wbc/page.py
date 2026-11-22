@@ -33,7 +33,8 @@ table.ee th:first-child,table.ee td:first-child{text-align:left;color:var(--mute
   <div class="ru-card" data-panel="plots" data-role="view">
     <b>End effector</b> <span class="ru-muted">commanded vs measured, world frame</span>
     <table class="ee" id="ee"></table>
-    <b>Tracking error</b> <span class="ru-muted">position m · orientation rad (×0.1), 20 s</span><canvas class="ru-plot" id="pe"></canvas>
+    <b>Tracking error, position</b> <span class="ru-muted">m, 20 s · QP shortfall (target − commanded), actual (target − measured), lead (commanded − measured)</span><canvas class="ru-plot" id="pe"></canvas>
+    <b>Tracking error, orientation</b> <span class="ru-muted">rad, the same three</span><canvas class="ru-plot" id="pr"></canvas>
     <b>Base twist</b> <span class="ru-muted">vx, vy m/s · w rad/s (body)</span><canvas class="ru-plot" id="pb"></canvas>
     <b>Solve time</b> <span class="ru-muted">ms per tick</span><canvas class="ru-plot" id="ps"></canvas>
   </div>
@@ -72,7 +73,7 @@ $("#setmode").onclick = () => call("hints", {base: {mode: $("#mode").value}});
 const GROUPS = [["Base caps", /^(max_speed|max_omega|max_accel|max_alpha|wheel_speed)$/],
   ["Base references and bands", /^(w_base|band_|k_band|w_slack|k_base_pose|k_heading|base_yaw_radius)/],
   ["EE tracking", /^(k_pos|k_rot|max_err|w_position|w_orientation|lm_|damping|w_arm|posture|k_posture|tie_|w_manip)/],
-  ["Arm limits and yielding", /^(joint_|limit_gain|reach|xi_|w_min|w_influence|resync)/],
+  ["Arm limits and yielding", /^(joint_|limit_gain|reach|xi_|w_min|w_influence|resync|lead_)/],
   ["Timeouts and inputs", /./]];
 let cfgCur = {};
 function cfgRender(r){
@@ -105,7 +106,8 @@ $("#apply").onclick = async () => {
 $("#revert").onclick = () => RU.api("config").then(cfgRender);
 RU.api("config").then(cfgRender).catch(e => err(e.message));
 const plots = {
-  e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "pos"}, {name: "rot×0.1"}]}),
+  e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "QP shortfall"}, {name: "actual"}, {name: "lead"}]}),
+  r: new RU.Plot($("#pr"), {seconds: 20, series: [{name: "QP shortfall"}, {name: "actual"}, {name: "lead"}]}),
   b: new RU.Plot($("#pb"), {seconds: 20, series: [{name: "vx"}, {name: "vy"}, {name: "w"}]}),
   s: new RU.Plot($("#ps"), {seconds: 20, series: [{name: "solve ms"}]}),
 };
@@ -113,7 +115,8 @@ let last = null;
 RU.rows("stream?batch_ms=100", d => {
   for (let i = 0; i < d.n; i++){
     const p = {}; for (const f of d.fields) p[f] = d.col(f)[i];
-    plots.e.push(p.t_tick, [p.arm_err_pos, 0.1 * p.arm_err_rot]);
+    plots.e.push(p.t_tick, [p.arm_err_pos, p.arm_err_meas_pos, p.arm_lead_pos]);
+    plots.r.push(p.t_tick, [p.arm_err_rot, p.arm_err_meas_rot, p.arm_lead_rot]);
     plots.b.push(p.t_tick, [p.base_vx, p.base_vy, p.base_w]);
     plots.s.push(p.t_tick, [p.solve_ms]);
     last = p;
@@ -123,6 +126,11 @@ RU.rows("stream?batch_ms=100", d => {
   const rows = ["x", "y", "z", "qx", "qy", "qz", "qw"].map(k => `<tr><td>${k}</td><td>${f(last["arm_cmd_" + k])}</td><td>${f(last["arm_meas_" + k])}</td><td>${f(last["arm_tgt_" + k])}</td></tr>`);
   $("#ee").innerHTML = `<tr><th></th><th>commanded</th><th>measured</th><th>target</th></tr>` + rows.join("");
 });
+// per joint |kp (q_cmd - q_meas)| against its budget lead_torque (Nm); "bound" while the lead bound binds
+const leadText = (s, L) => { const ld = s.arm && s.arm.lead; if (!ld) return "–";
+  const t = [1, 2, 3, 4, 5, 6].map(i => L["arm_lead_tau" + i]);
+  if (t.some(v => v === null || v === undefined)) return `budget ${ld.lead_torque.join(" / ")} Nm`;
+  return t.map((v, i) => `${Math.abs(v).toFixed(1)}/${ld.lead_torque[i]}`).join("  ") + ` Nm${ld.binding ? " (bound)" : ""}; binds ${ld.binds}`; };
 RU.sse("events", s => {
   lease.update(s);
   es.update({estop: s.estop && s.estop.latched ? s.estop : null});
@@ -137,7 +145,8 @@ RU.sse("events", s => {
     ["base mode", s.hints.base.mode],
     ["limited by", s.limited_by],
     ["solve", `${g(L.solve_ms, 3)} ms, ${g(L.solves, 0)} QP(s), status ${L.status}`],
-    ["EE error", `${g(L.arm_err_pos, 4)} m, ${g(L.arm_err_rot, 4)} rad`],
+    ["EE error", `QP shortfall ${g(L.arm_err_pos, 4)} m, ${g(L.arm_err_rot, 3)} rad; actual ${g(L.arm_err_meas_pos, 4)} m, ${g(L.arm_err_meas_rot, 3)} rad; lead ${g(L.arm_lead_pos, 4)} m, ${g(L.arm_lead_rot, 3)} rad`],
+    ["joint lead", leadText(s, L)],
     ["base", `${g(L.base_x, 3)}, ${g(L.base_y, 3)} m, ${g(L.base_yaw, 3)} rad (reset ${s.estimator.reset_id})`],
     ["estimator", `${s.estimator.health}, age ${g(s.estimator.age, 3)} s`],
     ["arm", `${s.arm.state || "–"}, age ${g(s.arm.age, 3)} s, resyncs ${s.arm.resyncs}`],

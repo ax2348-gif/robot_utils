@@ -51,7 +51,16 @@ class Config:
     xi_manip: float = 2.0           # 1/s: dw/dt >= -xi_manip w_influence (w - w_min) / (w_influence - w_min)
     lm_singular: float = 0.02       # adaptive damping on the arm, x (1 - w / w_influence)^2 below w_influence
     resync: float = 0.25            # rad: |q_meas - q_cmd| beyond this (any joint) resyncs the integration (at most
-                                    # 0.7 of the arm's lead bound; the world arm trails ~5 ticks: 0.1 rad at 2 rad/s)
+                                    # 0.7 of the arm's lead bound; the world arm trails ~5 ticks: 0.1 rad at 2 rad/s);
+                                    # with the lead bound below, a last-resort safety net only
+    # the lead bound (docs/wbc.md "Lead bound"): each arm joint's next command stays within lead_i = lead_torque_i /
+    # kp_i of the measured joints extrapolated over lead_delay (+ the arm state's age), so the servo's push
+    # kp (q_cmd - q) in contact stays within lead_torque. kp: the arm's gain profile (its GET /gains at enable);
+    # each value at most kp x the arm's max_lead (the arm drops goals beyond that)
+    lead_torque: tuple = (6.0, 6.0, 6.0, 1.5, 1.5, 1.5)   # Nm per joint
+    lead_delay: float = 0.08        # s: the measured arm's lag behind the command (read pipeline + servo; the world
+                                    # sim trails ~5 ticks) + the one tick the new command leads by + 2 ticks of margin
+                                    # (too long only widens the window on the moving side: safe); 0 = no extrapolation
     # tracking
     k_pos: float = 4.0              # 1/s, P on the EE position error
     k_rot: float = 4.0              # 1/s, P on the EE orientation error
@@ -112,18 +121,43 @@ class Config:
     arm_target_rot: float = 0.0873  # rad (5 deg)
     # estimator
     require_imu: bool = False
-    est_stale: float = 0.2          # s without an estimator row -> hold
+    est_stale: float = 0.35         # s without an estimator row -> hold (0.2 tripped on WBC process stalls on the Pi, 2026-11-21)
     est_pose_stale: float = 0.3     # s: a pose older than this -> hold
     max_predict: float = 0.1        # s, pose extrapolation cap
     jump_pos: float = 0.15          # m between consecutive poses: a jump (targets aborted)
     jump_theta: float = 0.30        # rad
     lease_heartbeat: float = 1.0    # s, the WBC's own client lease
+    late_tick: float = 0.1          # s: a control tick later than this disarms (stopgap: 3 dt = 30 ms tripped on Python GIL
+                                    # stalls on the Pi; the arm's own 30 ms watchdog and the swerve's 0.25 s remain the motor-level stops)
     arm_stale: float = 0.2          # s without an arm joint-channel state while enabled -> fault (Pi arm-loop gaps of
                                     # 105-121 ms were measured under camera load: docs/realtime.md)
 
     @property
     def dt(self) -> float:
         return 1.0 / self.rate_hz
+
+
+KP_FALLBACK = (72.0, 72.0, 96.0, 18.0, 18.0, 18.0)   # the soft profile's (rebotarm_dm_soft.yaml) if it cannot load
+
+
+def default_arm_gains() -> tuple[np.ndarray, float, str]:
+    """(kp per joint, the arm's max_lead, where kp came from) before the arm's own are known: the arm's default
+    gain profile file (rebot_ctl), else KP_FALLBACK."""
+    from ..arm.stream import MAX_LEAD
+    try:
+        from ..arm.config import DEFAULT_PROFILE, load_profile
+        return np.asarray(load_profile(DEFAULT_PROFILE).kp, float), MAX_LEAD, f"profile {DEFAULT_PROFILE} (file)"
+    except Exception:  # noqa: BLE001 - rebot_ctl missing: the copy
+        return np.asarray(KP_FALLBACK, float), MAX_LEAD, "fallback (soft profile copy)"
+
+
+def check_lead_torque(lead_torque, kp, max_lead: float) -> None:
+    """The hard ceiling: lead_torque_i <= kp_i x max_lead (beyond it the arm drops the goals)."""
+    ceil = np.asarray(kp, float)[:6] * float(max_lead)
+    lt = np.asarray(lead_torque, float)[:6]
+    if np.any(lt > ceil + 1e-9):
+        raise ValueError("lead_torque beyond kp x the arm's max_lead (" +
+                         ", ".join(f"{c:.2f}" for c in ceil) + " Nm)")
 
 
 def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -> Config:
@@ -137,8 +171,16 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
             changes[k] = tuple(float(v) for v in changes[k])
             if not all(math.isfinite(v) and v > 0 for v in changes[k]):
                 raise ValueError(f"{k} must be positive finite numbers (or null: the arm's)")
+    if "lead_torque" in changes:
+        v = changes["lead_torque"]
+        if not isinstance(v, (list, tuple)) or len(v) != 6 or any(
+                isinstance(x, bool) or not isinstance(x, (int, float)) for x in v):
+            raise ValueError("lead_torque must be 6 numbers (Nm per arm joint)")
+        changes["lead_torque"] = tuple(float(x) for x in v)
+        if not all(math.isfinite(x) and x > 0 for x in changes["lead_torque"]):
+            raise ValueError("lead_torque must be positive finite numbers (Nm)")
     c = replace(base or Config(), **changes)
-    nonneg = ("w_min", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
+    nonneg = ("w_min", "lead_delay", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
               "w_base_flat_yaw", "base_start_charge")   # 0 = off
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:

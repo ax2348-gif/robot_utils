@@ -13,7 +13,7 @@ sockets, the clock is passed in; ``teleop.TeleopClient`` runs the HTTP requests 
 - **Disarm** (``armed: false`` at once, then in every datagram): X; any discontinuity (``QuestGate``: reconnect,
   session, revision, gap); an invalid frame (unfocused, ...); stale, late or slow input (``QuestGate.fresh``); the
   LEFT controller inactive (the stop button gone); no command to send; the WBC's rows stale (newest older than
-  ``wbc_stale_s``, 0.3 s); the WBC's own row showing it disarmed after it processed our arming datagram, or not
+  ``wbc_stale_s``, 0.5 s); the WBC's own row showing it disarmed after it processed our arming datagram, or not
   enabled. Nothing re-arms on its own: every arm is a new Y press.
 - ``inhibit`` (a reason; the teleop node's sim reset sets it): every Y press is refused with it (no arm, no enable).
 """
@@ -76,7 +76,8 @@ class LatchConfig:
     grip_max: float = 0.4             # both grips below this to arm
     dead_zone: float = DEAD_ZONE
     robot_stale_s: float = 0.3        # the WBC row must be younger than this to arm
-    wbc_stale_s: float = 0.3          # armed: the newest WBC row older than this disarms
+    wbc_stale_s: float = 0.5          # armed: the newest WBC row older than this disarms (0.3 tripped on WBC process
+                                      # stalls on the Pi, 2026-11-21)
     disable_retry_s: float = 1.0      # X held: POST /disable again this often while the WBC still shows enabled
     enable_timeout_s: float = 2.0     # a press on a disabled WBC: cancelled if not enabled (and armed) by then
 

@@ -12,7 +12,11 @@ python -m robot_utils.nodes.wbc --swerve none --estimator none   # arm only (bas
 
 Options: `--model` (description instance / URL, `local`, or a `.urdf` with `base=planar`), `--arm`, `--swerve`,
 `--estimator` (instance names or URLs; `none` = off), `--udp-host` / `--udp-port` (default `127.0.0.1:9410`; on
-the robot set the LAN address, never `0.0.0.0`), `--config` (YAML of `spec.Config` keys), `--name`, `--port`.
+the robot set the LAN address, never `0.0.0.0`), `--config` (YAML of `spec.Config` keys), `--switch-interval`
+(Python's GIL switch interval for the process, default 0.0005 s, env `WBC_SWITCH_INTERVAL`; Python's own is
+0.005 s: the SCHED_FIFO control thread shares the GIL with normal-priority HTTP / SSE / stream-reader threads, and a
+descheduled thread holding the GIL blocks it — measured on the robot as `control tick overrun: 35 ms` and
+`estimator stream stale` disarms), `--name`, `--port`.
 Registered in `frontend/nodes.yaml` as `wbc`; page at the node root (state, base mode, EE commanded / measured /
 target, tracking error, base twist, solve time, events).
 
@@ -25,7 +29,75 @@ arm config's soft defaults, the same numbers); a tuple in the config narrows the
 speed and yaw rate are checked at `POST /enable` against the swerve's own `GET /limits` "hard" (beyond them: 422,
 both leases given back); the wheel speed has no swerve endpoint and is bounded by pose_servo's
 `planner.WHEEL_SPEED_MAX` (3 m/s, the steering model's limit) when the config is made. `resync` is 0.25 rad, at
-most 0.7 of the arm's lead bound (20°).
+most 0.7 of the arm's lead bound (20°): a last-resort net behind the **lead bound** (below): `lead_torque`
+6, 6, 6, 1.5, 1.5, 1.5 Nm, `lead_delay` 0.08 s.
+
+### Lead bound (contact force)
+
+The arm node servos each joint with the soft MIT law `tau = kp (q_cmd − q) + kd (qd_ff − qd) + gravity`
+(kp 72, 72, 96, 18, 18, 18 Nm/rad, `rebotarm_dm_soft.yaml`). The WBC integrates `q_cmd` from its previous command,
+so in sustained contact the command kept following the operator while the real arm was blocked: the push grew to
+kp × `resync` (17.6 / 17.6 / 23.4 / 4.4 Nm) before a resync, then again (a sawtooth). The lead bound is a
+**torque budget** per joint: `lead_i = lead_torque_i / kp_i` (at most the arm's `max_lead`), and every tick, hard
+in the QP, each arm joint's next command stays within `lead_i` of `q_ref`:
+
+`|q_cmd + q' ds − q_ref| ≤ lead`, `q_ref` = the measured joints extrapolated by their measured velocity (capped at
+the joint speed) over the state's age + `lead_delay`. The window is the **union** of the windows around the
+measured and around the extrapolated joints, so the extrapolation only ever widens it on the side the arm moves to:
+a `lead_delay` too long never drags the command along (a stopping command is always allowed); too short throttles
+fast motion (the arm then trails beyond the lead: `limited_by` lead in free motion). In contact the measured
+velocity is 0 and the window is exactly `lead` around the blocked joints: the servo's push `kp (q_cmd − q)` stays
+within `lead_torque` and the command slides along with the target only inside it (no resync, no sawtooth).
+
+- Outside the window (a sudden blockage while moving: the command led by the lag): the command returns toward it no
+  faster than it can stop at the edge (the discrete braking speed), within the joint box (the joint box wins:
+  always feasible). The transient is not bounded by the budget: the command's own acceleration limit lets it run
+  on by up to `v² / 2a` (0.2 rad at 2 rad/s on joints 1–3) before it comes back; at the speeds of contact work it
+  is small (tests: +0.06 Nm over the budget approaching a still edge).
+- `kp` comes from the arm's `GET /gains` (the profile in force) at enable; until then, and if it cannot be read
+  (an event), from the arm's default profile file (`soft`), else a copy of its kp. `max_lead` from the welcome.
+- `POST /config` `lead_torque` (6 positive numbers, Nm) and `lead_delay` (s, ≥ 0) apply at once; `lead_torque`
+  beyond kp × `max_lead` per joint is refused (422: the arm drops goals beyond `max_lead`; with the soft profile
+  25.1, 25.1, 33.5, 6.3, 6.3, 6.3 Nm). A budget above kp × `resync` (0.244 rad) lets the resync fire before the
+  bound in contact.
+- `limited_by` `lead` (7) when it binds (and nothing of higher priority: reach, manipulability, joint limits);
+  `/state.arm.lead`: `lead_torque`, `kp`, `kp_source`, `max_lead`, `lead_delay`, `bound` (rad), `dev` (the command's
+  distance beyond the measured window this tick, rad), `torque` (kp × dev), `binding`, `binds` (ticks it bound,
+  any joint, even when `limited_by` names a higher-priority limit).
+
+**Defaults.** 6 Nm on joints 1–3 (a third of the old sawtooth peak; above the gravity-compensation and payload
+errors a few Nm deep), 1.5 Nm on the wrist (joints 4–6, a third of its 4.4 Nm peak). Leads: 0.0833, 0.0833, 0.0625,
+0.0833, 0.0833, 0.0833 rad (4.8°, 4.8°, 3.6°, 4.8° ...). The hand force they allow, from the hand stiffness
+`(Jp K⁻¹ Jp^T)⁻¹` at the start pose (q 0, −0.6, −0.9, 0, 0.5, 0; TCP at 0.24, −0.16, 0.66 m): the force along an
+axis at which the first joint reaches its budget, and the hand's deflection then:
+
+| Axis (base) | Max hand force | Joint at its budget | Hand stiffness | Deflection |
+| --- | --- | --- | --- | --- |
+| x (forward) | 19.9 N | 2 | 640 N/m | 31 mm |
+| y (left) | 49.4 N | 1 | 3950 N/m | 13 mm |
+| z (up / down) | 14.5 N | 4 | 560 N/m | 26 mm |
+
+(The ready posture: 17.8, 46.5, 14.8 N.) A static load beyond the budget (a heavy payload, a gravity-compensation
+error) makes the arm sag rather than push harder: the budget bounds holding torque too.
+
+`lead_delay` 0.08 s: the world sim's measured arm trails the command by ~5 ticks (servo + pipelined read, docs/arm.md)
++ the one tick the new command leads by + 2 ticks of margin. In the controller tests (a pure-delay arm, the joints
+at their speed caps with 30 rad/s² reversals on the wrist) free motion is untouched up to a 6-tick lag; at 7 ticks
+it throttles reversals (½ a h² approaches the wrist's 0.083 rad lead). **The real arm's delay was not measured**:
+if fast teleop shows `limited_by` lead (and `binds` growing) without contact, raise `lead_delay` (safe: the window
+only widens on the moving side) or the wrist budget.
+
+### Three error numbers
+
+| Stream column | Difference | Meaning |
+| --- | --- | --- |
+| `<ee>_err_pos` / `_err_rot` | target − **commanded** | the QP's shortfall: how far the command is from the target (limits, the lead bound, the gains). Not where the hand is |
+| `<ee>_err_meas_pos` / `_err_meas_rot` | target − **measured** | the actual error: where the hand is vs where it is wanted |
+| `<ee>_lead_pos` / `_lead_rot` | commanded − **measured** | the servo's deflection: effort / contact force (in free motion also the arm's lag) |
+
+Position: the norm (m) of a world-axes difference; rotation: the angle (rad). NaN without a measured pose
+(disabled). Per joint `<ee>_lead_tau1..6` = kp (q_cmd − q_meas) (Nm). The page plots the three for position and
+orientation and shows each joint's lead torque against its budget.
 
 ## Using it
 
@@ -191,7 +263,7 @@ solves for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick:
   it only ever stops motion, never starts it; **manipulability floor**: `∇w·q' ≥ -xi w_i (w - w_min)/(w_i -
   w_min)` below `w_influence` (0.002; `w_min` 0.0008; the home pose has ~0.005), never below what the joint box
   allows; base speed (inscribed octagon), yaw rate, twist rate (octagon + yaw), every wheel's speed (inscribed
-  octagon, 8 rows each; the swerve modules from `swerve/constants.py`).
+  octagon, 8 rows each; the swerve modules from `swerve/constants.py`); the **lead bound** per arm joint (above).
 - **Deadband with hysteresis** on the base: a solve without the acceleration limits gives the desired twist; a
   stopped base starts above `deadband_*_on` (0.02 m/s, 0.06 rad/s), a moving one brakes below `*_off`; otherwise
   the base velocity is fixed to the braking step and the arm takes the motion. A second solve with the
@@ -199,7 +271,8 @@ solves for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick:
 - **Failure:** an infeasible or failed solve outputs zero velocity → the node faults and holds.
 
 Arm output: integrated from the previous **commanded** joints; resynced to the measured ones only past `resync`
-(0.25 rad, an event); q' is sent as the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
+(0.25 rad, an event; with the lead bound a last-resort net) and held within the lead bound of them; q' is sent as
+the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
 
 Known limits of v1 (measured in the tests): a velocity-level QP can end in a local minimum with the arm at a joint
 limit (a target behind and below the base): the error stays, reported (`limited_by` joint_limit), no yank. With
@@ -226,11 +299,17 @@ The arm's convention: timestamped rows on the Pi clock, append-only. The contrac
 frame**: forward, left, yaw rate — as the swerve command and the velocity hint), per EE `<ee>_cmd_x..qw` (the pose
 commanded this tick, world: anchor relative targets to it), `<ee>_meas_x..qw` (the arm's measured q at the base
 pose used), `<ee>_twist_vx..wz` (commanded, world axes), `<ee>_gripper`; `arm_age`, `est_age`, `target_age`.
-Appended: `limited`, `limited_by` (0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit),
-`input_age`, `hold`, `deadband`, `solves`, `wheel_max`, per EE the target (`_tgt_*`), `_err_pos`, `_err_rot`,
-`_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`; then `armed`, `tick_period` (ms),
-`tick_compute` (ms), `overruns`, `late_ticks`. `/state` shows `armed`, `disarm_reason`, `latch`, `tick`,
-`limited_by`, `hold_reason`, `fault`, the session counters, the inputs and the latest row.
+Appended: `limited`, `limited_by` (0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit,
+6 base_band, 7 lead), `input_age`, `hold`, `deadband`, `solves`, `wheel_max`, per EE the target (`_tgt_*`),
+`_err_pos`, `_err_rot`, `_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`; then `armed`,
+`tick_period` (ms), `tick_compute` (ms), `overruns`, `late_ticks`; then per EE `_err_meas_pos`, `_err_meas_rot`,
+`_lead_pos`, `_lead_rot`, `_lead_tau1..6` (above: "Three error numbers"). `/state` shows `armed`,
+`disarm_reason`, `latch`, `tick`, `limited_by`, `hold_reason`, `fault`, the session counters, the inputs, the lead
+bound (`arm.lead`) and the latest row.
+
+`/state` and the page's `/events` never stall the control tick: `state_dict` copies a snapshot (references and
+scalars) under the control lock and builds the document outside it; `/events` (SSE) sends on a change at most every
+0.5 s (2 Hz; changes in between coalesced) and at least every second.
 
 `POST /config` (runtime tuning, no lease): the base caps `max_speed`, `max_omega`, `max_accel`, `max_alpha`,
 `wheel_speed` are refused (422, the reason) unless the base is still (disabled, or a zero commanded twist: disarm
@@ -262,7 +341,10 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
   disarm trigger, no recovery re-arms, the arm_seq floor, braking / holding / gripper while disarmed, the caps while
   moving, clamped hint velocities, the e-stop's order and parallel fan-out, no command reaching the base on e-stop
   or disable), `tests/test_wbc_overrun.py` (tick timing: late-tick disarm, overrun counts, the measured-period
-  integration, a stalled controller in real time).
+  integration, a stalled controller in real time). `tests/test_wbc_lead.py` (the lead bound on a measured arm that
+  lags or is blocked: contact within the budget, free motion at the caps untouched, release, sudden blockage; the
+  node: kp from the arm's /gains, runtime config, `/state.arm.lead`, the three error numbers; `/state` holding the
+  control lock only briefly, `/events` at most 2 Hz).
 
 ## Not done yet
 

@@ -50,7 +50,8 @@ from .arm_channel import ARM_STATES, ArmChannel, ChannelError, joint_socket_path
 from .controller import LIMITED, EEState, QPController, Snapshot
 from .model import EESpec, WbcModel, arm_config_limits, fetch_urdf
 from .receiver import Inbox, Receiver
-from .spec import MODES, Config, Hints, hints_public, make_config, merge, parse_base, parse_hints
+from .spec import (MODES, Config, Hints, check_lead_torque, default_arm_gains, hints_public, make_config, merge,
+                   parse_base, parse_hints)
 from .targets import R_to_quat, TargetBuffer, quat_to_R
 
 log = logging.getLogger("wbc")
@@ -84,6 +85,10 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         f += [(f"{e}_q_cmd{i}", "rad") for i in range(1, 7)] + [(f"{e}_qd{i}", "rad/s") for i in range(1, 7)]
     f += [("armed", "bool"), ("tick_period", "ms"), ("tick_compute", "ms"), ("overruns", "count"),
           ("late_ticks", "count")]
+    for e in ees:
+        f += [(f"{e}_err_meas_pos", "m"), (f"{e}_err_meas_rot", "rad"), (f"{e}_lead_pos", "m"),
+              (f"{e}_lead_rot", "rad")]
+        f += [(f"{e}_lead_tau{i}", "Nm") for i in range(1, 7)]
     doc = {
         "t_tick": "control tick time, Pi monotonic s (the clock of target t)",
         "seq": "seq of the latest accepted datagram in force (0 = none)",
@@ -108,7 +113,8 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         "est_age": "s since the estimator pose used was sampled",
         "target_age": "s since the target in force was stamped (reactive) / past the end of the chunk (0 inside)",
         "limited": "1 if a hard limit bound the motion this tick (see limited_by)",
-        "limited_by": "0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit",
+        "limited_by": "0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit, 6 base_band, "
+                      "7 lead (the lead bound: the command held within lead_torque / kp of the measured arm)",
         "input_age": "s since the last datagram (target, chunk or alive) of the session",
         "hold": "1 if the controller held this tick (stale input, no client, estimator unusable, no target)",
         "<ee>_tgt_*": "the target of this tick, world (after blending)",
@@ -119,6 +125,16 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         "tick_compute": "this tick's compute time up to the publish (ms)",
         "overruns": "ticks whose period exceeded 1.5 dt (since start)",
         "late_ticks": "ticks later than 3 dt after the previous one (each disarms; since start)",
+        "<ee>_err_pos": "QP shortfall: |target - COMMANDED| EE position (m; the components would be world axes); "
+                        "_err_rot the rotation angle of target vs commanded (rad). Not where the hand is",
+        "<ee>_err_meas_pos": "actual error: |target - MEASURED| EE position (m, world axes): where the hand is vs "
+                             "where it is wanted; _err_meas_rot the rotation angle (rad). NaN without a measured pose",
+        "<ee>_lead_pos": "the servo's deflection: |COMMANDED - MEASURED| EE position (m, world axes): effort / "
+                         "contact force (in free motion also the arm's lag); _lead_rot the rotation angle (rad). NaN "
+                         "without a measured pose",
+        "<ee>_lead_tau*": "per arm joint kp (q_cmd - q_meas): the servo's push from the lead (Nm; the lead bound "
+                          "keeps it within lead_torque in contact, the measured arm extrapolated over its delay). NaN "
+                          "without a measured pose",
     }
     return [n for n, _ in f], [u for _, u in f], doc
 
@@ -145,6 +161,9 @@ class WbcNode:
                  udp_port: int = 9410, unix_socket: Optional[str] = None, arm_socket: Optional[str] = None,
                  name: str = "wbc"):
         self.cfg: Config = make_config(config)
+        kp0, ml0, _ = default_arm_gains()
+        check_lead_torque(self.cfg.lead_torque, kp0, ml0)
+        self.lead_binds = 0                 # ticks the lead bound bound (any joint; since start)
         self.clock = clock
         self.name = name
         self.arm_target, self.swerve_target, self.estimator_target = arm, swerve, estimator
@@ -616,8 +635,8 @@ class WbcNode:
             t["max_compute_ms"] = max(t["max_compute_ms"], c)
 
     def _tick_timing(self, now: float) -> tuple[float, Optional[float]]:
-        """The measured period since the previous tick: counts overruns (> 1.5 dt) and late ticks (> 3 dt); returns
-        (the integration step, the measured period clamped to [dt, 3 dt]; the late period or None)."""
+        """The measured period since the previous tick: counts overruns (> 1.5 dt) and late ticks (> cfg.late_tick, which
+        disarm); returns (the integration step, the measured period clamped to [dt, 3 dt]; the late period or None)."""
         dt = self.cfg.dt
         prev, self._tick_prev = self._tick_prev, now
         if prev is None:
@@ -629,7 +648,7 @@ class WbcNode:
         if period > 1.5 * dt:
             t["overruns"] += 1
         late = None
-        if period > 3 * dt:
+        if period > max(self.cfg.late_tick, 3 * dt):
             t["late"] += 1
             late = period
             if now - self._late_log > 1.0:              # the log at most once a second (the event: on disarm)
@@ -716,9 +735,11 @@ class WbcNode:
                                                               f"disarmed: {self.disarm_reason}")))
             base, est_age = self.base_pose(now)
             targets = {e: (None if why_hold or not self.armed else self.buffers[e].sample(now)) for e in self.ees}
+            meas = self._measured(now, st, paused)
             snap = Snapshot(now, base, self.base_twist.copy(),
                             {e: EEState(self.q_cmd[e].copy(), self.v_cmd[e].copy(), targets[e],
-                                        hints.ee(e, self.cfg), self._posture(hints, e)) for e in self.ees},
+                                        hints.ee(e, self.cfg), self._posture(hints, e),
+                                        *meas.get(e, (None, None, 0.0))) for e in self.ees},
                             hints, hold=why_hold is not None, base_available=self.base is not None,
                             velocity_age=now - self.velocity_t, hint_age=now - self.hint_t, dt=dt_int)
             out = self.ctl.step(snap)
@@ -740,6 +761,8 @@ class WbcNode:
             self._cmd_twists(base)
             if out.limited_by != "none":
                 self.limited_counts[out.limited_by] = self.limited_counts.get(out.limited_by, 0) + 1
+            if out.diag.get("lead_binding"):
+                self.lead_binds += 1
             self.state = ("idle" if not self.armed else "holding" if why_hold else
                           "tracking" if any(t is not None for t in targets.values()) else "idle")
             self._hold_reason = why_hold
@@ -749,6 +772,15 @@ class WbcNode:
                 gap = gr.gripper * self.gap_max
             self._send(now, gap, keepalive=paused)
             self._publish(now, out, hold=why_hold is not None, targets=targets, base=base, est_age=est_age)
+
+    def _measured(self, now: float, st, paused: bool) -> dict:
+        """ee -> (q_meas, qd_meas, age) for the lead bound: the arm's latest state (age since it arrived, on this
+        clock); none while paused (the commands follow the measured joints then) or without a finite reading."""
+        if st is None or paused or not np.all(np.isfinite(st.q)):
+            return {}
+        qd = st.qd if np.all(np.isfinite(st.qd)) else np.zeros(len(st.q))
+        age = now - st.t_rx if math.isfinite(st.t_rx) else 0.0
+        return {"arm": (st.q.copy(), np.asarray(qd, float).copy(), min(max(age, 0.0), 0.1))}
 
     def _posture(self, hints: Hints, ee: str) -> np.ndarray:
         p = hints.ee(ee, self.cfg).posture
@@ -910,8 +942,29 @@ class WbcNode:
         tk = self.tick
         row += [float(self.armed), tk["period_ms"], (time.perf_counter() - self._t0) * 1e3, float(tk["overruns"]),
                 float(tk["late"])]
+        for e in self.ees:
+            row += self._meas_columns(e, base, st, targets.get(e) if targets else None)
         self._last["out"] = out
         self.hub.publish_rows(np.array([row], dtype=np.float64), "tick")
+
+    def _meas_columns(self, e: str, base, st, tg) -> list:
+        """[err_meas_pos, err_meas_rot, lead_pos, lead_rot, lead_tau1..6]: target vs measured, commanded vs
+        measured (EE, world), kp (q_cmd - q_meas) per joint. NaN without a measured pose."""
+        nan = math.nan
+        if st is None or e not in self.q_cmd or not np.all(np.isfinite(st.q)):
+            return [nan] * 10
+        m = self.model
+        qm = dict(self.q_cmd)
+        qm[e] = st.q
+        Tm = m.fk(m.config(base, qm), e)
+        Tc = m.fk(m.config(base, self.q_cmd), e)
+        out = [nan, nan] if tg is None else [float(np.linalg.norm(tg.p - Tm.translation)),
+                                             float(np.linalg.norm(pin.log3(tg.R @ Tm.rotation.T)))]
+        out += [float(np.linalg.norm(Tc.translation - Tm.translation)),
+                float(np.linalg.norm(pin.log3(Tc.rotation @ Tm.rotation.T)))]
+        kp = self.ctl.kp.get(e) if self.ctl is not None else None
+        out += list(kp * (self.q_cmd[e] - st.q)) if kp is not None else [nan] * 6
+        return out
 
     # -- requests ------------------------------------------------------------------------------------------
 
@@ -979,6 +1032,7 @@ class WbcNode:
                 off = arm_http.tcp()
                 if off is not None:
                     self.model.set_tcp("arm", off)
+                self._apply_arm_gains(arm_http)
                 channel = ArmChannel(self.arm_socket)
                 try:
                     channel.open(arm_http.token)
@@ -1047,10 +1101,26 @@ class WbcNode:
                                                      lim.get("joint_acc") or DEFAULT_SOFT.joint_acc)
             if lim.get("max_lead"):
                 self.resync = min(self.cfg.resync, 0.7 * float(lim["max_lead"]))
+                self.ctl.max_lead["arm"] = float(lim["max_lead"])
             if lim.get("gap_max"):
                 self.gap_max = float(lim["gap_max"])
         except (TypeError, ValueError, IndexError) as e:
             self.events.add(f"arm limits in the welcome not usable ({e}); keeping the WBC's", "warn")
+
+    def _apply_arm_gains(self, arm_http) -> None:
+        """The servo's kp for the lead bound: the arm's gain profile in force (its GET /gains). Without it the
+        arm's default profile file stays (an event)."""
+        try:
+            g = arm_http.get("/gains")
+            kp = np.asarray(g["kp"], float)
+            n = len(self.model.arm_q["arm"])
+            if kp.shape[0] < n or not np.all(np.isfinite(kp[:n])) or np.any(kp[:n] <= 0):
+                raise ValueError(f"kp {g['kp']}")
+            self.ctl.kp["arm"] = kp[:n].copy()
+            self.ctl.kp_source = f"arm GET /gains (profile {g.get('name')})"
+        except Exception as e:  # noqa: BLE001 - optional: keep the default profile's
+            self.events.add(f"arm gains not readable ({type(e).__name__}: {e}); the lead bound uses "
+                            f"{self.ctl.kp_source}", "warn")
 
     def disable(self, reason: str = "requested", token: Optional[str] = None, check: bool = False) -> dict:
         if check:
@@ -1167,72 +1237,99 @@ class WbcNode:
             return {"state": self.state, "enabled": self.enabled, "fault": self.fault, "armed": self.armed}
 
     def state_dict(self) -> dict:
+        """The /state document. Only a snapshot of references and scalars is taken under ``self.lock`` (the lock the
+        control tick takes); the document is built outside it, so a /state request or an SSE update never stalls
+        the tick."""
         now = self.clock()
         with self.lock:
-            last = self.hub.recent(1, "tick") if self.hub else []
-            latest = ({k: (v if math.isfinite(v) else None) for k, v in zip(self.fields, last[0].tolist())}
-                      if len(last) else None)
-            ts = self._tick_times
-            rate = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None
-            info, e = self.lease.info, self.estop.info
-            out = self._last.get("out")
-            st = self.arm_state
-            lim = out.limited_by if out is not None else "none"
-            return {
-                "state": self.state,
-                "enabled": self.enabled,
-                "armed": self.armed,
-                "disarm_reason": None if self.armed else self.disarm_reason,
-                "latch": {"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
-                          "disarms": self.disarms, **self.latch_counts},
-                "tick": {k: (round(v, 3) if isinstance(v, float) and math.isfinite(v) else
-                             None if isinstance(v, float) else v) for k, v in self.tick.items()},
-                "holder": self.holder if self.enabled else None,
-                "fault": self.fault,
-                "hold_reason": getattr(self, "_hold_reason", None) if self.enabled else None,
-                "disabled_reason": self.disabled_reason,
-                "limited_by": lim,
-                "limited_counts": dict(self.limited_counts),
-                "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source,
-                          "t": e and e.t},
-                "lease": {"held": info is not None, "holder": info and info.client,
-                          "lease_id": info and info.lease_id,
-                          "expires_in": None if info is None else round(info.expires - now, 3)},
-                "session": {"session": self.receiver.session, "udp_port": self.receiver.udp_port,
-                            "unix_socket": self.receiver.unix_path, "seq": self.receiver.seq,
-                            "accepted": self.receiver.counts["accepted"],
-                            "dropped": dict(self.receiver.counts["dropped"]),
-                            "last_source": self.receiver.last_source,
-                            "input_age": None if self.last_rx == -math.inf else round(now - self.last_rx, 4)},
-                "model": {"source": self.model_info, "error": self.model_error,
-                          "ees": {k: {"link": v.link, "tcp": list(v.tcp), "reach": round(self.model.reach[k], 4)}
-                                  for k, v in self.model.ees.items()} if self.model else {}},
-                "arm": {"target": self.arm_target, "lease_id": self.arm_lease_id if self.enabled else None,
-                        "channel": None if self.channel is None else {
-                            "session": self.channel.session, "stale_ms": self.channel.stale_ms,
-                            **self.channel.counts, "last_error": self.channel.last_error},
-                        "state": None if st is None else st.state_name,
-                        "paused": bool(st is not None and st.paused),
-                        "limits": None if self.channel is None else self.channel.limits,
-                        "age": None if st is None else round(now - st.t_rx, 4),
-                        "resyncs": self.resyncs},
-                "swerve": {"target": self.swerve_target,
-                           "lease_id": self.base.lease_id if self.base else None,
-                           "sent": self.base.sent if self.base else None,
-                           "errors": self.base.errors if self.base else None,
-                           "telemetry": self.sw and {k: v for k, v in self.sw.items() if k != "rx"}},
-                "estimator": {"health": self.estimator_health(now) or "ok", "reset_id": self.est.reset_id,
-                              "pose_jumps": self.est.jumps,
-                              "age": None if self.est.row is None else round(now - self.est.row["t"], 4)},
-                "inputs": {k: u.status() for k, u in self.inputs.items()},
-                "hints": hints_public(self.effective_hints()),
-                "config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(self.cfg).items()},
-                "solve_failures": self.solve_fail,
-                "loop_hz": None if rate is None else round(rate, 1),
-                "realtime": dict(self.realtime),
-                "latest": latest,
-                "events": self.events.list()[-30:],
-            }
+            sn = dict(state=self.state, enabled=self.enabled, armed=self.armed, disarm_reason=self.disarm_reason,
+                      latch={"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
+                             "disarms": self.disarms, **self.latch_counts},
+                      tick=dict(self.tick), holder=self.holder, fault=self.fault,
+                      hold_reason=getattr(self, "_hold_reason", None), disabled_reason=self.disabled_reason,
+                      out=self._last.get("out"), limited_counts=dict(self.limited_counts), st=self.arm_state,
+                      channel=self.channel, arm_lease_id=self.arm_lease_id, base=self.base, sw=self.sw,
+                      hints=self.effective_hints(), cfg=self.cfg, resyncs=self.resyncs, solve_fail=self.solve_fail,
+                      tick_times=list(self._tick_times), lead_binds=self.lead_binds,
+                      kp=None if self.ctl is None else self.ctl.kp.get("arm"),
+                      max_lead=None if self.ctl is None else self.ctl.max_lead.get("arm"),
+                      kp_source=None if self.ctl is None else self.ctl.kp_source,
+                      lead=None if self.ctl is None or "arm" not in self.ctl.kp else self.ctl.lead("arm"),
+                      reset_id=self.est.reset_id, jumps=self.est.jumps,
+                      est_age=None if self.est.row is None else round(now - self.est.row["t"], 4),
+                      est_health=self.estimator_health(now) or "ok")
+        last = self.hub.recent(1, "tick") if self.hub else []
+        latest = ({k: (v if math.isfinite(v) else None) for k, v in zip(self.fields, last[0].tolist())}
+                  if len(last) else None)
+        ts = sn["tick_times"]
+        rate = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None
+        info, e = self.lease.info, self.estop.info
+        out, st, channel, base, sw = sn["out"], sn["st"], sn["channel"], sn["base"], sn["sw"]
+        lim = out.limited_by if out is not None else "none"
+        r6 = lambda v: None if v is None else [round(float(x), 6) for x in v]   # noqa: E731
+        ld = (out.diag.get("lead") or {}).get("arm") if out is not None else None
+        return {
+            "state": sn["state"],
+            "enabled": sn["enabled"],
+            "armed": sn["armed"],
+            "disarm_reason": None if sn["armed"] else sn["disarm_reason"],
+            "latch": sn["latch"],
+            "tick": {k: (round(v, 3) if isinstance(v, float) and math.isfinite(v) else
+                         None if isinstance(v, float) else v) for k, v in sn["tick"].items()},
+            "holder": sn["holder"] if sn["enabled"] else None,
+            "fault": sn["fault"],
+            "hold_reason": sn["hold_reason"] if sn["enabled"] else None,
+            "disabled_reason": sn["disabled_reason"],
+            "limited_by": lim,
+            "limited_counts": sn["limited_counts"],
+            "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source,
+                      "t": e and e.t},
+            "lease": {"held": info is not None, "holder": info and info.client,
+                      "lease_id": info and info.lease_id,
+                      "expires_in": None if info is None else round(info.expires - now, 3)},
+            "session": {"session": self.receiver.session, "udp_port": self.receiver.udp_port,
+                        "unix_socket": self.receiver.unix_path, "seq": self.receiver.seq,
+                        "accepted": self.receiver.counts["accepted"],
+                        "dropped": dict(self.receiver.counts["dropped"]),
+                        "last_source": self.receiver.last_source,
+                        "input_age": None if self.last_rx == -math.inf else round(now - self.last_rx, 4)},
+            "model": {"source": self.model_info, "error": self.model_error,
+                      "ees": {k: {"link": v.link, "tcp": list(v.tcp), "reach": round(self.model.reach[k], 4)}
+                              for k, v in self.model.ees.items()} if self.model else {}},
+            "arm": {"target": self.arm_target, "lease_id": sn["arm_lease_id"] if sn["enabled"] else None,
+                    "channel": None if channel is None else {
+                        "session": channel.session, "stale_ms": channel.stale_ms,
+                        **channel.counts, "last_error": channel.last_error},
+                    "state": None if st is None else st.state_name,
+                    "paused": bool(st is not None and st.paused),
+                    "limits": None if channel is None else channel.limits,
+                    "age": None if st is None else round(now - st.t_rx, 4),
+                    "resyncs": sn["resyncs"],
+                    # the lead bound: per joint the bound (rad) = lead_torque / kp (at most max_lead), the command's
+                    # deviation beyond the measured window this tick (rad) and its torque, how often it bound
+                    "lead": {"lead_torque": list(sn["cfg"].lead_torque), "kp": r6(sn["kp"]),
+                             "kp_source": sn["kp_source"], "max_lead": sn["max_lead"], "lead_delay": sn["cfg"].lead_delay,
+                             "bound": r6(sn["lead"]), "dev": r6(ld["dev"]) if ld else None,
+                             "torque": (r6(np.asarray(sn["kp"]) * np.asarray(ld["dev"]))
+                                        if ld and sn["kp"] is not None else None),
+                             "binding": bool(out is not None and out.diag.get("lead_binding")),
+                             "binds": sn["lead_binds"]}},
+            "swerve": {"target": self.swerve_target,
+                       "lease_id": base.lease_id if base else None,
+                       "sent": base.sent if base else None,
+                       "errors": base.errors if base else None,
+                       "telemetry": sw and {k: v for k, v in sw.items() if k != "rx"}},
+            "estimator": {"health": sn["est_health"], "reset_id": sn["reset_id"],
+                          "pose_jumps": sn["jumps"], "age": sn["est_age"]},
+            "inputs": {k: u.status() for k, u in self.inputs.items()},
+            "hints": hints_public(sn["hints"]),
+            "config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(sn["cfg"]).items()},
+            "solve_failures": sn["solve_fail"],
+            "loop_hz": None if rate is None else round(rate, 1),
+            "realtime": dict(self.realtime),
+            "latest": latest,
+            "events": self.events.list()[-30:],
+        }
 
     # -- runtime config ------------------------------------------------------------------------------
 
@@ -1266,6 +1363,8 @@ class WbcNode:
                 raise ValueError(f"{sorted(set(changes) & set(self.STRUCTURAL))}: only while disabled")
             self._caps_check_locked(changes)
             new = make_config(changes, base=self.cfg)
+            if "lead_torque" in changes and self.ctl is not None:
+                check_lead_torque(new.lead_torque, self.ctl.kp["arm"], self.ctl.max_lead["arm"])
             hard = getattr(self.base, "hard", None) or {} if self.base is not None else {}
             hs, hw = hard.get("max_speed"), hard.get("max_omega")
             if (hs is not None and new.max_speed > hs) or (hw is not None and new.max_omega > hw):
