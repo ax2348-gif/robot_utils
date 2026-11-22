@@ -1,8 +1,10 @@
 # Teleop data collection, v1: draft
 
-Status (2026-11-21): draft. The operator controls and the reset semantics are decided (below); the recorder's
-location, format and contents are open decisions. Built after the WBC and the sim are on main; the sim is the
-first target, the robot the same code with no reset.
+Status (2026-11-21): draft; **recording deferred** until the teleop integration (WBC + sim + Quest) is done. The
+operator controls and the reset semantics are decided (below) and are built **now, as part of the integration**,
+without recording: Y/X enable/disable, A = reset (sim: the safe reset + AR re-anchor; robot: AR re-anchor only),
+B inert (the headset's 2 s hold still stops telemetry). Recording later adds "then record" to A and "stop" to the
+B tap, for the sim and the robot alike. The recorder's location, format and contents are open decisions.
 
 ## Goal
 
