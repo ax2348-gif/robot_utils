@@ -484,14 +484,16 @@ class QPController(Controller):
                 rows.append(("base_band", pad(np.vstack([Wy, -Wy]), 0),
                              np.array([vr[2] + max(cfg.k_band * (cfg.band_yaw - ey), 0.0),
                                        -vr[2] + max(cfg.k_band * (cfg.band_yaw + ey), 0.0)])))
-            # twist band: conv{0, octagon(v_ref, band_twist)} (may lag down to zero, not exceed by more); slack 1
-            if v_ref is not None:
-                verts = [np.zeros(2)] + [vr[:2] + cfg.band_twist / C8 * np.array([math.cos((k + 0.5) * math.pi / 4),
-                                                                                  math.sin((k + 0.5) * math.pi / 4)])
+            # twist band around the base's OWN reference twist v_des (= v_ref + the pose-reference correction):
+            # conv{0, octagon(v_des, band_twist)}: the base may lag it down to zero, but the EE task may push it at
+            # most band_twist beyond its reference (it never stops the base from tracking it); slack 1
+            if has_ref:
+                verts = [np.zeros(2)] + [v_des[:2] + cfg.band_twist / C8 * np.array([math.cos((k + 0.5) * math.pi / 4),
+                                                                                     math.sin((k + 0.5) * math.pi / 4)])
                                          for k in range(8)]
                 for n_, h0 in hull_halfplanes(verts):
                     rows.append(("base_band", pad((n_ @ Wxy).reshape(1, nv), 1), np.array([h0])))
-                lo, hi = min(0.0, vr[2] - cfg.band_omega), max(0.0, vr[2] + cfg.band_omega)
+                lo, hi = min(0.0, v_des[2] - cfg.band_omega), max(0.0, v_des[2] + cfg.band_omega)
                 rows.append(("base_band", pad(np.vstack([Wy, -Wy]), 1), np.array([hi, -lo])))
 
         def solve_one(base_fixed: Optional[np.ndarray]):
