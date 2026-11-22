@@ -1,6 +1,7 @@
 """The WBC's control-tick timing (docs/wbc.md "Control tick timing"): every tick's period and compute time measured;
-overruns (> 1.5 dt) and late ticks (> 3 dt) counted; a late tick disarms ("control tick overrun: N ms"); the arm
-command integrated over the measured period clamped to [dt, 3 dt]. Lockstep on a hand-advanced clock against the
+overruns (> 1.5 dt) and late ticks (> Config.late_tick, 0.1 s) counted; a late tick disarms ("control tick overrun:
+N ms"), one between 3 dt and late_tick is only an overrun; the arm command integrated over the measured period clamped
+to [dt, 3 dt]. Lockstep on a hand-advanced clock against the
 fake arm, and once in real time with a stalled controller."""
 import json
 import socket
@@ -87,16 +88,20 @@ def rig(model):
 def test_a_late_tick_disarms_and_is_counted(rig):
     node = rig.node
     rig.armed_and_moving()
-    late0 = node.tick["late"]
+    assert node.cfg.late_tick == 0.1
+    late0, o0 = node.tick["late"], node.tick["overruns"]
     rig.target(*rig.goal)
-    rig.step(1, dt=0.045)                                     # 45 ms since the previous tick (> 3 dt)
-    assert not node.armed and node.disarm_reason == "control tick overrun: 45 ms"
-    assert node.tick["late"] == late0 + 1 and node.tick["overruns"] >= 1
-    assert any(e["msg"] == "DISARMED: control tick overrun: 45 ms" for e in node.events.list())
+    rig.step(1, dt=0.045)                                     # 45 ms: beyond 3 dt but within late_tick: an overrun only
+    assert node.armed and node.tick["late"] == late0 and node.tick["overruns"] == o0 + 1
+    rig.target(*rig.goal)
+    rig.step(1, dt=0.12)                                      # 120 ms since the previous tick (> late_tick)
+    assert not node.armed and node.disarm_reason == "control tick overrun: 120 ms"
+    assert node.tick["late"] == late0 + 1 and node.tick["overruns"] == o0 + 2
+    assert any(e["msg"] == "DISARMED: control tick overrun: 120 ms" for e in node.events.list())
     r = rig.row()
-    assert r["armed"] == 0.0 and r["late_ticks"] == late0 + 1 and abs(r["tick_period"] - 45.0) < 1e-6
+    assert r["armed"] == 0.0 and r["late_ticks"] == late0 + 1 and abs(r["tick_period"] - 120.0) < 1e-6
     st = node.state_dict()["tick"]
-    assert st["late"] == late0 + 1 and st["max_period_ms"] >= 45.0 and st["compute_ms"] > 0
+    assert st["late"] == late0 + 1 and st["max_period_ms"] >= 120.0 and st["compute_ms"] > 0
     q = node.q_cmd["arm"].copy()
     for _ in range(5):                                        # the client still sends its press: never re-armed
         rig.target(*rig.goal)
@@ -151,7 +156,7 @@ def test_the_joint_damper_uses_the_measured_step(model):
 
 
 def test_real_time_a_stalled_tick_disarms(model):
-    """The real control loop: one controller step stalls 60 ms; the next tick is late and disarms."""
+    """The real control loop: one controller step stalls 150 ms (> late_tick); the next tick is late and disarms."""
     d = tempfile.mkdtemp(prefix="wbcr")
     arm = FakeArm(d + "/arm.joint.sock")
     url, srv, th = serve(arm.app)
@@ -187,14 +192,14 @@ def test_real_time_a_stalled_tick_disarms(model):
         def slow_step(snap):
             if not stalled:
                 stalled.append(1)
-                time.sleep(0.06)
+                time.sleep(0.15)
             return inner(snap)
         node.ctl.step = slow_step
         wait_for(lambda: not node.armed, 2)
         assert node.disarm_reason.startswith("control tick overrun:"), node.disarm_reason
         ms = float(node.disarm_reason.split(":")[1].split("ms")[0])
-        assert 55 <= ms < 200, ms
-        assert node.tick["late"] >= 1 and node.tick["max_compute_ms"] >= 55
+        assert 145 <= ms < 400, ms
+        assert node.tick["late"] >= 1 and node.tick["max_compute_ms"] >= 145
         time.sleep(0.2)
         assert not node.armed                                  # the sender's old press never re-arms
     finally:
