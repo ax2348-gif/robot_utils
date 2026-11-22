@@ -346,27 +346,42 @@ def test_engagement_needs_fresh_robot_state_and_survives_no_estimator_reset():
     assert rig.core.status.state == "needs_release" and "estimator" in rig.core.status.reason
 
 
+def predicted_base(rob, dt):
+    """The stream row's base pose moved on by its commanded twist (base-frame vx, vy; yaw rate) for dt."""
+    vx, vy, w = rob.base_twist
+    v = F.rot_z(rob.base_yaw)[:2, :2] @ [vx, vy]
+    return F.PlanarFrame(rob.base_x + v[0] * dt, rob.base_y + v[1] * dt, rob.base_yaw + w * dt)
+
+
 def test_released_targets_ride_with_the_base_driven_by_the_stick():
-    """Released while the base drives under the stick: the world targets follow the base (the pose relative to the
-    base stays the command at release) and carry the base's rigid-body velocity at the EE as feedforward."""
+    """Released while the base drives under the stick: the world targets follow the base. The pose relative to the
+    base pose PREDICTED to when the WBC applies it (the row's age now - t_recv, plus ride_lead, by the commanded
+    twist) stays the command at release, so the target does not trail a moving base; the target carries the
+    base's rigid-body velocity at the EE as feedforward."""
     rig = Rig()
     c = rig.run(IDLE)
     rel0 = rig.rob.base.to_local(rig.rob.ee_p, rig.rob.ee_r)
     ee_cmd0 = rig.rob.ee_p.copy()
     vx, vy, w = 0.3, -0.1, 0.5
     rig.rob.base_twist = (vx, vy, w)
+    lead = rig.core.cfg.ride_lead
     for k in range(50):
         rig.frame(stick(IDLE, (0.3, 0.6), -0.5))
         rig.rob.base_x += 0.003                                  # the base moves (and the WBC's command with it)
         rig.rob.base_y += 0.001
         rig.rob.base_yaw += 0.005
         rig.rob.ee_p = rig.rob.ee_p + [0.003, 0.001, 0.0]        # never used while released
+        age = 0.02 if k % 2 else 0.0                             # every other command from a row 20 ms old
+        rig.rob.t_recv = rig.t - age
         c = rig.cmd()
         assert held(c) and c["base"]["mode"] == "commanded"
         e = ee_of(c)
-        rel = rig.rob.base.to_local(np.array(e["pos"]), F.matrix_from_quat(e["quat"]))
+        pe, re_ = np.array(e["pos"]), F.matrix_from_quat(e["quat"])
+        rel = predicted_base(rig.rob, age + lead).to_local(pe, re_)
         np.testing.assert_allclose(rel[0], rel0[0], atol=1e-9)
         np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+        # ahead of the row's own base pose by exactly the predicted motion (it is not the unpredicted pose)
+        assert np.linalg.norm(rig.rob.base.to_local(pe, re_)[0] - rel0[0]) > 0.5 * (age + lead) * 0.3
         # feedforward: v_base (world) + w x r, about z
         r = np.array(e["pos"]) - [rig.rob.base_x, rig.rob.base_y, 0]
         v = F.rot_z(rig.rob.base_yaw)[:2, :2] @ [vx, vy]
@@ -445,6 +460,33 @@ def test_engaged_sticks_integrate_an_offset_in_the_robot_frame_while_standing_st
     assert rig.core.hint == c["base"]["target"]                # exposed for the status line
 
 
+def test_engaged_target_moves_with_the_stick_offset():
+    """Engaged, standing, driving with the sticks (forward, left and a turn): the EE target moves with the stick
+    offset by the same planar rigid motion as the base hint (the hint without the offset to the hint with it), so
+    the target in the hint's frame stays the engagement command in the base's frame at engagement: the arm does not
+    fight the sticks. Without stick motion the target is the body-frozen one alone."""
+    rig = Rig()
+    rig.run(IDLE)
+    c = rig.run(GRIP)
+    ee0 = (rig.rob.ee_p.copy(), rig.rob.ee_r.copy())
+    rel0 = F.PlanarFrame(1.0, 2.0, 0.3).to_local(*ee0)
+    np.testing.assert_allclose(ee_of(c)["pos"], ee0[0], atol=1e-9)
+    for _ in range(60):
+        rig.frame(stick(GRIP, (0.5, 1.0), right_x=-1.0))
+    # the sticks back to rest for a frame: the target is computed before that frame's stick step, so while the
+    # sticks move it is one frame (10 ms of stick motion) behind the hint
+    c = rig.run(GRIP, n=1)
+    off = rig.core.offset
+    assert np.linalg.norm(off[:2]) > 0.2 and off[2] > 0.4
+    hx, hy, hyaw = hint_of(c)
+    np.testing.assert_allclose([hx, hy, hyaw], np.array([1.0, 2.0, 0.3]) + off, atol=1e-9)
+    e = ee_of(c)
+    rel = F.PlanarFrame(hx, hy, hyaw).to_local(np.array(e["pos"]), F.matrix_from_quat(e["quat"]))
+    np.testing.assert_allclose(rel[0], rel0[0], atol=1e-9)
+    np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+    assert np.linalg.norm(np.array(e["pos"]) - ee0[0]) > 0.2                  # it moved through the world
+
+
 def test_walking_and_sticks_combine():
     rig = Rig()
     rig.run(IDLE)
@@ -521,13 +563,17 @@ def test_target_datagrams_carry_the_estimator_epoch():
     assert rig.run(GRIP)["est_reset"] == 3
 
 
-def test_trigger_drives_the_gripper():
+def test_squeezing_the_trigger_closes_the_gripper():
+    """The headset's gripper intent follows the trigger (0 released .. 1 squeezed); the WBC's gripper is the opening
+    (0 closed .. 1 open): the command is 1 - the intent, engaged or not."""
     rig = Rig()
-    rig.run(IDLE)
+    assert ee_of(rig.run(IDLE))["gripper"] == pytest.approx(1.0)                # trigger released: open
     c = rig.run(replace(GRIP, right=replace(GRIP.right, trigger=0.7)))
-    assert ee_of(c)["gripper"] == pytest.approx(0.7)
+    assert ee_of(c)["gripper"] == pytest.approx(0.3)
+    c = rig.run(replace(GRIP, right=replace(GRIP.right, trigger=1.0)))
+    assert ee_of(c)["gripper"] == pytest.approx(0.0)                            # squeezed: closed
     c = rig.run(replace(IDLE, right=replace(IDLE.right, trigger=0.2)))     # independent of the clutch
-    assert ee_of(c)["gripper"] == pytest.approx(0.2)
+    assert ee_of(c)["gripper"] == pytest.approx(0.8)
     rig2 = Rig(Config(gripper=False))
     assert "gripper" not in ee_of(rig2.run(IDLE))
 
