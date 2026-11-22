@@ -1,4 +1,4 @@
-"""CLI: ``python -m robot_utils.collect run|cut`` (docs/collect.md)."""
+"""CLI: ``python -m robot_utils.collect run|cut|browse`` (docs/collect.md, docs/browse.md)."""
 from __future__ import annotations
 
 import argparse
@@ -45,10 +45,15 @@ def main(argv=None) -> int:
     c.add_argument("--pre-roll", type=float, default=0.0, help="s before t_start")
     c.add_argument("--post-roll", type=float, default=0.0, help="s after t_stop")
     c.add_argument("--episodes", help="comma-separated ids (default: all)")
+    from .browse.cli import add_parser as add_browse
+    add_browse(sub)
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if getattr(a, "verbose", False) else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if a.cmd == "browse":
+        from .browse.cli import run as run_browse
+        return run_browse(a)
     if a.cmd == "run":
         streams = [x for x in a.streams.split(",") if x.strip()]
         if a.teleop != "quest_teleop":

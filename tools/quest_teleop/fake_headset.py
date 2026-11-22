@@ -301,7 +301,74 @@ def demo_scenario() -> list:
             (8.5, unfocus), (8.51, refocus), (9.0, refocus), (9.01, newsession), (10.0, newsession)]
 
 
-SCENARIOS: dict[str, Callable[[], list]] = {"demo": demo_scenario, "idle": lambda: [(0.0, HeadsetState())]}
+def _press(keys: list, t: float, s: HeadsetState, hand: str, button: str, hold: float = 0.3) -> HeadsetState:
+    """Append a press of ``hand``'s ``button`` (``primary`` / ``secondary``) at ``t`` held ``hold`` s; returns ``s``."""
+    down = replace(s, **{hand: replace(getattr(s, hand), **{button: True})})
+    keys += [(t, s), (t + 0.01, down), (t + hold, down), (t + hold + 0.01, s)]
+    return s
+
+
+def episodes_scenario() -> list:
+    """Armed motion and episodes for recording tests (docs/collect.md): per episode Y (arm), A (start; the sim
+    resets, which disarms), Y again, engage the right grip, reach / twist / squeeze, walk 0.4 m, turn the head,
+    release, drive with the left stick, B tap (stop, kept). Three episodes, the third aborted with X mid-reach."""
+    keys: list = []
+    s = HeadsetState()
+    t = 0.0
+    keys.append((t, s))
+    for k in range(3):
+        sign = 1.0 if k % 2 == 0 else -1.0
+        t += 1.5
+        _press(keys, t, s, "left", "secondary")                 # Y: arm
+        t += 1.5
+        _press(keys, t, s, "right", "primary")                  # A: start the episode (the sim resets: disarmed)
+        t += 5.0
+        _press(keys, t, s, "left", "secondary")                 # Y: arm again after the reset
+        t += 1.2
+        grip = replace(s, right=replace(s.right, grip=1.0))
+        keys += [(t, s), (t + 0.01, grip)]
+        t += 1.0
+        reach = replace(grip, right=replace(grip.right, pos=(0.50, -0.2 + 0.10 * sign, -0.22),
+                                            rpy=(0.3 * sign, -0.2, 0.25 * sign), trigger=0.9))
+        keys.append((t, grip))
+        t += 3.0
+        keys.append((t, reach))
+        if k == 2:                                              # X mid-episode: disable, the episode is aborted
+            t += 0.8
+            _press(keys, t, reach, "left", "primary", hold=0.5)
+            t += 1.5
+            keys.append((t, replace(reach, right=replace(reach.right, grip=0.0))))
+            s = HeadsetState()
+            t += 0.5
+            keys.append((t, s))
+            continue
+        walk = replace(reach, head_pos=(0.4, 0.0, 0.0), right=replace(reach.right, pos=(0.90, -0.2 + 0.1 * sign, -0.22)))
+        t += 3.0
+        keys.append((t, walk))
+        turn = replace(walk, head_yaw=0.35 * sign)
+        t += 2.0
+        keys.append((t, turn))
+        t += 0.8
+        release = replace(turn, right=replace(turn.right, grip=0.0, trigger=0.0))
+        keys += [(t, turn), (t + 0.01, release)]
+        t += 0.8
+        drive = replace(release, left=replace(release.left, stick=(0.0, 0.8)))
+        keys += [(t, release), (t + 0.01, drive)]
+        t += 1.5
+        keys += [(t, drive), (t + 0.01, release)]
+        t += 0.8
+        _press(keys, t, release, "right", "secondary")          # B tap: stop, kept
+        t += 1.0
+        s = replace(release, head_pos=(0.0, 0.0, 0.0), head_yaw=0.0,
+                    right=replace(release.right, pos=HandState().pos, rpy=(0.0, 0.0, 0.0)))
+        keys += [(t, release), (t + 1.0, s)]
+        t += 1.0
+    keys.append((t + 2.0, s))
+    return keys
+
+
+SCENARIOS: dict[str, Callable[[], list]] = {"demo": demo_scenario, "idle": lambda: [(0.0, HeadsetState())],
+                                            "episodes": episodes_scenario}
 
 
 # -- the server ------------------------------------------------------------------------------------

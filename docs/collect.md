@@ -138,6 +138,8 @@ rows, by_type, dropped (the sum of the records' own dropped counts), time_fields
 | | `sent` | `t_send` |
 | | `event` | `t` |
 
+Reviewing sessions and episodes (replay, plots, 3D, video export): `python -m robot_utils.collect browse`, docs/browse.md.
+
 Training conversion (e.g. LeRobot), the arm's `t_meas` latency compensation and interpolation onto a master
 clock are offline steps on these files, not part of the cut.
 
