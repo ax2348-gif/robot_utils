@@ -131,6 +131,10 @@ class Config:
                                     # stalls on the Pi; the arm's own 30 ms watchdog and the swerve's 0.25 s remain the motor-level stops)
     arm_stale: float = 0.2          # s without an arm joint-channel state while enabled -> fault (Pi arm-loop gaps of
                                     # 105-121 ms were measured under camera load: docs/realtime.md)
+    # the control process (docs/wbc.md "Processes"): each watches the other's heartbeat in shared memory
+    ctl_heartbeat: float = 0.2      # s without the control process's heartbeat -> the server faults (disable, leases
+                                    # released); the operator restarts the node
+    srv_heartbeat: float = 0.5      # s without the server process's heartbeat -> the control process disarms and holds
 
     @property
     def dt(self) -> float:

@@ -67,6 +67,7 @@ def fetch_urdf(source: str) -> tuple[str, str]:
 
 class WbcModel:
     def __init__(self, urdf: str, ees: tuple = (EESpec(),), margin: float = LIMIT_MARGIN):
+        self.urdf, self.ee_specs, self.margin = urdf, tuple(ees), margin    # to rebuild it in the control process
         full = pin.buildModelFromXML(urdf)
         for j in BASE_JOINTS:
             if not full.existJointName(j):
