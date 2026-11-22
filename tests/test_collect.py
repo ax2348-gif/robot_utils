@@ -119,6 +119,17 @@ def test_index_orders_and_skips(tmp_path):
 
 # -- recording -----------------------------------------------------------------------------------
 
+def test_batching_only_the_row_streams(tmp_path):
+    s = Session("http://bot", tmp_path, "t", ["camera/color", "arm/stream", "wbc/stream", "quest_teleop/oplog/stream",
+                                              "camera/stream?streams=depth&mode=raw"], batch_ms=50)
+    params = {sp.name: sp.params for sp in s.specs}
+    assert params["arm"] == {"batch_ms": "50"} and params["wbc"] == {"batch_ms": "50"}
+    assert "batch_ms" not in params["camera.color"] and params["quest_teleop.oplog"] == {}
+    assert "batch_ms" not in params["camera.stream.streams.depth.mode.raw"]
+    s = Session("http://bot", tmp_path, "t", ["arm/stream"], session_name="b")       # the default: every row alone
+    assert s.specs[0].params == {}
+
+
 def test_records_streams_and_indexes_episodes(robot, tmp_path):
     run = Running(robot, tmp_path, start_teleop=True)
     assert ("task", {"text": "pick the cup"}) in robot.calls and ("start", None) in robot.calls

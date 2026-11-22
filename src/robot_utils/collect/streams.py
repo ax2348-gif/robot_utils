@@ -59,6 +59,10 @@ class StreamSpec:
             raise ValueError(f"stream spec {spec!r}: a camera spec is <node>/<stream>")
         return cls(spec, f"{node}.{cam}", f"{node}/stream", {"streams": cam, "mode": "jpeg", "every": "true"})
 
+    def is_rows_stream(self) -> bool:
+        """A node's own ``<node>/stream`` of tick rows (arm, swerve, estimator, wbc): it takes ``batch_ms``."""
+        return not self.params and self.path.count("/") == 1 and self.path.endswith("/stream")
+
     def url(self, robot: str) -> str:
         return f"{robot.rstrip('/')}/nodes/{self.path}"
 

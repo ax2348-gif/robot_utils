@@ -31,6 +31,10 @@ def main(argv=None) -> int:
     r.add_argument("--teleop", default="quest_teleop",
                    help="the quest_teleop node instance (its /task, /start, /stop, /eventlog; the default streams' "
                         "operator stream becomes <teleop>/oplog/stream)")
+    r.add_argument("--batch-ms", type=float, default=50.0,
+                   help="the row streams (<node>/stream: arm, swerve, estimator, wbc) in batches this long: the same "
+                        "rows and timestamps, far fewer records and packets on the robot (0 = every row on its own, "
+                        "e.g. for a policy run that consumes them live)")
     r.add_argument("--start-teleop", action="store_true", help="POST quest_teleop/start after the task")
     r.add_argument("--stop-teleop", action="store_true", help="POST quest_teleop/stop on Ctrl-C")
     r.add_argument("--rotate", type=_size, default=512 << 20, help="rotate each stream's file at this size")
@@ -53,7 +57,7 @@ def main(argv=None) -> int:
         streams = [x for x in a.streams.split(",") if x.strip()]
         if a.teleop != "quest_teleop":
             streams = [f"{a.teleop}/oplog/stream" if x.strip() == OPLOG_SPEC else x for x in streams]
-        s = Session(a.robot, a.out, a.task, streams, teleop=a.teleop,
+        s = Session(a.robot, a.out, a.task, streams, teleop=a.teleop, batch_ms=a.batch_ms,
                     start_teleop=a.start_teleop, stop_teleop=a.stop_teleop, rotate_bytes=a.rotate,
                     read_timeout=a.read_timeout, status_every=a.status_every, settle=a.settle,
                     session_name=a.name)

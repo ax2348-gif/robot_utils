@@ -22,8 +22,8 @@ ABORTS (POST /estop to the WBC, the arm and the swerve at once, then checks each
 
 - measured motion: any arm joint off its snapshot by > --q-drift or faster than --qd-max; the gripper gap off by
   > --gap-drift (outside the enable window, when the arm's first enable runs its gripper check); any wheel's
-  drive speed > --drive-vel or drive position off by > --drive-pos, steer angle off by > --steer or steer
-  speed > --steer-vel; the estimator's x / y off by > --xy or theta_odom off by > --steer, or speed > --drive-vel;
+  drive speed > --drive-vel or drive position off by > --drive-pos, steer angle off by > --steer (steer speed
+  is only reported: the robot's reads noise); the estimator's x / y off by > --xy or theta_odom off by > --steer, or speed > --drive-vel;
 - commanded motion (before it becomes motion): the WBC armed, its base twist or the swerve's requested /
   commanded twist non-zero (> --cmd-eps), the arm's commanded joints off the snapshot by > --q-drift while servoing;
 - a watched stream silent for > --stale s, or an estimator reset.
@@ -115,6 +115,8 @@ class Watchdog:
         self.est_reset = None
         self.estop_seen = {}
         self.slack = a.baseline_slack                   # measured limits x this until the baseline is done
+        self.arm_slack = False                          # from the baseline's end until the WBC holds the arm
+        self.arm_engage = False                         # the engage window after /start
         self.raised: dict = {}                          # signal -> threshold raised over the baseline noise
 
     # one signal: deviation `dev` against threshold `lim`; measured ones debounced
@@ -122,7 +124,13 @@ class Watchdog:
         if not math.isfinite(dev):
             return
         dev = abs(dev)
-        lim = self.raised.get(name, lim) * (self.slack if measured else 1.0)
+        slack = self.slack
+        if measured and self.arm_slack and name.startswith("arm."):
+            slack = self.a.baseline_slack            # the arm may float until the WBC holds it
+        lim = self.raised.get(name, lim) * (slack if measured else 1.0)
+        if measured and self.arm_engage and name.startswith("arm.q"):
+            # the arm's engage twitch (off -> servoing: j4 1.1 deg at 1.7 rad/s within 0.1 s, 2026-11-22)
+            lim = max(lim, self.a.engage_qd if name.startswith("arm.qd") else self.a.engage_q)
         if dev > self.peak.get(name, 0.0):
             self.peak[name] = dev
         if dev > lim:
@@ -165,8 +173,9 @@ class Watchdog:
                     q0 = self._ref(f"arm.q{j}", q)
                     self._chk(f"arm.q{j}", q - q0, a.q_drift)
                     self._chk(f"arm.qd{j}", g(f"j{j}_qd"), a.qd_max)
-                    if g("servo") >= 0.5:
-                        self._chk(f"arm.q_cmd{j}", g(f"j{j}_q_cmd") - q0, a.q_drift, measured=False)
+                    if g("servo") >= 0.5 and not self.arm_engage:   # disarmed, held: the command must not change
+                        qc = g(f"j{j}_q_cmd")
+                        self._chk(f"arm.q_cmd{j}", qc - self._ref(f"arm.q_cmd{j}", qc), a.q_drift, measured=False)
                 gap = g("g_gap")
                 if self.grip_ignore:
                     self.snap["arm.gap"] = gap
@@ -185,7 +194,9 @@ class Watchdog:
                         self._chk(f"swerve.{m}.drive_pos", p - self._ref(f"swerve.{m}.drive_pos", p), a.drive_pos)
                         s = g(f"{m}_steer_angle")
                         self._chk(f"swerve.{m}.steer", wrap(s - self._ref(f"swerve.{m}.steer", s)), a.steer)
-                        self._chk(f"swerve.{m}.steer_vel", g(f"{m}_steer_vel"), a.steer_vel)
+                        # steer_vel is reported only: on the robot it reads +-0.3-0.5 rad/s of noise with spikes
+                        # to 6 rad/s while the angle holds to 0.0004 rad (2026-11-22); the angle catches real steering
+                        self._chk(f"swerve.{m}.steer_vel", g(f"{m}_steer_vel"), float("inf"))
                 if g("estop") >= 0.5:
                     self.estop_seen["swerve"] = True
             elif node == "estimator":
@@ -241,7 +252,9 @@ class Watchdog:
             for n in WATCHED:
                 last = self.last[n]
                 ref = last if last is not None else t_start + 2.0   # 2 s to connect
-                if now - ref > self.a.stale:
+                # the arm node's enable (its gripper check) holds its loop: 793 ms seen on the robot (2026-11-22)
+                lim = max(self.a.stale, 1.5) if (n == "arm" and self.grip_ignore) else self.a.stale
+                if now - ref > lim:
                     self.trip("stale", f"{n} stream silent {now - ref:.2f} s")
 
     def start(self):
@@ -334,13 +347,15 @@ def main():
     ap.add_argument("--drive-vel", type=float, default=0.005, help="m/s, wheel speed / estimator speed")
     ap.add_argument("--drive-pos", type=float, default=0.002, help="m, wheel travel")
     ap.add_argument("--steer", type=float, default=0.0087, help="rad, steer angle / theta_odom off its snapshot")
-    ap.add_argument("--steer-vel", type=float, default=0.1, help="rad/s, steer speed")
     ap.add_argument("--xy", type=float, default=0.003, help="m, estimator position off its snapshot")
     ap.add_argument("--cmd-eps", type=float, default=1e-3, help="any |commanded twist| above this trips")
     ap.add_argument("--noise-factor", type=float, default=3.0,
                     help="a measured threshold below this x its baseline peak is raised to it (reported)")
     ap.add_argument("--baseline-slack", type=float, default=5.0,
                     help="during the baseline (noise not yet known) measured limits are this x larger")
+    ap.add_argument("--engage-window", type=float, default=1.0, help="s after /start with the engage limits")
+    ap.add_argument("--engage-q", type=float, default=0.052, help="rad, arm joint off its snapshot in the window (3 deg)")
+    ap.add_argument("--engage-qd", type=float, default=2.5, help="rad/s, arm joint speed in the window")
     ap.add_argument("--debounce", type=int, default=2, help="consecutive measured rows over a threshold")
     ap.add_argument("--stale", type=float, default=0.5, help="s of silence on a watched stream")
     ap.add_argument("--out", default=None, help="the verdict JSON (default ~/soak/<time>.json)")
@@ -392,11 +407,12 @@ def main():
         if sleep_watch(a.baseline):
             raise SystemExit
         wd.taking_snap = False
+        wd.arm_slack = True
         wd.slack = 1.0
         verdict["baseline_peak"] = dict(wd.peak)
         lims = [(r"arm\.q\d$", a.q_drift), (r"arm\.qd\d$", a.qd_max), (r"arm\.gap$", a.gap_drift),
                 (r"swerve\.\w+\.drive_vel$", a.drive_vel), (r"swerve\.\w+\.drive_pos$", a.drive_pos),
-                (r"swerve\.\w+\.steer$", a.steer), (r"swerve\.\w+\.steer_vel$", a.steer_vel),
+                (r"swerve\.\w+\.steer$", a.steer),
                 (r"est\.[xy]$", a.xy), (r"est\.theta_odom$", a.steer), (r"est\.speed$", a.drive_vel)]
         for k, pk in wd.peak.items():
             base = next((v for pat, v in lims if re.match(pat, k)), None)     # measured signals only
@@ -438,9 +454,19 @@ def main():
         log(f"{a.teleop} up (headset {'none' if a.no_headset else a.scenario + ' on :' + str(a.fake_port)}); "
             "POST /start: the WBC enables (arm + swerve hold)")
         wd.grip_ignore = True
+        wd.arm_engage = True                             # the arm engages inside /start (before it returns)
         call(a.teleop, "POST", "/task", {"text": "wbc soak (no motion)"})
         call(a.teleop, "POST", "/start", timeout=30.0)
         started = True
+        wd.arm_slack = False
+        for k in [k for k in list(wd.snap) if k.startswith("arm.q_cmd")]:   # the held command from here
+            wd.snap.pop(k, None)
+        if sleep_watch(a.engage_window):
+            raise SystemExit
+        for k in [k for k in list(wd.snap) if k.startswith("arm.q")]:   # the held pose and command after the engage
+            wd.snap.pop(k, None)
+        wd.arm_engage = False
+        log(f"engage window over: arm peaks {({k: round(v, 4) for k, v in wd.peak.items() if k.startswith('arm.q')})}")
         threading.Timer(a.enable_window, lambda: setattr(wd, "grip_ignore", False)).start()
 
         # 4. the soak

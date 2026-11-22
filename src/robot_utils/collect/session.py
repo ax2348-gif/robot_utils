@@ -44,12 +44,16 @@ class Session:
                  start_teleop: bool = False, stop_teleop: bool = False, rotate_bytes: int = 512 << 20,
                  read_timeout: float = 10.0, status_every: float = 5.0, settle: float = 1.0,
                  session_name: Optional[str] = None, status_stream=None, event_page: int = 1000,
-                 teleop: str = TELEOP):
+                 teleop: str = TELEOP, batch_ms: float = 0.0):
         self.robot = robot.rstrip("/")
         self.teleop = teleop                      # the quest_teleop node instance (its /task, /start, oplog)
         self.oplog_spec = f"{teleop}/oplog/stream"
         self.task = task
         self.specs = [StreamSpec.parse(s) for s in streams]
+        if batch_ms > 0:                          # recording only: rows in batches (same rows, same timestamps)
+            for sp in self.specs:
+                if sp.is_rows_stream() and "batch_ms" not in sp.params:
+                    sp.params["batch_ms"] = f"{batch_ms:g}"
         names = [s.name for s in self.specs]
         if len(set(names)) != len(names):
             raise ValueError(f"two streams map to the same file name: {names}")

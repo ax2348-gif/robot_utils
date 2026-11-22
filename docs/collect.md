@@ -29,6 +29,7 @@ python -m robot_utils.collect cut ~/data/20261121-143000 --pre-roll 0.5 --post-r
 | `--out` | (required) | parent directory; the session is `<out>/<YYYYMMDD-HHMMSS>` (`--name` overrides) |
 | `--task` | (required) | `POST /nodes/quest_teleop/task {"text"}` before anything else: the task of the next episodes |
 | `--streams` | `camera/color,wrist_camera/color,arm/stream,swerve/stream,estimator/stream,wbc/stream,quest_teleop/oplog/stream` | what to record |
+| `--batch-ms` | `50` | the row streams (`<node>/stream`: arm, swerve, estimator, wbc) in batches this long: the same rows and timestamps, far fewer records, packets and wakeups on the robot (measured 2026-11-22: the Pi near its CPU limit with the full stack plus a recorder). `0` = every row on its own, for a consumer that acts on them live (a policy run) |
 | `--start-teleop` | off | `POST /nodes/quest_teleop/start` once recording runs (a 409 ends the session with the WBC's reason) |
 | `--stop-teleop` | off | `POST /nodes/quest_teleop/stop` on Ctrl-C (the node aborts an open episode itself) |
 | `--rotate` | `512M` | start the stream's next file past this size |
