@@ -43,8 +43,11 @@ class Config:
     reach: float = 0.0              # m, the nominal shoulder-to-TCP reach (0 = from the model, ~0.68 m)
     reach_influence: float = 0.80   # the reach damper acts beyond this share of the nominal reach
     xi_reach: float = 0.3           # m/s, the reach damper's gain (approach speed at the influence distance)
-    w_min: float = 0.0008           # arm-only manipulability (Yoshikawa) floor (~a tenth of the home pose's 0.005)
-    w_influence: float = 0.002      # its damper acts below this
+    # arm-only translational manipulability w = sqrt(det(Jp Jp^T)) (m^3/rad^3; start pose ~0.011; 10 % of the joint
+    # range below ~0.003): w_min > 0 turns on a floor constraint (0 = off, the default: reach and joint limits bound
+    # the workspace); below w_influence the arm gets the adaptive damping (lm_singular)
+    w_min: float = 0.0
+    w_influence: float = 0.003
     xi_manip: float = 2.0           # 1/s: dw/dt >= -xi_manip w_influence (w - w_min) / (w_influence - w_min)
     lm_singular: float = 0.02       # adaptive damping on the arm, x (1 - w / w_influence)^2 below w_influence
     resync: float = 0.25            # rad: |q_meas - q_cmd| beyond this (any joint) resyncs the integration (at most
@@ -79,7 +82,7 @@ class Config:
     k_posture: float = 1.0          # 1/s
     tie_speed: float = 0.05         # m/s: posture and manipulability act fully at this desired EE speed, scaled
                                     # down below it (0 when the task is satisfied: no self-motion)
-    w_manip: float = 2e-4           # arm-only manipulability gradient
+    w_manip: float = 0.0            # pull toward higher manipulability (objective; 0 = off)
     k_heading: float = 2.0          # 1/s, base heading hint
     k_base_pose: float = 2.0        # 1/s, base pose hint / commanded pose
     # inputs
@@ -124,8 +127,8 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
             raise ValueError(f"{k} must be a positive finite number")
     if not (math.isfinite(c.reach) and c.reach >= 0):
         raise ValueError("reach must be >= 0 (0 = from the model)")
-    if not (0 < c.reach_influence < c.reach_fraction <= 1.0) or not (0 < c.w_min < c.w_influence):
-        raise ValueError("need 0 < reach_influence < reach_fraction <= 1 and 0 < w_min < w_influence")
+    if not (0 < c.reach_influence < c.reach_fraction <= 1.0) or not (0 <= c.w_min < c.w_influence):
+        raise ValueError("need 0 < reach_influence < reach_fraction <= 1 and 0 <= w_min < w_influence")
     if c.wheel_speed > WHEEL_SPEED_HARD:
         raise ValueError(f"wheel_speed beyond the wheels' limit {WHEEL_SPEED_HARD} m/s")
     if c.hold_timeout <= c.ff_timeout:

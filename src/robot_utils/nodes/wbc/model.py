@@ -183,9 +183,10 @@ class WbcModel:
         return np.array(self.data.oMi[j].translation), np.array(J)
 
     def arm_manipulability(self, q: np.ndarray, ee: str) -> float:
-        """Yoshikawa sqrt(det(J J^T)) of the arm alone (its joints' columns; the base excluded)."""
+        """Translational Yoshikawa manipulability sqrt(det(Jp Jp^T)) of the arm alone (m^3 per rad^3: the position
+        rows of its joints' columns; orientation rows left out so the units don't mix; the base excluded)."""
         self.update(q)
-        J = self.jacobian(q, ee)[:, self.arm_v[ee]]
+        J = self.jacobian(q, ee)[:3, self.arm_v[ee]]
         return float(math.sqrt(max(np.linalg.det(J @ J.T), 0.0)))
 
     def manipulability_gradient(self, q: np.ndarray, ee: str, h: float = 1e-5) -> tuple[float, np.ndarray]:

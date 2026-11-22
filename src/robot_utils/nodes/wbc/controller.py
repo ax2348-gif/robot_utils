@@ -378,7 +378,7 @@ class QPController(Controller):
             if cfg.w_manip > 0 and mu > 1e-12:
                 c[iv] -= tie * cfg.w_manip * (g / mu)
             # manipulability floor: grad w . q' >= -eta (w - w_min) / (w_i - w_min)
-            if mu < cfg.w_influence:
+            if cfg.w_min > 0 and mu < cfg.w_influence:
                 rhs = cfg.xi_manip * cfg.w_influence * (mu - cfg.w_min) / (cfg.w_influence - cfg.w_min)
                 # a limit only stops motion, never starts it: standing still is always allowed (rhs >= 0), and
                 # so is what the joint box forces (braking)
