@@ -183,14 +183,16 @@ frame; the base pose and estimator reset id used; the target/chunk id and `seq` 
   head part stays charged). Today the charge also gates sticks: 0.1–0.15 m/s never starts the base from rest
   (~35 % of stick travel). Tests: full stick from rest (released, engaged), sway still suppressed while the stick
   drives, the charge still applying to EE-driven assistance.
-- A pose band without a heading reference can trap the EE off target (the base turned 0.5 rad, joint 1 at its
-  limit, the band only allowing motion back toward the reference: 27 mm residual). The Quest client always sends a
-  heading; pose-only callers would hit it.
+- **The base pose reference is (x, y, theta) as one unit** (the owner's design: "pose" always meant x, y, theta).
+  Replace the hint's separate `pose` {x, y} + `heading` {yaw | face} with one base pose reference; a reference
+  without theta is refused (not defaulted to the current heading); the `face` options go (never in the design).
+  Found because a pose-only band could trap the EE off target (the base turned 0.5 rad, joint 1 at its limit,
+  27 mm residual). The Quest client always sends both, so teleop is unaffected until then.
 - `PoseHint.weight` / `HeadingHint.weight` are parsed but unused (the base weight is `w_base_ref` x `arm_vs_base`).
 - Client: with the sticks moving, the engaged EE target uses the previous frame's stick offset (`_track` before
   `_sticks` in body_frozen.py; ~4.5 mm at full stick): reorder.
-- A horizontal 15 cm hand circle at 1 Hz starts the base (the arm at its 2 rad/s joint caps): legitimate assist,
-  but worth watching on the robot.
+- Expected, not an issue: a horizontal 15 cm hand circle at 1 Hz starts the base (the arm at its 2 rad/s joint
+  caps cannot produce that EE speed: the base assists, as designed); the vertical circle stays within the arm.
 
 
 - The second research pass on streaming interfaces (UR `servoL` lookahead/gain, Franka's Cartesian streaming, MoveIt
