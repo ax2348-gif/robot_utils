@@ -47,21 +47,20 @@ from ..common.locks import LockStore, describe as describe_locks
 from ..common import realtime
 from ..common.server import EventLog
 from . import config as C
-from . import queries as Q
 from .bus import ArmBus, BusError, ReadLate, ReadMiss
 from .config import N
-from .gripper import Contact, Gripper, check_gripper
+from .gripper import Contact, Gripper
 from .gripper import free as gripper_free
 from .gripper import holding as gripper_holding
 from .jam import JAM_RESPONSES, JamConfig, JamDetector  # noqa: F401  (JAM_RESPONSES re-exported)
 from .jam import updated as jam_updated
 from .kin import ArmKinematics, pose_error, pose_public
-from .motion import PlanError, Trajectory
+from .motion import Trajectory
 from .planner import Planner
+from .requests import ENGAGE_LIMIT_TOL, STOW_NEAR, TRACK_IK_ITER, TRACK_MAX_JUMP, ArmRequests  # noqa: F401
 from .stream import JointStream, StreamConfig
 from .telemetry import COL, FIELD_DOC, JAC_UNITS, PHASES, UNITS  # noqa: F401  (re-exported: server, models, tests)
 from .telemetry import FIELDS, JAC_FIELDS, SOURCES, STATES, row_dict, tick_row
-from .telemetry import tracking as tracking_of_row
 
 log = logging.getLogger(__name__)
 
@@ -80,12 +79,8 @@ LATENCY_MARGIN_WARN = 0.001   # s between the p99 reply latency and the tick per
 LATENCY_WARN_EVERY = 60.0     # replies later than one tick are waited for one more (at most one warning a minute)
 LATE_WARN = 0.08              # s between ticks reported as an event (the motors' own 100 ms watchdog
                               # protects them: they drop to damping and report it, which faults)
-ENGAGE_LIMIT_TOL = math.radians(3.0)   # servoing may start with a joint this far outside its limits
 ENC_MISMATCH_ENABLE = 0.05    # rad between output encoder and motor feedback that refuses enable
 PLAN_DRIFT = 0.02             # rad the arm (measured) may move while a motion is planned
-TRACK_IK_ITER = 30            # the Quest teleop's per-command IK iterations (warm-started)
-TRACK_MAX_JUMP = math.radians(20.0)    # a track goal this far (any joint) from the measured pose is not taken (use servo)
-STOW_NEAR = math.radians(3.0)  # every joint this close to home: stow turns the motors off at once
 SLOW_TICK = 0.015             # s between ticks counted as an overrun
 ENABLE_TIMEOUT = 8.0          # s a POST /enable waits for initialization
 CONNECT_RETRY_S = 2.0
@@ -147,8 +142,9 @@ def finite(v):
     return v
 
 
-class ArmNode(JointStream):
+class ArmNode(JointStream, ArmRequests):
     dt = DT
+    warm_planner = True             # the control process plans nothing (its server process does)
 
     def __init__(self, bus_factory: Callable[[], ArmBus], profile: str = C.DEFAULT_PROFILE,
                  settings: Optional[C.NodeSettings] = None, hub: Optional[RowHub] = None,
@@ -203,6 +199,7 @@ class ArmNode(JointStream):
         self.read_misses = 0
         self.misses_by_motor: dict = {}
         self._lat: deque = deque(maxlen=LATENCY_WINDOW)   # s, complete reads only
+        self._tick_time: deque = deque(maxlen=LATENCY_WINDOW)   # (wall s, thread CPU s) per tick
         self._lat_n = 0
         self._lat_reported = False
         self._lat_warn_t = -math.inf
@@ -308,7 +305,27 @@ class ArmNode(JointStream):
             if self._base == "connecting" and now >= self._connect_at:
                 self._connect()
             return
+        w0, c0 = time.perf_counter(), time.thread_time()
         self.tick()
+        self._tick_time.append((time.perf_counter() - w0, time.thread_time() - c0))
+
+    def tick_time(self) -> Optional[dict]:
+        """How long the last LATENCY_WINDOW ticks took (ms): wall, on the CPU (this thread's CPU time: Python
+        running, i.e. holding the GIL, or native code) and off it (wall minus CPU: waiting for the GIL, for the bus,
+        or preempted), or None with too few."""
+        try:
+            a = np.array(list(self._tick_time), dtype=float) * 1e3
+        except RuntimeError:          # appended to meanwhile
+            return None
+        if len(a) < 50:
+            return None
+        w, c = a[:, 0], a[:, 1]
+        off = np.maximum(w - c, 0.0)
+        r = lambda v: round(float(v), 3)   # noqa: E731
+        return {"n": int(len(a)), "wall_p50_ms": r(np.percentile(w, 50)), "wall_p99_ms": r(np.percentile(w, 99)),
+                "wall_max_ms": r(w.max()), "cpu_p50_ms": r(np.percentile(c, 50)), "cpu_p99_ms": r(np.percentile(c, 99)),
+                "off_cpu_p50_ms": r(np.percentile(off, 50)), "off_cpu_p99_ms": r(np.percentile(off, 99)),
+                "off_cpu_max_ms": r(off.max())}
 
     def _connect(self) -> None:
         try:
@@ -322,7 +339,8 @@ class ArmNode(JointStream):
                     pass
                 raise
             self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
-            Planner.warm(self.kin)          # start the planner process now, not on the first plan
+            if self.warm_planner:
+                Planner.warm(self.kin)      # start the planner process now, not on the first plan
             self._base, self.error = "uninitialized", None
             self._lat.clear()
             self._lat_reported = False      # report the new connection's reply latency
@@ -400,9 +418,13 @@ class ArmNode(JointStream):
         if req is not None and req.get("result") is None:
             self._do_enable(req)
             return
+        self._pre_control()
         if self.motors_on:
             self._control(now, r)
         self._publish(now, dt_tick, r)
+
+    def _pre_control(self) -> None:
+        """Right before the command (control process: the goals that arrived during the read)."""
 
     def _stale_warn(self, now: float, age: float, missing: list) -> None:
         """Control thread: a gap in the readings is nearing the fault (STALE_ON): say so, at most
@@ -513,17 +535,6 @@ class ArmNode(JointStream):
             raise RequestError(409, f"{names[i]}: output encoder {math.degrees(qo):+.1f}° and motor feedback "
                                     f"{math.degrees(qm):+.1f}° disagree by {math.degrees(diff[i]):.1f}°: "
                                     "power-cycle the arm; not enabling")
-
-    def _limit_problem(self, q) -> Optional[str]:
-        """Why servoing must not start from ``q`` (a joint further outside its limits than
-        ENGAGE_LIMIT_TOL: the command would have to snap it back), or None."""
-        kin = self.kin
-        out = np.maximum(kin.lo - q, q - kin.hi)
-        for i in np.flatnonzero(out > ENGAGE_LIMIT_TOL):
-            return (f"joint{i + 1} is at {math.degrees(q[i]):+.1f}°, {math.degrees(out[i]):.1f}° outside its limits "
-                    f"{math.degrees(kin.lo[i]):+.1f}..{math.degrees(kin.hi[i]):+.1f}°: move it back by hand first "
-                    "(the arm floats while enabled)")
-        return None
 
     def _do_enable(self, req: dict) -> None:
         try:
@@ -1033,55 +1044,39 @@ class ArmNode(JointStream):
             self.last_motion, self.motion = m, None
             self.events.add(f"{m.traj.kind} {m.traj.id}: preempted by {by}")
 
-    def track_cmd(self, token, pose: pin.SE3, twist=None, twist_frame: str = "arm", seq: int = 0,
-                  gripper: Optional[dict] = None) -> dict:
-        self._ready(token)
+    # -- ArmRequests' hooks (requests.py) ------------------------------------------------------------
+
+    def _new_command(self) -> None:
         self._cmd_count += 1
-        if twist is not None:
-            twist = np.asarray(twist, dtype=float)
-            if twist.shape != (6,) or not np.all(np.isfinite(twist)):
-                raise ValueError("twist must be 6 finite numbers [vx, vy, vz, wx, wy, wz]")
-        twist_frame = "arm" if twist_frame == "base" else twist_frame      # "base": the old name of the arm frame
-        if twist_frame not in ("arm", "tcp"):
-            raise ValueError("twist_frame must be arm or tcp")
-        scaled = False
-        if twist is not None:          # bounded by the soft servo speeds
-            lin, ang = float(np.linalg.norm(twist[:3])), float(np.linalg.norm(twist[3:]))
-            if lin > self.soft.lin_vel:
-                twist[:3] *= self.soft.lin_vel / lin
-                scaled = True
-            if ang > self.soft.ang_vel:
-                twist[3:] *= self.soft.ang_vel / ang
-                scaled = True
-        g_args = self._check_gripper(**gripper) if gripper is not None else None
+
+    def _track_context(self):
         with self._lock:
             prev = self.track if self._arm_engaged() else None     # also a track not yet engaged
-            seed = self._arm_start()                 # the measured pose: IK seed and jump reference
-        if prev is not None and seq and prev.seq and seq < prev.seq:
-            return {"ok": False, "seq": seq, "ik": None, "limited": self._limited,
-                    "reason": f"stale: seq {seq} is older than {prev.seq} already applied"}
-        r = self.kin.ik(pose, seed, max_iter=TRACK_IK_ITER)
-        out = {"ok": r.ok, "seq": seq, "ik": r.public(), "limited": self._limited, "twist_scaled": scaled,
-               "reason": r.reason}
-        if r.ok:
-            jump = float(np.max(np.abs(r.q - seed)))
-            if jump > TRACK_MAX_JUMP:
-                out.update(ok=False, reason=f"too far for track: a joint is {math.degrees(jump):.0f}° from where it is "
-                                            f"(max {math.degrees(TRACK_MAX_JUMP):.0f}°); use servo for large moves")
-        if not out["ok"]:
-            return out
+            return (None if prev is None else prev.seq), self._arm_start()
+
+    def _track_apply(self, q, pose: pin.SE3, twist, twist_frame: str, seq: int, g_args) -> None:
         with self._lock:
             if not self.enabled:
                 raise RequestError(409, "disabled while solving")
             self._preempt("track")
             self.stream = None                      # HTTP track replaces the joint stream (and vice versa)
             self.hold_q = None
-            self.track = Track(r.q, pose, twist, twist_frame, self.clock(), int(seq))
+            self.track = Track(q, pose, twist, twist_frame, self.clock(), int(seq))
             if g_args is not None:
                 self._apply_gripper(*g_args)
-        return out
 
-    _check_gripper = staticmethod(check_gripper)
+    def _arm_start_now(self) -> np.ndarray:
+        with self._lock:
+            return self._arm_start()
+
+    def _servo_cmd(self) -> Optional[np.ndarray]:
+        """A copy of the command while servoing, else None (IK seeds)."""
+        with self._lock:
+            return self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
+
+    def _bus_names(self) -> Optional[list]:
+        b = self.bus
+        return None if b is None else list(b.names)
 
     def _apply_gripper(self, gap: Optional[float], max_force: Optional[float]) -> None:
         """Call under _lock. A gap makes the gripper hold it (from the next tick); the force limit
@@ -1152,89 +1147,6 @@ class ArmNode(JointStream):
         self.events.add(f"{traj.kind} {traj.id}: {traj.duration:.2f} s" + (f" to {traj.name}" if traj.name else ""))
         return out
 
-    def _plan(self, job: str, *args, **kwargs):
-        """Plans run in the planner process (planner.py), one at a time: in this process they
-        would hold the interpreter long enough to starve the control loop."""
-        if not self._plan_lock.acquire(blocking=False):
-            raise RequestError(409, "already planning another motion; retry")
-        try:
-            return Planner.run(job, self.kin, *args, **kwargs)
-        except PlanError as e:
-            raise RequestError(422, f"not planned (nothing moved): {e}", extra=getattr(e, "extra", None))
-        finally:
-            self._plan_lock.release()
-
-    def servo_cmd(self, token, pose: Optional[pin.SE3] = None, name: Optional[str] = None,
-                  lin_vel=None, lin_acc=None, ang_vel=None, ang_acc=None, duration=None,
-                  max_rot_deg: Optional[float] = None) -> dict:
-        """Blocking (planning): call from a worker thread."""
-        self._ready(token)
-        h, s = self.settings.hard, self.soft
-        lim = {}
-        for k, v in (("lin_vel", lin_vel), ("lin_acc", lin_acc), ("ang_vel", ang_vel), ("ang_acc", ang_acc)):
-            cap = getattr(s, k)
-            if v is not None and not (math.isfinite(float(v)) and 0 < float(v) <= getattr(h, k)):
-                raise ValueError(f"{k} must be within 0..{getattr(h, k):g}")
-            lim[k] = min(float(v), cap) if v is not None else cap
-        if name is not None and name not in self.settings.named_poses:
-            raise RequestError(422, f"unknown named pose {name!r} (have: {', '.join(self.settings.named_poses)})")
-        with self._lock:
-            q0 = self._arm_start()
-        if name is not None:
-            traj = self._plan("joint", q0, [self.settings.named_poses[name]], s.home_vel, s.joint_vel,
-                              kind="pose", name=name)
-        else:
-            rot_tol = None if max_rot_deg is None else math.radians(max_rot_deg)
-            traj = self._plan("servo", q0, pose, joint_vel=s.joint_vel, duration=duration, rot_tol=rot_tol, **lim)
-        return self._start(traj, "servo", q0)
-
-    def _home_traj(self, kind: str):
-        st = self.settings
-        with self._lock:
-            q0 = self._arm_start()
-        way = [st.named_poses[n] for n in st.home_via] + [st.named_poses["home"]]
-        return q0, self._plan("joint", q0, way, self.soft.home_vel, self.soft.joint_vel, kind=kind, name="home")
-
-    def home(self, token) -> dict:
-        self._ready(token)
-        q0, traj = self._home_traj("home")
-        return self._start(traj, "home", q0)
-
-    def stow(self, token) -> dict:
-        """Safe homing, then motors off (damping) at home. Already within STOW_NEAR of home on
-        every joint (measured): motors off at once."""
-        self._ready(token)
-        r = self.reading
-        if r is None:
-            raise RequestError(503, "no reading yet")
-        home = self.settings.named_poses["home"]
-        if np.all(np.abs(r.q - home) <= STOW_NEAR):
-            self._stowed("stowed: already at home")
-            return {"stowed": True, "motion": None}
-        q0, traj = self._home_traj("stow")
-        return {"stowed": False, "motion": self._start(traj, "stow", q0)}
-
-    def chunk(self, token, poses: list, dt: float, t0: Optional[float] = None, gaps_mm=None,
-              blend_s: float = 0.1) -> dict:
-        self._ready(token)
-        if not 0 < len(poses) <= 1000:
-            raise ValueError("a chunk has 1..1000 poses")
-        if gaps_mm is not None and len(gaps_mm) != len(poses):
-            raise ValueError("gaps_mm must have one value per pose")
-        if gaps_mm is not None and not all(math.isfinite(g) and 0.0 <= g / 1000 <= C.GAP_MAX + 1e-9 for g in gaps_mm):
-            raise ValueError(f"gaps_mm must be within 0..{C.GAP_MAX * 1000:.1f}")
-        if not 0.0 <= blend_s <= 1.0:
-            raise ValueError("blend_s must be within 0..1")
-        if t0 is not None and not math.isfinite(t0):
-            raise ValueError("t0 must be finite")
-        with self._lock:
-            q_now = self._arm_start()
-        now = self.clock()
-        traj = self._plan("chunk", q_now, poses, None if gaps_mm is None else [g / 1000 for g in gaps_mm],
-                          t0=now if t0 is None else float(t0), dt=dt, now=now, blend_s=blend_s,
-                          joint_vel=self.soft.joint_vel, q_now=q_now)
-        return self._start(traj, "chunk", q_now)
-
     def cancel(self, token) -> dict:
         """End the motion or track: servoing holds where its command is (floating: nothing to do)."""
         self._ready(token)
@@ -1292,73 +1204,6 @@ class ArmNode(JointStream):
         self.events.add("soft limits changed")
         return self.limits()
 
-    def limits(self) -> dict:
-        return {"hard": self.settings.hard.public(), "soft": self.soft.public()}
-
-    # reads -----------------------------------------------------------------------------------------
-
-    def _need_kin(self) -> ArmKinematics:
-        return Q.need_kin(self.kin)
-
-    def _servo_cmd(self) -> Optional[np.ndarray]:
-        """A copy of the command while servoing, else None (IK seeds)."""
-        with self._lock:
-            return self.q_cmd.copy() if (self.servo and self.q_cmd is not None) else None
-
-    def ik_check(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
-                 render: Optional[dict] = None) -> dict:
-        """IK seed only (never taken as where the arm is): "command" = the command while servoing,
-        else the measured pose; "measured" = the measured pose. With ``render`` (view options,
-        render.VIEW_DEFAULTS) the answer also carries ``image``: a PNG data URL of the query."""
-        return Q.ik_check(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, render)
-
-    def ik_image(self, pose: pin.SE3, seed: str = "command", max_rot_deg: Optional[float] = None,
-                 view: Optional[dict] = None) -> tuple[dict, bytes]:
-        """The IK check and its picture (render.py), both in the planner process: (IK answer, PNG).
-        Shows the measured arm (and gripper gap), so it needs a reading. No lease; nothing moves."""
-        return Q.ik_image(self.kin, self.reading, self._servo_cmd(), pose, seed, max_rot_deg, view)
-
-    def kinematics(self, q, frame: str = "arm") -> dict:
-        return Q.kinematics(self.kin, q, frame)
-
-    def kinematics_batch(self, qs: list, frame: str = "arm") -> list:
-        """Lookups at many configurations, in the planner process (no lease; nothing moves)."""
-        return Q.kinematics_batch(self.kin, qs, frame)
-
-    def kinematics_now(self, frame: str = "arm", which: str = "measured") -> dict:
-        """which "command": the command, only while servoing (409 otherwise)."""
-        r = self.reading
-        if r is None:
-            raise RequestError(503, "no reading yet")
-        if which == "command":
-            with self._lock:
-                if not (self.servo and self.q_cmd is not None):
-                    raise RequestError(409, f"no command: the arm is not servoing ({self.state})")
-                q = self.q_cmd.copy()
-        else:
-            q = r.q
-        out = self.kinematics(q, frame)
-        out["which"] = which
-        return out
-
-    # -- geometry as numbers (read only) -------------------------------------------------------------
-
-    def arm_in_base(self) -> dict:
-        """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
-        ``arm`` frame (cached 10 s); its shipped default if that node is unreachable. Says which."""
-        v, self._aib = Q.arm_in_base(self.description_node, self._aib)
-        return v
-
-    def geometry(self, q=None, pose: Optional[pin.SE3] = None, seed: str = "measured", max_rot_deg: Optional[float] = None,
-                 gap_mm: Optional[float] = None) -> dict:
-        """Gripper and finger geometry, and every box of the arm, as numbers in both the arm and the robot
-        base frame: at the measured configuration, at ``q``, or at the IK solution of a TCP ``pose``."""
-        return Q.geometry(self.kin, self.reading, self.ik_check, self.arm_in_base, q, pose, seed, max_rot_deg, gap_mm)
-
-    def links(self, q=None) -> list:
-        """The joint frames, end_link and tcp at ``q`` (default measured), for drawing."""
-        return Q.links(self.kin, self.reading, q)
-
     def gripper_state(self) -> dict:
         r, g = self.reading, self.gripper
         on = self.motors_on and self.g_servo
@@ -1371,49 +1216,18 @@ class ArmNode(JointStream):
                 "limiting": bool(self._g["limiting"] and on), "gap_max_mm": round(C.GAP_MAX * 1000, 2),
                 "default_max_force_n": C.DEFAULT_MAX_FORCE}
 
-    def joints(self) -> dict:
-        r = self.reading
-        if r is None:
-            raise RequestError(503, "no reading yet")
-        names = self.bus.names if self.bus else [f"joint{i}" for i in range(1, N + 1)]
-        lo = hi = None
-        if self.kin is not None:
-            lo, hi = self.kin.lo.tolist(), self.kin.hi.tolist()
-        with self._lock:
-            q_cmd = self.q_cmd.tolist() if (self.servo and self.q_cmd is not None) else None
-        return {"names": names[:N], "q": r.q.tolist(), "q_mot": r.q_mot.tolist(), "qd": r.qd.tolist(),
-                "tau": r.tau.tolist(), "q_cmd": q_cmd,
-                "status": r.status.tolist(), "t_mos": r.t_mos.tolist(), "t_rotor": r.t_rotor.tolist(),
-                "limits": {"lo": lo, "hi": hi}, "t": r.t}
-
-    def tracking(self) -> dict:
-        last = self.hub.recent(1, "tick")
-        if not len(last):
-            raise RequestError(503, "no tick yet")
-        return tracking_of_row(last[0])
-
-    def state_dict(self) -> dict:
-        info, e = self.lease.info, self.estop.info
-        now = self.clock()
-        last = self.hub.recent(1, "tick")
-        latest = row_dict(last[0]) if len(last) else None
-        recent = self.hub.recent(101, "tick")
-        rate = ((len(recent) - 1) / (recent[-1, 0] - recent[0, 0])
-                if len(recent) > 10 and recent[-1, 0] > recent[0, 0] else None)
+    def core_state(self, now: float) -> dict:
+        """The control-owned part of /state (``compose_state`` adds the lease, the e-stop, the chocks, the rows and
+        the events). The two-process node's control process publishes this as its snapshot."""
         with self._lock:
             m = self.motion or self.last_motion
             tr = self.track if self._arm_engaged() else None      # incl. a track the next tick engages
             motion = m.public(now) if m else None
-        ch = self.chocks()
-        return finite({
+        return {
             "state": self.state, "error": self.error, "sim": bool(self.bus and self.bus.sim),
             "initialized": self.initialized, "enabled": self.enabled, "motors_on": self.motors_on,
             "servo": self.servo, "gripper_engaged": self.g_servo,
-            "latched_motor_faults": self.latched,
-            "chocked": bool(ch), "locks": [l.public() for l in ch],
-            "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source, "t": e and e.t},
-            "lease": {"held": info is not None, "holder": info and info.client, "lease_id": info and info.lease_id,
-                      "expires_in": None if info is None else round(info.expires - now, 3)},
+            "latched_motor_faults": list(self.latched),
             "source": self._source_name(),
             "track": None if tr is None else {"seq": tr.seq, "age": round(now - tr.t, 3), "goal": pose_public(tr.pose),
                                               "twist": None if tr.twist is None else tr.twist.tolist(),
@@ -1421,20 +1235,57 @@ class ArmNode(JointStream):
             "motion": motion,
             "jam": self.jam_state(),
             "gripper": self.gripper_state(),
-            "profile": self.profile.name, "profiles": list(C.PROFILES),
+            "profile": self.profile.name,
             "tcp_offset": None if self.kin is None else self.kin.tcp_offset,
-            "named_poses": {k: np.degrees(v).round(3).tolist() for k, v in self.settings.named_poses.items()},
-            "stow_near_deg": math.degrees(STOW_NEAR),
             "limits": self.limits(),
-            "twist_timeout": TWIST_TIMEOUT, "lease_heartbeat": LEASE_HEARTBEAT,
-            "loop_hz": None if rate is None else round(rate, 1), "overruns": self.overruns,
-            "late_ticks": self.late_ticks, "read_misses": self.read_misses, "read_misses_by_motor": dict(self.misses_by_motor),
+            "overruns": self.overruns, "late_ticks": self.late_ticks, "read_misses": self.read_misses,
+            "read_misses_by_motor": dict(self.misses_by_motor),
             "reply_latency": self.latency_stats(),
             "feedback_refresh": self.feedback_refresh(),
             "realtime": dict(self.realtime),
-            "clients": self.hub.subscribers,
-            "events": self.events.list()[-20:],
             "joint_channel": self.stream_state(),
-            "latest": latest,
-            "server_mono": now,
-        })
+            "tick_time": self.tick_time(),
+        }
+
+    def state_dict(self) -> dict:
+        now = self.clock()
+        return compose_state(self.core_state(now), now, self.settings, self.lease.info, self.estop.info, self.chocks(),
+                             self.hub, self.events, {"mode": "thread"})
+
+
+def compose_state(core: dict, now: float, settings: C.NodeSettings, info, e, ch: list, hub: RowHub, events: EventLog,
+                  process: Optional[dict] = None) -> dict:
+    """GET /state: the control-owned part (``ArmNode.core_state``) with the lease ``info``, the e-stop ``e``, the
+    chocks ``ch``, the latest rows and the events."""
+    last = hub.recent(1, "tick")
+    latest = row_dict(last[0]) if len(last) else None
+    recent = hub.recent(101, "tick")
+    rate = ((len(recent) - 1) / (recent[-1, 0] - recent[0, 0])
+            if len(recent) > 10 and recent[-1, 0] > recent[0, 0] else None)
+    out = {k: core[k] for k in ("state", "error", "sim", "initialized", "enabled", "motors_on", "servo",
+                                "gripper_engaged", "latched_motor_faults")}
+    out.update({
+        "chocked": bool(ch), "locks": [l.public() for l in ch],
+        "estop": {"latched": e is not None, "reason": e and e.reason, "source": e and e.source, "t": e and e.t},
+        "lease": {"held": info is not None, "holder": info and info.client, "lease_id": info and info.lease_id,
+                  "expires_in": None if info is None else round(info.expires - now, 3)},
+        "source": core["source"], "track": core["track"], "motion": core["motion"], "jam": core["jam"],
+        "gripper": core["gripper"],
+        "profile": core["profile"], "profiles": list(C.PROFILES),
+        "tcp_offset": core["tcp_offset"],
+        "named_poses": {k: np.degrees(v).round(3).tolist() for k, v in settings.named_poses.items()},
+        "stow_near_deg": math.degrees(STOW_NEAR),
+        "limits": core["limits"],
+        "twist_timeout": TWIST_TIMEOUT, "lease_heartbeat": LEASE_HEARTBEAT,
+        "loop_hz": None if rate is None else round(rate, 1),
+        **{k: core[k] for k in ("overruns", "late_ticks", "read_misses", "read_misses_by_motor", "reply_latency",
+                                "feedback_refresh", "realtime")},
+        "clients": hub.subscribers,
+        "events": events.list()[-20:],
+        "joint_channel": core["joint_channel"],
+        "latest": latest,
+        "server_mono": now,
+    })
+    if process is not None:
+        out["process"] = {**process, "tick_time": core.get("tick_time")}
+    return finite(out)

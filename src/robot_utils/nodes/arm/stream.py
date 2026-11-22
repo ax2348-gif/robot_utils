@@ -51,7 +51,7 @@ MAX_LEAD = math.radians(20.0)        # rad a goal may lead the measured pose, an
 LIMIT_TOL = math.radians(0.5)        # rad a goal may lie outside the joint limits (it is clipped to them anyway)
 NOTE_EVERY = 5.0                     # s between events of one drop reason (after the first of a session)
 DROP_REASONS = ("session", "addr", "old", "mode", "not_enabled", "paused", "nonfinite", "limits", "gap",
-                "no_reading", "engage", "lead")
+                "no_reading", "engage", "lead", "server")
 BAD_PACKET = ("size", "magic", "version", "json", "unbound", "control")
 
 
@@ -109,6 +109,8 @@ def scale_to_cap(v: np.ndarray, cap) -> np.ndarray:
 
 class JointStream:
     """Mixin of ArmNode (uses its _lock, lease, estop, reading, kin, soft, events, motion, track, dt, ...)."""
+    _srv_lost = False                               # control process: the server process's heartbeat is missing
+    joint_channel_thread = True                     # control process: False, its loop polls the socket
 
     def _init_stream(self, socket_path, cfg: Optional[StreamConfig]) -> None:
         self.joint_socket = None if socket_path is None else str(socket_path)
@@ -128,7 +130,7 @@ class JointStream:
             return
         from .joint_channel import JointChannel
         self.joint_channel = JointChannel(self.joint_socket, self.stream_datagram)
-        self.joint_channel.start()
+        self.joint_channel.start(thread=self.joint_channel_thread)
 
     def stop_joint_channel(self) -> None:
         self.close_stream_session("node shutting down")
@@ -255,6 +257,8 @@ class JointStream:
             return
         if c.mode != F.MODE_GOAL:
             return self._drop(s, "mode", now, f"unknown mode {c.mode}")
+        if self._srv_lost:                          # the two-process node: the server process is lost (holding)
+            return self._drop(s, "server", now, "the arm node's server process is lost: holding")
         if not (self.enabled and self.motors_on and not self.estop.active):
             return self._drop(s, "not_enabled", now, f"the arm is {self.state}")
         m = self.motion
