@@ -256,7 +256,8 @@ def test_swerve_base_dimensions_equal_swerve_constants(node):
     assert {j["name"] for j in m["joints"]} >= {"base_FL_steer", "base_FL_wheel_joint"}
 
 
-@pytest.mark.parametrize("variant,base", [("simple", "swerve"), ("full", "swerve"), ("simple", "fixed")])
+@pytest.mark.parametrize("variant,base", [("simple", "swerve"), ("full", "swerve"), ("simple", "fixed"),
+                                          ("boxes", "swerve")])
 def test_model_tree_reproduces_the_urdf_kinematics(node, variant, base):
     """GET /model/tree (robot_tree.v1): its joints, composed as documented (tree.fk), give pinocchio's forward
     kinematics of the same URDF for random joint values; every link with a URDF visual has visuals."""
@@ -299,3 +300,82 @@ def test_model_tree_reproduces_the_urdf_kinematics(node, variant, base):
             assert np.allclose(Tl[:3, :3], f.rotation, atol=1e-6), link
     with_visual = {lk.get("name") for lk in ET.fromstring(a.urdf).findall("link") if lk.find("visual") is not None}
     assert with_visual and all(t["links"][n]["visuals"] for n in with_visual)
+
+
+def _page_arm_boxes(frames, gap):
+    """The description page's arm (common/viz_scene.py armSegments) in Python: the 8 corners of each ARM_BOXES box,
+    in the arm frame, from the arm node's GET links frames [(pos, R)] (joint1..6, end_link, tcp) and the gap."""
+    from robot_utils.nodes.arm.geometry import ARM_BOXES
+
+    def box(p, R, b, sy):
+        return np.array([p + R @ (np.array([b[1] + i * b[4] / 2, sy * (b[2] + j * b[5] / 2), b[3] + k * b[6] / 2]) / 1000)
+                         for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
+    I = (np.zeros(3), np.eye(3))
+    FR = {"base": I, "end": frames[6], **{f"link{i + 1}": frames[i] for i in range(6)}}
+    out = [box(*FR[b[0]], b, 1) for b in ARM_BOXES if b[0] in FR]
+    g = max(0.0, min(gap, 0.057))
+    E = frames[6]
+    for sgn in (1, -1):
+        p = E[0] + E[1][:, 1] * sgn * g / 2
+        out += [box(p, E[1], b, sgn) for b in ARM_BOXES if b[0] == "finger"]
+    return out
+
+
+def test_boxes_variant_draws_the_arm_as_the_page_does(node):
+    """variant=boxes: the arm's link visuals are ARM_BOXES, so for random joints and gaps the tree's boxes (posed by
+    tree.fk, in the arm frame) are the page's boxes on the arm node's own kinematics (ArmKinematics.frames, which
+    GET links serves), one to one; the swerve wheels are boxes on the steer links, no module housings."""
+    from robot_utils.nodes.arm.kin import ArmKinematics
+    from robot_utils.nodes.description.tree import fk, tree
+    a = node.model_builder().build(Options.parse("boxes", base="swerve"))
+    t = tree(a.urdf, "v")
+    kin = ArmKinematics()
+    rng = np.random.default_rng(7)
+    for _ in range(10):
+        q = np.array([rng.uniform(kin.model.lowerPositionLimit[i], kin.model.upperPositionLimit[i]) for i in range(6)])
+        gap = float(rng.uniform(0, 0.057))
+        frames = [(np.array(T.translation), np.array(T.rotation)) for T in kin.frames(q)]
+        page = _page_arm_boxes(frames, gap)
+        qd = {f"arm_{n}": float(v) for n, v in zip(kin.joint_names, q)} | {"arm_finger_left": gap / 2}
+        T = fk(t, qd)
+        Tarm = np.linalg.inv(T["arm_base_link"])
+        ours = []
+        for link, lk in t["links"].items():
+            if not link.startswith("arm_"):
+                continue
+            for v in lk["visuals"]:
+                assert v["type"] == "box" and v["quat"] == [0.0, 0.0, 0.0, 1.0], (link, v)
+                c, s = np.array(v["pos"]), np.array(v["size"])
+                P = np.array([c + np.array([i, j, k]) * s / 2 for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
+                M = Tarm @ T[link]
+                ours.append(P @ M[:3, :3].T + M[:3, 3])
+        assert len(ours) == len(page) == 15
+        left = list(range(len(ours)))
+        for B in page:                               # each page box is exactly one tree box (same 8 corners)
+            hit = [i for i in left if all(np.min(np.linalg.norm(ours[i] - p, axis=1)) < 1e-9 for p in B)]
+            assert len(hit) == 1, (B, hit)
+            left.remove(hit[0])
+    for mod in ("FL", "FR", "RR", "RL"):
+        assert [v["type"] for v in t["links"][f"base_{mod}_module"]["visuals"]] == ["box"]
+        assert t["links"][f"base_{mod}_wheel"]["visuals"] == []
+    assert t["links"]["arm_link6"]["visuals"] == []
+
+
+def test_boxes_variant_options(node):
+    """boxes is accepted wherever variants are (whole robot or per component), by /model, /model/urdf and /model/tree;
+    the options are in `options`, not in model_version (which follows the description, not the options)."""
+    with TestClient(create_app(node, start=False)) as c:
+        t = c.get("/model/tree", params={"variant": "boxes"})
+        assert t.status_code == 200
+        t = t.json()
+        assert t["options"]["variant"] == "boxes" and t["options"]["base"] == "swerve"
+        s = c.get("/model/tree").json()
+        assert s["options"]["variant"] == "simple" and s["model_version"] == t["model_version"]
+        assert set(s["links"]) == set(t["links"]) and s["joints"] == t["joints"] and s["movable"] == t["movable"]
+        r = c.get("/model/urdf", params={"variant": "boxes"})
+        assert r.status_code == 200 and "<mesh" not in r.text and 'name="arm_link2_upper_arm"' in r.text
+        m = c.get("/model", params={"variant": "full,arm=boxes"}).json()
+        assert {x["name"]: x["variant"] for x in m["components"]}["arm"] == "boxes"
+        r = c.get("/model/urdf", params={"variant": "full,arm=boxes"}).text
+        assert 'name="arm_link2_upper_arm"' in r and "<mesh" not in r     # the other components are procedural
+        assert c.get("/model/urdf", params={"variant": "arm=box"}).status_code == 400
