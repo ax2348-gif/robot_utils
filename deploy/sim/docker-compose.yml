@@ -1,0 +1,82 @@
+# The sim stack in Docker (docs/sim.md, "Docker"): nginx + the landing page + every node in --sim world mode + the
+# sim world, as on the robot: one origin, nodes on unix sockets in a volume shared with nginx.
+#
+#   docker compose -f deploy/sim/docker-compose.yml up --build        # http://localhost:8080/
+#   SIM_PORT=9000 SIM_BIND=0.0.0.0 docker compose -f deploy/sim/docker-compose.yml up -d   # another port, the LAN
+#   docker compose -f deploy/sim/docker-compose.yml down               # stops every node (SIGTERM to the launcher)
+#
+# NVIDIA GPU rendering (erid): add -f deploy/sim/docker-compose.gpu.yml. Remote access over Tailscale: the optional
+# `tailscale` service below (profile "tailscale", off by default): TS_AUTHKEY=tskey-... docker compose
+# -f deploy/sim/docker-compose.yml --profile tailscale up -d  ->  https://robot-sim.<tailnet>.ts.net/
+name: robot-sim
+
+x-image: &image
+  image: robot-utils-sim:latest
+  build:
+    context: ../..
+    dockerfile: deploy/sim/Dockerfile
+    # the submodules' checkouts (populated: git submodule update --init rev_ctl rebot_ctl); override to build from
+    # another checkout, e.g. REV_CTL_DIR=~/robot_utils/rev_ctl
+    additional_contexts:
+      rev_ctl: ${REV_CTL_DIR:-../../rev_ctl}
+      rebot_ctl: ${REBOT_CTL_DIR:-../../rebot_ctl}
+
+services:
+  # The landing page (frontend) and, started by it in order, the description node, the sim world and the nodes in
+  # sim mode (python -m robot_utils.nodes.sim.stack). Start / Stop on the landing page work as on the robot.
+  stack:
+    <<: *image
+    init: true                       # tini: forwards SIGTERM to the launcher, reaps the nodes
+    stop_grace_period: 60s           # the launcher stops each node in turn
+    environment:
+      # sim config merged over default_sim.yaml: software GL settings by default (the GPU override clears it)
+      ROBOT_SIM_CONFIG: ${ROBOT_SIM_CONFIG:-/opt/robot_utils/deploy/sim/sim_software_gl.yaml}
+      ROBOT_STACK_URL: http://localhost:${SIM_PORT:-8080}/      # what the launcher prints (it listens inside on 8090)
+      # the robot's description snapshot (measured camera mounts, active calibrations) is the host's: refresh it there
+      # (python -m robot_utils.nodes.sim.snapshot); the container has no ssh access to the robot
+      ROBOT_SNAPSHOT_NO_PULL: "1"
+    volumes:
+      - sockets:/run/robot-rt
+      - data:/home/robot/.local        # saved scenes, node settings
+      - ${ROBOT_SNAPSHOT_DIR:-${HOME}/.local/share/robot_utils/sim/description}:/home/robot/.local/share/robot_utils/sim/description
+    restart: "no"
+
+  # The port-80 proxy of the robot (frontend/proxy.py's nginx config), on 8080 in the container: /nodes/<name>/ to
+  # the node's socket, / to the landing page's.
+  nginx:
+    <<: *image
+    command:
+      - sh
+      - -c
+      - >-
+        python -m robot_utils.frontend.proxy --conf-dir /tmp/nginx --state-dir /tmp/nginx-state --port 8080
+        --sockets /run/robot-rt/robot >/dev/null
+        && exec nginx -e /tmp/nginx-state/error.log -c /tmp/nginx/nginx.conf -g 'daemon off;'
+    volumes:
+      - sockets:/run/robot-rt
+    ports:
+      - "${SIM_BIND:-127.0.0.1}:${SIM_PORT:-8080}:8080"
+    depends_on: [stack]
+    restart: unless-stopped
+
+  # Optional: the stack on your tailnet (https://robot-sim.<tailnet>.ts.net/, Tailscale's own TLS), off by default.
+  # Needs an auth key (https://login.tailscale.com/admin/settings/keys) and HTTPS enabled for the tailnet.
+  tailscale:
+    image: tailscale/tailscale:v1.76.6
+    profiles: [tailscale]
+    hostname: ${TS_HOSTNAME:-robot-sim}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    depends_on: [nginx]
+    restart: unless-stopped
+
+volumes:
+  sockets:
+  data:
+  tailscale:

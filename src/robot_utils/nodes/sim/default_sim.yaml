@@ -48,12 +48,21 @@ cameras:
     depth: {link: camera_depth_optical, width: 640, height: 400, fps: 30, fovy_deg: 65.0, delay: 0.017}
     depth_range: [0.15, 10.0]    # m; outside reads 0 (no depth)
     jpeg_quality: 80
+    # the camera's IMU (accelerometer + gyro, 1 kHz, every physics step): MuJoCo sensors at the link's origin, in its
+    # frame (the depth optical frame: x right, y down, z forward; at rest accel = (0, -9.81, 0) when level)
+    imu: {link: camera_depth_optical, delay: 0.002}   # delay: s from sample to host (t_capture - t_sensor)
   wrist_camera:
     serial: SIMWRIST0001
     color: {link: wrist_camera_color_optical, width: 640, height: 480, fps: 30, fovy_deg: 65.0, delay: 0.047}
     depth: {link: wrist_camera_depth_optical, width: 640, height: 400, fps: 30, fovy_deg: 65.0, delay: 0.047}
     depth_range: [0.07, 5.0]
     jpeg_quality: 80
+
+# Camera rendering. Shadows cost most with software OpenGL (OSMesa / llvmpipe in Docker: full model 540 -> 170 ms
+# per 640x480 frame without them); keep them on a GPU.
+render:
+  shadows: true
+  reflections: true
 
 # Objects in the scene at start / reset (POST /scene/objects adds more): box (size: full x, y, z) or cylinder
 # (radius, length along z); mass kg; pose xyz + yaw (or rpy).

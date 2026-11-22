@@ -241,3 +241,17 @@ def test_up_with_ar_restarts_only_when_the_ar_url_changes():
     assert ctl.up(ar="http://100.65.75.106:8080") == 0 and len(fq.ran('quest" run')) == n     # same URL: no restart
     assert ctl.up() == 0 and len(fq.ran('quest" run')) == n + 1 and fq.ar is None            # AR off: restart
     assert_safe(fq)
+
+
+def test_ar_values_resolve_to_the_url_the_headset_opens():
+    from quest_teleop.quest_ctl import resolve_ar
+    local = lambda host: {"100.72.77.83": "100.65.75.106"}[host]     # noqa: E731
+    assert resolve_ar("auto", "100.72.77.83", local) == "http://100.65.75.106:8080"
+    assert resolve_ar(":8090", "100.72.77.83", local) == "http://100.65.75.106:8090"
+    assert resolve_ar("erid:8080", "100.72.77.83", local) == "http://erid:8080"
+    assert resolve_ar("http://botcore-desktop.local/", "100.72.77.83", local) == "http://botcore-desktop.local"
+
+
+def test_local_address_toward_picks_the_route_without_sending():
+    from quest_teleop.quest_ctl import local_address_toward
+    assert local_address_toward("127.0.0.1") == "127.0.0.1"

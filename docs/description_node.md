@@ -155,6 +155,9 @@ Routes: `GET /model` (components, the frame tree with each link's parent joint a
 zero joint positions, the movable joints with their limits, `description_frames`: description frame -> link, and
 `model_version`), `GET /model/urdf` (header `X-Model-Version`), `GET /model/meshes/{component}/{path}`,
 `GET /model/bundle.zip` (robot.urdf with relative mesh paths, the meshes it uses, model.json).
+`GET /model/tree` (`robot_tree.v1`): the URDF's kinematic tree as plain JSON (links with visuals, joints with
+origin / axis / limits / mimic), defaults `variant=simple`, `base=swerve`, `mesh_uri=http`; for clients that do
+their own kinematics with `robot_state.v1` (docs/sim.md, "Robot state stream").
 `model_version` hashes the YAML, the active calibrations, the camera nodes' factory frames and every component
 file; it changes when a calibration is activated, not with the options. `/description` and `/transform` agree
 with the model at zero joint positions (tested for every frame both have).

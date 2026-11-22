@@ -20,6 +20,7 @@ thread. The world never touches a node: backends reach it through ``protocol`` s
 """
 from __future__ import annotations
 
+import collections
 import copy
 import io
 import logging
@@ -47,6 +48,7 @@ WORLD_CONTYPE, WORLD_CONAFFINITY = 1, 3      # floor and objects collide with th
 INTEGRATORS = {"euler": mujoco.mjtIntegrator.mjINT_EULER, "rk4": mujoco.mjtIntegrator.mjINT_RK4,
                "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT, "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST}
 SHAPES = ("box", "cylinder")
+IMU_BUFFER = 2000                    # samples kept per IMU (2 s at 1 kHz)
 
 
 class SimError(ValueError):
@@ -138,6 +140,9 @@ class World:
         self.wrenches: list = []          # [body id, until (sim s), wrench 6]
         self.generation = 0               # bumps on every recompile (renderers rebuild)
         self.steps = 0
+        self.imu: dict = {}               # camera -> deque of samples (seq, t_host, t_sim, ax, ay, az, gx, gy, gz)
+        self.imu_seq = 0
+        self.imu_cond = threading.Condition(threading.Lock())
         self.spec = self._build_spec(urdf, assets)
         for o in (self.cfg.get("scene") or {}).get("objects") or []:
             self._spec_object(self._check_object(o))
@@ -235,6 +240,17 @@ class World:
                     raise SimError(f"camera {cam}: the model has no link {sc['link']!r}")
                 body.add_camera(name=f"{cam}_{stream}", pos=[0, 0, 0], quat=[0, 1, 0, 0], fovy=float(sc["fovy_deg"]))
                 w_max, h_max = max(w_max, int(sc["width"])), max(h_max, int(sc["height"]))
+        # IMUs (the head camera's accelerometer + gyro): sensors at a site on the configured link, IMU frame = the link's
+        for cam, cc in (self.cfg.get("cameras") or {}).items():
+            ic = cc.get("imu")
+            if not ic:
+                continue
+            body = spec.body(ic["link"])
+            if body is None:
+                raise SimError(f"camera {cam}: the model has no IMU link {ic['link']!r}")
+            body.add_site(name=f"{cam}_imu", pos=[0, 0, 0])
+            for kind, typ in (("accel", mujoco.mjtSensor.mjSENS_ACCELEROMETER), ("gyro", mujoco.mjtSensor.mjSENS_GYRO)):
+                spec.add_sensor(name=f"{cam}_{kind}", type=typ, objtype=mujoco.mjtObj.mjOBJ_SITE, objname=f"{cam}_imu")
         spec.visual.global_.offwidth, spec.visual.global_.offheight = w_max, h_max
         spec.visual.map.znear = 0.01          # x the model extent: near clip ~ cm (depth precision)
         return spec
@@ -280,6 +296,12 @@ class World:
             fj = m.joint("arm_finger_left")
             self.finger_q, self.finger_v = int(fj.qposadr[0]), int(fj.dofadr[0])
             self.finger_a = m.actuator("arm_finger").id
+        self.imu_adr = {}                   # camera -> (accel adr, gyro adr) in sensordata
+        for cam in (self.cfg.get("cameras") or {}):
+            try:
+                self.imu_adr[cam] = (int(m.sensor(f"{cam}_accel").adr[0]), int(m.sensor(f"{cam}_gyro").adr[0]))
+            except KeyError:
+                pass
         self.obj_idx = {}
         for name in self.objects:
             jj = m.joint(f"obj_{name}_free")
@@ -496,6 +518,7 @@ class World:
             for _ in range(int(n)):
                 self._control()
                 mujoco.mj_step(self.m, self.d)
+                self._sample_imu(time.monotonic())
             self.steps += int(n)
             return float(self.d.time)
 
@@ -520,7 +543,8 @@ class World:
             self._thread.start()
 
     def pause(self) -> None:
-        self.running = False
+        with self.lock:                                # the physics thread finishes its batch first
+            self.running = False
 
     def close(self) -> None:
         self.running = False
@@ -536,6 +560,8 @@ class World:
                 continue
             now = time.monotonic()
             with self.lock:
+                if not self.running:                   # paused while this thread waited for the lock
+                    continue
                 w0, s0 = self._anchor
                 behind = s0 + (now - w0) * self.rtf - float(self.d.time)
                 n = int(behind / dt)
@@ -543,9 +569,11 @@ class World:
                     self.behind += 1
                     self._anchor = (now, float(self.d.time))
                     n = int(0.01 / dt)
+                w0, s0 = self._anchor
                 for _ in range(min(n, 20)):
                     self._control()
                     mujoco.mj_step(self.m, self.d)
+                    self._sample_imu(w0 + (float(self.d.time) - s0) / self.rtf)    # the host time it stands for
                 self.steps += min(n, 20)
             self._measure(now)
             if n < 20:
@@ -557,6 +585,40 @@ class World:
             self.step_rate = (self.steps - s) / (now - w)
             self.rtf_measured = (float(self.d.time) - t) / (now - w)
             self._rate = (now, self.steps, float(self.d.time), self.step_rate)
+
+    # -- IMU ---------------------------------------------------------------------------------------------
+
+    def _sample_imu(self, t_host: float) -> None:
+        """After a physics step (lock held): one sample per IMU (MuJoCo's accelerometer: specific force, so
+        +9.81 m/s^2 up at rest; gyro: angular velocity; both in the IMU link's frame)."""
+        if not self.imu_adr:
+            return
+        sd = self.d.sensordata
+        t = float(self.d.time)
+        self.imu_seq += 1
+        for cam, (a, g) in self.imu_adr.items():
+            buf = self.imu.get(cam)
+            if buf is None:
+                buf = self.imu[cam] = collections.deque(maxlen=IMU_BUFFER)
+            buf.append((self.imu_seq, t_host, t, float(sd[a]), float(sd[a + 1]), float(sd[a + 2]),
+                        float(sd[g]), float(sd[g + 1]), float(sd[g + 2])))
+        if self.imu_seq % 5 == 0:
+            with self.imu_cond:
+                self.imu_cond.notify_all()
+
+    def imu_samples(self, cam: str, after: int = 0, wait: float = 0.0) -> list:
+        """Samples of ``cam``'s IMU with seq > ``after`` (oldest first), waiting up to ``wait`` s for one."""
+        if cam not in self.imu_adr:
+            raise SimError(f"camera {cam!r} has no IMU in the sim config")
+        end = time.monotonic() + wait
+        while True:
+            with self.lock:
+                buf = self.imu.get(cam) or ()
+                out = [s for s in buf if s[0] > after] if buf and buf[-1][0] > after else []
+            if out or time.monotonic() >= end:
+                return out
+            with self.imu_cond:
+                self.imu_cond.wait(max(0.0, min(0.05, end - time.monotonic())))
 
     # -- arm backend -------------------------------------------------------------------------------------
 

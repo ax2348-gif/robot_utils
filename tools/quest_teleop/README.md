@@ -121,14 +121,15 @@ quest` in `~/.ssh/config`, the quest-dev-runtime SSH server): `sh "$QUEST_ENV_RO
 `~/.config/quest-env/root` as `profile.sh` does (`q` itself exists only in interactive shells). It automates only the
 headset side.
 
-- `quest_up [--scheme body-frozen|standard] [--demo] [--ar URL] [--restart] [--wait 30]`: SSH reachability (a clear message if
+- `quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--restart] [--wait 30]`: SSH reachability (a clear message if
   the headset is asleep or offline); `git fetch` and compare with the upstream, `quest pull` only when behind and
   never over a dirty tree (reported, not forced); `quest run --no-viewer --scheme=…` (`-s` with `--demo`), skipped
   when the stream already answers in the wanted mode and nothing was pulled; waits for port 9391; prints session,
   rate, focus, scheme and battery. The scheme works without `-s`: the script writes `off body-frozen` to
   `~/.config/quest-env/demo-mode` and native reads the second word independently of the demo flag.
-  `--ar URL` adds the headset's robot AR view of the robot frontend at URL (quest_env ROBOT_AR.md), e.g. the Mac's
-  sim stack started with `--host 0.0.0.0`: `quest_up --ar http://<mac tailscale ip>:8080`. A changed or dropped
+  `--ar` adds the headset's robot AR view (quest_env ROBOT_AR.md). Bare `--ar` is this machine's sim stack (started
+  with `--host 0.0.0.0`, port 8080; `--ar :PORT` for another) at this machine's address on the route to the headset
+  (its Tailscale address when the headset is reached over Tailscale); `--ar URL` or `--ar host[:port]` otherwise. A changed or dropped
   URL restarts telemetry (it is read once at native start).
 - `quest_down`: `quest stop`. `quest_status`: `quest status`, the mode file, the XR session state (the telemetry
   process's last `OpenXR session state` line in logcat), stream liveness, battery.

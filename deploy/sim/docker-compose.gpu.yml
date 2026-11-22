@@ -1,0 +1,20 @@
+# NVIDIA GPU rendering for the sim world (erid): MuJoCo renders the cameras with EGL on the GPU instead of OSMesa.
+# Needs the NVIDIA driver and the NVIDIA Container Toolkit on the host (nvidia-ctk runtime configure --runtime=docker).
+#
+#   docker compose -f deploy/sim/docker-compose.yml -f deploy/sim/docker-compose.gpu.yml up --build
+#
+# Check: docker compose ... exec stack python -c "import mujoco; mujoco.Renderer(mujoco.MjModel.from_xml_string('<mujoco/>'), 8, 8)"
+services:
+  stack:
+    environment:
+      ROBOT_SIM_CONFIG: ""                # shadows and reflections back on
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+      NVIDIA_DRIVER_CAPABILITIES: all     # "graphics" brings libEGL_nvidia and its glvnd vendor file
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

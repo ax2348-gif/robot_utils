@@ -7,6 +7,7 @@ backends over Unix sockets in <runtime dir>/robot/sim/<name>/. Serves its page a
 """
 import argparse
 import logging
+import os
 
 from ..common.serve import add_serve_args, serve
 
@@ -15,7 +16,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="description",
                    help="description node (instance name or URL), a bundle .zip, or 'local' (default: description)")
-    p.add_argument("--config", default=None, help="sim config YAML merged over default_sim.yaml")
+    p.add_argument("--config", default=os.environ.get("ROBOT_SIM_CONFIG") or None,
+                   help="sim config YAML merged over default_sim.yaml (default: $ROBOT_SIM_CONFIG if set)")
     p.add_argument("--variant", default=None, help="model variant: full | simple (default: the config's)")
     p.add_argument("--paused", action="store_true", help="start paused (advance with POST /step)")
     p.add_argument("--rtf", type=float, default=None, help="real-time factor (default 1)")

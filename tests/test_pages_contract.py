@@ -36,6 +36,7 @@ PAGES = {
     "power": lambda: node_page("power"),
     "arm": lambda: node_page("arm"),
     "wbc": lambda: node_page("wbc"),
+    "sim": lambda: node_page("sim"),
 }
 
 
@@ -44,8 +45,8 @@ def ui_js() -> str:
 
 
 def scripts(html: str) -> list[str]:
-    """Inline <script> bodies (not <script src=...>)."""
-    return re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)
+    """Inline <script> bodies (not <script src=...>, not import maps: JSON)."""
+    return re.findall(r"<script(?![^>]*\b(?:src=|type=\"importmap\"))[^>]*>(.*?)</script>", html, re.S)
 
 
 def has(pattern: str, text: str) -> bool:

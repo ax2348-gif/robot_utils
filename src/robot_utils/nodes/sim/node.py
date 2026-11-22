@@ -17,6 +17,7 @@ import yaml
 from ..common.hub import RowHub
 from ..common.server import EventLog
 from .protocol import IpcServer, backend_socket
+from . import viz
 from .render import Cameras
 from .world import SimError, World, unzip_bundle
 
@@ -45,10 +46,40 @@ def fetch_bundle(source: str, variant: str = "full") -> tuple[bytes, str]:
         return r.content, f"description node {source} (model {r.headers.get('x-model-version')})"
 
 
+def description_of(source: str) -> Optional[dict]:
+    """The description node's GET /description (None for a bundle or ``local``)."""
+    if source == "local" or source.endswith(".zip"):
+        return None
+    from ..common.client import NodeClient
+    with NodeClient(source, timeout=10.0) as c:
+        return c.get("/description")
+
+
+def apply_camera_serials(config: dict, description: Optional[dict]) -> dict:
+    """Make each sim camera report the robot's serial for that camera name (the description's ``last_serial``,
+    from the robot's snapshot), so the description node applies that camera's active calibrations unchanged.
+    Without one the sim config's serial stays (no calibration matches it: nominal mounts). Returns {name: serial}."""
+    from .snapshot import camera_serials
+    cams = config.get("cameras") or {}
+    serials = camera_serials(description or {}, cams)
+    for name, s in serials.items():
+        cams[name]["serial"] = s
+    return serials
+
+
 def world_from(source: str, config: dict) -> World:
     data, how = fetch_bundle(source, (config.get("model") or {}).get("variant", "full"))
     urdf, assets, info = unzip_bundle(data)
-    return World(urdf, assets, config, {"source": how, "model_version": info.get("model_version")})
+    try:
+        desc = description_of(source)
+    except Exception as e:  # noqa: BLE001 - the model came; the serials fall back to the config's
+        log.warning("description %s: GET /description failed (%s): sim camera serials from the config", source, e)
+        desc = None
+    serials = apply_camera_serials(config, desc)
+    mounts = {name: c.get("from") for name, c in ((desc or {}).get("cameras") or {}).items()}
+    log.info("camera serials %s; camera mounts %s", serials, mounts or "nominal (no description node)")
+    return World(urdf, assets, config, {"source": how, "model_version": info.get("model_version"),
+                                        "camera_serials": serials, "camera_mounts": mounts})
 
 
 class SimNode:
@@ -61,6 +92,7 @@ class SimNode:
         self.events = EventLog(on_add=self.hub.state_changed)
         self.servers: dict = {}
         self.t_start = time.monotonic()
+        self.markers = viz.Markers()
 
     # -- lifecycle ---------------------------------------------------------------------------------
 
@@ -115,6 +147,9 @@ class SimNode:
         if op == "frames":
             metas, data = self.cameras.frames(cam, h.get("after") or {}, float(h.get("wait", 0.05)))
             return {"frames": metas}, data
+        if op == "imu":
+            rows = self.world.imu_samples(cam, int(h.get("after") or 0), min(1.0, float(h.get("wait", 0.05))))
+            return {"samples": rows}
         raise SimError(f"unknown camera op {op!r}")
 
     # -- scene files -----------------------------------------------------------------------------------
@@ -143,6 +178,39 @@ class SimNode:
         self.events.add(f"scene loaded{f' {name!r}' if name else ''}: {len(objects)} objects")
         return out
 
+    # -- 3D view -----------------------------------------------------------------------------------------
+
+    def frames(self) -> set:
+        """Names a marker's frame may be: model bodies and scene objects (besides world / base)."""
+        with self.world.lock:
+            m = self.world.m
+            return {m.body(i).name for i in range(m.nbody)} | set(self.world.objects)
+
+    def put_markers(self, markers: list, source: Optional[str] = None, replace: bool = False) -> dict:
+        names = self.markers.put(markers, self.frames(), source, replace)
+        return {"names": names, "count": len(self.markers.list())}
+
+    def viz_frame(self, markers_version: Optional[int] = None) -> dict:
+        """Body poses now; the markers too unless the caller already has this version of them."""
+        out = viz.frame(self.world)
+        mk = self.markers.list()
+        out["markers_version"] = self.markers.version
+        if markers_version != self.markers.version:
+            out["markers"] = mk
+        return out
+
+    def robot_state(self) -> dict:
+        """One robot_state.v1 record (docs/sim.md, "Robot state stream")."""
+        s = viz.robot_state(self.world)
+        sim = s.pop("sim")
+        self._state_seq = getattr(self, "_state_seq", 0) + 1
+        arm = self.world.arm if self.world.has_arm else None
+        return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",
+                "t_host": round(time.monotonic(), 4), "model_version": s["model_version"], "frame": "world",
+                "base": s["base"], "joints": s["joints"], "objects": s["objects"],
+                "overlays": {"markers": self.markers.list(), "sim": sim,
+                             **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}}
+
     # -- state -------------------------------------------------------------------------------------------
 
     def state(self) -> dict:
@@ -155,7 +223,9 @@ class SimNode:
                           "ms_per_frame": {s: round(1000 * c.render_s[s] / c.rendered[s], 2) if c.rendered[s] else None
                                            for s in c.rendered}}
         return {"state": "running" if snap["running"] else "paused", "error": self.cameras.error,
-                "model": {"source": w.model_info.get("source"), "model_version": w.model_info.get("model_version")},
+                "model": {"source": w.model_info.get("source"), "model_version": w.model_info.get("model_version"),
+                          "camera_serials": w.model_info.get("camera_serials") or {},
+                          "camera_mounts": w.model_info.get("camera_mounts") or {}},
                 "fidelity": {"base": "hybrid (kinematic modules, dynamic chassis)",
                              "arm": w.cfg["components"]["arm"].get("fidelity", "kinematic")},
                 **snap, "cameras": cams,

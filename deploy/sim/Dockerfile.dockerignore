@@ -1,0 +1,13 @@
+# build context = the repository root; only pyproject.toml, README.md, src/ and deploy/sim/ are copied
+.git
+.claude
+**/__pycache__
+**/*.pyc
+motorbridge_2ec
+rev_ctl
+rebot_ctl
+tests
+tools
+examples
+docs
+MUJOCO_LOG.TXT

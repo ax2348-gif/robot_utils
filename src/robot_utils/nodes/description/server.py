@@ -622,6 +622,63 @@ class ModelConventions(BaseModel):
     names: str = Field(description="How links are named.")
 
 
+class TreeVisual(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["box", "cylinder", "sphere", "mesh"] = Field(description="URDF geometry.")
+    name: Optional[str] = Field(None, description="The visual's name, if any.")
+    pos: list[float] = Field(description="m, in its link.")
+    quat: list[float] = Field(description="[x, y, z, w], in its link.")
+    rgba: list[float] = Field(description="Colour 0..1.")
+    size: Optional[list[float]] = Field(None, description="m, box full extents.")
+    radius: Optional[float] = Field(None, description="m (cylinder, sphere).")
+    length: Optional[float] = Field(None, description="m, cylinder length along its z.")
+    url: Optional[str] = Field(None, description="Mesh file (per mesh_uri).")
+    scale: Optional[list[float]] = Field(None, description="Mesh scale.")
+
+
+class TreeLink(BaseModel):
+    visuals: list[TreeVisual] = Field(description="What to draw, in the link's frame.")
+
+
+class TreeMimic(BaseModel):
+    joint: str = Field(description="The joint it follows.")
+    multiplier: float = Field(description="q = multiplier * q(joint) + offset.")
+    offset: float = Field(description="rad or m.")
+
+
+class TreeJoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(description="Joint name (the key in robot_state.v1 `joints`).")
+    type: str = Field(description="fixed | revolute | continuous | prismatic.")
+    parent: str = Field(description="Parent link.")
+    child: str = Field(description="Child link.")
+    pos: list[float] = Field(description="m, the child frame in the parent at q = 0.")
+    quat: list[float] = Field(description="[x, y, z, w], the child frame in the parent at q = 0.")
+    axis: list[float] = Field(description="Motion axis in the child frame.")
+    lower: Optional[float] = Field(None, description="Lower limit.")
+    upper: Optional[float] = Field(None, description="Upper limit.")
+    velocity: Optional[float] = Field(None, description="Velocity limit.")
+    effort: Optional[float] = Field(None, description="Effort limit.")
+    mimic: Optional[TreeMimic] = Field(None, description="Follows another joint.")
+
+
+class TreeUnits(BaseModel):
+    length: str = Field(description="m.")
+    angle: str = Field(description="rad.")
+    quat: str = Field(description="Quaternion component order: x, y, z, w.")
+
+
+class ModelTree(BaseModel):
+    schema_: str = Field(alias="schema", serialization_alias="schema", description="robot_tree.v1.")
+    model_version: Optional[str] = Field(description="Changes with the description / calibrations.")
+    root: str = Field(description="Root link (base_link): robot_state.v1 `base` is its pose in the world.")
+    options: ModelOptionsOut
+    links: dict[str, TreeLink] = Field(description="Every link with its visuals.")
+    joints: list[TreeJoint] = Field(description="Every joint, parents first.")
+    movable: list[str] = Field(description="Names of the revolute / continuous / prismatic joints.")
+    units: TreeUnits
+
+
 class ModelOut(BaseModel):
     """The robot model (GET /model): what /model/urdf assembles with the same options."""
     model_version: str = Field(description="Hash of the description YAML, the active calibrations, the camera "
@@ -773,6 +830,18 @@ def create_app(node: DescriptionNode, start: bool = True) -> FastAPI:
                          mounts: str = _q["mounts"], mesh_uri: str = _q["mesh_uri"]):
         text, v = await _model_call(node.model_urdf, model_opts(request, variant, base, mounts, mesh_uri))
         return Response(text, media_type="application/xml", headers={"X-Model-Version": v, "Cache-Control": "no-store"})
+
+    @app.get("/model/tree", response_model=ModelTree, response_model_exclude_unset=True, tags=["model"],
+             summary="The kinematic tree as plain JSON (robot_tree.v1): links with visuals, joints; for clients "
+                     "that compute their own kinematics (AR view)")
+    async def model_tree(request: Request,
+                         variant: str = Query("simple", description="full | simple (default: primitives only)"),
+                         base: str = Query("swerve", description="fixed | planar | swerve (default: steer and wheel "
+                                                                 "joints, as robot_state.v1 reports them)"),
+                         mounts: str = _q["mounts"],
+                         mesh_uri: str = Query("http", description="Mesh URLs: http (this node's /model/meshes, "
+                                                                   "default) | package | relative | file.")):
+        return await _model_call(node.model_tree, model_opts(request, variant, base, mounts, mesh_uri))
 
     @app.get("/model/meshes/{component}/{path:path}", tags=["model"], response_class=Response,
              summary="A mesh file of the model",

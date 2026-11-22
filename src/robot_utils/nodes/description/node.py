@@ -243,6 +243,12 @@ class DescriptionNode:
         b = self.model_builder()
         return b.build(opts).urdf, b.version()
 
+    def model_tree(self, opts) -> dict:
+        """GET /model/tree: the kinematic tree of the URDF these options assemble, as JSON (tree.py)."""
+        from .tree import tree
+        b = self.model_builder()
+        return tree(b.build(opts).urdf, b.version(), opts.public())
+
     def model_mesh(self, component: str, path: str):
         """The file of a mesh the full model uses (KeyError if it uses no such mesh)."""
         from .model import Options
