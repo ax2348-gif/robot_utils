@@ -242,9 +242,13 @@ class ArmLatch:
             self.just_enabled = False
         if not self.armed or self.arm_dgram_seq is None:
             return
+        # only rows that reflect our arming datagram (their seq: the newest datagram the WBC processed) count: an
+        # older row may predate our enable
+        a, seq = _num(row.get("armed")), _num(row.get("seq"))
+        if seq is None or seq < self.arm_dgram_seq:
+            return
         if st is not None and int(st) not in WBC_ENABLED:
             self.disarm("the WBC is " + {WBC_DISABLED: "disabled", WBC_FAULT: "in a fault"}.get(int(st), "not enabled"))
             return
-        a, seq = _num(row.get("armed")), _num(row.get("seq"))
-        if a is not None and seq is not None and seq >= self.arm_dgram_seq and a == 0.0:
+        if a is not None and a == 0.0:
             self.disarm("the WBC disarmed (its /state disarm_reason)")

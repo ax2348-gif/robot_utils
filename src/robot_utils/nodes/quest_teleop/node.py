@@ -24,8 +24,8 @@ from ..common.client import NodeClient
 from ..common.hub import RowHub
 from ..common.lease import RequestError
 from ..common.server import EventLog
-from .client import (DEFAULT_PORT, STALE_S, Config, LocalWbcClient, QuestReader, TeleopClient, WbcStream, close_wbc,
-                     open_wbc, quest_ctl)
+from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, LocalWbcClient, QuestReader,
+                     TeleopClient, WbcStream, close_wbc, open_wbc, quest_ctl)
 
 log = logging.getLogger("quest_teleop")
 
@@ -74,6 +74,11 @@ _COLS = [
     ("head_y", "m", ""), ("head_yaw", "rad", ""),
     ("offset_x", "m", "engaged: the stick offset of the base hint (world)"), ("offset_y", "m", ""),
     ("offset_yaw", "rad", ""),
+    # appended (append-only from here)
+    ("armed", "bool", "1 while the client is armed (Y); 0 disarmed (X, stale input, ...: teleop state reason)"),
+    ("wbc_armed", "bool", "the WBC's own armed flag (its stream)"),
+    ("quest_latency", "s", "the newest headset frame's latency over the session's best (arrival - sample time)"),
+    ("quest_rate_short", "Hz", "valid headset frames over the last 0.5 s (below 30 Hz: stale, disarms)"),
 ]
 FIELDS = [c[0] for c in _COLS]
 UNITS = [c[1] for c in _COLS]
@@ -170,19 +175,23 @@ class DeadlineRunner:
 
 
 class QuestTeleopNode:
-    def __init__(self, wbc: str = "wbc", *, quest_host: Optional[str] = None, quest_port: int = DEFAULT_PORT,
+    def __init__(self, wbc: str = "wbc", *, arm: Optional[str] = None, swerve: Optional[str] = None,
+                 quest_host: Optional[str] = None, quest_port: int = DEFAULT_PORT,
                  ssh_host: str = "quest", cfg: Optional[Config] = None, stale_s: float = STALE_S,
+                 max_latency: float = MAX_LATENCY_S, min_rate: float = MIN_RATE_HZ,
                  ar: str = ":80", scheme: str = "body-frozen", ctl_timeout: float = 240.0, wait: float = 30.0,
                  runner_factory: Optional[Callable] = None, probe: Optional[Callable] = None,
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic):
         self.name = name
         self.wbc_target = wbc
+        self.arm_target, self.swerve_target = arm, swerve     # the e-stop goes to these directly too
         self.ssh_host = ssh_host
         self.quest_host = quest_host or quest_ctl.ssh_hostname(ssh_host)   # `ssh -G`: local, no network
         self.quest_port = quest_port
         self.cfg = cfg or Config()
         self.stale_s = stale_s
+        self.max_latency, self.min_rate = max_latency, min_rate
         self.ar = ar
         self.scheme = scheme
         self.ctl_timeout, self.wait = ctl_timeout, wait
@@ -254,14 +263,16 @@ class QuestTeleopNode:
                 self.phase, self.error = "stopped", f"start refused: {msg}"
             self.events.add(f"start refused: {msg}", "warn")
             raise RequestError(409, f"the WBC refused: {msg}") from None
-        client = TeleopClient(self.cfg, self.monitor, self.stream, wbc, stale_s=self.stale_s, clock=self.clock)
+        client = TeleopClient(self.cfg, self.monitor, self.stream, wbc, stale_s=self.stale_s, clock=self.clock,
+                              max_latency=self.max_latency, min_rate=self.min_rate)
+        client.session_opened(info)
         self.monitor.drain()            # frames from before the start are not this client's
         with self.lock:
             self.wbc, self.client = wbc, client
             self.phase, self.started_at = "running", self.clock()
             self.last_msg = None
-        self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; "
-                        f"the {self.cfg.hand} grip clutches the arm")
+        self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; nothing moves until "
+                        f"Y (left) arms, X disables; the {self.cfg.hand} grip clutches the arm")
         return self.teleop_info()
 
     def stop_teleop(self, reason: str = "requested") -> dict:
@@ -274,6 +285,8 @@ class QuestTeleopNode:
         self.hub.state_changed()
         with self.step_lock:            # the loop's current step finishes; nothing is sent after this
             pass
+        if client is not None:
+            client.close()
         problems = []
         close_wbc(wbc, log=problems.append)
         wbc.close()
@@ -288,27 +301,49 @@ class QuestTeleopNode:
     def _auto_stop(self, reason: str) -> None:
         threading.Thread(target=self.stop_teleop, args=(reason,), name="quest-teleop-stop", daemon=True).start()
 
+    ESTOP_TIMEOUTS = {"wbc": 2.5, "arm": 1.0, "swerve": 1.0}   # the WBC answers after its own fan-out
+
     def estop(self, reason: str = "", source: str = "") -> dict:
-        """Forward the e-stop to the WBC (which forwards it to the arm and the swerve), then stop teleop."""
-        forwarded, err, downstream = False, None, None
-        try:   # the WBC forwards to the arm and the swerve (0.5 s each) before it answers
-            with NodeClient.for_instance(self.wbc_target, timeout=2.5) as c:
-                r = c.post("/estop", {"reason": reason or "quest_teleop e-stop", "source": source or self.name})
-            forwarded = bool(isinstance(r, dict) and r.get("latched"))
-            downstream = r.get("forwarded") if isinstance(r, dict) else None
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"[:200]
-        if forwarded:
-            self.wbc_estop = {"latched": True, "reason": reason or "quest_teleop e-stop", "source": source or self.name,
-                              "t": self.clock()}
-        self.events.add("e-stop forwarded to the WBC" if forwarded else f"e-stop forward to the WBC FAILED: {err}",
-                        "warn" if forwarded else "error")
+        """E-stop the arm, the swerve and the WBC directly and IN PARALLEL (one thread each: a slow or dead one
+        never delays the others; each latches and coasts), then stop teleop. ``latched``: any of them latched."""
+        why, src = reason or "quest_teleop e-stop", source or self.name
+        res: dict = {}
+
+        def post(name: str, target: str) -> None:
+            try:
+                with NodeClient.for_instance(target, timeout=self.ESTOP_TIMEOUTS[name]) as c:
+                    r = c.post("/estop", {"reason": why, "source": src})
+                res[name] = {"latched": bool(isinstance(r, dict) and r.get("latched", True)), "error": None,
+                             "reply": r if isinstance(r, dict) else None}
+            except Exception as e:  # noqa: BLE001
+                res[name] = {"latched": False, "error": f"{type(e).__name__}: {e}"[:200], "reply": None}
+
+        targets = [(n, t) for n, t in (("arm", self.arm_target), ("swerve", self.swerve_target),
+                                        ("wbc", self.wbc_target)) if t]
+        threads = [threading.Thread(target=post, args=nt, name=f"quest-estop-{nt[0]}", daemon=True) for nt in targets]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + max(self.ESTOP_TIMEOUTS.values()) + 0.5
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        out_t = {n: {k: v for k, v in res.get(n, {"latched": False, "error": "no answer in time"}).items()
+                     if k != "reply"} for n, _ in targets}
+        wbc = out_t.get("wbc", {})
+        if wbc.get("latched"):
+            self.wbc_estop = {"latched": True, "reason": why, "source": src, "t": self.clock()}
+        for n, r in out_t.items():
+            self.events.add(f"e-stop to the {n}: " + ("latched" if r["latched"] else f"FAILED: {r['error']}"),
+                            "warn" if r["latched"] else "error")
         running = self.phase == "running"
         if running:
             self._auto_stop("e-stop")
-        out = {"latched": forwarded, "forwarded": forwarded, "wbc_forwarded": downstream, "teleop_stopping": running}
-        if err:
-            out["error"] = err
+        wr = (res.get("wbc") or {}).get("reply")
+        out = {"latched": any(r["latched"] for r in out_t.values()), "targets": out_t,
+               "forwarded": bool(wbc.get("latched")), "wbc_forwarded": wr.get("forwarded") if wr else None,
+               "teleop_stopping": running}
+        errs = [f"{n}: {r['error']}" for n, r in out_t.items() if r["error"]]
+        if errs:
+            out["error"] = "; ".join(errs)
         return out
 
     # -- headset control -------------------------------------------------------------------------------------
@@ -436,6 +471,7 @@ class QuestTeleopNode:
         wrow, wt = self.stream.latest()
         if wrow is not None:
             ee = self.cfg.ee
+            row["wbc_armed"] = wrow.get("armed", nan)
             row.update(wbc_state=wrow.get("state", nan), wbc_base_mode=wrow.get("base_mode", nan),
                        wbc_limited=wrow.get("limited", nan), wbc_limited_by=wrow.get("limited_by", nan),
                        wbc_age=now - wt, base_x=wrow.get("base_x", nan), base_y=wrow.get("base_y", nan),
@@ -445,6 +481,10 @@ class QuestTeleopNode:
                 row[f"ee_tgt_{a}"] = wrow.get(f"{ee}_tgt_{a}", nan)
         if client is not None:
             core = client.core
+            row["armed"] = float(client.latch.armed)
+            g = client.gate
+            row["quest_latency"] = nan if g.latency is None else g.latency
+            row["quest_rate_short"] = g.rate(now)
             row["quest_discontinuities"] = float(client.gate.counts.get("discontinuities", 0))
             row["engagements"] = float(core.status.engagements)
             row["sent"] = float(client.wbc.sent.get("target", 0))
@@ -489,6 +529,7 @@ class QuestTeleopNode:
                 self.wbc_estop = e if e.get("latched") else None
                 self.wbc_state = {
                     "reachable": True, "error": None, "state": s.get("state"), "enabled": s.get("enabled"),
+                    "armed": s.get("armed"), "disarm_reason": s.get("disarm_reason"),
                     "holder": s.get("holder"), "fault": s.get("fault"), "hold_reason": s.get("hold_reason"),
                     "disabled_reason": s.get("disabled_reason"), "limited_by": s.get("limited_by"),
                     "base_mode": ((s.get("hints") or {}).get("base") or {}).get("mode"),
@@ -509,7 +550,8 @@ class QuestTeleopNode:
                         why = "the WBC e-stop is latched"
                     elif w.get("fault"):
                         why = f"WBC fault: {w['fault']}"
-                    elif not w.get("enabled"):
+                    elif not w.get("enabled") and not self._disabled_by_x():
+                        # (disabled by our own X: the session stays open, Y re-enables)
                         why = f"the WBC was disabled ({w.get('disabled_reason') or 'no reason'})"
                     elif w["lease"]["holder"] != CLIENT_NAME:
                         why = f"the WBC lease is no longer ours ({w['lease']['holder'] or 'free'})"
@@ -521,12 +563,26 @@ class QuestTeleopNode:
         if c is not None:
             c.close()
 
+    def _disabled_by_x(self) -> bool:
+        c = self.client
+        return bool(c is not None and c.latch.disabled_by_client)
+
     # -- state -----------------------------------------------------------------------------------------------
 
     def teleop_info(self) -> dict:
         c, w = self.client, self.wbc
         core = c.core if c else None
+        lt = c.latch if c else None
+        now = self.clock()
         return {"phase": self.phase, "state": self.client_state(),
+                "armed": bool(lt and lt.armed), "arm_seq": lt.arm_seq if lt else None,
+                "disarm_reason": (None if lt.armed else lt.reason) if lt else None,
+                "disabled_by_x": bool(lt and lt.disabled_by_client), "presses": lt.presses if lt else 0,
+                "input": None if c is None else {
+                    "fresh": c.gate.fresh(now), "why": None if c.gate.fresh(now) else c.gate.why_stale(now),
+                    "latency_ms": None if c.gate.latency is None else round(c.gate.latency * 1e3, 1),
+                    "rate_hz": round(c.gate.rate(now), 1), "late": c.gate.counts.get("late", 0),
+                    "slow": c.gate.counts.get("slow", 0)},
                 "sending": bool(c and c.sending), "reason": core.status.reason if core else None,
                 "refused": dict(core.status.refused) if core else {},
                 "engagements": core.status.engagements if core else 0,
@@ -554,7 +610,9 @@ class QuestTeleopNode:
             "estop": {"latched": bool(e.get("latched")), "reason": e.get("reason"), "source": e.get("source"),
                       "t": e.get("t"), "on": "wbc"},
             "ctl": self.ctl_info(),
-            "config": {"wbc": self.wbc_target, "quest_host": self.quest_host, "quest_port": self.quest_port,
+            "config": {"wbc": self.wbc_target, "arm": self.arm_target, "swerve": self.swerve_target,
+                       "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
+                       "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
                        "head_walk": cfg.head_walk, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout},

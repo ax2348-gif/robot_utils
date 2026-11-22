@@ -24,7 +24,7 @@ except ImportError:
 
 from quest_teleop import quest_ctl  # noqa: E402,F401
 from quest_teleop.body_frozen import Config  # noqa: E402,F401
-from quest_teleop.quest_stream import DEFAULT_PORT, STALE_S, QuestReader  # noqa: E402,F401
+from quest_teleop.quest_stream import DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestReader  # noqa: E402,F401
 from quest_teleop.teleop import TeleopClient, close_wbc, open_wbc  # noqa: E402,F401
 from quest_teleop.wbc_client import WbcClient, WbcStream  # noqa: E402,F401
 

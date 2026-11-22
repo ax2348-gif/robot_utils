@@ -204,6 +204,23 @@ def test_no_recovery_rearms_with_y_held_through_it():
     assert all(not m["armed"] for m in rig.wbc.msgs[-100:])
 
 
+def test_a_wbc_row_older_than_the_arming_datagram_never_disarms():
+    """Enable-then-arm: the newest WBC row may predate the enable (disabled, not armed); only rows that processed
+    our arming datagram (seq) count."""
+    rig = Rig()
+    rig.stream.row["state"] = 0.0
+    rig.run(IDLE, 2)
+    rig.run(Y(), 4)
+    assert rig.latch.armed
+    old = dict(rig.stream.row, state=0.0, armed=0.0, seq=rig.stream.row["seq"] - 1)
+    rig.stream.latest = lambda: (dict(old), rig.t)             # the stream lags: an old row, fresh in age
+    rig.run(IDLE, 5)
+    assert rig.latch.armed
+    old["seq"] = float(rig.wbc.seq)                             # a row after our datagrams, disabled: disarm
+    rig.frame(IDLE)
+    assert not rig.latch.armed and "disabled" in rig.latch.reason
+
+
 def test_alive_and_the_old_press_never_rearm_after_a_wbc_side_disarm():
     rig = Rig()
     rig.arm()
