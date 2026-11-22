@@ -50,10 +50,17 @@ def stack(tmp_path):
             n["start"]["args"] = ["--data-dir", str(tmp_path / "description")]
     cfg = tmp_path / "nodes.yaml"
     cfg.write_text(yaml.safe_dump(reg))
+    # the robot's description snapshot: a fake robot store, pulled with a local "ssh"
+    from test_sim_snapshot import LOCAL, robot_store
+
+    from robot_utils.nodes.sim import snapshot
+    _, active = robot_store(tmp_path / "robot")
+    snapshot.pull("robot", str(tmp_path / "description"), command=LOCAL, remote_dir=str(tmp_path / "robot"))
     port = free_port()
     env = dict(os.environ, PYTHONPATH=str(ROOT / "src") + os.pathsep + os.environ.get("PYTHONPATH", ""))
     proc = subprocess.Popen([sys.executable, "-m", "robot_utils.nodes.sim.stack", "--port", str(port), "--config",
-                             str(cfg), "--runtime-dir", rt, "--nodes", "description,sim,arm,swerve,estimator"],
+                             str(cfg), "--runtime-dir", rt, "--nodes", "description,sim,arm,swerve,estimator",
+                             "--no-pull"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=tmp_path)
     lines = []
     end = time.monotonic() + 150
@@ -66,7 +73,7 @@ def stack(tmp_path):
             break
     assert any("[sim stack] up:" in x for x in lines), "".join(lines)
     try:
-        yield f"http://127.0.0.1:{port}", Path(rt) / "robot", proc, lines
+        yield f"http://127.0.0.1:{port}", Path(rt) / "robot", proc, lines, active
     finally:
         if proc.poll() is None:
             proc.send_signal(signal.SIGINT)
@@ -77,7 +84,7 @@ def stack(tmp_path):
 
 
 def test_sim_stack_runs_and_stops_cleanly(stack):
-    base, sockets, proc, lines = stack
+    base, sockets, proc, lines, active = stack
     c = httpx.Client(base_url=base, timeout=20)
     managed = {n["name"]: n for n in c.get("/api/managed").json()["nodes"]}
     for name in ("description", "sim", "arm", "swerve", "estimator"):
@@ -89,6 +96,10 @@ def test_sim_stack_runs_and_stops_cleanly(stack):
     st = c.get("/nodes/sim/state").json()
     assert st["state"] == "running" and st["model"]["source"].startswith("description node")
     assert st["backends"]["swerve"]["clients"] == 1
+    # the robot's snapshot: the head camera reports the robot's serial and its mount is calibrated
+    assert st["model"]["camera_serials"] == {"camera": "CPC64630004G", "wrist_camera": "SIMWRIST0001"}
+    assert st["model"]["camera_mounts"]["camera"]["ground"] == active
+    assert any(f"ground {active}" in x for x in lines) and any("serial CPC64630004G" in x for x in lines), lines
     # the swerve node (--sim world) moves the world's base; the estimator sees it
     tok = c.post("/nodes/swerve/lease", json={"client": "test"}).json()["token"]
     H = {"X-Lease-Token": tok}

@@ -32,9 +32,13 @@ services:
       # sim config merged over default_sim.yaml: software GL settings by default (the GPU override clears it)
       ROBOT_SIM_CONFIG: ${ROBOT_SIM_CONFIG:-/opt/robot_utils/deploy/sim/sim_software_gl.yaml}
       ROBOT_STACK_URL: http://localhost:${SIM_PORT:-8080}/      # what the launcher prints (it listens inside on 8090)
+      # the robot's description snapshot (measured camera mounts, active calibrations) is the host's: refresh it there
+      # (python -m robot_utils.nodes.sim.snapshot); the container has no ssh access to the robot
+      ROBOT_SNAPSHOT_NO_PULL: "1"
     volumes:
       - sockets:/run/robot-rt
-      - data:/home/robot/.local        # description calibrations, saved scenes, node settings
+      - data:/home/robot/.local        # saved scenes, node settings
+      - ${ROBOT_SNAPSHOT_DIR:-${HOME}/.local/share/robot_utils/sim/description}:/home/robot/.local/share/robot_utils/sim/description
     restart: "no"
 
   # The port-80 proxy of the robot (frontend/proxy.py's nginx config), on 8080 in the container: /nodes/<name>/ to

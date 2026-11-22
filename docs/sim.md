@@ -142,6 +142,32 @@ first, then the landing page (tested: no socket left behind). If the description
 launcher prints its last log lines and stops. The landing page's proxy streams fine, but browsers allow 6
 connections per origin (the sim page uses 2: `events`, `viz/stream`).
 
+## The robot's calibrations in the sim
+
+The sim's camera mounts come from the description node it loads the model from, with `mounts=calibrated`. In the
+stack that node runs on its own data dir (`~/.local/share/robot_utils/sim/description`), which holds a **snapshot of
+the robot's description state**: `description.yaml` (the measured nominal camera poses and each camera's
+`last_serial`), `active.json` and the **active** calibration directories only (`calibrations/<type>/<serial>/<id>/`),
+copied read-only from the robot's store (`botcore:~/.local/share/robot_utils/description`: one `cat active.json`,
+one `tar c` of those files; nothing is written on the robot) plus `snapshot.json` (host, when, the active ids).
+
+- **At start** the stack refreshes it when the robot answers (ssh, about 6 s timeout; `--robot-host HOST`, default
+  `botcore`; `--no-pull` to skip), else keeps the previous snapshot, and prints which one it uses:
+  `[sim stack] robot description snapshot from botcore pulled 2026-11-21 19:21:42: CPC64630004G: ground
+  20261116-211209, yaw 20261111-183418; camera serials camera=CPC64630004G`, or plainly
+  `... snapshot: NONE ...: camera mounts are NOMINAL`. After the sim node is up it prints each sim camera's serial
+  and whether its mount is calibrated (also on the sim page, "cameras", and in `/state` `model.camera_serials` /
+  `camera_mounts`).
+- **By hand**, without the stack: `python -m robot_utils.nodes.sim.snapshot` (`--host`, `--dir`; `--show` only
+  prints what is there). A pull replaces the whole directory (the sim description node's own writes go with it).
+- **Serials**: the description node looks calibrations up by the camera's reported serial, so the sim node gives
+  each sim camera the robot's serial for that camera name (the description's `last_serial`, read from the
+  description node's `GET /description` when it loads the model), falling back to the sim config's
+  (`SIMHEAD0001`, `SIMWRIST0001`: no calibration matches those, so nominal mounts). The camera nodes then report
+  that serial and the description node applies the active calibrations as on the robot; it has no sim code path.
+- The registry's description data dir is never the robot's own (`~/.local/share/robot_utils/description`): the
+  stack refuses to snapshot into it.
+
 ## Docker
 
 `deploy/sim/`: `Dockerfile` (python 3.12-slim, nginx-light, OSMesa / EGL, the nodes' dependencies, `rev_ctl` and
@@ -160,6 +186,11 @@ docker compose -f deploy/sim/docker-compose.yml down              # stops every 
 - **Submodules**: the build takes `rev_ctl` and `rebot_ctl` as named build contexts, default the repo's own
   checkouts (`git submodule update --init rev_ctl rebot_ctl`); from a worktree without them:
   `REV_CTL_DIR=~/robot_utils/rev_ctl REBOT_CTL_DIR=~/robot_utils/rebot_ctl docker compose ... build`.
+- **The robot's description snapshot**: the host's `~/.local/share/robot_utils/sim/description` (or
+  `ROBOT_SNAPSHOT_DIR`) is mounted as the container's sim description data dir; the container does not pull
+  (`ROBOT_SNAPSHOT_NO_PULL=1`: no ssh keys in it). Refresh on the host with `python -m robot_utils.nodes.sim.snapshot`,
+  then restart the stack (`docker compose ... restart stack`): a pull replaces the directory, which a running
+  container does not see. Without a snapshot the mounts are nominal (the launcher's log says so).
 - **Rendering**: software OpenGL (OSMesa) by default, with `deploy/sim/sim_software_gl.yaml` as `ROBOT_SIM_CONFIG`
   (shadows and reflections off: on a MacBook's Docker, full model, 640×480 colour frame 540 → 170 ms; physics keeps
   rtf 1.0; the four streams run at ~3–10 fps). Faster: `model: {variant: simple}` in that file (40 ms).

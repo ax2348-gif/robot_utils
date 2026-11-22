@@ -6,7 +6,7 @@ import gzip
 import json
 import time
 from contextlib import asynccontextmanager
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
@@ -170,6 +170,8 @@ class BackendState(BaseModel):
 class ModelSource(BaseModel):
     source: Optional[str] = Field(description="Where the model came from.")
     model_version: Optional[str] = Field(description="The description node's model_version.")
+    camera_serials: dict[str, str] = Field({}, description="Serial each sim camera reports: the robot's (from the description snapshot) or the sim config's.")
+    camera_mounts: dict[str, Any] = Field({}, description="Per camera, what its mount came from at model load (the description's `from`: nominal, ground / yaw calibration ids).")
 
 
 class Fidelity(BaseModel):
@@ -263,6 +265,8 @@ class VizMesh(BaseModel):
 class VizModel(BaseModel):
     generation: int = Field(description="Bumps when the model recompiles (objects added / removed): fetch again.")
     model_version: Optional[str] = Field(description="The description node's model_version.")
+    camera_serials: dict[str, str] = Field({}, description="Serial each sim camera reports: the robot's (from the description snapshot) or the sim config's.")
+    camera_mounts: dict[str, Any] = Field({}, description="Per camera, what its mount came from at model load (the description's `from`: nominal, ground / yaw calibration ids).")
     cell: float = Field(description="m, mesh simplification cell (0 = as compiled).")
     bodies: list[VizBody] = Field(description="Bodies by index (pose stream order).")
     geoms: list[VizGeom] = Field(description="Drawable geoms.")

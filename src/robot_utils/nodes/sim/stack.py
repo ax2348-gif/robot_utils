@@ -1,10 +1,15 @@
 """python -m robot_utils.nodes.sim.stack [--port 8080] [--host 127.0.0.1] [--nodes a,b,...] [--runtime-dir DIR]
+                                        [--robot-host botcore | --no-pull]
 
 The whole robot stack on the MuJoCo sim world, on this machine (docs/sim.md, "The sim stack"): the landing page
 (``robot_utils.frontend``) with the sim registry (``stack_nodes.yaml``: every node in its sim mode), which then
 starts the nodes itself, in order: the description node, the sim node, then arm, swerve, cameras, power,
 estimator, pose_servo (``--nodes`` changes the list). So the landing page works as on the robot: tiles, pages,
 Start / Stop. Open http://localhost:8080/ (the frontend's own /nodes/ proxy; no nginx needed).
+
+Camera mounts: at start it refreshes the robot's description snapshot (measured mounts, active calibrations) over
+ssh into the sim description node's data dir when the robot answers (``--robot-host``, ``--no-pull``; snapshot.py),
+else keeps the previous one, and says which one it uses, or that there is none and the mounts are nominal.
 
 Ctrl-C (or SIGTERM) stops every node (in reverse order), then the landing page. Node logs: the landing page's
 "logs" per tile, or ``GET /api/nodes/<name>/logs``. Never on the robot: it would start nodes on hardware names
@@ -89,6 +94,49 @@ def start_node(fe: Frontend, name: str) -> bool:
     return False
 
 
+def description_dir(cfg: str) -> Optional[str]:
+    """The description node's --data-dir in the registry (where the robot's snapshot goes)."""
+    from ...frontend.config import load_config
+    for n in load_config(cfg):
+        if n.node_kind == "description" and n.start is not None:
+            args = list(n.start.args)
+            if "--data-dir" in args and args.index("--data-dir") + 1 < len(args):
+                return os.path.expanduser(args[args.index("--data-dir") + 1])
+            from ..description.store import DEFAULT_DATA_DIR
+            return DEFAULT_DATA_DIR
+    return None
+
+
+def snapshot_robot(cfg: str, host: str, refresh: bool) -> None:
+    """Refresh the robot's description snapshot (short timeout), then say which one the sim uses."""
+    from . import snapshot
+    d = description_dir(cfg)
+    if d is None:
+        log("no description node in the registry: no robot snapshot")
+        return
+    from ..description.store import DEFAULT_DATA_DIR
+    if os.path.abspath(d) == os.path.abspath(DEFAULT_DATA_DIR):
+        log(f"the registry's description node uses the robot's own data dir {d}: not overwriting it with a snapshot")
+    elif refresh:
+        try:
+            snapshot.pull(host, d, timeout=6.0)
+            log(f"pulled the robot's description from {host}")
+        except snapshot.SnapshotError as e:
+            log(f"robot {host} not reachable ({str(e)[:160]}): keeping the previous snapshot")
+    log(snapshot.describe(d))
+
+
+def report_cameras(fe: Frontend) -> None:
+    st, s = fe.call("GET", "/nodes/sim/state", timeout=10.0)
+    if st != 200:
+        return
+    m = s.get("model") or {}
+    for name, serial in (m.get("camera_serials") or {}).items():
+        used = (m.get("camera_mounts") or {}).get(name)
+        cal = [f"{k} {used[k]}" for k in ("ground", "yaw") if isinstance(used, dict) and used.get(k)]
+        log(f"sim camera {name}: serial {serial}, mount " + (("calibrated: " + ", ".join(cal)) if cal else "NOMINAL"))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.sim.stack", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -101,6 +149,11 @@ def main(argv=None) -> int:
     p.add_argument("--runtime-dir", default=None,
                    help="run the stack under this XDG_RUNTIME_DIR (sockets in <dir>/robot/), e.g. to run two stacks; "
                         "keep it short: unix socket paths are limited to ~100 characters")
+    p.add_argument("--robot-host", default=os.environ.get("ROBOT_SNAPSHOT_HOST", "botcore"),
+                   help="ssh host of the robot whose description (measured mounts, active calibrations) the sim uses: "
+                        "refreshed at start when it answers, else the previous snapshot (default botcore)")
+    p.add_argument("--no-pull", action="store_true", default=bool(os.environ.get("ROBOT_SNAPSHOT_NO_PULL")),
+                   help="use the description snapshot as it is (python -m robot_utils.nodes.sim.snapshot refreshes it)")
     a = p.parse_args(argv)
 
     env = dict(os.environ, PYTHONUNBUFFERED="1")
@@ -116,6 +169,7 @@ def main(argv=None) -> int:
     if fe.up():
         p.error(f"something already answers on port {a.port} (another stack?); stop it or use --port")
     cfg = a.config or registry_path()
+    snapshot_robot(cfg, a.robot_host, not a.no_pull)
     cmd = [sys.executable, "-m", "robot_utils.frontend", "--config", cfg, "--port", str(a.port), "--host", a.host,
            "--no-observe"]
     log(f"landing page: {' '.join(cmd[1:])}")
@@ -142,6 +196,8 @@ def main(argv=None) -> int:
                 break
             if start_node(fe, name):
                 started.append(name)
+                if name == "sim":
+                    report_cameras(fe)
             elif name in ("description", "sim"):
                 log("the world is needed by the other nodes: stopping")
                 stopping["flag"] = True

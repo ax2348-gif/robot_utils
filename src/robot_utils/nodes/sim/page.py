@@ -124,7 +124,11 @@ function render(s) {
   $("#state").textContent = s.state;
   $("#state").className = "ru-pill " + (s.state === "running" ? "ru-ok" : "ru-warn");
   kv($("#clockkv"), [["rtf", `${s.rtf} (measured ${s.rtf_measured})`], ["steps/s", s.step_rate], ["fell behind", s.behind],
-                     ["model", esc(s.model.source || "")], ["fidelity", `base ${esc(s.fidelity.base)}; arm ${esc(s.fidelity.arm)}`]]);
+                     ["model", esc(s.model.source || "")],
+                     ["cameras", Object.entries(s.model.camera_serials || {}).map(([n, v]) => {
+                        const m = (s.model.camera_mounts || {})[n];
+                        const how = m && (m.ground || m.yaw) ? "calibrated" + (m.ground ? " ground " + esc(m.ground) : "") + (m.yaw ? " yaw " + esc(m.yaw) : "") : '<span class="ru-warn">nominal</span>';
+                        return `${esc(n)} ${esc(v)}: ${how}`; }).join("<br>") || "–"], ["fidelity", `base ${esc(s.fidelity.base)}; arm ${esc(s.fidelity.arm)}`]]);
   const b = s.base, a = s.arm;
   kv($("#robot"), [["base xyz", b.xyz.map(f3).join(", ") + " m"], ["yaw", (b.rpy[2] * 180 / Math.PI).toFixed(1) + "°"],
                     ["twist", b.twist.map(f3).join(", ")],

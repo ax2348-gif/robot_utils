@@ -46,10 +46,40 @@ def fetch_bundle(source: str, variant: str = "full") -> tuple[bytes, str]:
         return r.content, f"description node {source} (model {r.headers.get('x-model-version')})"
 
 
+def description_of(source: str) -> Optional[dict]:
+    """The description node's GET /description (None for a bundle or ``local``)."""
+    if source == "local" or source.endswith(".zip"):
+        return None
+    from ..common.client import NodeClient
+    with NodeClient(source, timeout=10.0) as c:
+        return c.get("/description")
+
+
+def apply_camera_serials(config: dict, description: Optional[dict]) -> dict:
+    """Make each sim camera report the robot's serial for that camera name (the description's ``last_serial``,
+    from the robot's snapshot), so the description node applies that camera's active calibrations unchanged.
+    Without one the sim config's serial stays (no calibration matches it: nominal mounts). Returns {name: serial}."""
+    from .snapshot import camera_serials
+    cams = config.get("cameras") or {}
+    serials = camera_serials(description or {}, cams)
+    for name, s in serials.items():
+        cams[name]["serial"] = s
+    return serials
+
+
 def world_from(source: str, config: dict) -> World:
     data, how = fetch_bundle(source, (config.get("model") or {}).get("variant", "full"))
     urdf, assets, info = unzip_bundle(data)
-    return World(urdf, assets, config, {"source": how, "model_version": info.get("model_version")})
+    try:
+        desc = description_of(source)
+    except Exception as e:  # noqa: BLE001 - the model came; the serials fall back to the config's
+        log.warning("description %s: GET /description failed (%s): sim camera serials from the config", source, e)
+        desc = None
+    serials = apply_camera_serials(config, desc)
+    mounts = {name: c.get("from") for name, c in ((desc or {}).get("cameras") or {}).items()}
+    log.info("camera serials %s; camera mounts %s", serials, mounts or "nominal (no description node)")
+    return World(urdf, assets, config, {"source": how, "model_version": info.get("model_version"),
+                                        "camera_serials": serials, "camera_mounts": mounts})
 
 
 class SimNode:
@@ -193,7 +223,9 @@ class SimNode:
                           "ms_per_frame": {s: round(1000 * c.render_s[s] / c.rendered[s], 2) if c.rendered[s] else None
                                            for s in c.rendered}}
         return {"state": "running" if snap["running"] else "paused", "error": self.cameras.error,
-                "model": {"source": w.model_info.get("source"), "model_version": w.model_info.get("model_version")},
+                "model": {"source": w.model_info.get("source"), "model_version": w.model_info.get("model_version"),
+                          "camera_serials": w.model_info.get("camera_serials") or {},
+                          "camera_mounts": w.model_info.get("camera_mounts") or {}},
                 "fidelity": {"base": "hybrid (kinematic modules, dynamic chassis)",
                              "arm": w.cfg["components"]["arm"].get("fidelity", "kinematic")},
                 **snap, "cameras": cams,
