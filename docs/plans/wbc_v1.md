@@ -16,9 +16,12 @@ arm move. Runs on the Pi at 100 Hz. Open to bimanual and 7-DoF arms (nothing is 
 
 - **On the Pi, 100 Hz**, CPU (a small QP: daqp solves 9 variables in ~7 µs; a full pink/mink-style step was 0.04 ms
   on the Mac, estimated ~0.1–0.3 ms on the Pi).
-- **pink (Pinocchio) for kinematics and the QP, in the sim and on the robot alike**: one kinematic model from the
-  description node's `/model/urdf?base=planar`, the same code path in both; MuJoCo stays physics-only and off the
-  robot. Solver: daqp through qpsolvers.
+- **Pinocchio for kinematics, a QP of our own on it, in the sim and on the robot alike**: one kinematic model from
+  the description node's `/model/urdf?base=planar`, the same code path in both; MuJoCo stays physics-only and off the
+  robot. Solver: daqp through qpsolvers. (Decided 2026-11-21, superseding pink: pink's configuration and acceleration
+  limits went infeasible approaching a joint limit; the direct QP keeps a joint box that is always feasible and
+  carries the reach/manipulability constraints and the two-stage base hint. Measured 0.15–0.21 ms p50 per tick on
+  the Mac.)
 - **QP first, MPC swappable** behind one controller interface (below).
 - **EE targets are canonical in the world (odometry) frame**; pose plus optional velocity feedforward (with a staleness
   timeout); reactive streams and timestamped chunks are one mechanism (a target trajectory).
