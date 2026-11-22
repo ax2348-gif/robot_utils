@@ -60,13 +60,13 @@ def test_base_drives_forward_sideways_and_turns(w):
     drive(w, 2.0, 0.0, 0.3)
     b = w.base_state()
     assert b["twist"][0] == pytest.approx(0.3, abs=0.01) and abs(b["twist"][1]) < 0.01
-    assert 0.4 < b["xyz"][0] < 0.6                       # 0.85 m/s^2 ramp, then 0.3 m/s
+    assert 0.5 < b["xyz"][0] < 0.62                      # the SPARK ramp (~10 m/s^2), then 0.3 m/s
     drive(w, 1.5, 0.0, 0.0)
     assert abs(w.base_state()["twist"][0]) < 0.01
     x0 = w.base_state()["xyz"]
-    drive(w, 2.0, math.pi / 2, 0.2)                      # wheels turn 90 deg at <= 4 pi rad/s, then go left
+    drive(w, 2.0, math.pi / 2, 0.2)                      # wheels turn 90 deg at the steer rate cap while driving
     b = w.base_state()
-    assert b["xyz"][1] - x0[1] > 0.2 and abs(b["xyz"][0] - x0[0]) < 0.02
+    assert b["xyz"][1] - x0[1] > 0.2 and abs(b["xyz"][0] - x0[0]) < 0.05
     # turning in place: each wheel tangential
     for k in range(3000):
         if k % 10 == 0:
@@ -82,13 +82,58 @@ def _modules():
     return MODULES
 
 
-def test_steer_rate_and_wheel_accel_follow_the_planner_bounds(w):
+def test_steer_rate_wheel_speed_and_accel_are_the_robots(w):
+    from robot_utils.nodes.sim.limits import swerve_limits
+    L = swerve_limits()
     w.swerve_op("modules", {"steer": {m: [True, 1.0] for m in w.module_names}, "drive": {}})
     w.step(50)
     st = w.module_states()["modules"]["FL"]
-    assert st["steer"] <= 12.566 * 0.05 + 0.01            # 4 pi rad/s
-    drive(w, 0.2, 1.0, 2.0)
-    assert w.module_states()["modules"]["FL"]["speed"] <= 0.85 * 0.2 + 0.02
+    assert st["steer"] <= L["steer_rate_max"] * 0.05 + 0.01          # ~7.4 rad/s: STEER_MAX_OUTPUT x free rate
+    drive(w, 0.1, 0.0, 3.0)
+    assert w.module_states()["modules"]["FL"]["speed"] <= L["wheel_accel_max"] * 0.1 + 0.05   # the SPARK ramp
+    drive(w, 1.5, 0.0, 3.0)                                            # 3 m/s asked: the duty cap's ~1.87 m/s
+    assert w.module_states()["modules"]["FL"]["speed"] == pytest.approx(L["wheel_speed_max"], abs=0.05)
+
+
+def test_sim_limits_are_the_robot_configs(w, tmp_path):
+    """Every actuator limit of the world comes from the robot codebase (swerve/constants.py as setup_sparks.py
+    configures the SPARKs, arm/config.py as the arm node loads it), computed here independently."""
+    from robot_utils.nodes.arm import config as C
+    from robot_utils.nodes.sim.limits import robot_limits
+    from robot_utils.nodes.sim.world import SimError, World, load_config
+    from robot_utils.nodes.swerve import constants as K
+    from robot_utils.nodes.swerve import setup_sparks
+    L = w.limits
+    assert all(np.all(np.asarray(L[k]) == np.asarray(v)) for k, v in robot_limits().items()) and set(L) == set(robot_limits())
+    assert L["wheel_speed_max"] == pytest.approx(K.DRIVE_MAX_OUTPUT * K.DRIVE_FREE_SPEED)          # ~1.87 m/s
+    assert L["wheel_accel_max"] == pytest.approx(K.DRIVE_FREE_SPEED / K.DRIVE_RAMP)
+    assert L["steer_rate_max"] == pytest.approx(K.STEER_MAX_OUTPUT * K.NEO550_FREE_RPM / 60 * 2 * math.pi
+                                                / K.STEER_REDUCTION)
+    assert 1.1 < L["steer_rate_max"] / (2 * math.pi) < 1.3                    # "about 1.2 wheel rotations/s"
+    assert L["wheel_torque_max"] == pytest.approx(
+        min(K.DRIVE_MAX_OUTPUT * K.VORTEX_STALL_TORQUE, K.VORTEX_STALL_TORQUE / K.VORTEX_STALL_CURRENT
+            * K.DRIVE_CURRENT_LIMIT) * K.DRIVE_REDUCTION)
+    assert L["steer_torque_max"] == pytest.approx(
+        min(K.STEER_MAX_OUTPUT * K.NEO550_STALL_TORQUE, K.NEO550_STALL_TORQUE / K.NEO550_STALL_CURRENT
+            * K.STEER_CURRENT_LIMIT) * K.STEER_REDUCTION)
+    assert np.allclose(L["joint_speed_max"], C.load_settings().hard.joint_vel)
+    assert L["finger_force_max"] == C.HARD_MAX_FORCE
+    # the SPARK configuration these assume is the one setup_sparks applies
+    src = open(setup_sparks.__file__).read()
+    assert "output_range(-c.DRIVE_MAX_OUTPUT, c.DRIVE_MAX_OUTPUT)" in src and "closed_loop_ramp_rate(c.DRIVE_RAMP)" in src
+    assert "output_range(-c.STEER_MAX_OUTPUT, c.STEER_MAX_OUTPUT)" in src
+    # the actuators carry those torque caps
+    m = w.m
+    assert m.actuator_forcerange[m.actuator("wheel_FL").id][1] == pytest.approx(L["wheel_torque_max"])
+    assert m.actuator_forcerange[m.actuator("steer_FL").id][1] == pytest.approx(L["steer_torque_max"])
+    # an arm settings file's joint_vel_max (as the arm node loads it) reaches the world
+    from robot_utils.nodes.sim.limits import arm_limits
+    f = tmp_path / "arm.yaml"
+    f.write_text("joint_vel_max: [1, 1, 1, 3, 3, 3]\n")
+    assert arm_limits(C.load_settings(f))["joint_speed_max"].tolist() == [1, 1, 1, 3, 3, 3]
+    # a sim config cannot set its own limits
+    with pytest.raises(SimError, match="limits come from the robot config"):
+        World("<robot name='x'/>", {}, load_config(overrides={"base": {"wheel_speed_max": 3.0}}))
 
 
 def test_disabled_modules_coast_and_heartbeat_loss_disables(w):

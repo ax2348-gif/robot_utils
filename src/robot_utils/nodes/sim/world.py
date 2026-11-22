@@ -5,13 +5,13 @@
 lights and scene objects. Every physics step it first runs the per-component controllers:
 
 - **base** (the decided hybrid): per module, the steer angle and wheel speed references follow the
-  commanded SPARK setpoints through the planner's bounds (steer rate, wheel speed, wheel
-  acceleration); a stiff position servo (steer) and a velocity servo (wheel), each torque-capped near
-  the motor's stall torque, make the wheels turn; wheel-floor friction moves the free chassis. A
+  commanded SPARK setpoints within the robot's own limits (limits.py: the SPARKs' output range, ramp and
+  current limits from swerve/constants.py); a stiff position servo (steer) and a velocity servo (wheel),
+  each torque-capped at what the duty / current limits allow, make the wheels turn; wheel-floor friction moves the free chassis. A
   disabled drive coasts (no torque); a disabled steer holds its angle. Soft wheel contact is the
   modules' compliance.
 - **arm** (kinematic fidelity): the joint reference follows the MIT position setpoint within
-  ``joint_speed_max`` (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
+  arm node's hard joint speed caps (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
   (``qfrc_bias`` as a joint torque, so the chassis carries the arm's weight) keeps the joints on it.
   The gripper's reference follows its goal at ``gripper_speed``; the fingers are force-capped.
 
@@ -134,6 +134,12 @@ class Arm:
 class World:
     def __init__(self, urdf: str, assets: dict, config: Optional[dict] = None, model_info: Optional[dict] = None):
         self.cfg = config or default_config()
+        from .limits import refuse_overrides, robot_limits
+        bad = refuse_overrides(self.cfg)
+        if bad:
+            raise SimError(f"the sim config sets {', '.join(bad)}: limits come from the robot config "
+                           "(swerve/constants.py, arm/config.py; docs/sim.md)")
+        self.limits = robot_limits()
         self.model_info = model_info or {}
         self.lock = threading.RLock()
         self.objects: dict = {}           # name -> spec dict (shape, size, mass, pose at add / reset)
@@ -218,9 +224,10 @@ class World:
             mm = MODULE_JOINT.match(j.name or "")
             if mm:
                 s, w = bc["steer"], bc["wheel"]
-                self._servo(spec, f"steer_{mm.group(1)}", j.name, float(s["kp"]), float(s["kv"]), float(s["torque_max"]))
+                L = self.limits
+                self._servo(spec, f"steer_{mm.group(1)}", j.name, float(s["kp"]), float(s["kv"]), L["steer_torque_max"])
                 self._servo(spec, f"wheel_{mm.group(1)}", f"base_{mm.group(1)}_wheel_joint", 0.0, float(w["kv"]),
-                            float(w["torque_max"]), velocity=True)
+                            L["wheel_torque_max"], velocity=True)
         ac = self.cfg["components"]["arm"]
         if ac.get("fidelity", "kinematic") != "kinematic":
             raise SimError(f"arm fidelity {ac.get('fidelity')!r} is not built yet (kinematic only)")
@@ -229,7 +236,7 @@ class World:
             for jn in ARM_JOINTS:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
             if "arm_finger_left" in names:
-                self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, float(ac["finger_force_max"]))
+                self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, self.limits["finger_force_max"])
         # cameras: MuJoCo looks along -z with y up; the optical frame looks along +z with y down
         w_max, h_max = 640, 480
         for cam, cc in (self.cfg.get("cameras") or {}).items():
@@ -466,7 +473,8 @@ class World:
         if d.time - self.swerve_last > 0.1:          # no setpoints: the SPARKs' heartbeat is gone
             for mod in self.modules:
                 mod.steer_on = mod.drive_on = False
-        rate, vmax, amax = float(bc["steer_rate_max"]), float(bc["wheel_speed_max"]), float(bc["wheel_accel_max"])
+        L = self.limits
+        rate, vmax, amax = L["steer_rate_max"], L["wheel_speed_max"], L["wheel_accel_max"]
         for mod, ix in zip(self.modules, self.mod):
             if mod.steer_on:
                 err = wrap(mod.steer_goal - wrap(mod.steer_ref))
@@ -499,7 +507,7 @@ class World:
         if a.enabled and a.cmd is not None:
             q, _, kp, _, _ = a.cmd
             target = np.where(kp > 0, q, a.q_ref)     # kp = 0 (floating): hold where it is
-            vmax = float(ac["joint_speed_max"]) * dt
+            vmax = self.limits["joint_speed_max"] * dt
             a.q_ref = a.q_ref + np.clip(target - a.q_ref, -vmax, vmax)
         d.ctrl[self.arm_a] = a.q_ref
         d.qfrc_applied[self.arm_v] = d.qfrc_bias[self.arm_v]      # gravity / bias feedforward

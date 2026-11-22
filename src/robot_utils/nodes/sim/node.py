@@ -18,6 +18,7 @@ from ..common.hub import RowHub
 from ..common.server import EventLog
 from .protocol import IpcServer, backend_socket
 from . import viz
+from .limits import describe as describe_limits
 from .render import Cameras
 from .world import SimError, World, unzip_bundle
 
@@ -226,6 +227,7 @@ class SimNode:
                 "model": {"source": w.model_info.get("source"), "model_version": w.model_info.get("model_version"),
                           "camera_serials": w.model_info.get("camera_serials") or {},
                           "camera_mounts": w.model_info.get("camera_mounts") or {}},
+                "limits": describe_limits(w.limits),
                 "fidelity": {"base": "hybrid (kinematic modules, dynamic chassis)",
                              "arm": w.cfg["components"]["arm"].get("fidelity", "kinematic")},
                 **snap, "cameras": cams,

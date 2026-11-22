@@ -41,14 +41,41 @@ The robot never collides with itself; it collides with the floor and objects.
 
 | component | fidelity (v1) | model |
 |---|---|---|
-| base | hybrid (decided) | per module a steer position servo and a wheel velocity servo, each torque-capped near the motor's stall torque (45 N m steer, 18.3 N m wheel). Their references follow the SPARK setpoints through the planner's bounds: steer rate 4π rad/s, wheel speed 3 m/s, wheel acceleration 0.85 m/s² (`max_accel + max_alpha · WHEEL_R` of the planner caps). The chassis is a free body moved by wheel–floor friction; soft wheel contact (`solref 0.02 s`) is the modules' compliance (all four wheels stay loaded, tested). A disabled drive coasts (no torque), a disabled steer holds its angle; no setpoints for 0.1 s disables every module (a lost heartbeat). |
-| arm | kinematic | the reference follows each MIT position setpoint within `joint_speed_max` (6 rad/s); a joint sent kp = 0 holds where it is. A stiff servo plus a `qfrc_bias` feedforward applied as joint torque keeps the joints on it, so the chassis carries the arm's weight and reaction. No MIT frame for 0.1 s while enabled: status 0xD (the motors' CAN watchdog); a lost backend connection likewise. |
+| base | hybrid (decided) | per module a steer position servo and a wheel velocity servo, each torque-capped at what the SPARK's duty and current limits allow (9.0 N m steer, 3.5 N m wheel). Their references follow the SPARK setpoints within the robot's own limits: steer rate 7.4 rad/s, wheel speed 1.87 m/s, wheel acceleration 10.7 m/s² (see "Limits come from the robot config"). The chassis is a free body moved by wheel–floor friction; soft wheel contact (`solref 0.02 s`) is the modules' compliance (all four wheels stay loaded, tested). A disabled drive coasts (no torque), a disabled steer holds its angle; no setpoints for 0.1 s disables every module (a lost heartbeat). |
+| arm | kinematic | the reference follows each MIT position setpoint within the arm node's hard joint speed caps (2, 2, 2, 6, 6, 6 rad/s); a joint sent kp = 0 holds where it is. A stiff servo plus a `qfrc_bias` feedforward applied as joint torque keeps the joints on it, so the chassis carries the arm's weight and reaction. No MIT frame for 0.1 s while enabled: status 0xD (the motors' CAN watchdog); a lost backend connection likewise. |
 | gripper | kinematic | the motor angle follows its goal (kp > 0), or closes / opens under a torque command, at `gripper_speed`; the fingers (gap = −q · 16 mm/rad) are force-capped, so they stop on an object. |
 | cameras | rendered | head and wrist: colour (JPEG, as the camera's MJPG) and depth (Y16 mm, 0 outside `depth_range`) at the configured size / rate / field of view, rendered from the links `<camera>_color_optical` / `_depth_optical`. `t_sensor` = the host time of the rendered state, `t_capture` = `t_sensor` + the measured delay (head colour 30 ms, depth 17 ms, wrist 47 ms). No noise or exposure yet. |
 | IMU | MuJoCo sensors | the head camera's (`cameras.camera.imu`): accelerometer (specific force: +9.81 m/s² up at rest) and gyro at the link's origin, in its frame (the depth optical frame), sampled every physics step (1 kHz); `t_sensor` = the host time the sample stands for (real-time mode: the wall-clock anchor), `t_capture` = + `delay` (2 ms). No bias, noise or temperature model. The camera node's attitude filter and the estimator's fused heading run on it unchanged. The wrist camera has none (as the Gemini 305). |
 
 `dynamic` fidelity (MIT motors, backlash, friction, gripper contact law) is the next step: the config already
 has `components.arm.fidelity`; anything but `kinematic` is refused for now.
+
+## Limits come from the robot config
+
+The world has no actuator limits of its own: `nodes/sim/limits.py` computes them from the robot codebase at start
+(shown in `/state` `limits`), and a sim config that sets one is refused. Controllers (pose_servo, the WBC) keep
+their own, tighter settings on top, as on the robot.
+
+| limit | value now | from |
+|---|---|---|
+| wheel speed | 1.87 m/s | `swerve/constants.py` `DRIVE_MAX_OUTPUT` (0.35, the drive SPARK's closed-loop `output_range`, `setup_sparks.py`) × `DRIVE_FREE_SPEED` |
+| wheel acceleration | 10.7 m/s² | `DRIVE_FREE_SPEED / DRIVE_RAMP` (the drive SPARK's closed-loop ramp: 0.5 s from 0 to full output) |
+| wheel torque | 3.5 N m | min(`DRIVE_MAX_OUTPUT` × Vortex stall torque, `DRIVE_CURRENT_LIMIT` (40 A) × its torque per amp) × `DRIVE_REDUCTION` (the current limit governs) |
+| steer rate | 7.4 rad/s (1.18 turns/s) | `STEER_MAX_OUTPUT` (0.3, the steer SPARK's `output_range`) × `STEER_FREE_RATE` (NEO 550 free speed / `STEER_REDUCTION` 46.42) |
+| steer torque | 9.0 N m | min(`STEER_MAX_OUTPUT` × NEO 550 stall torque, `STEER_CURRENT_LIMIT` (20 A) × its torque per amp) × `STEER_REDUCTION` |
+| arm joint speeds | 2, 2, 2, 6, 6, 6 rad/s | `arm/config.py` `HARD.joint_vel`, as the arm node loads it (`load_settings()`: `~/.config/robot_utils/arm.yaml` `joint_vel_max` overrides) |
+| gripper force | 120 N per finger | `arm/config.py` `HARD_MAX_FORCE` |
+
+The motor figures (`VORTEX_STALL_TORQUE` / `_CURRENT`, `NEO550_FREE_RPM`, `NEO550_STALL_TORQUE` / `_CURRENT`,
+`STEER_REDUCTION`) are REV datasheet values, added to `swerve/constants.py` next to the existing `VORTEX_FREE_RPM`.
+The simulated SPARK is a speed clamp plus a torque cap (the two ends of the duty cap's torque–speed line, slightly
+stronger than the motor in between). Not from the robot config, so listed as estimates: `gripper_speed` (6 rad/s of
+the gripper motor: the robot sets no speed, the node sends the goal through MIT PD; ~0.5 s full stroke), the arm's
+`watchdog` (0.1 s: the Damiao motors' CAN timeout) and `reply_latency` (7 ms, measured). Sim-only keys:
+servo stiffness / damping and armatures, contact and friction.
+
+Before this (2026-11-21) the sim used the pose_servo planner's caps (4π rad/s steering, 3 m/s, 0.85 m/s²) and
+stall-torque estimates: it steered faster and pushed harder than the robot can.
 
 ## Time
 
@@ -269,9 +296,8 @@ with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 
 ## Config (`default_sim.yaml`)
 
-`physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (bounds, servo gains, torque caps,
-armature, wheel contact, start pose), `components.arm` (fidelity, speeds, servo, finger force, reply latency,
-watchdog, start pose), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
+`physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (servo gains, armature, wheel contact,
+start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
 `delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene.objects`,
 `time` (`run`, `rtf`).
 

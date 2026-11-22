@@ -55,6 +55,16 @@ DRIVE_MPS_PER_RPM = math.pi * WHEEL_DIAMETER / DRIVE_REDUCTION / 60  # motor RPM
 VORTEX_FREE_RPM = 6784
 DRIVE_FREE_SPEED = VORTEX_FREE_RPM * DRIVE_MPS_PER_RPM  # m/s at 12 V (5.3)
 
+# --- Motors (REV datasheets, 12 V) and the steering gear: what the hardware can do at most. The sim derives its
+# limits from these and the output / current limits below (nodes/sim/limits.py).
+VORTEX_STALL_TORQUE = 3.6     # N m
+VORTEX_STALL_CURRENT = 211.0  # A
+NEO550_FREE_RPM = 11000
+NEO550_STALL_TORQUE = 0.97    # N m
+NEO550_STALL_CURRENT = 100.0  # A
+STEER_REDUCTION = 9424 / 203  # MAXSwerve steering gear, motor to module (46.42)
+STEER_FREE_RATE = NEO550_FREE_RPM / 60 * 2 * math.pi / STEER_REDUCTION   # rad/s of the module at 12 V (24.8)
+
 # --- Gains (soft, for the first tests) --------------------------------------------------
 # Units: steering error in encoder rotations, drive velocity in wheel m/s; P output is duty
 # cycle, feedforward is in volts (firmware 26: parameter 16 is kV, not a duty-cycle F gain).

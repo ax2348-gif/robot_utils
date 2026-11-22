@@ -184,6 +184,9 @@ class SimState(BaseModel):
     error: Optional[str] = Field(description="The last rendering error; null if fine.")
     model: ModelSource
     fidelity: Fidelity
+    limits: dict[str, Any] = Field(description="The actuator limits, from the robot config (docs/sim.md, \"Limits come "
+                                               "from the robot config\"): wheel / steer speed, acceleration, torque; "
+                                               "arm joint speeds; finger force.")
     t: float = Field(description="s, sim clock.")
     running: bool = Field(description="Real-time mode.")
     rtf: float = Field(description="Target real-time factor.")
