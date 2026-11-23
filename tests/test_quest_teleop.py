@@ -448,7 +448,7 @@ def test_engaged_hint_starts_at_the_base_pose_and_mirrors_the_head():
 
 
 def test_engaged_sticks_integrate_an_offset_in_the_robot_frame_while_standing_still():
-    rig = Rig()
+    rig = Rig(Config(headless=False))   # the robot-frame left stick (headless off)
     rig.run(IDLE)
     rig.run(GRIP)
     for _ in range(100):                                       # full forward for 1 s (frames every 10 ms)
@@ -673,13 +673,14 @@ def test_first_person_after_a_stick_turn_walking_and_reaching_follow_the_robot()
 
 def test_the_modes_agree_without_a_stick_turn():
     """The stick terms differ only in the yaw: with walking, turning, reaching, crouching and stick translation
-    (no stick yaw), both modes command the same targets and hints."""
+    (no stick yaw), both modes command the same targets and hints. (Headless off: the headless left stick is a
+    third-person extra that drives along the operator's facing.)"""
     seq = [rigid(GRIP, (0.03 * k, 0.01 * k, -0.005 * k), 0.04 * k) for k in range(1, 20)]
     seq += [stick(replace(s_, right=replace(s_.right, pos=tuple(np.array(s_.right.pos) + [0.05, -0.02, 0.03]))),
                   (0.6, 0.8)) for s_ in seq[-1:] * 15]
     out = {}
     for mode in ("third", "first"):
-        rig = Rig(Config(mode=mode))
+        rig = Rig(Config(mode=mode, headless=False))
         rig.run(IDLE)
         rig.run(GRIP)
         out[mode] = [rig.run(s_, n=1) for s_ in seq]

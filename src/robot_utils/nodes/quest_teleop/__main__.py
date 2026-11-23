@@ -39,9 +39,9 @@ def main() -> None:
     p.add_argument("--mode", choices=("third", "first"), default="third",
                    help="third person (default: the sticks move the robot, directions stay room-aligned) or first "
                         "person (the sticks shift the anchor); switchable on the page, from the next grip")
-    p.add_argument("--headless", action="store_true",
-                   help="third person, registered: the left stick moves the robot along the operator's facing "
-                        "(switchable on the page)")
+    p.add_argument("--no-headless", action="store_true",
+                   help="third person: the left stick moves the robot along its own forward instead of the "
+                        "operator's facing (headless, the default; switchable on the page)")
     p.add_argument("--no-gripper", action="store_true")
     p.add_argument("--stale-ms", type=float, default=200.0, help="headset freshness timeout")
     p.add_argument("--ctl-timeout", type=float, default=240.0, help="s: overall limit of one quest up / down")
@@ -63,7 +63,7 @@ def main() -> None:
     from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
     from .server import create_app
-    cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=a.headless, gripper=not a.no_gripper)
+    cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=not a.no_headless, gripper=not a.no_gripper)
     off = lambda v: None if v in ("none", "") else v   # noqa: E731
     node = QuestTeleopNode(a.wbc, arm=off(a.arm), swerve=off(a.swerve), quest_host=a.quest, quest_port=a.quest_port,
                            ssh_host=a.ssh_host, cfg=cfg, stale_s=a.stale_ms / 1e3, max_latency=a.max_latency_ms / 1e3,

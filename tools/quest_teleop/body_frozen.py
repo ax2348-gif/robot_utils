@@ -276,7 +276,7 @@ class Config:
     velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
     max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
-    headless: bool = False            # third person, registered: the left stick moves the robot along the
+    headless: bool = True             # third person, registered: the left stick moves the robot along the
                                       # operator's facing (mapped by the registration), not the robot's forward
     mode: str = "third"               # third: the sticks move the robot, directions stay room-aligned (the
                                       # grip registers the headset to the robot); first: the sticks shift the

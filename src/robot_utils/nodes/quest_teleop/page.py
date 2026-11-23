@@ -62,7 +62,7 @@ canvas.ru-plot{width:100%;height:70px}
         <span class="ru-muted" id="sending"></span></div>
       <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
-      <div class="ctl"><button class="ru" id="headless">Headless left stick: off</button></div>
+      <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
       <div class="ru-muted" id="reg"></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
@@ -104,7 +104,7 @@ $("#stop").onclick = () => call("stop");
 $("#qup").onclick = () => call("quest/up");
 $("#qdown").onclick = () => call("quest/down");
 $("#mode3").onclick = () => call("mode/third");
-let headlessOn = false;
+let headlessOn = true;
 $("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
 $("#mode1").onclick = () => call("mode/first");
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));

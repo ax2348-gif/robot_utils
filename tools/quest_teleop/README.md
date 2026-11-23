@@ -143,7 +143,8 @@ On each engagement of the arm's hand, seen from its start:
     frame realign (not on gaps or reconnects), and the next enable or click registers again. A system recenter
     of the headset is not visible in the stream: click to re-register. A clutch without
     any registration (nothing armed: tools, tests) registers. First person ignores it: every clutch zeroes.
-  - **Headless left stick** (third person, `--headless` or the page's toggle, default off, applies at once): with a
+  - **Headless left stick** (third person, **on by default**; `--no-headless` or the page's toggle turns it off,
+    applies at once): with a
     registration, the left stick moves the robot along **your facing** (`A`'s yaw + your yaw), not the robot's
     forward. Engaged it integrates into `s` as before; released it is the same world direction expressed in the base
     frame. The right stick's yaw is unchanged.
