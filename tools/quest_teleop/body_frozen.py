@@ -25,11 +25,13 @@ gravity-aligned yaw) → hand, and the robot chain mirrors it: world → base re
 - **Link 1**, base reference = the base at engagement + the head's motion since engagement (+ the stick offset):
   the base hint below.
 - **Link 2**, the EE in the base reference = the EE at engagement (``B0⁻¹ ∘ command``) + the hand's delta **in the
-  current head frame** since engagement (``ee_rel``).
+  current head frame** since engagement (``ee_rel``). The head frame takes from the head only what the base can
+  follow: horizontal position and gravity-aligned yaw. Its height stays at the head's height at engagement, so a
+  crouch lowers the hand and the arm with it.
 - **Target** = link 1 ∘ link 2.
 
 The invariant: while the hand keeps its pose relative to the head, the EE target keeps its pose relative to the base
-reference, for any walking or turning. The frozen-frame formula breaks it on turns: the hand sweeps an arc about the
+reference, for any walking or turning. Vertical motion is not absorbed: the base cannot follow it. The frozen-frame formula breaks it on turns: the hand sweeps an arc about the
 head, the base turns about its own origin, and the EE drifts sideways by about ``|dyaw| * |ee_in_base - hand_in_head|``
 in the plane. Clutch invariance is unchanged: both links' deltas start at zero, so engaging gives exactly the
 command. A head lost mid-engagement freezes both links (link 2 reads the hand in the last tracked head frame). When
@@ -87,6 +89,8 @@ import numpy as np
 
 from . import frames as F
 from .arming import sticks_neutral
+
+UP_LOCAL = F.C.T @ np.array([0.0, 0.0, 1.0])     # the up axis in OpenXR LOCAL (+Y)
 
 
 
@@ -497,7 +501,11 @@ class TeleopCore:
         DEMO.md body-frozen formula."""
         eng = self.eng
         if self.cfg.head_walk and eng.head_last is not None:
-            frame = F.OperatorFrame(*eng.head_last)
+            # only what the base can follow moves the frame (x, y, yaw): the height stays at the head's height at
+            # engagement (or re-anchor), so a crouch or a rise moves the hand, and so the arm, up and down
+            p, yaw = eng.head_last
+            p = np.asarray(p, float) + UP_LOCAL * float(UP_LOCAL @ (eng.head_p0 - np.asarray(p, float)))
+            frame = F.OperatorFrame(p, yaw)
         else:
             frame = eng.operator
         hand = frame.pose(hand_p_local, hand_r_local)

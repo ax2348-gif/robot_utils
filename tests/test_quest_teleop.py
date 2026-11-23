@@ -552,6 +552,20 @@ def test_rigid_operator_motion_keeps_the_ee_fixed_in_the_base_reference(motion):
         np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
 
 
+@pytest.mark.parametrize("yaw", [0.0, 0.7])
+def test_crouching_lowers_the_arm(yaw):
+    """The base cannot follow vertical motion, so the head frame keeps its height at engagement: crouching with the
+    hand held against the body lowers the EE by the same amount, also after a turn (whose planar part is still
+    absorbed: the EE's horizontal pose in the base reference is unchanged)."""
+    rig = Rig()
+    rig.run(IDLE)
+    rel0 = ee_in_hint(rig.run(GRIP))
+    for k in range(1, 31):
+        rel = ee_in_hint(rig.run(rigid(GRIP, (0.2 * k / 30, 0.0, -0.3 * k / 30), yaw * k / 30), n=1))
+    np.testing.assert_allclose(rel[0] - rel0[0], [0.0, 0.0, -0.3], atol=1e-9)
+    np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+
+
 def test_hand_motion_relative_to_the_head_moves_the_ee_in_the_base_reference():
     """After a turn, reaching forward relative to the body reaches forward relative to the robot."""
     rig = Rig()
