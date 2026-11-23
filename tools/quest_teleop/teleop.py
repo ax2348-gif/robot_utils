@@ -269,6 +269,8 @@ def main(argv=None) -> int:
     ap.add_argument("--mode", choices=("third", "first"), default="third",
                     help="third person (default: the sticks move the robot, directions stay room-aligned) or "
                          "first person (the sticks shift the anchor)")
+    ap.add_argument("--headless", action="store_true",
+                    help="third person, registered: the left stick moves the robot along the operator's facing")
     ap.add_argument("--no-gripper", action="store_true")
     ap.add_argument("--max-latency-ms", type=float, default=MAX_LATENCY_S * 1e3,
                     help="headset frames later than this over the session's best count as stale (disarm)")
@@ -276,7 +278,7 @@ def main(argv=None) -> int:
                     help="headset frame rate (over 0.5 s) below this counts as stale (disarm)")
     args = ap.parse_args(argv)
 
-    cfg = Config(hand=args.hand, ee=args.ee, head_walk=not args.no_head_walk, mode=args.mode, gripper=not args.no_gripper)
+    cfg = Config(hand=args.hand, ee=args.ee, head_walk=not args.no_head_walk, mode=args.mode, headless=args.headless, gripper=not args.no_gripper)
     wbc = WbcClient(args.wbc, udp_host=args.udp_host)
     stream = WbcStream(args.wbc).start()
     reader = QuestReader(args.quest, args.quest_port).start()

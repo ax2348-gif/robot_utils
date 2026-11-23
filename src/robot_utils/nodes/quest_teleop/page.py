@@ -62,6 +62,8 @@ canvas.ru-plot{width:100%;height:70px}
         <span class="ru-muted" id="sending"></span></div>
       <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
+      <div class="ctl"><button class="ru" id="headless">Headless left stick: off</button></div>
+      <div class="ru-muted" id="reg"></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
       <div class="ru-muted" id="reason"></div>
@@ -102,6 +104,8 @@ $("#stop").onclick = () => call("stop");
 $("#qup").onclick = () => call("quest/up");
 $("#qdown").onclick = () => call("quest/down");
 $("#mode3").onclick = () => call("mode/third");
+let headlessOn = false;
+$("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
 $("#mode1").onclick = () => call("mode/first");
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const f = (v, n) => v === null || v === undefined || !isFinite(v) ? "–" : Number(v).toFixed(n);
@@ -125,6 +129,11 @@ RU.sse("events", s => {
   $("#status").textContent = s.state.replace("_", " ");
   $("#status").className = "ru-pill " + ({engaged: "ru-ok", released: "ru-ok", stale: "ru-warn", needs_release: "ru-warn", refused: "ru-warn"}[s.state] || "");
   $("#start").disabled = T.phase !== "stopped"; $("#stop").disabled = T.phase !== "running";
+  $("#reg").textContent = s.config.mode !== "third" ? "first person: every grip aligns your forward to the robot's" : (T.registered ? "registered (" + T.registration + "): face where the robot faces and click the right stick to re-register" : "not registered: the first enable (Y) or a right-stick click registers (face where the robot faces)" + (T.registration ? " · " + T.registration : ""));
+  headlessOn = !!s.config.headless;
+  $("#headless").textContent = "Headless left stick: " + (headlessOn ? "on" : "off");
+  $("#headless").classList.toggle("live", headlessOn);
+  $("#headless").disabled = s.config.mode !== "third";
   $("#mode3").classList.toggle("live", s.config.mode === "third"); $("#mode1").classList.toggle("live", s.config.mode === "first");
   $("#sending").textContent = running ? (T.sending ? `sending · ${T.sent ? T.sent.target : 0} targets` : "silent (holding)") : (T.stop_reason ? "stopped: " + T.stop_reason : "");
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");

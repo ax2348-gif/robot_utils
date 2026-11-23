@@ -431,6 +431,14 @@ class QuestTeleopNode:
         self.hub.state_changed()
         return {"mode": self.cfg.mode}
 
+    def set_headless(self, on: bool) -> dict:
+        """Third person, registered: the left stick moves the robot along the operator's facing (applies at once)."""
+        old, self.cfg.headless = self.cfg.headless, bool(on)
+        if self.cfg.headless != old:
+            self.events.add(f"headless left stick {'on' if on else 'off'}")
+        self.hub.state_changed()
+        return {"headless": self.cfg.headless}
+
     def stop_teleop(self, reason: str = "requested") -> dict:
         with self.lock:
             if self.phase != "running":
@@ -780,6 +788,8 @@ class QuestTeleopNode:
                 "sending": bool(c and c.sending), "reason": core.status.reason if core else None,
                 "refused": dict(core.status.refused) if core else {},
                 "engagements": core.status.engagements if core else 0,
+                "registered": bool(core and core.status.registered),
+                "registration": core.status.registration if core else "",
                 "sent": dict(w.sent) if w else None, "renew_errors": w.renew_errors if w else None,
                 "transport": w.transport if w else None, "session": w.session if w else None,
                 "last_sent_age": None if self.last_sent_at is None or c is None
@@ -809,7 +819,7 @@ class QuestTeleopNode:
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
-                       "head_walk": cfg.head_walk, "mode": cfg.mode, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
+                       "head_walk": cfg.head_walk, "mode": cfg.mode, "headless": cfg.headless, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,

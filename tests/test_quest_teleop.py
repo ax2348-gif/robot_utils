@@ -711,19 +711,150 @@ def test_the_mode_is_read_at_engagement():
     assert rig.core.eng.mode == "first"
 
 
-def test_offset_restarts_at_zero_on_every_engagement():
-    rig = Rig()
+@pytest.mark.parametrize("mode", ["third", "first"])
+def test_reengaging_starts_at_the_current_base(mode):
+    """A clutch never moves the robot: the hint restarts at the base's current pose. First person zeroes the
+    stick terms at every clutch; third person keeps the registration and carries the robot's offset from its
+    registered pose (here the base moved 0.2 / 0.1 m while released) in the stick translation."""
+    rig = Rig(Config(mode=mode))
     rig.run(IDLE)
     rig.run(GRIP)
     for _ in range(50):
         rig.frame(stick(GRIP, (0.0, 1.0)))
-    assert np.linalg.norm(rig.core.offset) > 0.2
     assert rig.run(IDLE)["base"] == {"mode": "locked"}          # release: the hint is dropped
     assert rig.core.hint is None
     rig.rob.base_x, rig.rob.base_y = 1.2, 2.1                   # the base got there meanwhile
     c = rig.run(GRIP)
-    np.testing.assert_allclose(rig.core.offset, 0.0)
     np.testing.assert_allclose(hint_of(c), [1.2, 2.1, 0.3], atol=1e-9)
+    if mode == "first":
+        np.testing.assert_allclose(rig.core.offset, 0.0)
+        np.testing.assert_allclose(rig.core.eng.correction, 0.0)
+    else:
+        np.testing.assert_allclose(rig.core.offset, [0.2, 0.1, 0.0], atol=1e-9)
+
+
+def armed_rig(mode="third", robot_yaw=0.3, op_yaw=0.0):
+    """Armed (Y) with the operator at ``op_yaw`` and the robot at ``robot_yaw``: the first enable registers."""
+    rig = Rig(Config(mode=mode))
+    rig.rob.base_yaw = robot_yaw
+    f = rig.frame(replace(IDLE, head_yaw=op_yaw))
+    rig.core.on_arm(f)
+    rig.run(replace(IDLE, head_yaw=op_yaw))
+    return rig
+
+
+def test_the_first_enable_registers_and_later_clutches_keep_it():
+    """Registered at Y (operator facing yaw 0, robot heading 0.3: the room is rotated by 0.3). The operator turns
+    to 1.0 while released and grips: walking forward goes along the operator's room forward mapped by the
+    registration (1.3), not along the robot's heading as a per-clutch zero would."""
+    rig = armed_rig()
+    assert rig.core.status.registered and rig.core.status.registration == "first enable"
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    c0 = rig.run(replace(turned, right=replace(turned.right, grip=1.0)))
+    np.testing.assert_allclose(hint_of(c0), [1.0, 2.0, 0.3], atol=1e-9)    # the clutch moves nothing
+    walked = rigid(replace(turned, right=replace(turned.right, grip=1.0)), (math.cos(1.0), math.sin(1.0), 0.0), 1.0)
+    c = rig.run(walked, n=1)
+    np.testing.assert_allclose(hint_of(c)[:2] - [1.0, 2.0], [math.cos(1.3), math.sin(1.3)], atol=1e-9)
+    assert hint_of(c)[2] == pytest.approx(0.3)                              # no turn: the heading is kept
+
+
+def test_reaching_follows_the_registration_across_clutches():
+    rig = armed_rig()
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    g = replace(turned, right=replace(turned.right, grip=1.0))
+    e0 = np.array(ee_of(rig.run(g))["pos"])
+    reach = replace(g, right=replace(g.right, pos=tuple(np.array(g.right.pos) + F.rot_z(1.0) @ [0.1, 0, 0])))
+    e = np.array(ee_of(rig.run(reach, n=1))["pos"])
+    np.testing.assert_allclose(e - e0, 0.1 * np.array([math.cos(1.3), math.sin(1.3), 0.0]), atol=1e-9)
+
+
+def click(state, down=True):
+    return replace(state, right=replace(state.right, click=down))
+
+
+def test_a_right_stick_click_while_released_re_registers():
+    """After the click (operator facing 1.0, robot heading 0.3) the operator's forward is the robot's forward."""
+    rig = armed_rig()
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    rig.run(click(turned), n=1)
+    rig.run(turned, n=1)
+    assert rig.core.status.registration == "right stick click"
+    g = replace(turned, right=replace(turned.right, grip=1.0))
+    rig.run(g)
+    c = rig.run(rigid(g, (math.cos(1.0), math.sin(1.0), 0.0), 1.0), n=1)
+    np.testing.assert_allclose(hint_of(c)[:2] - [1.0, 2.0], [math.cos(0.3), math.sin(0.3)], atol=1e-9)
+
+
+def test_a_right_stick_click_while_engaged_re_registers_in_place():
+    """Engaged with the registration rotated by 0.3 (walking forward goes 0.3 off); the click re-registers to how
+    the operator faces now: nothing moves at the click, and walking forward then goes along the robot's forward."""
+    rig = armed_rig()
+    g = replace(IDLE, right=replace(IDLE.right, grip=1.0))
+    rig.run(g)
+    c0 = rig.run(click(g), n=1)
+    c1 = rig.run(g, n=1)
+    assert rig.core.status.registration == "right stick click (engaged)"
+    np.testing.assert_allclose(hint_of(c1), hint_of(c0), atol=1e-12)
+    np.testing.assert_allclose(ee_of(c1)["pos"], ee_of(c0)["pos"], atol=1e-12)
+    c = rig.run(rigid(g, (1.0, 0.0, 0.0), 0.0), n=1)
+    np.testing.assert_allclose(hint_of(c)[:2] - hint_of(c1)[:2], [math.cos(0.3), math.sin(0.3)], atol=1e-9)
+
+
+def test_an_estimator_reset_drops_the_registration():
+    rig = armed_rig()
+    rig.rob.est_reset = 1.0
+    rig.run(IDLE)
+    assert not rig.core.status.registered and "estimator reset" in rig.core.status.registration
+
+
+def test_a_stream_gap_keeps_the_registration_but_a_new_session_drops_it():
+    rig = armed_rig()
+    rig.frame(IDLE, dt=0.5)                                      # a 0.5 s gap: a discontinuity, frames unchanged
+    assert rig.core.status.registered
+    rig.run(replace(IDLE, session=2))                            # a new XR session: the headset's room may move
+    assert not rig.core.status.registered
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_headless_left_stick_follows_the_operators_facing(headless):
+    """Registered (room rotated 0.3), operator turned to 1.0, engaged, left stick forward 1 s: headless drives
+    along the operator's facing in the room (1.3), otherwise along the robot's forward (0.3)."""
+    rig = armed_rig()
+    rig.core.cfg.headless = headless
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    g = replace(turned, right=replace(turned.right, grip=1.0))
+    h0 = hint_of(rig.run(g))
+    for _ in range(100):
+        rig.frame(stick(g, (0.0, 1.0)))
+    c = rig.run(g, n=1)
+    d = 1.3 if headless else 0.3
+    np.testing.assert_allclose(hint_of(c)[:2] - h0[:2], 0.45 * np.array([math.cos(d), math.sin(d)]), atol=0.01)
+
+
+def test_headless_left_stick_released_commands_the_world_direction_in_the_base_frame():
+    rig = armed_rig()
+    rig.core.cfg.headless = True
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    rig.run(stick(turned, (0.0, 1.0)))                         # sticks seen neutral after arming, then forward
+    v = rig.cmd()["base"]["velocity"]
+    np.testing.assert_allclose([v["vx"], v["vy"]], 0.45 * np.array([math.cos(1.0), math.sin(1.0)]), atol=1e-6)
+    assert v["frame"] == "base"
+
+
+def test_first_person_ignores_the_registration():
+    """First person zeroes at every clutch: after turning while released, walking forward follows the robot."""
+    rig = armed_rig(mode="first")
+    turned = rigid(IDLE, (0.0, 0.0, 0.0), 1.0)
+    rig.run(turned)
+    g = replace(turned, right=replace(turned.right, grip=1.0))
+    rig.run(g)
+    c = rig.run(rigid(g, (math.cos(1.0), math.sin(1.0), 0.0), 1.0), n=1)
+    np.testing.assert_allclose(hint_of(c)[:2] - [1.0, 2.0], [math.cos(0.3), math.sin(0.3)], atol=1e-9)
 
 
 OPERATOR_MOTIONS = {

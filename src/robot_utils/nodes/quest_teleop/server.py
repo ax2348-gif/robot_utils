@@ -126,6 +126,13 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    @app.post("/headless/{state}", tags=["control"], summary="Headless left stick (`on` | `off`, third person, "
+                                                              "registered): the stick moves along the operator's facing")
+    async def set_headless(state: str):
+        if state not in ("on", "off"):
+            raise HTTPException(400, "state must be 'on' or 'off'")
+        return node.set_headless(state == "on")
+
     @app.post("/stop", tags=["control"], summary="Stop teleop: stop sending, disable the WBC, release its lease")
     async def stop_teleop():
         return await asyncio.to_thread(node.stop_teleop, "requested")

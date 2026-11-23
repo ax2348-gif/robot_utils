@@ -136,6 +136,17 @@ On each engagement of the arm's hand, seen from its start:
     `A ← (Base·Δ·Base⁻¹)·A`, i.e. `Base → Base·Δ`, a turn about the robot. Your forward stays the robot's forward
     for walking and reaching.
   - Without a stick yaw the two modes command exactly the same; they differ only after one.
+  - **Registration (third person)** is persistent: made at the **first enable** (the Y press that arms, after Start:
+    face where the robot faces), or by a **right stick click** (released: at once; engaged: in place, nothing moves).
+    Later clutches keep it: the clutch puts the robot's offset from its registered pose into the stick slots
+    (`s`, `σ`), so it moves nothing and the room directions stay. It is dropped on an estimator reset, a new XR session or an operator
+    frame realign (not on gaps or reconnects), and the next enable or click registers again. A system recenter
+    of the headset is not visible in the stream: click to re-register. A clutch without
+    any registration (nothing armed: tools, tests) registers. First person ignores it: every clutch zeroes.
+  - **Headless left stick** (third person, `--headless` or the page's toggle, default off, applies at once): with a
+    registration, the left stick moves the robot along **your facing** (`A`'s yaw + your yaw), not the robot's
+    forward. Engaged it integrates into `s` as before; released it is the same world direction expressed in the base
+    frame. The right stick's yaw is unchanged.
 
 Released or not yet engaged, the arm rides with the platform. The WBC takes world targets only, so the client
 computes the riding target: at release it stores the **commanded EE at release** relative to the base (`arm_cmd_*`
