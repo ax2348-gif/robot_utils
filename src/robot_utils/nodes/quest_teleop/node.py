@@ -420,6 +420,17 @@ class QuestTeleopNode:
                         f"Y (left) arms, X disables; the {self.cfg.hand} grip clutches the arm")
         return self.teleop_info()
 
+    def set_mode(self, mode: str) -> dict:
+        """Third or first person: where the sticks enter the frame chain (tools/quest_teleop/README.md). Read at
+        each engagement, so it applies from the next grip; an engagement in progress keeps its mode."""
+        if mode not in ("third", "first"):
+            raise ValueError(f"mode must be 'third' or 'first', not {mode!r}")
+        old, self.cfg.mode = self.cfg.mode, mode
+        if mode != old:
+            self.events.add(f"mode: {mode} person (from the next grip)")
+        self.hub.state_changed()
+        return {"mode": self.cfg.mode}
+
     def stop_teleop(self, reason: str = "requested") -> dict:
         with self.lock:
             if self.phase != "running":
@@ -798,7 +809,7 @@ class QuestTeleopNode:
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
-                       "head_walk": cfg.head_walk, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
+                       "head_walk": cfg.head_walk, "mode": cfg.mode, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,

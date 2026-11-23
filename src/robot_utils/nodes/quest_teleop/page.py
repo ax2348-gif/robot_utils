@@ -60,6 +60,8 @@ canvas.ru-plot{width:100%;height:70px}
     <div class="ru-card" data-panel="teleop" data-role="control"><b>Teleop</b>
       <div class="ctl"><button class="ru live" id="start">Start</button><button class="ru" id="stop">Stop</button>
         <span class="ru-muted" id="sending"></span></div>
+      <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
+        <span class="ru-muted" id="modenote">applies from the next grip</span></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
       <div class="ru-muted" id="reason"></div>
@@ -99,6 +101,8 @@ $("#start").onclick = () => call("start");
 $("#stop").onclick = () => call("stop");
 $("#qup").onclick = () => call("quest/up");
 $("#qdown").onclick = () => call("quest/down");
+$("#mode3").onclick = () => call("mode/third");
+$("#mode1").onclick = () => call("mode/first");
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const f = (v, n) => v === null || v === undefined || !isFinite(v) ? "–" : Number(v).toFixed(n);
 const STEPS = [["released", "released", "good"], ["engaged", "engaged", "good"], ["needs_release", "needs release", "bad"],
@@ -121,6 +125,7 @@ RU.sse("events", s => {
   $("#status").textContent = s.state.replace("_", " ");
   $("#status").className = "ru-pill " + ({engaged: "ru-ok", released: "ru-ok", stale: "ru-warn", needs_release: "ru-warn", refused: "ru-warn"}[s.state] || "");
   $("#start").disabled = T.phase !== "stopped"; $("#stop").disabled = T.phase !== "running";
+  $("#mode3").classList.toggle("live", s.config.mode === "third"); $("#mode1").classList.toggle("live", s.config.mode === "first");
   $("#sending").textContent = running ? (T.sending ? `sending · ${T.sent ? T.sent.target : 0} targets` : "silent (holding)") : (T.stop_reason ? "stopped: " + T.stop_reason : "");
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");
   const why = running ? (T.reason || "") : (s.error || "");

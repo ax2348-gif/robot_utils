@@ -214,6 +214,9 @@ class Engagement:
     ee_rel: Optional[tuple] = None   # link 2: the EE target in the base reference frame
     head_last: Optional[tuple] = None   # the newest tracked head (LOCAL position, yaw): link 2's frame
     rebase_hand: bool = False        # the head was re-anchored: re-anchor link 2 on the next hand pose
+    mode: str = "third"              # "third" | "first": where the stick terms enter (Config.mode at capture)
+    correction: np.ndarray = field(default_factory=lambda: np.zeros(3))   # first person: anchor correction C
+    hand_delta: Optional[tuple] = None   # link 2's hand delta (dp, dR), body frame
     head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
     head_dyaw: float = 0.0                                             # last head yaw change
     head_yaw_unwrapped: float = 0.0                                    # continuous (the velocity fit)
@@ -255,6 +258,9 @@ class Config:
     velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
     max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
+    mode: str = "third"               # third: the sticks move the robot, directions stay room-aligned (the
+                                      # grip registers the headset to the robot); first: the sticks shift the
+                                      # anchor (your forward is the robot's forward). Read at each engagement.
     ride_lead: float = 0.01           # s: released, the riding target is placed on the base pose predicted this far
                                       # past the stream row's arrival (plus its age), so it does not lag the base
     feedforward: bool = True          # engaged: the EE twist and the hint velocity (see the module docstring)
@@ -382,8 +388,21 @@ class TeleopCore:
             return                       # the capture frame: the offset stays zero (engaging never moves the robot)
         v = self.stick_v(frame["control_intent"])
         yaw = robot.base_yaw if robot is not None else self.eng.robot.yaw
-        self.offset[:2] += F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt
-        self.offset[2] += v[2] * dt
+        d_xy = F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt     # stick forward = the robot's forward
+        d_yaw = v[2] * dt
+        if self.eng.mode == "first":
+            # an increment in the robot's own frame, Base -> Base·Δ, folded into the anchor correction
+            # C <- (Base Δ Base⁻¹) C: a turn about the base reference's position, then the translation
+            x, y, _ = self._hint_pose()
+            c = self.eng.correction
+            pivot = np.array([x, y])
+            rz = F.rot_z(d_yaw)[:2, :2]
+            c[:2] = rz @ (c[:2] - pivot) + pivot + d_xy
+            c[2] += d_yaw
+        else:
+            # third person: the translation in the world (left, T(s)), the yaw on the robot only (right, R(sigma))
+            self.offset[:2] += d_xy
+            self.offset[2] += d_yaw
 
     def _engagement(self, frame: dict, verdict, robot: Optional[RobotState], now: float) -> None:
         if verdict.discontinuity:
@@ -445,6 +464,7 @@ class TeleopCore:
         eng.target_raw = (robot.ee_p.copy(), robot.ee_r.copy())
         eng.target = eng.target_raw
         eng.ee_rel = eng.ee_anchor
+        eng.mode = "first" if self.cfg.mode == "first" else "third"
         eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
@@ -482,7 +502,7 @@ class TeleopCore:
         new pose; link 2 re-anchors on the next hand pose (``rebase_hand``) at the current ``ee_rel``. The robot
         does not move; only motion from here on counts."""
         eng = self.eng
-        x, y, byaw = self._hint_pose(np.zeros(3))
+        x, y, byaw = self._head_pose()
         eng.robot = F.PlanarFrame(x, y, byaw, float(eng.robot.p[2]))
         eng.head_p0 = np.asarray(head_p_local, float).copy()
         eng.head_yaw0 = float(yaw)
@@ -509,23 +529,45 @@ class TeleopCore:
         else:
             frame = eng.operator
         hand = frame.pose(hand_p_local, hand_r_local)
+        sigma = self._sigma()
         if eng.rebase_hand:
+            # the new anchor is the current link-2 pose with the third-person stick yaw taken back out (it is
+            # applied to the anchor, inside the hand delta: R(sigma) anchor ⊕ 0 = the current pose)
             eng.hand_anchor = hand
-            eng.ee_anchor = eng.ee_rel
+            eng.ee_anchor = _rot_pose(eng.ee_rel, -sigma)
             eng.rebase_hand = False
-        return F.apply_delta(eng.ee_anchor, *F.delta(eng.hand_anchor, hand))
+        eng.hand_delta = F.delta(eng.hand_anchor, hand)
+        return F.apply_delta(_rot_pose(eng.ee_anchor, sigma), *eng.hand_delta)
 
-    def _compose(self, offset) -> tuple:
-        """World target = the base reference (link 1, with ``offset``) ∘ ``ee_rel`` (link 2)."""
-        x, y, yaw = self._hint_pose(offset)
-        return F.PlanarFrame(x, y, yaw, float(self.eng.robot.p[2])).to_world(*self.eng.ee_rel)
+    def _sigma(self) -> float:
+        """The stick yaw applied inside the hand delta: the third-person stick yaw (it turns the robot, not the
+        direction mappings); 0 in first person, whose stick yaw lives in the anchor correction."""
+        return float(self.offset[2]) if self.eng is not None and self.eng.mode == "third" else 0.0
+
+    def _compose(self, with_sticks: bool = True) -> tuple:
+        """World target = the base reference without the stick terms (``A ∘ O(t)``: base at engagement + the
+        head's motion) ∘ ``ee_rel``, then the stick terms on the left: third person ``T(s)``, first person the
+        anchor correction ``C``. (The third-person stick yaw is already inside ``ee_rel``.)"""
+        eng = self.eng
+        if eng.hand_delta is not None:
+            # link 2 with this frame's stick yaw (the sticks are integrated after the hand is read)
+            eng.ee_rel = F.apply_delta(_rot_pose(eng.ee_anchor, self._sigma()), *eng.hand_delta)
+        x, y, yaw = self._head_pose()
+        p, r = F.PlanarFrame(x, y, yaw, float(eng.robot.p[2])).to_world(*eng.ee_rel)
+        if not with_sticks:
+            return p, r
+        if eng.mode == "third":
+            return p + np.array([self.offset[0], self.offset[1], 0.0]), r
+        c = eng.correction
+        rz = F.rot_z(c[2])
+        return rz @ p + np.array([c[0], c[1], 0.0]), rz @ r
 
     def _track_offset(self, frame: dict) -> None:
-        """The target with this frame's stick offset (the base hint's too) and the feedforward fits' samples."""
+        """The target with this frame's stick terms (the base hint's too) and the feedforward fits' samples."""
         eng = self.eng
         if not eng.captured_now:                   # the capture frame keeps the exact command (no jump)
-            eng.target_raw = self._compose(np.zeros(3))
-            eng.target = self._compose(self.offset)
+            eng.target_raw = self._compose(with_sticks=False)
+            eng.target = self._compose()
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
             return
@@ -536,14 +578,36 @@ class TeleopCore:
         if eng.target_r0 is None:
             eng.target_r0 = r.copy()
         if self.cfg.head_walk and eng.head_tracked:
-            xy = eng.robot.r[:2, :2] @ eng.head_d[:2]
-            eng.head_fit.push(t, [xy[0], xy[1], eng.head_yaw_unwrapped])
+            # in the operator frame of the engagement; mapped to the world at use (``_map_rot``): in first person
+            # the mapping turns with the stick yaw
+            eng.head_fit.push(t, [eng.head_d[0], eng.head_d[1], eng.head_yaw_unwrapped])
 
-    def _hint_pose(self, offset) -> tuple:
-        """The base hint (x, y, yaw) world: the base at engagement + the head's motion + ``offset``."""
+    def _head_pose(self) -> tuple:
+        """The base reference without the stick terms, ``A ∘ O(t)``: the base at engagement (link-1 anchor) + the
+        head's motion, (x, y, yaw) world."""
         eng = self.eng
-        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + offset[:2]
-        return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw + offset[2])
+        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2]
+        return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw)
+
+    def _map_rot(self) -> np.ndarray:
+        """The rotation (2x2) taking operator-frame motion to world motion: the engagement's, and in first person
+        also the anchor correction's yaw."""
+        eng = self.eng
+        r = eng.robot.r[:2, :2]
+        return F.rot_z(eng.correction[2])[:2, :2] @ r if eng.mode == "first" else r
+
+    def _hint_pose(self, offset=None) -> tuple:
+        """The base hint (x, y, yaw) world: ``A ∘ O(t)`` with the stick terms. Third person ``T(s) · A·O(t) ·
+        R(sigma)`` (``offset``: the stick translation s, world, and yaw sigma; default the current ones); first
+        person ``C · A·O(t)`` with the anchor correction ``C``."""
+        eng = self.eng
+        x, y, yaw = self._head_pose()
+        if eng.mode == "first":
+            c = eng.correction
+            xy = F.rot_z(c[2])[:2, :2] @ [x, y] + c[:2]
+            return float(xy[0]), float(xy[1]), F.wrap(yaw + c[2])
+        o = self.offset if offset is None else offset
+        return float(x + o[0]), float(y + o[1]), F.wrap(yaw + o[2])
 
     def feedforward(self) -> tuple:
         """(EE twist [vx, vy, vz, wx, wy, wz] world, hint velocity (vx, vy, omega) world) of the engagement: the
@@ -553,6 +617,7 @@ class TeleopCore:
             return np.zeros(6), np.zeros(3)
         tw = eng.hand_fit.velocity(6)
         hv = eng.head_fit.velocity(3) if self.cfg.head_walk and eng.head_tracked else np.zeros(3)
+        hv[:2] = self._map_rot() @ hv[:2]
         sv = self.stick_v(self.frame["control_intent"]) if self.frame is not None else [0.0, 0.0, 0.0]
         yaw = self.last_robot.base_yaw if self.last_robot is not None else eng.robot.yaw
         hv = hv + np.concatenate([F.rot_z(yaw)[:2, :2] @ np.array(sv[:2]), [sv[2]]])
@@ -632,6 +697,14 @@ class TeleopCore:
             target["heading"]["omega"] = float(hv[2])
         self.hint = target
         return {"mode": "hint", "target": target}
+
+
+def _rot_pose(pose, angle: float) -> tuple:
+    """A pose turned about Z through the origin of its frame."""
+    if not angle:
+        return pose
+    rz = F.rot_z(angle)
+    return rz @ np.asarray(pose[0], float), rz @ np.asarray(pose[1], float)
 
 
 def stick_velocity(intent: dict) -> list:

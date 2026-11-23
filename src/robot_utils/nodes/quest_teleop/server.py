@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -117,6 +117,14 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
                                                    "(409 with the WBC's reason if it refuses)")
     async def start_teleop():
         return await asyncio.to_thread(node.start_teleop)
+
+    @app.post("/mode/{mode}", tags=["control"], summary="Third or first person (`third` | `first`): where the sticks "
+                                                         "enter the frame chain; applies from the next grip")
+    async def set_mode(mode: str):
+        try:
+            return node.set_mode(mode)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.post("/stop", tags=["control"], summary="Stop teleop: stop sending, disable the WBC, release its lease")
     async def stop_teleop():

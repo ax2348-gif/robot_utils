@@ -620,6 +620,97 @@ def test_head_loss_and_reacquisition_do_not_move_the_robot():
         np.testing.assert_allclose(rel[1], rel_back[1], atol=1e-9)
 
 
+def turned_by_stick(mode, frames=196):
+    """Engaged at the robot's heading (yaw 0, operator yaw 0: the grip registers them), then the right stick
+    turns the robot about 90 degrees while the operator stands still."""
+    rig = Rig(Config(mode=mode))
+    rig.rob.base_yaw = 0.0
+    rig.run(IDLE)
+    rig.run(GRIP)
+    for _ in range(frames):
+        rig.frame(stick(GRIP, right_x=-1.0))
+    c = rig.run(GRIP, n=1)
+    return rig, c
+
+
+@pytest.mark.parametrize("mode", ["third", "first"])
+def test_a_stick_turn_turns_the_robot_in_place(mode):
+    rig, c = turned_by_stick(mode)
+    np.testing.assert_allclose(hint_of(c)[:2], [1.0, 2.0], atol=1e-9)      # about the base: no translation
+    assert hint_of(c)[2] == pytest.approx(math.pi / 2, abs=0.05)
+    rob = robot()
+    rel0 = F.PlanarFrame(1.0, 2.0, 0.0).to_local(rob.ee_p, rob.ee_r)        # the EE in the base at engagement
+    rel = ee_in_hint(c)                                                      # the arm swings with the robot
+    np.testing.assert_allclose(rel[0], rel0[0], atol=1e-9)
+    np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+
+
+def test_third_person_after_a_stick_turn_walking_and_reaching_stay_room_aligned():
+    """Shared world: the grip registered the headset to the robot; a stick turn changes the robot's heading but
+    not the directions. Walking forward (in the room) moves the robot forward in the room, sideways for itself;
+    reaching forward moves the EE forward in the room."""
+    rig, c0 = turned_by_stick("third")
+    h0, e0 = hint_of(c0), np.array(ee_of(c0)["pos"])
+    c = rig.run(replace(GRIP, right=replace(GRIP.right, pos=tuple(np.array(GRIP.right.pos) + [0.1, 0, 0]))), n=1)
+    np.testing.assert_allclose(np.array(ee_of(c)["pos"]) - e0, [0.1, 0.0, 0.0], atol=1e-9)
+    c = rig.run(rigid(GRIP, (1.0, 0.0, 0.0), 0.0), n=1)
+    np.testing.assert_allclose(hint_of(c) - h0, [1.0, 0.0, 0.0], atol=1e-9)
+
+
+def test_first_person_after_a_stick_turn_walking_and_reaching_follow_the_robot():
+    """Egocentric: the stick turn shifted the anchor. Walking forward moves the robot along its own (new)
+    forward; reaching forward moves the EE along the robot's forward."""
+    rig, c0 = turned_by_stick("first")
+    yaw = hint_of(c0)[2]
+    fwd = np.array([math.cos(yaw), math.sin(yaw), 0.0])
+    h0, e0 = hint_of(c0), np.array(ee_of(c0)["pos"])
+    c = rig.run(replace(GRIP, right=replace(GRIP.right, pos=tuple(np.array(GRIP.right.pos) + [0.1, 0, 0]))), n=1)
+    np.testing.assert_allclose(np.array(ee_of(c)["pos"]) - e0, 0.1 * fwd, atol=1e-9)
+    c = rig.run(rigid(GRIP, (1.0, 0.0, 0.0), 0.0), n=1)
+    np.testing.assert_allclose(hint_of(c)[:2] - h0[:2], fwd[:2], atol=1e-9)
+    assert hint_of(c)[2] == pytest.approx(yaw)
+
+
+def test_the_modes_agree_without_a_stick_turn():
+    """The stick terms differ only in the yaw: with walking, turning, reaching, crouching and stick translation
+    (no stick yaw), both modes command the same targets and hints."""
+    seq = [rigid(GRIP, (0.03 * k, 0.01 * k, -0.005 * k), 0.04 * k) for k in range(1, 20)]
+    seq += [stick(replace(s_, right=replace(s_.right, pos=tuple(np.array(s_.right.pos) + [0.05, -0.02, 0.03]))),
+                  (0.6, 0.8)) for s_ in seq[-1:] * 15]
+    out = {}
+    for mode in ("third", "first"):
+        rig = Rig(Config(mode=mode))
+        rig.run(IDLE)
+        rig.run(GRIP)
+        out[mode] = [rig.run(s_, n=1) for s_ in seq]
+    for a, b in zip(out["third"], out["first"]):
+        np.testing.assert_allclose(ee_of(a)["pos"], ee_of(b)["pos"], atol=1e-9)
+        np.testing.assert_allclose(ee_of(a)["quat"], ee_of(b)["quat"], atol=1e-9)
+        np.testing.assert_allclose(hint_of(a), hint_of(b), atol=1e-9)
+
+
+def test_first_person_walking_feedforward_turns_with_the_stick():
+    rig, _ = turned_by_stick("first")
+    for k in range(1, 15):                                    # walking forward at 0.4 m/s (operator frame)
+        rig.frame(moving(GRIP, k, v_hand=(0.4, 0, 0), v_head=(0.4, 0, 0)))
+    hv = rig.core.feedforward()[1]
+    yaw = rig.core._hint_pose()[2]
+    np.testing.assert_allclose(hv[:2], 0.4 * np.array([math.cos(yaw), math.sin(yaw)]), atol=0.03)
+
+
+def test_the_mode_is_read_at_engagement():
+    """Toggling the mode takes effect at the next grip, never mid-engagement."""
+    cfg = Config(mode="third")
+    rig = Rig(cfg)
+    rig.run(IDLE)
+    rig.run(GRIP)
+    cfg.mode = "first"
+    assert rig.core.eng.mode == "third"
+    rig.run(IDLE)
+    rig.run(GRIP)
+    assert rig.core.eng.mode == "first"
+
+
 def test_offset_restarts_at_zero_on_every_engagement():
     rig = Rig()
     rig.run(IDLE)

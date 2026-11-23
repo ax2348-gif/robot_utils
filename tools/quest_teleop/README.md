@@ -126,6 +126,16 @@ On each engagement of the arm's hand, seen from its start:
   - Clutch invariance is unchanged: both links' deltas start at zero on engagement.
   - A head lost mid-engagement freezes both links: the hand is read in the last tracked head frame. When the head
     returns, both re-anchor where they are, so the robot does not move.
+- **Sticks: third vs first person** (`--mode`, the node page's toggle; read at each grip). The grip registers the
+  headset to the robot (you face where the robot faces). With `A` = that registration, `O(t)` your body pose (neck:
+  x, y, yaw), `δ` the hand delta in your body frame and `E0` the EE in the base at grip:
+  - **third person** (default; shared room): base `= T(s) · A · O(t) · R(σ)`, EE `= T(s) · A · O(t) · [δ ⊙ R(σ)E0]`.
+    The stick translation `s` moves the robot in the world, and the stick yaw `σ` turns only the robot (and swings
+    the arm with it). Walking and reaching stay room-aligned.
+  - **first person** (egocentric): one anchor `A(t)`; a stick increment `Δ` (robot frame) updates it as
+    `A ← (Base·Δ·Base⁻¹)·A`, i.e. `Base → Base·Δ`, a turn about the robot. Your forward stays the robot's forward
+    for walking and reaching.
+  - Without a stick yaw the two modes command exactly the same; they differ only after one.
 
 Released or not yet engaged, the arm rides with the platform. The WBC takes world targets only, so the client
 computes the riding target: at release it stores the **commanded EE at release** relative to the base (`arm_cmd_*`
