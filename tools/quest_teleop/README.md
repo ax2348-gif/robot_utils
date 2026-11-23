@@ -111,7 +111,19 @@ On each engagement of the arm's hand, seen from its start:
 - **Target** (world) `= F · (e0 + dp, dR · E0)`: at engagement exactly the current command. Platform motion does not
   move it; operator travel does; equal operator and platform travel leaves it fixed relative to the platform.
   `F`'s origin cancels (`target.p = ee.p + R_F dp`), so the platform frame and DEMO's shoulder frame give the same
-  target.
+  target. That is the formula with head walking off (`--no-head-walk`).
+- **Two links with head walking on** (the default). The headset is worn on the neck, so it is a torso proxy. The
+  robot chain mirrors the operator's: world → base reference (link 1: the base at engagement + the head's motion +
+  the stick offset, i.e. the base hint) → EE (link 2: `F⁻¹ · command` at engagement + the hand's delta **in the
+  current head frame**, position + gravity-aligned yaw). Target = link 1 ∘ link 2.
+  - **The invariant:** while the hand keeps its pose relative to the head, the EE target keeps its pose relative to
+    the base reference, for any walking or turning.
+  - The frozen-frame formula broke it on turns. The hand sweeps an arc about the head while the base turns about its
+    own origin, so the EE drifted sideways by about `|Δyaw| · |ee_in_base − hand_in_head|` in the plane: about 0.15 m
+    for a 30° turn with a 0.28 m lever.
+  - Clutch invariance is unchanged: both links' deltas start at zero on engagement.
+  - A head lost mid-engagement freezes both links: the hand is read in the last tracked head frame. When the head
+    returns, both re-anchor where they are, so the robot does not move.
 
 Released or not yet engaged, the arm rides with the platform. The WBC takes world targets only, so the client
 computes the riding target: at release it stores the **commanded EE at release** relative to the base (`arm_cmd_*`

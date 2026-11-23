@@ -17,7 +17,23 @@ Per engagement of the arm's hand:
 - **Target** = that frozen robot frame applied to ``(anchor.p + dp, dR anchor.R)``, in the world frame. At
   engagement it is exactly the current command. Platform motion does not move it; operator travel does. The frame's
   origin cancels (``target.p = ee.p + R_F dp``), so the platform frame and a shoulder frame with the same yaw give
-  the same target.
+  the same target. That is the formula with head walking off.
+
+**Two links (head walking on).** The operator chain is world → head (worn on the neck: a torso proxy; position and
+gravity-aligned yaw) → hand, and the robot chain mirrors it: world → base reference → EE.
+
+- **Link 1**, base reference = the base at engagement + the head's motion since engagement (+ the stick offset):
+  the base hint below.
+- **Link 2**, the EE in the base reference = the EE at engagement (``B0⁻¹ ∘ command``) + the hand's delta **in the
+  current head frame** since engagement (``ee_rel``).
+- **Target** = link 1 ∘ link 2.
+
+The invariant: while the hand keeps its pose relative to the head, the EE target keeps its pose relative to the base
+reference, for any walking or turning. The frozen-frame formula breaks it on turns: the hand sweeps an arc about the
+head, the base turns about its own origin, and the EE drifts sideways by about ``|dyaw| * |ee_in_base - hand_in_head|``
+in the plane. Clutch invariance is unchanged: both links' deltas start at zero, so engaging gives exactly the
+command. A head lost mid-engagement freezes both links (link 2 reads the hand in the last tracked head frame). When
+the head comes back, both re-anchor where they are, as at an engagement, so the robot does not move.
 
 Engagement rules: an engagement starts only after this consumer has seen the hand released (valid, not engaged)
 since the last discontinuity (start, reconnect, session or revision change, gap, invalid frame, estimator reset,
@@ -183,14 +199,17 @@ def rotvec(r) -> np.ndarray:
 class Engagement:
     id: int
     operator: F.OperatorFrame
-    hand_anchor: tuple            # controller pose in the operator frame at engagement
-    robot: F.PlanarFrame          # frozen platform frame
-    ee_anchor: tuple              # measured EE in the frozen platform frame
+    hand_anchor: tuple            # link 2 anchor: the controller pose in the head frame (operator frame at engagement)
+    robot: F.PlanarFrame          # link 1 anchor: the platform frame at engagement (moved by a head re-anchor)
+    ee_anchor: tuple              # link 2 anchor: the commanded EE in the link-1 anchor frame
     est_reset: float
     head_yaw0: float
     head_p0: np.ndarray           # LOCAL
-    target: Optional[tuple] = None   # newest world target (body-frozen, moved with the stick offset)
-    target_raw: Optional[tuple] = None   # the body-frozen target alone (operator hand and travel)
+    target: Optional[tuple] = None   # newest world target: base reference (with the stick offset) ∘ ee_rel
+    target_raw: Optional[tuple] = None   # the same without the stick offset
+    ee_rel: Optional[tuple] = None   # link 2: the EE target in the base reference frame
+    head_last: Optional[tuple] = None   # the newest tracked head (LOCAL position, yaw): link 2's frame
+    rebase_hand: bool = False        # the head was re-anchored: re-anchor link 2 on the next hand pose
     head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
     head_dyaw: float = 0.0                                             # last head yaw change
     head_yaw_unwrapped: float = 0.0                                    # continuous (the velocity fit)
@@ -202,7 +221,9 @@ class Engagement:
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
-    """World target for the current controller pose (DEMO.md body-frozen formula)."""
+    """World target for the current controller pose by the DEMO.md body-frozen formula: the hand's delta in the
+    operator frame frozen at engagement, applied in the frozen platform frame. ``TeleopCore`` uses it only through
+    the same formula with link 1 frozen (``head_walk`` off); with head walking it composes the two links."""
     current = eng.operator.pose(hand_p_local, hand_r_local)
     dp, dr = F.delta(eng.hand_anchor, current)
     return eng.robot.to_world(*F.apply_delta(eng.ee_anchor, dp, dr))
@@ -391,9 +412,9 @@ class TeleopCore:
             if hp is None:
                 self.drop("hand pose missing")
                 return
-            self.eng.target_raw = body_frozen_target(self.eng, *hp)
             self.eng.captured_now = False
-            self._track(frame)
+            self._track(frame)                   # link 1 (and a head re-anchor) before link 2 reads the head
+            self.eng.ee_rel = self._link2(*hp)
             self.status.state = "engaged"
             return
         if self.needs_release:
@@ -419,6 +440,8 @@ class TeleopCore:
             return
         eng.target_raw = (robot.ee_p.copy(), robot.ee_r.copy())
         eng.target = eng.target_raw
+        eng.ee_rel = eng.ee_anchor
+        eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
@@ -437,19 +460,64 @@ class TeleopCore:
             head = head_pose(frame)
             yaw = F.head_yaw(head[1]) if head is not None else None
             if yaw is not None:
+                if not eng.head_tracked:            # reacquired: re-anchor so neither link jumps
+                    self._reanchor_head(head[0], yaw)
                 eng.head_d = F.rot_z(-eng.head_yaw0) @ F.C @ (head[0] - eng.head_p0)
                 dyaw = F.wrap(yaw - eng.head_yaw0)
                 eng.head_yaw_unwrapped += F.wrap(dyaw - eng.head_dyaw)
                 eng.head_dyaw = dyaw
+                eng.head_last = (np.asarray(head[0], float).copy(), yaw)
             elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
                 eng.head_fit.reset()
             eng.head_tracked = yaw is not None
         self._tracked = True
 
+    def _reanchor_head(self, head_p_local, yaw: float) -> None:
+        """The head came back after a loss, possibly elsewhere. Both links restart from where they are, as at an
+        engagement: link 1's anchor becomes the current base reference (without the stick offset) and the head's
+        new pose; link 2 re-anchors on the next hand pose (``rebase_hand``) at the current ``ee_rel``. The robot
+        does not move; only motion from here on counts."""
+        eng = self.eng
+        x, y, byaw = self._hint_pose(np.zeros(3))
+        eng.robot = F.PlanarFrame(x, y, byaw, float(eng.robot.p[2]))
+        eng.head_p0 = np.asarray(head_p_local, float).copy()
+        eng.head_yaw0 = float(yaw)
+        eng.head_d = np.zeros(3)
+        eng.head_dyaw = 0.0
+        eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
+        eng.rebase_hand = True
+        eng.head_fit.reset()
+
+    def _link2(self, hand_p_local, hand_r_local) -> tuple:
+        """Link 2: the EE target in the base reference frame, from the hand's motion relative to the head.
+
+        With head walking the hand is read in the current head frame (newest tracked head: position, gravity-aligned
+        yaw), so a rigid operator motion (head and hand together) leaves it unchanged; link 1 carries the motion to
+        the base. Without head walking link 1 is frozen and so is the frame (the operator frame at engagement): the
+        DEMO.md body-frozen formula."""
+        eng = self.eng
+        if self.cfg.head_walk and eng.head_last is not None:
+            frame = F.OperatorFrame(*eng.head_last)
+        else:
+            frame = eng.operator
+        hand = frame.pose(hand_p_local, hand_r_local)
+        if eng.rebase_hand:
+            eng.hand_anchor = hand
+            eng.ee_anchor = eng.ee_rel
+            eng.rebase_hand = False
+        return F.apply_delta(eng.ee_anchor, *F.delta(eng.hand_anchor, hand))
+
+    def _compose(self, offset) -> tuple:
+        """World target = the base reference (link 1, with ``offset``) ∘ ``ee_rel`` (link 2)."""
+        x, y, yaw = self._hint_pose(offset)
+        return F.PlanarFrame(x, y, yaw, float(self.eng.robot.p[2])).to_world(*self.eng.ee_rel)
+
     def _track_offset(self, frame: dict) -> None:
         """The target with this frame's stick offset (the base hint's too) and the feedforward fits' samples."""
         eng = self.eng
-        eng.target = self._with_offset(eng.target_raw)
+        if not eng.captured_now:                   # the capture frame keeps the exact command (no jump)
+            eng.target_raw = self._compose(np.zeros(3))
+            eng.target = self._compose(self.offset)
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
             return
@@ -468,19 +536,6 @@ class TeleopCore:
         eng = self.eng
         xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + offset[:2]
         return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw + offset[2])
-
-    def _with_offset(self, target):
-        """The body-frozen target moved with the stick offset: the same planar rigid motion that takes the base
-        hint without the offset to the hint with it, so the EE and base references agree (the arm does not fight
-        the sticks)."""
-        if target is None or not np.any(self.offset):
-            return target
-        x0, y0, _ = self._hint_pose(np.zeros(3))
-        Rz = F.rot_z(float(self.offset[2]))
-        c0 = np.array([x0, y0, 0.0])
-        c1 = c0 + np.array([self.offset[0], self.offset[1], 0.0])
-        p, r = target
-        return c1 + Rz @ (np.asarray(p, float) - c0), Rz @ np.asarray(r, float)
 
     def feedforward(self) -> tuple:
         """(EE twist [vx, vy, vz, wx, wy, wz] world, hint velocity (vx, vy, omega) world) of the engagement: the

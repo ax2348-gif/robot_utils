@@ -505,6 +505,107 @@ def test_walking_and_sticks_combine():
     np.testing.assert_allclose(rig.core.offset[:2], F.rot_z(0.3)[:2, :2] @ [0.0, 0.45 * 0.5], atol=0.01)
 
 
+def rigid(s: HeadsetState, head_pos, head_yaw, head_pitch=0.0, base: HeadsetState = None) -> HeadsetState:
+    """``s`` with the operator moved as a rigid body (neck-worn headset and hand together) so that the head is at
+    ``head_pos`` with ``head_yaw``: the hand keeps its pose relative to the head's yaw frame. ``base`` is the state
+    the hand's relative pose is taken from (default ``s``). Pitch changes only the headset's own orientation."""
+    b = base or s
+    dyaw = head_yaw - b.head_yaw
+    rel = F.rot_z(-b.head_yaw) @ (np.array(b.right.pos) - np.array(b.head_pos))
+    pos = np.array(head_pos, float) + F.rot_z(head_yaw) @ rel
+    r, p, y = b.right.rpy
+    return replace(s, head_pos=tuple(float(v) for v in head_pos), head_yaw=head_yaw, head_pitch=head_pitch,
+                   right=replace(s.right, pos=tuple(pos), rpy=(r, p, y + dyaw)))
+
+
+def ee_in_hint(c):
+    """The EE target in the base hint's frame (link 2 as the WBC sees it)."""
+    e = ee_of(c)
+    return F.PlanarFrame(*hint_of(c)).to_local(np.array(e["pos"]), F.matrix_from_quat(e["quat"]))
+
+
+RIGID_MOTIONS = {
+    "walk": [((0.6, 0.2, 0.0), 0.0, 0.0)],
+    "turn_in_place": [((0.0, 0.0, 0.0), a, 0.0) for a in np.linspace(0.05, 0.8, 16)],
+    "turn_back_and_forth": [((0.0, 0.0, 0.0), 0.6 * math.sin(k / 4), 0.0) for k in range(1, 30)],
+    "walk_and_turn": [((0.02 * k, 0.01 * k, 0.0), -0.03 * k, 0.2) for k in range(1, 40)],
+    "turn_past_pi": [((0.1, 0.0, 0.0), a, 0.0) for a in np.linspace(0.2, 3.6, 18)],
+}
+
+
+@pytest.mark.parametrize("motion", sorted(RIGID_MOTIONS))
+def test_rigid_operator_motion_keeps_the_ee_fixed_in_the_base_reference(motion):
+    """The owner's invariant: once engaged, while the hand keeps its pose relative to the (neck-worn) headset, the
+    EE target keeps its pose relative to the base reference, for any walk or turn. With the frozen-frame formula a
+    turn swept the EE sideways by about |dyaw| x |ee_in_base - hand_in_head| (0.15 m at 30 degrees here)."""
+    rig = Rig()
+    start = replace(REACH, head_pos=(0.1, -0.1, 0.0), head_yaw=0.5,
+                    right=replace(REACH.right, pos=(0.5, -0.3, -0.3), rpy=(0.2, -0.1, 0.4)))
+    rig.run(replace(start, right=replace(start.right, grip=0.0)))
+    c0 = rig.run(start)
+    rel0 = ee_in_hint(c0)
+    np.testing.assert_allclose(ee_of(c0)["pos"], rig.rob.ee_p, atol=1e-12)          # engaging moves nothing
+    for head_pos, yaw, pitch in RIGID_MOTIONS[motion]:
+        c = rig.run(rigid(start, head_pos, 0.5 + yaw, pitch), n=1)
+        rel = ee_in_hint(c)
+        np.testing.assert_allclose(rel[0], rel0[0], atol=1e-9)
+        np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+
+
+def test_hand_motion_relative_to_the_head_moves_the_ee_in_the_base_reference():
+    """After a turn, reaching forward relative to the body reaches forward relative to the robot."""
+    rig = Rig()
+    rig.run(IDLE)
+    c0 = rig.run(GRIP)
+    rel0 = ee_in_hint(c0)
+    turned = rigid(GRIP, (0.3, 0.1, 0.0), 1.0)
+    rig.run(turned)
+    reach = replace(turned, right=replace(turned.right,
+                                          pos=tuple(np.array(turned.right.pos) + F.rot_z(1.0) @ [0.10, 0.05, 0.02])))
+    rel = ee_in_hint(rig.run(reach))
+    np.testing.assert_allclose(rel[0] - rel0[0], [0.10, 0.05, 0.02], atol=1e-9)
+    np.testing.assert_allclose(rel[1], rel0[1], atol=1e-9)
+
+
+def test_without_head_walk_the_target_is_the_frozen_frame_formula():
+    """``head_walk`` off: link 1 is frozen (the base reference moves only with the sticks) and the hand is read in
+    the operator frame frozen at engagement, the DEMO.md body-frozen formula."""
+    rig = Rig(Config(head_walk=False))
+    rig.run(IDLE)
+    rig.run(GRIP)
+    eng = rig.core.eng
+    moved = rigid(GRIP, (0.4, 0.2, 0.0), 0.7)
+    c = rig.run(moved)
+    expected = body_frozen_target(eng, *to_local(moved.right.pos, F.rot_z(0.7)))
+    np.testing.assert_allclose(ee_of(c)["pos"], expected[0], atol=1e-9)
+    np.testing.assert_allclose(F.matrix_from_quat(ee_of(c)["quat"]), expected[1], atol=1e-9)
+    np.testing.assert_allclose(hint_of(c), [1.0, 2.0, 0.3], atol=1e-12)
+
+
+def test_head_loss_and_reacquisition_do_not_move_the_robot():
+    """Head lost mid-engagement: the base reference holds and the hand is read in the last tracked head frame. The
+    operator walks and turns meanwhile; when the head comes back elsewhere both links re-anchor where they are, so
+    the commands do not jump, and the invariant and hand mapping hold from the new head pose on."""
+    rig = Rig()
+    rig.run(IDLE)
+    rig.run(GRIP)
+    rig.run(rigid(GRIP, (0.2, 0.0, 0.0), 0.3))
+    lost = replace(rigid(GRIP, (0.2, 0.0, 0.0), 0.3), head_tracked=False)
+    c_lost = rig.run(lost)
+    reacquired = rigid(GRIP, (0.9, -0.4, 0.0), 1.4)                    # the operator moved rigidly while lost
+    c_back = rig.run(reacquired, n=1)
+    np.testing.assert_allclose(hint_of(c_back), hint_of(c_lost), atol=1e-12)
+    np.testing.assert_allclose(ee_of(c_back)["pos"], ee_of(c_lost)["pos"], atol=1e-12)
+    np.testing.assert_allclose(F.matrix_from_quat(ee_of(c_back)["quat"]),
+                               F.matrix_from_quat(ee_of(c_lost)["quat"]), atol=1e-12)
+    rel_back = ee_in_hint(c_back)
+    for k in range(1, 20):                                              # rigid motion from the new pose
+        c = rig.run(rigid(GRIP, (0.9 + 0.02 * k, -0.4, 0.0), 1.4 - 0.05 * k, base=reacquired), n=1)
+        rel = ee_in_hint(c)
+        np.testing.assert_allclose(rel[0], rel_back[0], atol=1e-9)
+        np.testing.assert_allclose(rel[1], rel_back[1], atol=1e-9)
+
+
 def test_offset_restarts_at_zero_on_every_engagement():
     rig = Rig()
     rig.run(IDLE)
