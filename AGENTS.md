@@ -17,7 +17,7 @@ computer. This file is what you need to help someone run the **simulator with Me
      arming, clutch, body-frozen mapping;
   3. **`wbc` node:** a QP moving the arm and base together, fed by datagrams on a unix socket;
   4. **arm and swerve nodes,** which drive the sim world.
-- **The headset side** lives in two other repositories, both on branch `collab` (quest_dev tag `collab-v2`, quest_env tag `collab-v1`):
+- **The headset side** lives in two other repositories, both on branch `collab` tag `collab-v2`:
   - [quest_dev](https://github.com/ax2348-gif/quest_dev): an Android app giving the Quest an SSH server (port 8022)
     and a native XR host;
   - [quest_env](https://github.com/ax2348-gif/quest_env): the headset app, its `quest` script and native telemetry

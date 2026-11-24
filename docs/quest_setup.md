@@ -73,7 +73,9 @@ It goes through these steps, asking before anything that cannot be undone:
    - `--extra-keys FILE` (repeatable): public keys of other machines that should reach the headset (a robot, a
      second computer). Added when missing on every run, never removed. Those machines record the headset's host
      key with the `known_hosts` line the wizard prints at the end.
-6. **quest_env:** copies the headset app to the headset and verifies it.
+6. **quest_env:** copies the headset app to the headset, installs Git there (quest_env's developer tools), and
+   makes it a Git clone tracking branch `collab` (`--quest-env-branch` picks another), so quest up can update it.
+   Then it verifies it.
 7. **Optional check:** starts the headset app once, reads its stream, then stops it.
 
 **Migrating a runtime from another build.** The wizard backs up the runtime's data over SSH into
@@ -148,7 +150,8 @@ No cable is needed.
 The wizard installs fixed versions:
 - the runtime 1.6.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v2) tag `collab-v2`,
   checked by SHA-256;
-- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v1) tag `collab-v1`.
+- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v2) tag `collab-v2`,
+  which then tracks branch `collab`.
 
-They are set at the top of `tools/quest_teleop/quest_setup.py`. A headset that already has its own Git clone of
-quest_env keeps it.
+They are set at the top of `tools/quest_teleop/quest_setup.py`. A headset whose quest_env is already a Git clone
+tracking a branch keeps it.
