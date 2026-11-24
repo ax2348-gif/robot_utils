@@ -50,7 +50,8 @@ RUNTIME_PACKAGE = "dev.quest.runtime"
 RUNTIME_VERSION = "1.6.0"
 RUNTIME_URL = "https://raw.githubusercontent.com/ax2348-gif/quest_dev/collab-v2/artifacts/quest-dev-runtime.apk"
 RUNTIME_SHA256 = "edc738e0154f2df6c3ae23c7e26ab5f0f46aa3e5518cf92aba807981ce3e4e9d"
-QUEST_ENV_REF = "collab-v1"
+QUEST_ENV_REF = "collab-v2"
+QUEST_ENV_GIT = "https://github.com/ax2348-gif/quest_env.git"
 QUEST_ENV_URL = f"https://codeload.github.com/ax2348-gif/quest_env/tar.gz/refs/tags/{QUEST_ENV_REF}"
 TAILSCALE_PACKAGE = "com.tailscale.ipn"
 TAILSCALE_APK_URL = "https://pkgs.tailscale.com/stable/tailscale-android-universal-latest.apk"
@@ -157,7 +158,7 @@ def tar_tree(src: Path) -> bytes:
         for root, dirs, files in os.walk(src):
             dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
             for name in sorted(files):
-                if name == ".DS_Store" or name.startswith("._"):
+                if name in (".DS_Store", ".git") or name.startswith("._"):
                     continue
                 p = Path(root) / name
                 if p.is_symlink():
@@ -786,26 +787,43 @@ class Wizard:
         return dest
 
     def step_quest_env(self) -> bool:
+        """quest_env as a Git clone tracking --quest-env-branch (so `quest pull` and quest_up's update check work),
+        with the developer tools (git, curl, wget) it ships. A clone that already tracks a branch is left alone."""
         self.step("6. quest_env (the headset app) on the headset")
-        rc, out = self.ssh(f'R={HEADSET_ROOT}; [ -d "$R/.git" ] && echo is-git; [ -f "$R/quest" ] && echo present; '
-                           f'cat "$R/{REF_FILE}" 2>/dev/null; true')
-        lines = out.split()
-        want = self.a.quest_env and "local" or QUEST_ENV_REF
-        if "is-git" in lines:
-            self.say("   the headset has its own Git clone of quest_env: left as it is (quest_up pulls it)")
-        elif "present" in lines and want in lines and not self.a.quest_env:
-            self.say(f"   quest_env {QUEST_ENV_REF} is already there")
+        probe = (f'R={HEADSET_ROOT}; [ -f "$R/quest" ] && echo present; [ -x "$HOME/bin/git" ] && echo has-git; '
+                 '[ -d "$R/.git" ] && [ -x "$HOME/bin/git" ] && git -C "$R" rev-parse --abbrev-ref @{u} >/dev/null '
+                 '2>&1 && echo tracking; true')
+        state = set(self.ssh(probe, 30)[1].split())
+        if "tracking" in state:
+            self.say("   the headset has a Git clone of quest_env tracking a branch: left as it is (quest_up pulls it)")
+        elif self.check_only:
+            return self.record("quest_env on the headset", False,
+                               "missing" if "present" not in state else "not a tracking Git clone")
         else:
-            if self.check_only:
-                return self.record("quest_env on the headset", False, "missing or another version")
-            src = self.quest_env_source()
-            self.say(f"   copying quest_env ({'from ' + str(src) if self.a.quest_env else QUEST_ENV_REF}) to the "
-                     "headset's ~/workspace/quest_env")
-            rc, out = self.ssh(f'R={HEADSET_ROOT}; rm -rf "$R.new" && mkdir -p "$R.new" && tar -xf - -C "$R.new" && '
-                               f'rm -rf "$R" && mv "$R.new" "$R" && echo {want} > "$R/{REF_FILE}" && echo copied',
-                               300, tar_tree(src))
-            if rc != 0 or "copied" not in out:
-                raise Abort(f"copying quest_env failed: {out.strip()[-300:]}")
+            if "has-git" not in state or "present" not in state:
+                src = self.quest_env_source()
+                self.say(f"   copying quest_env ({'from ' + str(src) if self.a.quest_env else QUEST_ENV_REF}) to the "
+                         "headset's ~/workspace/quest_env")
+                rc, out = self.ssh(f'R={HEADSET_ROOT}; rm -rf "$R.new" && mkdir -p "$R.new" && tar -xf - -C "$R.new" '
+                                   f'&& rm -rf "$R" && mv "$R.new" "$R" && echo copied', 300, tar_tree(src))
+                if rc != 0 or "copied" not in out:
+                    raise Abort(f"copying quest_env failed: {out.strip()[-300:]}")
+            if "has-git" not in state:
+                self.say("   installing the developer tools (git, curl, wget) from quest_env's package")
+                rc, out = self.ssh(f'R={HEADSET_ROOT}; sh "$R/quest" install-devtools && "$HOME/bin/git" --version',
+                                   300)
+                if rc != 0 or "git version" not in out:
+                    raise Abort(f"installing the developer tools failed: {out.strip()[-300:]}")
+            branch = self.a.quest_env_branch
+            self.say(f"   making it a Git clone of {QUEST_ENV_GIT} tracking '{branch}'")
+            rc, out = self.ssh(
+                f'R={HEADSET_ROOT}; PATH="$HOME/bin:$PATH"; cd "$R" && rm -f {REF_FILE} && {{ [ -d .git ] || git init -q; }} && '
+                f'{{ git remote remove origin 2>/dev/null; true; }} && git remote add origin {QUEST_ENV_GIT} && '
+                f'git fetch -q origin {branch} && git checkout -q -f -B {branch} origin/{branch} && git clean -fdq && '
+                f'git log --oneline -1', 300)
+            if rc != 0:
+                raise Abort(f"cloning quest_env failed (does the headset reach github.com?): {out.strip()[-300:]}")
+            self.say(f"   at {out.strip().splitlines()[-1][:80] if out.strip() else '?'}")
         profile = "" if self.check_only else 'sh "$R/shell/install-profile.sh" >/dev/null && '
         rc, out = self.ssh(f'R={HEADSET_ROOT}; {profile}sh "$R/quest" verify', 120)
         if rc != 0:
@@ -881,6 +899,8 @@ def main(argv=None) -> int:
     ap.add_argument("--apk", help="a local runtime APK instead of the pinned download")
     ap.add_argument("--reinstall-runtime", action="store_true", help="install the runtime even if it is current")
     ap.add_argument("--quest-env", help="copy this local quest_env checkout instead of the pinned version")
+    ap.add_argument("--quest-env-branch", default="collab",
+                    help="the quest_env branch the headset's clone tracks (default %(default)s)")
     ap.add_argument("--skip-telemetry", action="store_true", help="skip the final telemetry check")
     ap.add_argument("--cache", default="~/.cache/robot_utils/quest", help="downloads (default %(default)s)")
     ap.add_argument("--backup-dir", default="~/quest-backups",

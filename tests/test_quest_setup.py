@@ -75,7 +75,8 @@ class FakeHeadset:
         self.reachable = reachable           # the tailnet route from the computer
         self.writes = []
         self.installs = []
-        self.quest_env = None
+        self.quest_env = None                 # None, "copy" or "tracking" (a Git clone tracking a branch)
+        self.git_tools = False
         self.started = 0
         self.signed_elsewhere = False        # the installed runtime came from another build (no in-place update)
         self.uninstalls = 0
@@ -136,12 +137,20 @@ class FakeHeadset:
             return 255, "quest@host: Permission denied (publickey)."
         if command == "echo quest-ok":
             return 0, "quest-ok\n"
-        if "is-git" in command:
-            return 0, ("present\n" + self.quest_env) if self.quest_env else ""
+        if "echo tracking" in command:                  # step 6's probe
+            return 0, "".join(w + "\n" for w, on in (("present", self.quest_env), ("has-git", self.git_tools),
+                                                       ("tracking", self.quest_env == "tracking")) if on)
         if "tar -xf" in command:
             assert tarfile.open(fileobj=io.BytesIO(data)).getnames()
-            self.quest_env = command.split("echo ")[1].split(" >")[0]
+            self.quest_env = "copy"
             return 0, "copied\n"
+        if "install-devtools" in command:
+            self.git_tools = True
+            return 0, "git version 2.56.0\n"
+        if "git remote add origin" in command:
+            assert self.git_tools and self.quest_env
+            self.quest_env = "tracking"
+            return 0, "7cddd29 Telemetry\n"
         if command == "cat ~/.ssh/authorized_keys":
             return 0, self.keys
         if command.startswith("cat >> ~/.ssh/authorized_keys"):
@@ -155,7 +164,7 @@ class FakeHeadset:
 def wizard(tmp_path, monkeypatch, hs, answers=(), **over):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     args = dict(check=False, yes=False, serial=None, alias="quest", key=str(tmp_path / ".ssh/quest_ed25519"),
-                extra_keys=[], apk=str(tmp_path / "rt.apk"), reinstall_runtime=False, quest_env=None,
+                extra_keys=[], apk=str(tmp_path / "rt.apk"), reinstall_runtime=False, quest_env=None, quest_env_branch="collab",
                 skip_telemetry=True, cache=str(tmp_path / "cache"),
                 backup_dir=str(tmp_path / "backups"))
     args.update(over)
@@ -194,7 +203,7 @@ def wizard(tmp_path, monkeypatch, hs, answers=(), **over):
 def test_fresh_headset_in_one_run_and_a_rerun_changes_nothing(tmp_path, monkeypatch):
     hs = FakeHeadset(runtime=None)
     assert wizard(tmp_path, monkeypatch, hs).run_all() == 0
-    assert hs.installs and hs.writes == ["authorized_keys", "tailnet_ip"] and hs.quest_env == Q.QUEST_ENV_REF
+    assert hs.installs and hs.writes == ["authorized_keys", "tailnet_ip"] and hs.quest_env == "tracking"
     cfg = (tmp_path / ".ssh/config").read_text()
     assert "HostName 100.101.102.103" in cfg and "Port 8022" in cfg
     before = (list(hs.installs), list(hs.writes), cfg)
@@ -265,7 +274,7 @@ def test_declining_the_uninstall_keeps_a_working_runtime_and_carries_on(tmp_path
     w = wizard(tmp_path, monkeypatch, hs, answers=["n", "n"])  # no migration, no uninstall
     w.backup_runtime = lambda: (_ for _ in ()).throw(AssertionError("no backup on a no"))
     assert w.run_all() == 0
-    assert hs.uninstalls == 0 and hs.runtime == "1.5.3" and hs.quest_env == Q.QUEST_ENV_REF
+    assert hs.uninstalls == 0 and hs.runtime == "1.5.3" and hs.quest_env == "tracking"
     assert ("runtime installed", True, "kept version 1.5.3, another build") in w.results
 
 
@@ -316,3 +325,10 @@ def test_extra_keys_are_added_when_missing_and_never_removed(tmp_path, monkeypat
     for _ in range(2):                                          # the rerun finds it there: unchanged
         assert wizard(tmp_path, monkeypatch, hs, extra_keys=[str(robot)]).run_all() == 0
     assert hs.keys.count("AAAArobot") == 1 and "AAAAkeep" in hs.keys and hs.writes == []
+
+
+def test_a_copied_quest_env_becomes_a_tracking_clone_with_git(tmp_path, monkeypatch):
+    hs = FakeHeadset(keys="ssh-ed25519 AAAAmine quest@test\n", tailnet_ip="100.101.102.103")
+    hs.quest_env = "copy"                                       # an older wizard's plain copy, no git
+    assert wizard(tmp_path, monkeypatch, hs, quest_env_branch="main").run_all() == 0
+    assert hs.git_tools and hs.quest_env == "tracking"
