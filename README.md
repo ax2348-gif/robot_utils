@@ -49,6 +49,9 @@ landing page that indexes them. Start each on the robot from this checkout, with
 |---|---|---|---|
 | camera (Orbbec Gemini 336L: color, depth, IR, IMU) | `python -m robot_utils.nodes.orbbec` | `/nodes/camera/` | [docs/orbbec_node.md](docs/orbbec_node.md) |
 | swerve base | `python -m robot_utils.nodes.swerve` | `/nodes/swerve/` | [docs/swerve_node.md](docs/swerve_node.md) |
+| arm (reBot Arm B601-DM: gravity-compensated Cartesian control, gripper) | `python -m robot_utils.nodes.arm` | `/nodes/arm/` | [docs/arm.md](docs/arm.md) |
+| wbc (whole-body control: the arm and the base together so the end effector follows world targets) | `python -m robot_utils.nodes.wbc` | `/nodes/wbc/` | [docs/wbc.md](docs/wbc.md) |
+| quest_teleop (Meta Quest whole-body teleop through the WBC; see [Teleoperation](#teleoperation-meta-quest)) | `python -m robot_utils.nodes.quest_teleop` | `/nodes/quest_teleop/` | [docs/quest_teleop_node.md](docs/quest_teleop_node.md) |
 | estimator (pose from swerve odometry + camera IMU) | `python -m robot_utils.nodes.estimator` | `/nodes/estimator/` | [docs/estimator_node.md](docs/estimator_node.md) |
 | pose servo (drive the base to a pose: jerk-limited, uses the estimator) | `python -m robot_utils.nodes.pose_servo` | `/nodes/pose_servo/` | [docs/pose_servo_node.md](docs/pose_servo_node.md) |
 | robot description (frames, camera calibration) | `python -m robot_utils.nodes.description` | `/nodes/description/` | [docs/description_node.md](docs/description_node.md) |
@@ -68,8 +71,8 @@ page. The shared conventions (routing, record framing, time sync, `/meta`, lease
 [docs/nodes.md](docs/nodes.md).
 
 - Camera: keep the robot still for about 2 s after starting it (startup IMU calibration).
-- Swerve: holds the CAN adapter while it runs, so `quest_teleop.sh`'s base process cannot run
-  at the same time. One-time SPARK setup (already done on this robot):
+- Swerve: holds the CAN adapter while it runs, so the legacy root scripts (`quest_teleop.sh`,
+  `teleop_base.sh`, [below](#teleoperation-meta-quest)) cannot drive the base at the same time. One-time SPARK setup (already done on this robot):
   `python -m robot_utils.nodes.swerve.setup_sparks slcan:/dev/ttyACM0` shows the differences,
   `--apply` writes and saves them.
 - Port 80 needs, once per machine, `sudo tools/enable_low_ports.sh` and the `nginx` package
@@ -82,6 +85,81 @@ page. The shared conventions (routing, record framing, time sync, `/meta`, lease
 
 The older single-file camera viewer (`python examples/orbbec_web_viewer.py`, port 8080) still
 works; design notes in [docs/orbbec_viewer.md](docs/orbbec_viewer.md).
+
+## Teleoperation (Meta Quest)
+
+Whole-body teleop: the operator walks and reaches with a Meta Quest headset (worn on the neck as a torso
+proxy) and its controllers; the robot's arm and base follow together. Third person: the operator watches the
+robot (or the simulator), and the headset is only an input device.
+
+```
+Quest headset                         this repo (the robot's Pi, or a Mac running the sim)
+quest_env native app  --TCP 9391-->   quest_teleop node  --datagrams-->  wbc node  -->  arm node + swerve node
+(poses, buttons, sticks,              (arming, clutch,                    (QP: arm and base       (or the sim world)
+ control_intent)                       body-frozen mapping, episodes)     together)
+```
+
+| piece | where |
+|---|---|
+| Headset app: telemetry and control intent over TCP 9391, the `quest` script (`quest run`, `quest status`) | [quest_env](https://github.com/ax2348-gif/quest_env) (cloned onto the headset) |
+| Headset runtime: the APK that gives the Quest an SSH server, terminals and a native XR process | [quest_dev](https://github.com/ax2348-gif/quest_dev) (`quest-dev-runtime`) |
+| Teleop client core: arming (Y / X), clutch, body-frozen mapping, headset stream gate, `quest_up` / `quest_down` | [tools/quest_teleop/](tools/quest_teleop/) ([README](tools/quest_teleop/README.md)) |
+| The node: page, Start / Stop, headset up / down, episodes, event log, top speed | [src/robot_utils/nodes/quest_teleop/](src/robot_utils/nodes/quest_teleop/) ([docs](docs/quest_teleop_node.md)) |
+| Whole-body controller | [src/robot_utils/nodes/wbc/](src/robot_utils/nodes/wbc/) ([docs](docs/wbc.md)) |
+| Recording episodes (on a laptop, not the Pi) | [src/robot_utils/collect/](src/robot_utils/collect/) ([docs](docs/collect.md)) |
+
+**Setting up a headset:** plug it in and run the wizard, `python3 tools/quest_teleop/quest_setup.py`. It installs
+Tailscale and the runtime on the headset, authorises an SSH key, adds `Host quest` to `~/.ssh/config` and copies
+quest_env over; it is safe to rerun after a failure. The checklist and a troubleshooting table are in
+[docs/quest_setup.md](docs/quest_setup.md). Once set up, the headset is reached over Tailscale with no cable.
+
+The node reads the headset's stream at that address, port 9391. **Using it:** open the node's page
+(`/nodes/quest_teleop/`, also under Tools on the landing page), **Quest up** (starts the headset app over ssh),
+**Start** (takes the WBC). Nothing moves until **Y** arms. The controls:
+
+| input | released | engaged (grip held) |
+|---|---|---|
+| Y (left) / X (left) | arm (enables first) / disarm and disable | the same |
+| right grip | engage: the arm follows the controller | release: the arm rides with the base |
+| right trigger | gripper (0 open – 1 closed) | the same |
+| left stick, right stick X | drive the base (headless: along your facing), turn it | offset the base hint |
+| walking, turning | nothing | the robot mirrors you |
+| right stick click | register: face where the robot faces and click (third person) | |
+| A (right) / B tap (right) | start / stop an episode (the sim stack resets the sim first) | the same |
+| B held 2 s | the headset stops its telemetry (the episode is aborted) | |
+
+Top speed: 0.8 m/s, 0.9 rad/s (`--max-speed` / `--max-omega`, or the page). Details and the arming rules:
+[tools/quest_teleop/README.md](tools/quest_teleop/README.md). Record with
+`python -m robot_utils.collect --task "..." --start-teleop` ([docs/collect.md](docs/collect.md)).
+
+The root scripts `quest_teleop.sh` and `teleop_base.sh` are the earlier two-process teleop (the arm through
+`rebot_ctl`, the base through `rev_ctl`); the node replaces them.
+
+## Simulator
+
+A MuJoCo world that the same nodes attach to through their hardware backends: every page, the WBC and the
+Quest teleop work against it unchanged. Runs on a Mac or Linux machine, never on the robot.
+
+```bash
+./install.sh --no-service                 # the venv (on a Mac: no systemd services)
+source .venv/bin/activate
+pip install -e '.[sim]'                   # MuJoCo
+python -m robot_utils.nodes.sim.stack --no-pull                  # http://localhost:8080/
+python -m robot_utils.nodes.sim.stack --no-pull --host 0.0.0.0   # reachable from a headset (Quest teleop)
+```
+
+The stack starts the landing page and the nodes in order (description, sim, arm, swerve, cameras, power,
+estimator, pose servo, wbc); the sim page is `/nodes/sim/`. Ctrl-C stops everything. `--no-pull` skips copying
+the robot's camera calibrations over ssh (only possible with access to the robot); without them the camera
+mounts are nominal.
+
+**With the Quest** (set up with the wizard above): `python -m robot_utils.nodes.sim.stack --quest --no-pull` is the
+one-step launcher. It serves on every interface, starts the `quest_teleop` node too, brings the headset up with
+the AR view (the simulated robot drawn over passthrough, served by this machine on port 8080), retrying while the
+headset sleeps, and starts teleop; put the headset on and press Y. Ctrl-C also stops the headset's telemetry.
+By hand: `--host 0.0.0.0`, then on the pages **Start** the `quest_teleop` tile, **Quest up**, **Start**. A (right)
+resets the sim before each episode. Collaborator walkthrough: [docs/quest_setup.md](docs/quest_setup.md). Docker, the GPU option and the details:
+[docs/sim.md](docs/sim.md).
 
 ## Administration
 

@@ -28,7 +28,7 @@ python -m robot_utils.collect cut ~/data/20261121-143000 --pre-roll 0.5 --post-r
 | `--robot` | (required) | the frontend, e.g. `http://botcore` (every path is `<robot>/nodes/...`) |
 | `--out` | (required) | parent directory; the session is `<out>/<YYYYMMDD-HHMMSS>` (`--name` overrides) |
 | `--task` | (required) | `POST /nodes/quest_teleop/task {"text"}` before anything else: the task of the next episodes |
-| `--streams` | `camera/color,wrist_camera/color,arm/stream,swerve/stream,estimator/stream,wbc/stream,quest_teleop/oplog/stream` | what to record |
+| `--streams` | `camera/color,wrist_camera/color,camera/imu/stream,arm/stream,swerve/stream,estimator/stream,wbc/stream,quest_teleop/oplog/stream` | what to record (`camera/imu/stream`: the chassis camera's ~100 Hz IMU records, attitude and mean acceleration; cheap) |
 | `--batch-ms` | `50` | the row streams (`<node>/stream`: arm, swerve, estimator, wbc) in batches this long: the same rows and timestamps, far fewer records, packets and wakeups on the robot (measured 2026-11-22: the Pi near its CPU limit with the full stack plus a recorder). `0` = every row on its own, for a consumer that acts on them live (a policy run) |
 | `--start-teleop` | off | `POST /nodes/quest_teleop/start` once recording runs (a 409 ends the session with the WBC's reason) |
 | `--stop-teleop` | off | `POST /nodes/quest_teleop/stop` on Ctrl-C (the node aborts an open episode itself) |
@@ -78,7 +78,7 @@ seen on the operator stream), and `session.json` gets the stop time, reason and 
 ```
 
 `<name>` is the spec with a trailing `/stream` dropped and `/` -> `.`: `camera.color`, `wrist_camera.color`,
-`arm`, `swerve`, `estimator`, `wbc`, `quest_teleop.oplog`.
+`camera.imu`, `arm`, `swerve`, `estimator`, `wbc`, `quest_teleop.oplog`.
 
 **Stream files** are what the node sent, byte for byte (record framing of docs/nodes.md "Streams"), so
 `common.protocol.iter_records` / `iter_rows` read them, concatenated or one by one. Two additions, both whole

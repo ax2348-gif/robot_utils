@@ -30,8 +30,8 @@ from .records import RawSplitter, header_time, rows_times
 
 log = logging.getLogger("collect")
 
-DEFAULT_STREAMS = ("camera/color", "wrist_camera/color", "arm/stream", "swerve/stream", "estimator/stream",
-                   "wbc/stream", "quest_teleop/oplog/stream")
+DEFAULT_STREAMS = ("camera/color", "wrist_camera/color", "camera/imu/stream", "arm/stream", "swerve/stream",
+                   "estimator/stream", "wbc/stream", "quest_teleop/oplog/stream")
 OPLOG_SPEC = "quest_teleop/oplog/stream"
 
 

@@ -137,6 +137,61 @@ def report_cameras(fe: Frontend) -> None:
         log(f"sim camera {name}: serial {serial}, mount " + (("calibrated: " + ", ".join(cal)) if cal else "NOMINAL"))
 
 
+QUEST_RETRY_S = 10.0          # --quest: quest up again this often while the headset does not answer
+QUEST_TRIES = 30              # ... at most this many times (5 minutes)
+
+
+def quest_bring_up(fe: Frontend, stopping: dict) -> bool:
+    """--quest: the headset up with the AR view (the node's ``POST /quest/up``: ssh, update, telemetry, the stream),
+    retried while the headset does not answer (asleep, offline); then ``POST /start`` (the WBC lease and enable).
+    The operator then only puts the headset on and presses Y."""
+    node = "/nodes/quest_teleop"
+    last = None
+    for attempt in range(1, QUEST_TRIES + 1):
+        st, body = fe.call("POST", f"{node}/quest/up", timeout=20.0)
+        if st not in (200, 409):
+            log(f"quest up refused ({st}): {(body or {}).get('detail')}")
+            return False
+        end = time.monotonic() + 300
+        ctl: dict = {}
+        while time.monotonic() < end and not stopping["flag"]:
+            time.sleep(1.0)
+            st, state = fe.call("GET", f"{node}/state", timeout=10.0)
+            ctl = (state or {}).get("ctl") or {} if st == 200 else {}
+            if ctl and not ctl.get("busy"):
+                break
+        if stopping["flag"]:
+            return False
+        lines = [ln.get("line", "") if isinstance(ln, dict) else str(ln) for ln in ctl.get("lines") or []]
+        if ctl.get("rc") == 0:
+            for line in lines[-4:]:
+                log(f"headset: {line}")
+            break
+        if lines != last:
+            for line in lines[-6:]:
+                log(f"headset: {line}")
+            last = lines
+        if attempt == 1:
+            log("the headset is not up yet. Wake it (press its power button once), check that Tailscale is "
+                f"Connected on it and on this machine; retrying every {QUEST_RETRY_S:.0f} s (Ctrl-C stops the stack; "
+                "python3 tools/quest_teleop/quest_setup.py --check diagnoses the setup)")
+        t = time.monotonic() + QUEST_RETRY_S
+        while time.monotonic() < t and not stopping["flag"]:
+            time.sleep(0.3)
+        if stopping["flag"]:
+            return False
+    else:
+        log("gave up on the headset; press Quest up on the teleop page once it is awake, then Start")
+        return False
+    st, body = fe.call("POST", f"{node}/start", timeout=40.0)
+    if st != 200:
+        log(f"teleop start refused: {(body or {}).get('detail')} (press Start on the teleop page to retry)")
+        return False
+    log("teleop running: put the headset on (or around your neck), face the simulated robot, press Y (left "
+        "controller) to arm, hold the right grip to move the arm; the sticks drive the base")
+    return True
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.sim.stack", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -152,9 +207,21 @@ def main(argv=None) -> int:
     p.add_argument("--robot-host", default=os.environ.get("ROBOT_SNAPSHOT_HOST", "botcore"),
                    help="ssh host of the robot whose description (measured mounts, active calibrations) the sim uses: "
                         "refreshed at start when it answers, else the previous snapshot (default botcore)")
+    p.add_argument("--quest", action="store_true",
+                   help="one-step Quest teleop: serve on every interface (unless --host is given), start the "
+                        "quest_teleop node too, bring the headset up with the AR view (`ssh quest`, retried while it "
+                        "sleeps) and start teleop; Ctrl-C also stops the headset's telemetry")
     p.add_argument("--no-pull", action="store_true", default=bool(os.environ.get("ROBOT_SNAPSHOT_NO_PULL")),
                    help="use the description snapshot as it is (python -m robot_utils.nodes.sim.snapshot refreshes it)")
     a = p.parse_args(argv)
+    if a.quest:
+        if "--host" not in (argv if argv is not None else sys.argv[1:]):
+            a.host = "0.0.0.0"           # the headset fetches the AR view from this machine
+        if "quest_teleop" not in [n.strip() for n in a.nodes.split(",")]:
+            a.nodes += ",quest_teleop"
+        if a.port != 8080:
+            log(f"note: the registry's quest_teleop passes --ar :8080, so the headset's AR view looks for port 8080, "
+                f"not {a.port}")
 
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     if a.runtime_dir:
@@ -209,6 +276,8 @@ def main(argv=None) -> int:
             log(f"sim world     {url}/nodes/sim/")
             log(f"sockets       {sock_dir}")
             log("Ctrl-C stops everything")
+            if a.quest and "quest_teleop" in started:
+                quest_bring_up(fe, stopping)
         while not stopping["flag"] and front.poll() is None:
             time.sleep(0.3)
         if front.poll() is not None and not stopping["flag"]:
@@ -220,6 +289,15 @@ def main(argv=None) -> int:
             running = [n["name"] for n in (body if isinstance(body, list) else (body or {}).get("nodes", []))
                        if (n.get("managed") or {}).get("state") in ("running", "starting")]
             order = [n for n in reversed(started) if n in running] + [n for n in running if n not in started]
+            if a.quest and "quest_teleop" in running:
+                log("stopping the headset's telemetry (quest down)")
+                fe.call("POST", "/nodes/quest_teleop/quest/down", timeout=10.0)
+                end = time.monotonic() + 30
+                while time.monotonic() < end:
+                    st, state = fe.call("GET", "/nodes/quest_teleop/state", timeout=10.0)
+                    if st != 200 or not ((state or {}).get("ctl") or {}).get("busy"):
+                        break
+                    time.sleep(0.5)
             for name in order:
                 log(f"stopping {name}")
                 fe.call("POST", f"/api/nodes/{name}/stop", timeout=30.0)
