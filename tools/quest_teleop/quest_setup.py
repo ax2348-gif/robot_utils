@@ -103,9 +103,12 @@ def version_tuple(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
 
 
-def ssh_block(alias: str, host: str, key: Path, known_hosts: Path) -> str:
+def tilde(p) -> str:
     home = str(Path.home())
-    tilde = lambda p: "~" + str(p)[len(home):] if str(p).startswith(home) else str(p)   # noqa: E731
+    return "~" + str(p)[len(home):] if str(p).startswith(home) else str(p)
+
+
+def ssh_block(alias: str, host: str, key: Path, known_hosts: Path) -> str:
     return "\n".join([
         BLOCK_BEGIN,
         f"Host {alias}",
@@ -179,6 +182,7 @@ class Wizard:
         self.known_hosts = Path.home() / ".ssh" / "known_hosts_quest"
         self.ssh_config = Path.home() / ".ssh" / "config"
         self.backup_dir = Path(a.backup_dir).expanduser()
+        self.reinstalled = False
         self.adb: Optional[str] = None
         self.serial: Optional[str] = None
         self.quest_ip: Optional[str] = None
@@ -233,9 +237,14 @@ class Wizard:
         p = self.run(argv, timeout, data)
         return p.returncode, (p.stdout + p.stderr).decode(errors="replace")
 
-    def ssh(self, command: str, timeout: float = 30, data: Optional[bytes] = None) -> tuple[int, str]:
-        p = self.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", self.a.alias, command],
-                     timeout, data)
+    def key_opts(self) -> list[str]:
+        """Offer this wizard's key too: an owner's own Host entry may not name it."""
+        return ["-o", f"IdentityFile={self.key}"] if self.key.exists() else []
+
+    def ssh(self, command: str, timeout: float = 30, data: Optional[bytes] = None, plain: bool = False
+            ) -> tuple[int, str]:
+        p = self.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                      *([] if plain else self.key_opts()), self.a.alias, command], timeout, data)
         return p.returncode, (p.stdout + p.stderr).decode(errors="replace")
 
     def download(self, url: str, dest: Path, sha256: Optional[str] = None) -> Path:
@@ -374,6 +383,7 @@ class Wizard:
         raise Abort(f"installing the {what} failed: {out.strip()[-300:]}")
 
     def reinstall(self, apk: Path, package: str, what: str) -> None:
+        self.reinstalled = self.reinstalled or package == RUNTIME_PACKAGE
         self.adb_cmd("uninstall", package, timeout=60)
         rc, out = self.adb_cmd("install", str(apk), timeout=300)
         if not (rc == 0 and "Success" in out):
@@ -384,7 +394,7 @@ class Wizard:
         """Run ``command`` over SSH, piping the file ``src`` into it or its output into the file ``dst``; prints
         progress. Returns (exit code, stderr)."""
         argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
-                *extra, self.a.alias, command]
+                *self.key_opts(), *extra, self.a.alias, command]
         p = subprocess.Popen(argv, stdin=subprocess.PIPE if src else subprocess.DEVNULL,
                              stdout=subprocess.PIPE if dst else subprocess.DEVNULL, stderr=subprocess.PIPE)
         moved, shown, t_end = 0, time.monotonic(), time.monotonic() + timeout
@@ -454,8 +464,8 @@ class Wizard:
             return bool(key)
 
         def reachable() -> bool:
-            p = self.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *extra, self.a.alias,
-                          "echo quest-ok"], 20)
+            p = self.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self.key_opts(), *extra,
+                          self.a.alias, "echo quest-ok"], 20)
             return p.returncode == 0 and b"quest-ok" in p.stdout
 
         if not (self.wait_for("the new runtime's host key", pin, 60, 2.0)
@@ -526,8 +536,15 @@ class Wizard:
 
     # 5. key, ssh config, provisioning
     def runtime_status(self) -> str:
-        _, out = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/status", timeout=20)
-        return out.strip()
+        """The runtime's status line; waits while its provider does not answer yet (just after an install)."""
+        out = ""
+        for _ in range(10):
+            rc, out = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/status", timeout=20)
+            if rc == 0 and "rror" not in out:
+                return out.strip()
+            time.sleep(2)
+        raise Abort(f"the runtime does not answer over USB ({out.strip()[-200:]}). Open it once in the headset "
+                    "(Library > Unknown sources > Quest developer runtime) and rerun")
 
     def ensure_key(self) -> None:
         if self.key.exists() and self.key.with_suffix(".pub").exists():
@@ -565,9 +582,17 @@ class Wizard:
         os.chmod(self.ssh_config, 0o600)
         self.say(f"   ~/.ssh/config: 'Host {self.a.alias}' -> {self.quest_ip}:{SSH_PORT}")
 
-    def ssh_ok(self) -> tuple[bool, str]:
-        rc, out = self.ssh("echo quest-ok", 20)
+    def ssh_ok(self, plain: bool = False) -> tuple[bool, str]:
+        rc, out = self.ssh("echo quest-ok", 20, plain=plain)
         return rc == 0 and "quest-ok" in out, out.strip()
+
+    def ssh_option(self, name: str) -> str:
+        p = self.run(["ssh", "-G", self.a.alias], 10)
+        for line in p.stdout.decode(errors="replace").splitlines():
+            k, _, v = line.partition(" ")
+            if k == name:
+                return v
+        return ""
 
     def write_runtime(self, name: str, data: bytes) -> None:
         rc, out = self.adb_cmd("shell", "content", "write", "--uri", f"{PROVIDER}/{name}", data=data, timeout=30)
@@ -578,14 +603,45 @@ class Wizard:
         """Write the listen address (always: it is the headset's own Tailscale address) and, with ``keys_too``, the
         authorised keys; then (re)start the SSH service."""
         if keys_too:
-            keys = self.key.with_suffix(".pub").read_bytes()
-            if self.a.extra_keys:
-                keys += b"\n" + Path(self.a.extra_keys).expanduser().read_bytes()
-            if b"PRIVATE KEY" in keys:
-                raise Abort("--extra-keys must hold public keys only")
-            self.write_runtime("authorized_keys", keys.strip() + b"\n")
+            keys = [self.key.with_suffix(".pub").read_text().strip()] + self.extra_keys()
+            self.write_runtime("authorized_keys", ("\n".join(keys) + "\n").encode())
         self.write_runtime("tailnet_ip", self.quest_ip.encode() + b"\n")
         self.adb_cmd("shell", "content", "call", "--uri", PROVIDER, "--method", "start", timeout=30)
+
+    def extra_keys(self) -> list[str]:
+        """The public key lines of --extra-keys files."""
+        out = []
+        for name in self.a.extra_keys or []:
+            text = Path(name).expanduser().read_text()
+            if "PRIVATE KEY" in text:
+                raise Abort(f"--extra-keys {name} holds a private key: pass the .pub file")
+            out += [l.strip() for l in text.splitlines() if re.match(r"(ssh-|ecdsa-|sk-)", l.strip())]
+        return out
+
+    def known_hosts_line(self) -> str:
+        _, out = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/host_public_key", timeout=20)
+        key = next((l.split()[:2] for l in out.splitlines() if l.startswith("ssh-")), None)
+        return f"[{self.quest_ip}]:{SSH_PORT} {' '.join(key)}" if key else "(host key unavailable over USB)"
+
+    def ensure_extra_keys(self) -> bool:
+        """Add any --extra-keys line the headset does not authorise yet (by key, not comment); never remove."""
+        want = self.extra_keys()
+        if not want:
+            return True
+        rc, have = self.ssh("cat ~/.ssh/authorized_keys", 20)
+        if rc != 0:
+            return False
+        blobs = {l.split()[1] for l in have.splitlines() if len(l.split()) > 1}
+        missing = [k for k in want if k.split()[1] not in blobs]
+        if not missing:
+            return True
+        if self.check_only:
+            self.say(f"   {len(missing)} of the --extra-keys are not authorised yet")
+            return False
+        rc, out = self.ssh("cat >> ~/.ssh/authorized_keys && echo added", 20, data=("\n".join(missing) + "\n").encode())
+        self.say(f"   authorised {len(missing)} more key(s): " + ", ".join(k.split()[2] if len(k.split()) > 2 else
+                                                                         k.split()[1][-12:] for k in missing))
+        return rc == 0 and "added" in out
 
     def port_open(self) -> bool:
         try:
@@ -596,52 +652,114 @@ class Wizard:
 
     def step_ssh(self) -> bool:
         self.step("5. SSH to the headset over Tailscale")
-        if self.ssh_ok()[0]:   # already works (this wizard's entry, or the owner's own): change nothing
-            return self.record(f"ssh {self.a.alias}", True, f"{self.quest_ip}:{SSH_PORT}")
+        if self.ssh_ok(plain=True)[0]:   # already works (this wizard's entry, or the owner's own)
+            ok = self.ensure_extra_keys()
+            return self.record(f"ssh {self.a.alias}", ok, f"{self.quest_ip}:{SSH_PORT}" if ok else
+                               "could not authorise the --extra-keys")
         self.ensure_key()
         self.write_ssh_config()
         ok, out = self.ssh_ok()
         if not ok and "REMOTE HOST IDENTIFICATION HAS CHANGED" in out:
-            self.say("   The headset's SSH host key differs from the one recorded (expected after reinstalling the "
-                     f"runtime). The record is in {self.known_hosts}, this wizard's own file.")
-            if self.check_only or not self.ask("Forget the old host key?", True):
-                return self.record("ssh quest", False, "host key changed")
-            self.run(["ssh-keygen", "-R", f"[{self.quest_ip}]:{SSH_PORT}", "-f", str(self.known_hosts)], 10)
+            if not self.forget_host_key():
+                return self.record(f"ssh {self.a.alias}", False, "host key changed")
             ok, out = self.ssh_ok()
         if not ok:
             if self.check_only:
                 return self.record(f"ssh {self.a.alias}", False, out[-200:])
-            status = self.runtime_status()
-            fresh = not status or "Provision authorized_keys" in status
-            listening_here = status.startswith("SSH running") and self.quest_ip in status
-            if fresh:
-                self.say("   provisioning the runtime: this computer's key, the headset's Tailscale address")
-                self.provision(keys_too=True)
-            elif not listening_here:
-                # keys are there; the runtime listens elsewhere (an old address) or waits for one
-                self.say(f"   the runtime is not listening on {self.quest_ip} ({status.splitlines()[0][:80]}): "
-                         "setting its address")
-                self.provision(keys_too=False)
-            elif not self.port_open():
-                raise Abort(f"the runtime listens on {self.quest_ip}:{SSH_PORT}, but this computer cannot reach it: "
-                            "are both devices Connected in the same tailnet, and do the tailnet's access rules allow "
-                            f"this computer to reach the headset? (`tailscale ping {self.quest_ip}` tells)")
-            else:
-                self.say("   The headset answers but refuses this computer's key: its runtime already has another "
-                         "set of authorised keys. Replacing the set locks out machines that use this headset now, "
-                         "unless their public keys are passed with --extra-keys FILE.")
-                if not self.ask("Replace the headset's authorised keys with this computer's key?", False):
-                    raise Abort("not provisioned. Ask the headset's owner to add this public key to the headset's "
-                                f"~/.ssh/authorized_keys: {self.key.with_suffix('.pub').read_text().strip()}")
-                self.provision(keys_too=True)
-            if not self.wait_for(f"the runtime's SSH listener on {self.quest_ip}",
-                                 lambda: self.ssh_ok()[0], 30, 2.0):
-                ok, out = self.ssh_ok()
-                raise Abort(f"ssh {self.a.alias} still fails ({out[-200:]}); the runtime says: "
-                            f"{self.runtime_status()[-300:]}")
-            _, host_key = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/host_public_key", timeout=20)
-            self.say(f"   the headset's SSH host key: {host_key.strip()}")
+            self.provision_for_ssh()
+        if not self.ensure_extra_keys():
+            return self.record(f"ssh {self.a.alias}", False, "could not authorise the --extra-keys")
+        if not self.ssh_ok(plain=True)[0] and not self.add_identity_to_own_entry():
+            return self.record(f"ssh {self.a.alias}", False, f"works only with {tilde(self.key)}: add "
+                               f"'IdentityFile {tilde(self.key)}' to your own 'Host {self.a.alias}' entry in "
+                               "~/.ssh/config (the teleop node uses that entry as it is)")
         return self.record(f"ssh {self.a.alias}", True, f"{self.quest_ip}:{SSH_PORT}")
+
+    def add_identity_to_own_entry(self) -> bool:
+        """The owner's own Host entry does not offer this wizard's key: offer to add one IdentityFile line to it."""
+        line = f"IdentityFile {tilde(self.key)}"
+        text = self.ssh_config.read_text() if self.ssh_config.exists() else ""
+        lines = text.splitlines(keepends=True)
+        at = next((i for i, l in enumerate(lines) if l.split()[:2] == ["Host", self.a.alias]), None)
+        if self.check_only or at is None:
+            return False
+        self.say(f"   Your own 'Host {self.a.alias}' entry in ~/.ssh/config does not offer {tilde(self.key)}, the "
+                 f"key authorised on the headset, so a plain `ssh {self.a.alias}` (as the teleop node runs it) is "
+                 "refused.")
+        if not self.ask(f"Add '{line}' to that entry (the old file is kept as config.before-quest-setup)?", True):
+            return False
+        nxt = lines[at + 1] if at + 1 < len(lines) else ""
+        indent = (nxt[:len(nxt) - len(nxt.lstrip())] if nxt.strip() else "") or "    "
+        lines.insert(at + 1, f"{indent}{line}\n")
+        backup = self.ssh_config.with_name("config.before-quest-setup")
+        if not backup.exists():
+            shutil.copy2(self.ssh_config, backup)
+        self.ssh_config.write_text("".join(lines))
+        return self.ssh_ok(plain=True)[0]
+
+    def forget_host_key(self) -> bool:
+        """The headset's host key changed: forget the old one, in whichever known_hosts file the entry uses."""
+        files = self.ssh_option("userknownhostsfile").split() or [str(self.known_hosts)]
+        kh = Path(files[0]).expanduser()
+        ours = kh == self.known_hosts
+        self.say("   The headset's SSH host key differs from the one recorded"
+                 + (" (expected: the runtime was just reinstalled)" if self.reinstalled else "")
+                 + f". The record is in {tilde(kh)}" + (", this wizard's own file." if ours else
+                 " (a copy is kept as known_hosts.old). Other machines that knew the headset see the new key too."))
+        if self.check_only or not self.ask("Forget the old host key?", ours or self.reinstalled):
+            return False
+        self.run(["ssh-keygen", "-R", f"[{self.quest_ip}]:{SSH_PORT}", "-f", str(kh)], 10)
+        # record the new key as read over USB (a trusted channel), so even a strict entry accepts it
+        _, out = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/host_public_key", timeout=20)
+        key = next((l.split()[:2] for l in out.splitlines() if l.startswith("ssh-")), None)
+        if key:
+            with open(kh, "a") as f:
+                f.write(f"[{self.quest_ip}]:{SSH_PORT} {' '.join(key)}\n")
+        return True
+
+    def provision_for_ssh(self) -> None:
+        """SSH fails: provision what is missing (keys and address on a fresh runtime, else the address, or ask
+        before replacing someone else's keys), then wait for the listener."""
+        status = self.runtime_status()
+        fresh = not status or "Provision authorized_keys" in status
+        listening_here = status.startswith("SSH running") and self.quest_ip in status
+        if fresh:
+            self.say("   provisioning the runtime: this computer's key, the headset's Tailscale address")
+            self.provision(keys_too=True)
+        elif not listening_here:
+            # keys are there; the runtime listens elsewhere (an old address) or waits for one
+            self.say(f"   the runtime is not listening on {self.quest_ip} ({status.splitlines()[0][:80]}): "
+                     "setting its address")
+            self.provision(keys_too=False)
+        elif not self.port_open():
+            raise Abort(f"the runtime listens on {self.quest_ip}:{SSH_PORT}, but this computer cannot reach it: "
+                        "are both devices Connected in the same tailnet, and do the tailnet's access rules allow "
+                        f"this computer to reach the headset? (`tailscale ping {self.quest_ip}` tells)")
+        else:
+            self.say("   The headset answers but refuses this computer's key: its runtime already has another "
+                     "set of authorised keys. Replacing the set locks out machines that use this headset now, "
+                     "unless their public keys are passed with --extra-keys FILE.")
+            if not self.ask("Replace the headset's authorised keys with this computer's key?", False):
+                raise Abort("not provisioned. Ask the headset's owner to add this public key to the headset's "
+                            f"~/.ssh/authorized_keys: {self.key.with_suffix('.pub').read_text().strip()}")
+            self.provision(keys_too=True)
+        def up() -> bool:
+            ok, out = self.ssh_ok()
+            return ok or "REMOTE HOST IDENTIFICATION HAS CHANGED" in out
+        if not self.wait_for(f"the runtime's SSH listener on {self.quest_ip}", up, 30, 2.0):
+            ok, out = self.ssh_ok()
+            raise Abort(f"ssh {self.a.alias} still fails ({out[-200:]}); the runtime says: "
+                        f"{self.runtime_status()[-300:]}")
+        _, host_key = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/host_public_key", timeout=20)
+        shown = next((l.strip() for l in host_key.splitlines() if l.startswith("Fingerprint")), host_key.strip())
+        self.say(f"   the headset's SSH host key: {shown}")
+        ok, out = self.ssh_ok()
+        if not ok and "REMOTE HOST IDENTIFICATION HAS CHANGED" in out:
+            if not self.forget_host_key():
+                raise Abort("the old host key is still recorded; rerun and answer yes to forget it")
+            ok, out = self.ssh_ok()
+        if not ok:
+            raise Abort(f"ssh {self.a.alias} still fails: {out[-200:]}")
 
     # 6. quest_env
     def quest_env_source(self) -> Path:
@@ -699,6 +817,9 @@ class Wizard:
         self.step("7. Telemetry check (optional)")
         if self.check_only or self.a.skip_telemetry:
             return True
+        if not any(n == f"ssh {self.a.alias}" and ok for n, ok, _ in self.results):
+            self.say(f"   skipped: needs a working `ssh {self.a.alias}` (step 5)")
+            return True
         self.say("   This starts the headset app once and reads its stream. Wake the headset (press the power button "
                  "once; it need not be worn, but the stream only flows while the XR session runs).")
         if not self.ask("Run the check now?", True):
@@ -737,6 +858,8 @@ class Wizard:
         if not bad and not self.check_only:
             self.say(f"""
 Done: the headset is reachable as `ssh {self.a.alias}` over Tailscale; the cable can go.
+Other machines that reach the headset (pass their public keys with --extra-keys) record its host key with:
+  {self.known_hosts_line()}
 Next (docs/quest_setup.md, "Try it in the simulator"):
   python -m robot_utils.nodes.sim.stack --no-pull --host 0.0.0.0
   open http://localhost:8080/ -> Start the quest_teleop tile -> its page: Quest up, then Start
@@ -752,7 +875,9 @@ def main(argv=None) -> int:
     ap.add_argument("--alias", default="quest", help="ssh host name for the headset (default %(default)s; the "
                                                      "teleop node's --ssh-host)")
     ap.add_argument("--key", default="~/.ssh/quest_ed25519", help="SSH key for the headset (created if missing)")
-    ap.add_argument("--extra-keys", help="a file of further public keys to authorise (other machines)")
+    ap.add_argument("--extra-keys", action="append", default=[], metavar="FILE",
+                    help="public keys of other machines to authorise on the headset (repeatable); added if missing "
+                         "on every run, never removed")
     ap.add_argument("--apk", help="a local runtime APK instead of the pinned download")
     ap.add_argument("--reinstall-runtime", action="store_true", help="install the runtime even if it is current")
     ap.add_argument("--quest-env", help="copy this local quest_env checkout instead of the pinned version")

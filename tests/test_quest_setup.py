@@ -79,6 +79,8 @@ class FakeHeadset:
         self.started = 0
         self.signed_elsewhere = False        # the installed runtime came from another build (no in-place update)
         self.uninstalls = 0
+        self.provider_down = 0                # reads that fail before the provider answers (just installed)
+        self.owner_entry = False
 
     def status(self):
         if not self.keys:
@@ -98,6 +100,9 @@ class FakeHeadset:
         if a[:2] == ["shell", "dumpsys"]:
             return 0, f"versionName={self.runtime}" if self.runtime else ""
         if a[:3] == ["shell", "content", "read"]:
+            if self.provider_down:
+                self.provider_down -= 1
+                return 0, "Error while accessing provider:dev.quest.runtime.files"
             return 0, self.status() if a[-1].endswith("/status") else "ssh-ed25519 AAAAhost"
         if a[:3] == ["shell", "content", "write"]:
             name = a[-1].rsplit("/", 1)[1]
@@ -122,7 +127,9 @@ class FakeHeadset:
             return 0, "Success"
         raise AssertionError(f"unexpected adb {a}")
 
-    def ssh(self, command, data=None):
+    def ssh(self, command, data=None, plain=False):
+        if plain and self.owner_entry:                  # the owner's own Host entry offers other keys only
+            return 255, "quest@host: Permission denied (publickey)."
         if not self.reachable or self.tailnet_ip != self.ip:
             return 255, "ssh: connect to host port 8022: Operation timed out"
         if not self.keys or "AAAAmine" not in self.keys:
@@ -135,6 +142,11 @@ class FakeHeadset:
             assert tarfile.open(fileobj=io.BytesIO(data)).getnames()
             self.quest_env = command.split("echo ")[1].split(" >")[0]
             return 0, "copied\n"
+        if command == "cat ~/.ssh/authorized_keys":
+            return 0, self.keys
+        if command.startswith("cat >> ~/.ssh/authorized_keys"):
+            self.keys += data.decode()
+            return 0, "added\n"
         if "install-profile" in command:
             return 0, "telemetry OK\n"
         raise AssertionError(f"unexpected ssh {command}")
@@ -143,7 +155,7 @@ class FakeHeadset:
 def wizard(tmp_path, monkeypatch, hs, answers=(), **over):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     args = dict(check=False, yes=False, serial=None, alias="quest", key=str(tmp_path / ".ssh/quest_ed25519"),
-                extra_keys=None, apk=str(tmp_path / "rt.apk"), reinstall_runtime=False, quest_env=None,
+                extra_keys=[], apk=str(tmp_path / "rt.apk"), reinstall_runtime=False, quest_env=None,
                 skip_telemetry=True, cache=str(tmp_path / "cache"),
                 backup_dir=str(tmp_path / "backups"))
     args.update(over)
@@ -153,7 +165,7 @@ def wizard(tmp_path, monkeypatch, hs, answers=(), **over):
     monkeypatch.setattr("builtins.input", lambda prompt="": replies.pop(0))
     w.find_adb = lambda: "/usr/bin/adb"
     w.adb_cmd = lambda *a, timeout=60, data=None: hs.adb(*a, data=data)
-    w.ssh = lambda command, timeout=30, data=None: hs.ssh(command, data)
+    w.ssh = lambda command, timeout=30, data=None, plain=False: hs.ssh(command, data, plain)
     w.local_tailnet = lambda: ["100.64.0.5"]
     w.port_open = lambda: hs.reachable
     w.wait_for = lambda what, check, timeout, every=3.0: check()
@@ -255,3 +267,52 @@ def test_declining_the_uninstall_keeps_a_working_runtime_and_carries_on(tmp_path
     assert w.run_all() == 0
     assert hs.uninstalls == 0 and hs.runtime == "1.5.3" and hs.quest_env == Q.QUEST_ENV_REF
     assert ("runtime installed", True, "kept version 1.5.3, another build") in w.results
+
+
+def test_a_freshly_installed_runtime_is_provisioned_once_its_provider_answers(tmp_path, monkeypatch):
+    hs = FakeHeadset(keys="ssh-ed25519 AAAAold old\n", tailnet_ip="100.101.102.103", runtime="1.5.3")
+    hs.signed_elsewhere, hs.provider_down = True, 2
+    monkeypatch.setattr(Q.time, "sleep", lambda s: None)
+    assert wizard(tmp_path, monkeypatch, hs, answers=["y"]).run_all() == 0   # SSH refuses: no migration offer
+    assert hs.uninstalls == 1 and hs.writes == ["authorized_keys", "tailnet_ip"] and "AAAAmine" in hs.keys
+
+
+def owner_config(tmp_path):
+    (tmp_path / ".ssh").mkdir(exist_ok=True)
+    cfg = tmp_path / ".ssh/config"
+    cfg.write_text("Host quest\n  HostName 100.101.102.103\n  Port 8022\n  User quest\nHost other\n  Port 1\n")
+    return cfg
+
+
+def test_an_owner_entry_gets_the_wizard_key_on_a_yes(tmp_path, monkeypatch):
+    cfg = owner_config(tmp_path)
+    hs = FakeHeadset(runtime=None)
+    hs.owner_entry = True
+    w = wizard(tmp_path, monkeypatch, hs, answers=["y"])
+    def ssh(command, timeout=30, data=None, plain=False):
+        hs.owner_entry = "quest_ed25519" not in cfg.read_text()
+        return hs.ssh(command, data, plain)
+    w.ssh = ssh
+    assert w.run_all() == 0
+    assert cfg.read_text().startswith("Host quest\n  IdentityFile ~/.ssh/quest_ed25519\n  HostName")
+    assert (tmp_path / ".ssh/config.before-quest-setup").exists()
+
+
+def test_an_owner_entry_left_alone_on_a_no_is_reported(tmp_path, monkeypatch):
+    cfg = owner_config(tmp_path)
+    before = cfg.read_text()
+    hs = FakeHeadset(runtime=None)
+    hs.owner_entry = True
+    w = wizard(tmp_path, monkeypatch, hs, answers=["n"])
+    assert w.run_all() == 1 and cfg.read_text() == before
+    assert any(n == "ssh quest" and not ok and "IdentityFile" in d for n, ok, d in w.results)
+
+
+def test_extra_keys_are_added_when_missing_and_never_removed(tmp_path, monkeypatch):
+    hs = FakeHeadset(keys="ssh-ed25519 AAAAmine quest@test\nssh-ed25519 AAAAkeep laptop\n",
+                     tailnet_ip="100.101.102.103")
+    robot = tmp_path / "robot.pub"
+    robot.write_text("ssh-ed25519 AAAArobot robot\n")
+    for _ in range(2):                                          # the rerun finds it there: unchanged
+        assert wizard(tmp_path, monkeypatch, hs, extra_keys=[str(robot)]).run_all() == 0
+    assert hs.keys.count("AAAArobot") == 1 and "AAAAkeep" in hs.keys and hs.writes == []

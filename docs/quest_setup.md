@@ -68,7 +68,11 @@ It goes through these steps, asking before anything that cannot be undone:
 5. **SSH:**
    - creates `~/.ssh/quest_ed25519` and authorises it on the headset;
    - adds `Host quest` to `~/.ssh/config`;
-   - checks that `ssh quest` works over Tailscale.
+   - checks that `ssh quest` works over Tailscale. An existing `Host quest` entry of your own is kept; if it
+     does not offer the wizard's key, the wizard offers to add one `IdentityFile` line to it;
+   - `--extra-keys FILE` (repeatable): public keys of other machines that should reach the headset (a robot, a
+     second computer). Added when missing on every run, never removed. Those machines record the headset's host
+     key with the `known_hosts` line the wizard prints at the end.
 6. **quest_env:** copies the headset app to the headset and verifies it.
 7. **Optional check:** starts the headset app once, reads its stream, then stops it.
 
@@ -127,6 +131,7 @@ No cable is needed.
 | wizard waits for the headset's Tailscale address | not signed in, VPN not allowed, a different tailnet | open Tailscale in the headset (Library → Unknown sources), sign in with the computer's account |
 | `ssh quest` times out | the headset sleeps, or Tailscale is off on either side | press the power button; both Tailscale apps Connected; `tailscale ping <headset address>` |
 | wizard: "signed by another build" | the runtime came from another computer's build | answer yes to migrate (backup, reinstall, restore); no keeps it |
+| another machine: `Permission denied` or "host identification has changed" | its key is not authorised, or the runtime was reinstalled | rerun with `--extra-keys <its .pub>`; on it, `ssh-keygen -R "[<headset>]:8022"` and add the printed `known_hosts` line |
 | `Permission denied (publickey)` | the headset was set up by someone else's computer | rerun the wizard; it asks before replacing the headset's keys |
 | launcher: "the headset is not up yet", forever | asleep, offline, or the XR app lost focus | wake it; `python3 tools/quest_teleop/quest_setup.py --check` |
 | stream "NOT focused" / no tracking | the headset is not worn, the privacy lock is on, another app is in front | put it on once; close other apps |
