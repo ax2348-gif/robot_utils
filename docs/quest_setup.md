@@ -62,13 +62,24 @@ It goes through these steps, asking before anything that cannot be undone:
    - opens it in the headset: **sign in** with the same account and **allow the VPN** connection;
    - the wizard waits until the headset has its Tailscale address.
 4. **The Quest developer runtime:** installs the APK, checked by SHA-256. Under Tailscale's own settings in the
-   headset, *Always-on VPN* keeps the headset reachable after a reboot.
+   headset, *Always-on VPN* keeps the headset reachable after a reboot. A runtime from another build cannot be
+   updated in place; if it answers over SSH, the wizard offers to migrate it (see below), otherwise it asks
+   before uninstalling. Declining keeps the installed runtime.
 5. **SSH:**
    - creates `~/.ssh/quest_ed25519` and authorises it on the headset;
    - adds `Host quest` to `~/.ssh/config`;
    - checks that `ssh quest` works over Tailscale.
 6. **quest_env:** copies the headset app to the headset and verifies it.
 7. **Optional check:** starts the headset app once, reads its stream, then stops it.
+
+**Migrating a runtime from another build.** The wizard backs up the runtime's data over SSH into
+`~/quest-backups/runtime-<serial>-<time>.tar`: its home (workspace, dotfiles, installed tools), authorised keys, SSH
+host key, address and settings. It refuses to continue if the backup looks incomplete, and only then uninstalls,
+installs the new runtime, restores everything except the BlackBox container, and restarts SSH with the old host
+key, so every machine that knew the headset still trusts it. The backup is kept; delete it once the headset
+works. If a restore is interrupted, rerun the wizard, or restore by hand once `ssh quest` works:
+`ssh quest 'cd "$HOME/../.." && tar -xpf - --exclude "blackbox/*"' < ~/quest-backups/<file>.tar`, then restart the
+runtime (`adb shell content call --uri content://dev.quest.runtime.files --method stop`, then `--method start`).
 
 **Stopped, or something failed?** Fix what it says and run it again: finished steps are skipped.
 `python3 tools/quest_teleop/quest_setup.py --check` reports the state without changing anything. Unplug the cable
@@ -115,6 +126,7 @@ No cable is needed.
 | wizard: `unauthorized` | the USB debugging prompt is waiting in the headset | put it on, Allow, tick Always allow |
 | wizard waits for the headset's Tailscale address | not signed in, VPN not allowed, a different tailnet | open Tailscale in the headset (Library → Unknown sources), sign in with the computer's account |
 | `ssh quest` times out | the headset sleeps, or Tailscale is off on either side | press the power button; both Tailscale apps Connected; `tailscale ping <headset address>` |
+| wizard: "signed by another build" | the runtime came from another computer's build | answer yes to migrate (backup, reinstall, restore); no keeps it |
 | `Permission denied (publickey)` | the headset was set up by someone else's computer | rerun the wizard; it asks before replacing the headset's keys |
 | launcher: "the headset is not up yet", forever | asleep, offline, or the XR app lost focus | wake it; `python3 tools/quest_teleop/quest_setup.py --check` |
 | stream "NOT focused" / no tracking | the headset is not worn, the privacy lock is on, another app is in front | put it on once; close other apps |
@@ -128,9 +140,10 @@ No cable is needed.
 
 ## Pinned versions
 
-The wizard installs fixed versions, both from the tag `collab-v1`:
-- the runtime 1.6.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v1), checked by SHA-256;
-- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v1).
+The wizard installs fixed versions:
+- the runtime 1.6.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v2) tag `collab-v2`,
+  checked by SHA-256;
+- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v1) tag `collab-v1`.
 
 They are set at the top of `tools/quest_teleop/quest_setup.py`. A headset that already has its own Git clone of
 quest_env keeps it.

@@ -77,6 +77,8 @@ class FakeHeadset:
         self.installs = []
         self.quest_env = None
         self.started = 0
+        self.signed_elsewhere = False        # the installed runtime came from another build (no in-place update)
+        self.uninstalls = 0
 
     def status(self):
         if not self.keys:
@@ -108,6 +110,12 @@ class FakeHeadset:
         if a[:3] == ["shell", "content", "call"]:
             self.started += 1
             return 0, "Result: Bundle[{}]"
+        if a[0] == "uninstall":
+            self.uninstalls += 1
+            self.runtime, self.keys, self.tailnet_ip, self.signed_elsewhere = None, None, None, False
+            return 0, "Success"
+        if a[:2] == ["install", "-r"] and self.signed_elsewhere:
+            return 1, "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]"
         if a[0] == "install":
             self.installs.append(a[-1])
             self.runtime = Q.RUNTIME_VERSION
@@ -136,7 +144,8 @@ def wizard(tmp_path, monkeypatch, hs, answers=(), **over):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     args = dict(check=False, yes=False, serial=None, alias="quest", key=str(tmp_path / ".ssh/quest_ed25519"),
                 extra_keys=None, apk=str(tmp_path / "rt.apk"), reinstall_runtime=False, quest_env=None,
-                skip_telemetry=True, cache=str(tmp_path / "cache"))
+                skip_telemetry=True, cache=str(tmp_path / "cache"),
+                backup_dir=str(tmp_path / "backups"))
     args.update(over)
     w = Q.Wizard(argparse.Namespace(**args))
     w.interactive = True
@@ -220,3 +229,29 @@ def test_an_unmanaged_host_entry_elsewhere_stops_the_wizard(tmp_path, monkeypatc
         argv, 0, b"hostname 100.99.0.1\nport 22\n", b"") if argv[:2] == ["ssh", "-G"] else inner(argv, timeout, data))
     assert w.run_all() == 1
     assert (tmp_path / ".ssh/config").read_text() == "Host quest\n    HostName 100.99.0.1\n"
+
+
+def test_a_runtime_from_another_build_is_migrated_with_its_data(tmp_path, monkeypatch):
+    hs = FakeHeadset(keys="ssh-ed25519 AAAAmine quest@test\nssh-ed25519 AAAArobot robot\n",
+                     tailnet_ip="100.101.102.103", runtime="1.5.3")
+    hs.signed_elsewhere = True
+    w = wizard(tmp_path, monkeypatch, hs, answers=["y"])
+    steps = []
+    w.backup_runtime = lambda: steps.append(("backup", hs.uninstalls, hs.keys)) or tmp_path / "b.tar"
+    def restore(backup):
+        steps.append(("restore", hs.uninstalls, backup))
+        hs.keys, hs.tailnet_ip = steps[0][2], hs.ip           # what restore_runtime puts back
+    w.restore_runtime = restore
+    assert w.run_all() == 0
+    assert [s[:2] for s in steps] == [("backup", 0), ("restore", 1)] and hs.runtime == Q.RUNTIME_VERSION
+    assert "AAAArobot" in hs.keys                               # other machines keep their access
+
+
+def test_declining_the_uninstall_keeps_a_working_runtime_and_carries_on(tmp_path, monkeypatch):
+    hs = FakeHeadset(keys="ssh-ed25519 AAAAmine quest@test\n", tailnet_ip="100.101.102.103", runtime="1.5.3")
+    hs.signed_elsewhere = True
+    w = wizard(tmp_path, monkeypatch, hs, answers=["n", "n"])  # no migration, no uninstall
+    w.backup_runtime = lambda: (_ for _ in ()).throw(AssertionError("no backup on a no"))
+    assert w.run_all() == 0
+    assert hs.uninstalls == 0 and hs.runtime == "1.5.3" and hs.quest_env == Q.QUEST_ENV_REF
+    assert ("runtime installed", True, "kept version 1.5.3, another build") in w.results

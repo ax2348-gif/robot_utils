@@ -17,7 +17,7 @@ computer. This file is what you need to help someone run the **simulator with Me
      arming, clutch, body-frozen mapping;
   3. **`wbc` node:** a QP moving the arm and base together, fed by datagrams on a unix socket;
   4. **arm and swerve nodes,** which drive the sim world.
-- **The headset side** lives in two other repositories, both on branch `collab`, tag `collab-v1`:
+- **The headset side** lives in two other repositories, both on branch `collab` (quest_dev tag `collab-v2`, quest_env tag `collab-v1`):
   - [quest_dev](https://github.com/ax2348-gif/quest_dev): an Android app giving the Quest an SSH server (port 8022)
     and a native XR host;
   - [quest_env](https://github.com/ax2348-gif/quest_env): the headset app, its `quest` script and native telemetry
@@ -64,6 +64,9 @@ In short:
 - **The macOS firewall** blocks port 8080, so there is no AR view.
 - **An existing `Host quest` entry** in `~/.ssh/config` points elsewhere. The wizard refuses to edit an entry it
   did not write; use `--alias`, then start the node with `--ssh-host`.
+- **A runtime from another build** (another signing key) cannot be updated in place. The wizard migrates it:
+  backup to `~/quest-backups/`, reinstall, restore with the same host key (docs/quest_setup.md, "Migrating a
+  runtime"). The backup is the recovery path if anything goes wrong after the uninstall.
 - **The headset was provisioned by another computer:** `Permission denied (publickey)`. The wizard asks before
   replacing the keys.
 

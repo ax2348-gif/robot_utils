@@ -48,8 +48,8 @@ from quest_ctl import QuestCtl, SshRunner  # noqa: E402
 # -- pins: what a collaborator gets (bump together with the tags) ----------------------------------------------
 RUNTIME_PACKAGE = "dev.quest.runtime"
 RUNTIME_VERSION = "1.6.0"
-RUNTIME_URL = "https://raw.githubusercontent.com/ax2348-gif/quest_dev/collab-v1/artifacts/quest-dev-runtime.apk"
-RUNTIME_SHA256 = "683d488a60221dd265ad009b89a34b86d312b7e85d01e5e9dd2bb114f06ba4f0"
+RUNTIME_URL = "https://raw.githubusercontent.com/ax2348-gif/quest_dev/collab-v2/artifacts/quest-dev-runtime.apk"
+RUNTIME_SHA256 = "edc738e0154f2df6c3ae23c7e26ab5f0f46aa3e5518cf92aba807981ce3e4e9d"
 QUEST_ENV_REF = "collab-v1"
 QUEST_ENV_URL = f"https://codeload.github.com/ax2348-gif/quest_env/tar.gz/refs/tags/{QUEST_ENV_REF}"
 TAILSCALE_PACKAGE = "com.tailscale.ipn"
@@ -62,6 +62,10 @@ BLOCK_BEGIN = "# >>> robot_utils quest (managed by tools/quest_teleop/quest_setu
 BLOCK_END = "# <<< robot_utils quest <<<"
 REF_FILE = ".robot_utils_ref"
 HEADSET_ROOT = '"$HOME/workspace/quest_env"'
+# the runtime's app data (its home is files/home) and what a migration carries across a reinstall
+APP_DATA = '"$HOME/../.."'
+RUNTIME_DATA = ("files/home", "files/native", "files/ssh_host_ed25519_key", "files/ssh_host_ed25519_key.pub",
+                "files/host_public_key.txt", "files/tailnet_ip", "shared_prefs", "blackbox/data")
 
 
 class Abort(Exception):
@@ -174,6 +178,7 @@ class Wizard:
         self.key = Path(a.key).expanduser()
         self.known_hosts = Path.home() / ".ssh" / "known_hosts_quest"
         self.ssh_config = Path.home() / ".ssh" / "config"
+        self.backup_dir = Path(a.backup_dir).expanduser()
         self.adb: Optional[str] = None
         self.serial: Optional[str] = None
         self.quest_ip: Optional[str] = None
@@ -337,21 +342,140 @@ class Wizard:
             found = tailnet_addresses(out)
         return found
 
-    def install_apk(self, apk: Path, package: str, what: str) -> None:
+    def install_apk(self, apk: Path, package: str, what: str) -> bool:
+        """Install or update in place. An APK signed by another build cannot be updated: for the runtime, offer to
+        migrate (back up its data, reinstall, restore) when SSH reaches it; else ask before an erasing uninstall.
+        False when the owner keeps the installed app."""
         rc, out = self.adb_cmd("install", "-r", str(apk), timeout=300)
         if rc == 0 and "Success" in out:
-            return
+            return True
         if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in out:
-            self.say(f"   The {what} on the headset was signed by another build, so it cannot be updated in place. "
-                     "Uninstalling it erases its data (for the runtime: its SSH host key, authorised keys and "
-                     "workspace; they are set up again by this wizard).")
+            self.say(f"   The {what} on the headset was signed by another build, so it cannot be updated in place: "
+                     "it has to be uninstalled, which erases its data.")
+            if package == RUNTIME_PACKAGE and self.ssh_ok()[0]:
+                self.say("   The installed runtime answers over SSH, so its data can be carried over: its home "
+                         "(workspace, dotfiles, installed tools), authorised keys, SSH host key (other machines keep "
+                         f"trusting it) and settings are backed up to {self.backup_dir}, then restored into the new "
+                         "runtime.")
+                if self.ask("Back up, reinstall and restore?", True):
+                    backup = self.backup_runtime()
+                    self.reinstall(apk, package, what)
+                    self.restore_runtime(backup)
+                    return True
+            elif package == RUNTIME_PACKAGE:
+                self.say("   It does not answer over SSH from here, so its data cannot be backed up first: "
+                         "uninstalling erases its home, workspace, authorised keys and SSH host key (machines that "
+                         "knew the headset then see a new host key).")
             if not self.ask(f"Uninstall the {what} and install this one?", False):
-                raise Abort(f"left the existing {what} in place")
-            self.adb_cmd("uninstall", package, timeout=60)
-            rc, out = self.adb_cmd("install", str(apk), timeout=300)
-            if rc == 0 and "Success" in out:
-                return
+                self.say(f"   keeping the installed {what} (it works, but gets no updates from this release)")
+                return False
+            self.reinstall(apk, package, what)
+            return True
         raise Abort(f"installing the {what} failed: {out.strip()[-300:]}")
+
+    def reinstall(self, apk: Path, package: str, what: str) -> None:
+        self.adb_cmd("uninstall", package, timeout=60)
+        rc, out = self.adb_cmd("install", str(apk), timeout=300)
+        if not (rc == 0 and "Success" in out):
+            raise Abort(f"installing the {what} failed: {out.strip()[-300:]}")
+
+    # migrating the runtime's data across a reinstall
+    def ssh_stream(self, command: str, src=None, dst=None, extra: tuple = (), timeout: float = 3600) -> tuple[int, str]:
+        """Run ``command`` over SSH, piping the file ``src`` into it or its output into the file ``dst``; prints
+        progress. Returns (exit code, stderr)."""
+        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
+                *extra, self.a.alias, command]
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE if src else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE if dst else subprocess.DEVNULL, stderr=subprocess.PIPE)
+        moved, shown, t_end = 0, time.monotonic(), time.monotonic() + timeout
+        try:
+            pipe_in, pipe_out = (src, p.stdin) if src else (p.stdout, dst)
+            while True:
+                chunk = pipe_in.read(1 << 20)
+                if not chunk:
+                    break
+                pipe_out.write(chunk)
+                moved += len(chunk)
+                if time.monotonic() - shown > 5:
+                    shown = time.monotonic()
+                    self.say(f"   ... {moved / 1e6:.0f} MB")
+                if time.monotonic() > t_end:
+                    p.kill()
+                    break
+            if src:
+                p.stdin.close()
+            p.wait(timeout=600)
+        except BaseException:
+            p.kill()
+            raise
+        return p.returncode, p.stderr.read().decode(errors="replace")
+
+    def backup_runtime(self) -> Path:
+        files = " ".join(RUNTIME_DATA)
+        rc, out = self.ssh(f"cd {APP_DATA} && find {files} ! -type s ! -type p 2>/dev/null | wc -l", 120)
+        expected = int(out.split()[-1]) if rc == 0 and out.split() and out.split()[-1].isdigit() else None
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.backup_dir / f"runtime-{self.serial or 'quest'}-{time.strftime('%Y%m%d-%H%M%S')}.tar"
+        self.say(f"   backing up the runtime's data to {dest} ({expected} entries; sockets are skipped)")
+        with open(dest, "wb") as f:
+            rc, err = self.ssh_stream(f"cd {APP_DATA} && find {files} ! -type s ! -type p 2>/dev/null | "
+                                      "tar -cf - --no-recursion -T -", dst=f)
+        if rc != 0:
+            raise Abort(f"the backup failed (exit {rc}: {err.strip()[-200:]}); nothing was uninstalled. {dest} is "
+                        "incomplete")
+        with tarfile.open(dest) as t:
+            names = set(t.getnames())
+        missing = [n for n in ("files/ssh_host_ed25519_key", "files/home/.ssh/authorized_keys") if n not in names]
+        if missing or (expected is not None and len(names) < expected):
+            raise Abort(f"the backup looks incomplete ({len(names)} of {expected} entries; missing {missing}); "
+                        "nothing was uninstalled")
+        self.say(f"   backed up {len(names)} entries, {dest.stat().st_size / 1e6:.0f} MB (kept; delete it once "
+                 "the headset works)")
+        return dest
+
+    def restore_runtime(self, backup: Path) -> None:
+        with tarfile.open(backup) as t:
+            keys = t.extractfile("files/home/.ssh/authorized_keys").read()
+        self.say("   restoring: the old authorised keys and address first, so this computer can log in")
+        self.write_runtime("authorized_keys", keys)
+        self.write_runtime("tailnet_ip", self.quest_ip.encode() + b"\n")
+        self.adb_cmd("shell", "content", "call", "--uri", PROVIDER, "--method", "start", timeout=30)
+        # the fresh install made a new host key; trust exactly that one (read over USB) for the restore
+        pinned = self.cache / "migrate_known_hosts"
+        extra = ("-o", f"UserKnownHostsFile={pinned}", "-o", "StrictHostKeyChecking=yes",
+                 "-o", "HostKeyAlias=quest-migrate")
+
+        def pin() -> bool:
+            _, out = self.adb_cmd("shell", "content", "read", "--uri", f"{PROVIDER}/host_public_key", timeout=20)
+            key = next((l.strip() for l in out.splitlines() if l.startswith("ssh-")), None)
+            if key:
+                pinned.parent.mkdir(parents=True, exist_ok=True)
+                pinned.write_text("quest-migrate " + " ".join(key.split()[:2]) + "\n")
+            return bool(key)
+
+        def reachable() -> bool:
+            p = self.run(["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *extra, self.a.alias,
+                          "echo quest-ok"], 20)
+            return p.returncode == 0 and b"quest-ok" in p.stdout
+
+        if not (self.wait_for("the new runtime's host key", pin, 60, 2.0)
+                and self.wait_for("the new runtime's SSH", reachable, 60, 2.0)):
+            raise Abort(f"the new runtime does not answer over SSH yet; its data is safe in {backup}. Rerun the "
+                        f"wizard, or restore by hand: docs/quest_setup.md, 'Migrating a runtime'")
+        self.say(f"   restoring {backup.name} (everything but the BlackBox container)")
+        with open(backup, "rb") as f:
+            rc, err = self.ssh_stream(f"cd {APP_DATA} && tar -xpf - --exclude 'blackbox/*'", src=f, extra=extra)
+        if rc != 0:
+            raise Abort(f"the restore failed (exit {rc}: {err.strip()[-200:]}); the data is safe in {backup}")
+        # restart, so SSH serves the restored host key
+        self.adb_cmd("shell", "content", "call", "--uri", PROVIDER, "--method", "stop", timeout=30)
+        time.sleep(2)
+        self.adb_cmd("shell", "content", "call", "--uri", PROVIDER, "--method", "start", timeout=30)
+        if not self.wait_for("SSH with the restored host key", lambda: self.ssh_ok()[0], 60, 2.0):
+            raise Abort(f"SSH does not answer with the restored host key: {self.ssh_ok()[1][-200:]}; the data is "
+                        f"safe in {backup}")
+        pinned.unlink(missing_ok=True)
+        self.say("   restored: the same host key, keys and home as before")
 
     def step_headset_tailscale(self) -> bool:
         self.step("3. Tailscale on the headset")
@@ -396,7 +520,8 @@ class Wizard:
         apk = Path(self.a.apk).expanduser() if self.a.apk else self.download(
             RUNTIME_URL, self.cache / f"quest-dev-runtime-{RUNTIME_VERSION}.apk", RUNTIME_SHA256)
         self.say(f"   installing the runtime {RUNTIME_VERSION}" + (f" (replacing {have})" if have else ""))
-        self.install_apk(apk, RUNTIME_PACKAGE, "runtime")
+        if not self.install_apk(apk, RUNTIME_PACKAGE, "runtime"):
+            return self.record("runtime installed", True, f"kept version {have}, another build")
         return self.record("runtime installed", True, f"version {self.runtime_version()}")
 
     # 5. key, ssh config, provisioning
@@ -471,6 +596,8 @@ class Wizard:
 
     def step_ssh(self) -> bool:
         self.step("5. SSH to the headset over Tailscale")
+        if self.ssh_ok()[0]:   # already works (this wizard's entry, or the owner's own): change nothing
+            return self.record(f"ssh {self.a.alias}", True, f"{self.quest_ip}:{SSH_PORT}")
         self.ensure_key()
         self.write_ssh_config()
         ok, out = self.ssh_ok()
@@ -631,6 +758,8 @@ def main(argv=None) -> int:
     ap.add_argument("--quest-env", help="copy this local quest_env checkout instead of the pinned version")
     ap.add_argument("--skip-telemetry", action="store_true", help="skip the final telemetry check")
     ap.add_argument("--cache", default="~/.cache/robot_utils/quest", help="downloads (default %(default)s)")
+    ap.add_argument("--backup-dir", default="~/quest-backups",
+                    help="where a runtime migration backs up the headset's data (default %(default)s)")
     return Wizard(ap.parse_args(argv)).run_all()
 
 
