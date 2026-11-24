@@ -46,7 +46,7 @@ def main() -> None:
     p.add_argument("--max-speed", type=float, default=0.8,
                    help="m/s: the left stick's full deflection and the base hint's clamp (the WBC's own caps still "
                         "apply; switchable on the page; default %(default)s)")
-    p.add_argument("--max-omega", type=float, default=1.0,
+    p.add_argument("--max-omega", type=float, default=0.9,
                    help="rad/s: the right stick's full deflection and the base hint's clamp (default %(default)s)")
     p.add_argument("--stale-ms", type=float, default=200.0, help="headset freshness timeout")
     p.add_argument("--ctl-timeout", type=float, default=240.0, help="s: overall limit of one quest up / down")

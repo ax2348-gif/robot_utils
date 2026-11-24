@@ -299,9 +299,9 @@ class Config:
     ff_max_omega: float = 3.0         # rad/s, EE feedforward clamp
     # the top speed (``set_top_speed``: both pairs together; the WBC clamps further to its own caps)
     stick_max_speed: float = 0.8      # m/s, the left stick at full deflection (any direction: clamped to a circle)
-    stick_max_omega: float = 1.0      # rad/s, the right stick at full deflection
+    stick_max_omega: float = 0.9      # rad/s, the right stick at full deflection
     hint_max_speed: float = 0.8       # m/s, the hint velocity clamp (head walking + sticks)
-    hint_max_omega: float = 1.0       # rad/s
+    hint_max_omega: float = 0.9       # rad/s
 
 
 def set_top_speed(cfg: Config, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> Config:

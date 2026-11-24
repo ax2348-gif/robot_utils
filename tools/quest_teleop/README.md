@@ -96,7 +96,7 @@ All of this only while armed (Y, above).
 | B tap (right, < 2 s), the teleop node | stop the episode (kept); held 2 s: the headset stops telemetry, the episode is aborted | the same |
 
 Stick scaling: the stream's `control_intent.base_velocity` (native: 18 % dead zone, 0.45 m/s and 0.8 rad/s full
-scale, per axis) is rescaled here to `Config.stick_max_speed` / `stick_max_omega` (0.8 m/s, 1.0 rad/s), the left
+scale, per axis) is rescaled here to `Config.stick_max_speed` / `stick_max_omega` (0.8 m/s, 0.9 rad/s), the left
 stick's translation clamped to a circle. The native constants are duplicated in `body_frozen.py`
 (`NATIVE_STICK_*`) until a joint refactor with quest_env moves the scaling to one place. The WBC still clamps to
 its own `max_speed` / `max_omega`. Stick clicks are not mapped (left click was the Quest app's automove; the WBC replaces it).
@@ -167,7 +167,7 @@ by `v / k` (measured in the QP at 0.5 m/s: the EE 142 mm behind, the base 250 mm
 hint carries `vx, vy` (pose) and `omega` (heading) = the hint target's velocity (the head's motion mapped as the
 hint's position is, plus the stick offset's rate, exact). Both are least-squares slopes over the frames of the last
 `ff_window` = 60 ms on `sample_time_ns`: exact for a steady motion, about 30 ms (half the window) behind a change of
-speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the stick maxima (`hint_max_speed` / `hint_max_omega`, 0.8 m/s, 1.0 rad/s; the WBC clamps further to its own caps). Zero
+speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the stick maxima (`hint_max_speed` / `hint_max_omega`, 0.8 m/s, 0.9 rad/s; the WBC clamps further to its own caps). Zero
 while the head is lost (its history restarts). **Every engagement starts them at zero**: only this engagement's
 frames count, and they ramp in as the window fills, so re-engaging never moves the robot. With it: the EE about 1 mm
 behind, the base about 18 mm (the same QP test). `Config(feedforward=False)` turns it off.

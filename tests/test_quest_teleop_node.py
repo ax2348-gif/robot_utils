@@ -322,12 +322,12 @@ def test_with_the_real_wbc_over_its_unix_socket(tmp_path, monkeypatch):
 def test_top_speed_asserts_the_wbc_caps_only_while_the_base_is_still_and_stop_restores_the_original(env):
     fake, http, headset, node = env["fake"], env["http"], env["headset"], env["node"]
     # stopped: the client's top speed only (the WBC caps at the next Start)
-    assert http.post("/top_speed", json={"max_speed": 0.9}).json() == {"max_speed": 0.9, "max_omega": 1.0}
+    assert http.post("/top_speed", json={"max_speed": 0.9}).json() == {"max_speed": 0.9, "max_omega": 0.9}
     assert "config" not in fake.names()
     assert http.post("/top_speed", json={"max_speed": 2.5}).status_code == 400          # beyond the hard limit
     wait_for(lambda: headset.n_clients == 1 and node.stream.latest()[0] is not None)
     assert http.post("/start").status_code == 200
-    assert fake.config["max_speed"] == 0.9 and fake.config["max_omega"] == 1.0
+    assert fake.config["max_speed"] == 0.9 and fake.config["max_omega"] == 0.9
     # running and enabled: the WBC refuses (the base may move): 409, nothing changes
     r = http.post("/top_speed", json={"max_speed": 1.5})
     assert r.status_code == 409 and "still" in r.json()["detail"]

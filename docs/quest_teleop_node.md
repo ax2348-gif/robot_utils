@@ -20,7 +20,7 @@ Options: `--wbc` (instance name or URL; default `wbc`), `--arm`, `--swerve` (ins
 240 s), `--wait` (quest up waits this long for the stream, default 30 s), `--data-dir` (the event log, default
 `~/.local/share/robot_utils/quest_teleop/`), `--log-cap-mb` (its size cap, 200), `--sim` (the sim node, instance or
 URL, when the stack is a sim: A resets it; default `none`), `--reset-timeout` (5 s), `--max-speed` /
-`--max-omega` (the top speed, below; 0.8 m/s, 1.0 rad/s), `--name`, `--port` (debug).
+`--max-omega` (the top speed, below; 0.8 m/s, 0.9 rad/s), `--name`, `--port` (debug).
 
 **Top speed and the WBC caps.** `--max-speed` / `--max-omega` (or `POST /top_speed {"max_speed", "max_omega"}`,
 the page's **top speed** row) set the sticks' full deflection (the native 0.45 m/s / 0.8 rad/s rescaled; the left
