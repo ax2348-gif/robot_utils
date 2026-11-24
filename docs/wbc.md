@@ -68,8 +68,8 @@ stale`. Neither a shorter switch interval nor higher thresholds fixed it: the GI
 
 ### Defaults (for the first tests, the owner's)
 
-Base: `max_speed` 0.6 m/s (body), `max_omega` 0.8 rad/s, `max_accel` 1.0 m/s², `max_alpha` 1.5 rad/s², every
-wheel `wheel_speed` 1.0 m/s. Arm: `joint_vel` / `joint_acc` default to **the arm's own** (null in the config): the
+Base: `max_speed` 0.8 m/s (body), `max_omega` 0.9 rad/s, `max_accel` 2.0 m/s², `max_alpha` 1.5 rad/s², every
+wheel `wheel_speed` 2.0 m/s (the owner's tuned values, 2026-11-24; first tests: 0.6, 0.8, 1.0, 1.0). Arm: `joint_vel` / `joint_acc` default to **the arm's own** (null in the config): the
 arm's joint-channel welcome `limits` (2, 2, 2, 6, 6, 6 rad/s; 10, 10, 10, 30, 30, 30 rad/s²; until a welcome, the
 arm config's soft defaults, the same numbers); a tuple in the config narrows them, never widens. Ceilings: the base
 speed and yaw rate are checked at `POST /enable` against the swerve's own `GET /limits` "hard" (beyond them: 422,

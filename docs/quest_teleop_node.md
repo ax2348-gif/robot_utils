@@ -19,7 +19,20 @@ Options: `--wbc` (instance name or URL; default `wbc`), `--arm`, `--swerve` (ins
 `--no-gripper`, `--stale-ms` (as `teleop.py`), `--ctl-timeout` (overall limit of one quest up / down, default
 240 s), `--wait` (quest up waits this long for the stream, default 30 s), `--data-dir` (the event log, default
 `~/.local/share/robot_utils/quest_teleop/`), `--log-cap-mb` (its size cap, 200), `--sim` (the sim node, instance or
-URL, when the stack is a sim: A resets it; default `none`), `--reset-timeout` (5 s), `--name`, `--port` (debug).
+URL, when the stack is a sim: A resets it; default `none`), `--reset-timeout` (5 s), `--max-speed` /
+`--max-omega` (the top speed, below; 0.8 m/s, 1.0 rad/s), `--name`, `--port` (debug).
+
+**Top speed and the WBC caps.** `--max-speed` / `--max-omega` (or `POST /top_speed {"max_speed", "max_omega"}`,
+the page's **top speed** row) set the sticks' full deflection (the native 0.45 m/s / 0.8 rad/s rescaled; the left
+stick clamped to a circle) and the base hint's velocity clamp. Start asserts them as the WBC's `max_speed` /
+`max_omega` (`POST /config`, after the lease and before the enable, while the base is still) and remembers the
+values they replaced; Stop (any stop: requested, e-stop, auto-stop, a refused start) restores those after the
+disable and before the release, so the next lease holder gets the WBC as it was. A cap someone else changed
+meanwhile (`POST /config` needs no lease) is left as theirs. Changed while running, the WBC takes the new caps only
+while the base is still (disarm with X first: otherwise 409 and nothing changes); stopped, they apply at the next
+Start. `/state`'s `teleop.wbc_caps` shows what is asserted and what it replaced. Not covered: a node killed
+without a stop leaves the caps asserted (the lease lapses, the caps stay); `wheel_speed`, `max_accel` stay the
+WBC's own (a `wheel_speed` below the top speed caps the command first).
 
 Registered in `frontend/nodes.yaml` (the robot, `--ar :80`) and `nodes/sim/stack_nodes.yaml` (the sim stack,
 `--ar :8080 --sim sim`), instance `quest_teleop`; in the sim stack it is not in the launcher's default list: Start it

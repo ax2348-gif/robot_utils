@@ -42,6 +42,7 @@ class FakeWbc:
         self.enabled = False
         self.lease_client = None              # the client holding the lease (None: free)
         self.estops: list[dict] = []          # POST /estop bodies
+        self.config = {"max_speed": 0.6, "max_omega": 0.8, "wheel_speed": 1.0}   # GET / POST /config (caps only)
         self._stop = threading.Event()
         threading.Thread(target=self._recv, args=(self.udp, "udp"), daemon=True).start()
         if unix_path:
@@ -110,6 +111,18 @@ class FakeWbc:
             fake.enabled = False
             fake.row["state"] = 0.0
             return {"enabled": False}
+
+        @app.get("/config")
+        async def get_config():
+            return {"config": dict(fake.config)}
+
+        @app.post("/config")
+        async def set_config(body: dict):           # no lease (as the WBC); the caps only while disabled
+            fake.calls.append(("config", body))
+            if fake.enabled:
+                raise HTTPException(422, "the base caps change only while the base is still")
+            fake.config.update(body)
+            return {"config": dict(fake.config)}
 
         @app.post("/hints")
         async def hints(body: dict, x_lease_token: str = Header(None)):

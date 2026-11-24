@@ -63,6 +63,10 @@ canvas.ru-plot{width:100%;height:70px}
       <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
       <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
+      <div class="ctl">top speed <input type="number" id="vmax" step="0.1" min="0.1" max="2" style="width:64px"> m/s
+        <input type="number" id="wmax" step="0.1" min="0.1" max="4" style="width:64px"> rad/s
+        <button class="ru" id="setspeed">Set</button></div>
+      <div class="ru-muted" id="capsnote"></div>
       <div class="ru-muted" id="reg"></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
@@ -107,6 +111,10 @@ $("#mode3").onclick = () => call("mode/third");
 let headlessOn = true;
 $("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
 $("#mode1").onclick = () => call("mode/first");
+$("#setspeed").onclick = async () => {
+  try { err(""); await RU.api("top_speed", {method: "POST", body: {max_speed: +$("#vmax").value, max_omega: +$("#wmax").value}}); }
+  catch(e){ err(e.message); }
+};
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const f = (v, n) => v === null || v === undefined || !isFinite(v) ? "–" : Number(v).toFixed(n);
 const STEPS = [["released", "released", "good"], ["engaged", "engaged", "good"], ["needs_release", "needs release", "bad"],
@@ -131,6 +139,11 @@ RU.sse("events", s => {
   $("#start").disabled = T.phase !== "stopped"; $("#stop").disabled = T.phase !== "running";
   $("#reg").textContent = s.config.mode !== "third" ? "first person: every grip aligns your forward to the robot's" : (T.registered ? "registered (" + T.registration + "): face where the robot faces and click the right stick to re-register" : "not registered: the first enable (Y) or a right-stick click registers (face where the robot faces)" + (T.registration ? " · " + T.registration : ""));
   headlessOn = !!s.config.headless;
+  for (const [id, v] of [["#vmax", s.config.max_speed], ["#wmax", s.config.max_omega]])
+    if (document.activeElement !== $(id)) $(id).value = v;
+  const WC = T.wbc_caps;
+  $("#capsnote").textContent = "the sticks' full deflection; Start sets the WBC's max_speed / max_omega to it and Stop restores them"
+    + (WC && Object.keys(WC.asserted).length ? " · now asserted (WBC had " + Object.entries(WC.previous).map(([k, v]) => k + " " + v).join(", ") + ")" : "");
   $("#headless").textContent = "Headless left stick: " + (headlessOn ? "on" : "off");
   $("#headless").classList.toggle("live", headlessOn);
   $("#headless").disabled = s.config.mode !== "third";

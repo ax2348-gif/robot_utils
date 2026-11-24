@@ -97,6 +97,7 @@ class WbcClient:
         self.arm_seq_floor = 0             # POST /session's arm_seq: presses are numbered above it
         self.sent = {"target": 0, "alive": 0}
         self.renew_errors = 0
+        self.caps: dict = {"asserted": {}, "previous": {}}   # the WBC caps this lease set, and what they replaced
         self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._addr: Optional[tuple] = None
         self._stop_renew = threading.Event()
@@ -127,6 +128,14 @@ class WbcClient:
 
     def disable(self) -> Optional[dict]:
         return self.http.post("/disable")
+
+    def get_config(self) -> dict:
+        """The WBC's config in force (``GET /config``'s ``config``)."""
+        return self.http.get("/config")["config"]
+
+    def set_config(self, changes: dict) -> dict:
+        """``POST /config`` (no lease needed; the base caps only while the base is still)."""
+        return self.http.post("/config", changes)
 
     def set_hints(self, hints: dict) -> Optional[dict]:
         return self.http.post("/hints", hints)

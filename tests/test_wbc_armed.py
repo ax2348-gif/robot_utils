@@ -607,8 +607,8 @@ def test_caps_refused_while_the_base_moves(rig):
                  ("wheel_speed", 0.8)):
         r = c.post("/config", json={k: v})
         assert r.status_code == 422 and "while the base moves" in r.json()["detail"], (k, r.text)
-    assert node.cfg.max_speed == 0.6
-    assert c.post("/config", json={"max_speed": 0.6, "k_pos": 4.5}).status_code == 200   # same value: no change
+    assert node.cfg.max_speed == 0.8
+    assert c.post("/config", json={"max_speed": 0.8, "k_pos": 4.5}).status_code == 200   # same value: no change
     assert node.cfg.k_pos == 4.5
     # a datagram's base.limits while moving: ignored (the limits in force stay), counted
     rig.target(p0, q0, base={**vel, "limits": {"max_speed": 0.1}})
@@ -621,6 +621,7 @@ def test_caps_refused_while_the_base_moves(rig):
     assert c.post("/config", json={"max_speed": 0.5}).status_code == 200
     assert node.cfg.max_speed == 0.5
     # still: a datagram's limits apply
+    p0, q0 = rig.cmd_pose()                                # (the base drove on: re-arm at the EE's current pose)
     rig.aseq, rig.armed = rig.aseq + 1, True
     rig.target(p0, q0, base={"mode": "locked", "limits": {"max_speed": 0.1}})
     rig.step(1)

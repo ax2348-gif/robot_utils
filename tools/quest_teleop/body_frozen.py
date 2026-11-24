@@ -98,6 +98,9 @@ UP_LOCAL = F.C.T @ np.array([0.0, 0.0, 1.0])     # the up axis in OpenXR LOCAL (
 # to one place (a joint refactor with quest_env: send the raw normalised sticks and scale here only).
 NATIVE_STICK_SPEED = 0.45    # m/s, the native base_velocity forward / left at full deflection
 NATIVE_STICK_OMEGA = 0.8     # rad/s, the native base_velocity yaw at full deflection
+# Bounds on the configurable top speed: the swerve's hard limits (docs/swerve_node.md; the WBC caps lie within them)
+TOP_SPEED_LIMIT = 2.0        # m/s
+TOP_OMEGA_LIMIT = 4.0        # rad/s
 
 
 def _pl_compose(a, b) -> np.ndarray:
@@ -294,10 +297,26 @@ class Config:
     ff_window: float = 0.06           # s, the velocity fit's window (adds about half of it as lag)
     ff_max_speed: float = 1.0         # m/s, EE feedforward clamp
     ff_max_omega: float = 3.0         # rad/s, EE feedforward clamp
-    stick_max_speed: float = 1.2      # m/s, the left stick at full deflection (any direction: clamped to a circle)
+    # the top speed (``set_top_speed``: both pairs together; the WBC clamps further to its own caps)
+    stick_max_speed: float = 0.8      # m/s, the left stick at full deflection (any direction: clamped to a circle)
     stick_max_omega: float = 1.0      # rad/s, the right stick at full deflection
-    hint_max_speed: float = 1.2       # m/s, the hint velocity clamp (the WBC clamps to its own max_speed beyond)
-    hint_max_omega: float = 1.0       # rad/s (likewise the WBC's max_omega)
+    hint_max_speed: float = 0.8       # m/s, the hint velocity clamp (head walking + sticks)
+    hint_max_omega: float = 1.0       # rad/s
+
+
+def set_top_speed(cfg: Config, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> Config:
+    """The teleop's top speed, in place: the sticks' full deflection and the hint velocity clamp together
+    (``max_speed`` m/s, ``max_omega`` rad/s; None keeps that one). Bounded by the swerve's hard limits
+    (``TOP_*_LIMIT``); ValueError otherwise, nothing changed. Applies from the next frame (the head's velocity fit
+    takes its clamp at the next engagement)."""
+    for v, lim, what in ((max_speed, TOP_SPEED_LIMIT, "max_speed (m/s)"), (max_omega, TOP_OMEGA_LIMIT, "max_omega (rad/s)")):
+        if v is not None and not (_finite(v) and 0 < v <= lim):
+            raise ValueError(f"{what} must be in (0, {lim}]")
+    if max_speed is not None:
+        cfg.stick_max_speed = cfg.hint_max_speed = float(max_speed)
+    if max_omega is not None:
+        cfg.stick_max_omega = cfg.hint_max_omega = float(max_omega)
+    return cfg
 
 
 def head_pose(frame: dict):

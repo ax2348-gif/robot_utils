@@ -43,6 +43,11 @@ def main() -> None:
                    help="third person: the left stick moves the robot along its own forward instead of the "
                         "operator's facing (headless, the default; switchable on the page)")
     p.add_argument("--no-gripper", action="store_true")
+    p.add_argument("--max-speed", type=float, default=0.8,
+                   help="m/s: the left stick's full deflection and the base hint's clamp (the WBC's own caps still "
+                        "apply; switchable on the page; default %(default)s)")
+    p.add_argument("--max-omega", type=float, default=1.0,
+                   help="rad/s: the right stick's full deflection and the base hint's clamp (default %(default)s)")
     p.add_argument("--stale-ms", type=float, default=200.0, help="headset freshness timeout")
     p.add_argument("--ctl-timeout", type=float, default=240.0, help="s: overall limit of one quest up / down")
     p.add_argument("--wait", type=float, default=30.0, help="s: quest up waits this long for the stream")
@@ -59,11 +64,15 @@ def main() -> None:
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    from .client import Config
+    from .client import Config, set_top_speed
     from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
     from .server import create_app
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=not a.no_headless, gripper=not a.no_gripper)
+    try:
+        set_top_speed(cfg, a.max_speed, a.max_omega)
+    except ValueError as e:
+        p.error(str(e))
     off = lambda v: None if v in ("none", "") else v   # noqa: E731
     node = QuestTeleopNode(a.wbc, arm=off(a.arm), swerve=off(a.swerve), quest_host=a.quest, quest_port=a.quest_port,
                            ssh_host=a.ssh_host, cfg=cfg, stale_s=a.stale_ms / 1e3, max_latency=a.max_latency_ms / 1e3,

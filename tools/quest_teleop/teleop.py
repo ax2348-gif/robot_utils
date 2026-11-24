@@ -28,13 +28,13 @@ if __package__ in (None, ""):
     except ImportError:
         sys.path.insert(0, str(_here.parents[2] / "src"))
     from quest_teleop.arming import ArmLatch, LatchConfig   # noqa: E402
-    from quest_teleop.body_frozen import Config, RobotState, TeleopCore   # noqa: E402
+    from quest_teleop.body_frozen import Config, RobotState, TeleopCore, set_top_speed   # noqa: E402
     from quest_teleop.quest_stream import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestGate,   # noqa: E402
                                            QuestReader)
     from quest_teleop.wbc_client import WbcClient, WbcStream   # noqa: E402
 else:
     from .arming import ArmLatch, LatchConfig
-    from .body_frozen import Config, RobotState, TeleopCore
+    from .body_frozen import Config, RobotState, TeleopCore, set_top_speed
     from .quest_stream import DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestGate, QuestReader
     from .wbc_client import WbcClient, WbcStream
 
@@ -214,21 +214,57 @@ class TeleopClient:
                 status(self)
 
 
+def top_speed_caps(cfg: Config) -> dict:
+    """The WBC caps this teleop asserts while it holds the lease: its top speed (``set_top_speed``)."""
+    return {"max_speed": cfg.stick_max_speed, "max_omega": cfg.stick_max_omega}
+
+
+def assert_caps(wbc: WbcClient, caps: dict) -> dict:
+    """Set the WBC caps ``caps`` (refused unless the base is still), remembering in ``wbc.caps`` what they replaced
+    (the first value seen this lease: a later assert keeps the original to restore). Returns the changes sent."""
+    cur = wbc.get_config()
+    changes = {k: float(v) for k, v in caps.items() if cur.get(k) != v}
+    if changes:
+        wbc.set_config(changes)
+        for k, v in changes.items():
+            wbc.caps["previous"].setdefault(k, cur.get(k))
+            wbc.caps["asserted"][k] = v
+    return changes
+
+
+def restore_caps(wbc: WbcClient) -> dict:
+    """Put back the WBC caps ``assert_caps`` replaced, for the next lease holder. A cap someone else changed since
+    (``POST /config`` needs no lease) is theirs and stays. Returns the values restored."""
+    asserted, previous = wbc.caps["asserted"], wbc.caps["previous"]
+    if not asserted:
+        return {}
+    cur = wbc.get_config()
+    back = {k: previous[k] for k, v in asserted.items() if cur.get(k) == v and previous.get(k) is not None
+            and previous[k] != v}
+    if back:
+        wbc.set_config(back)
+    wbc.caps = {"asserted": {}, "previous": {}}
+    return back
+
+
 def open_wbc(wbc: WbcClient, cfg: Config) -> dict:
-    """Lease (renewed in the background), session-default hints, enable, a datagram session."""
+    """Lease (renewed in the background), the teleop's top speed as the WBC caps (while still disabled; restored
+    by ``close_wbc``), session-default hints, enable, a datagram session."""
     wbc.acquire()
+    assert_caps(wbc, top_speed_caps(cfg))
     wbc.set_hints(default_hints(cfg))
     wbc.enable()
     return wbc.open_session()
 
 
 def close_wbc(wbc: WbcClient, log: Callable[[str], None] = print) -> None:
-    """Disable and release, each attempted even if the other fails."""
-    for f in (wbc.disable, wbc.release):
+    """Disable, restore the WBC caps ``open_wbc`` asserted, release: each attempted even if another fails (the
+    restore runs after the disable: the caps change only while the base is still)."""
+    for name, f in (("disable", wbc.disable), ("restore_caps", lambda: restore_caps(wbc)), ("release", wbc.release)):
         try:
             f()
         except Exception as e:  # noqa: BLE001
-            log(f"  {f.__name__}: {e}")
+            log(f"  {name}: {e}")
 
 
 def status_line(c: TeleopClient) -> str:
@@ -273,6 +309,10 @@ def main(argv=None) -> int:
                     help="third person: the left stick moves the robot along its own forward instead of the "
                          "operator's facing (headless, the default)")
     ap.add_argument("--no-gripper", action="store_true")
+    ap.add_argument("--max-speed", type=float, default=Config.stick_max_speed,
+                    help="m/s: the left stick's full deflection and the base hint's clamp (default %(default)s)")
+    ap.add_argument("--max-omega", type=float, default=Config.stick_max_omega,
+                    help="rad/s: the right stick's full deflection and the base hint's clamp (default %(default)s)")
     ap.add_argument("--max-latency-ms", type=float, default=MAX_LATENCY_S * 1e3,
                     help="headset frames later than this over the session's best count as stale (disarm)")
     ap.add_argument("--min-rate", type=float, default=MIN_RATE_HZ,
@@ -280,6 +320,10 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     cfg = Config(hand=args.hand, ee=args.ee, head_walk=not args.no_head_walk, mode=args.mode, headless=not args.no_headless, gripper=not args.no_gripper)
+    try:
+        set_top_speed(cfg, args.max_speed, args.max_omega)
+    except ValueError as e:
+        ap.error(str(e))
     wbc = WbcClient(args.wbc, udp_host=args.udp_host)
     stream = WbcStream(args.wbc).start()
     reader = QuestReader(args.quest, args.quest_port).start()

@@ -26,6 +26,12 @@ class TaskIn(BaseModel):
     text: str = Field("", description="The task of the next episodes (in each episode_start's detail).")
 
 
+class TopSpeedIn(BaseModel):
+    max_speed: Optional[float] = Field(None, description="m/s: the left stick's full deflection, the hint clamp and "
+                                                         "(while running) the WBC's max_speed; omitted: unchanged")
+    max_omega: Optional[float] = Field(None, description="rad/s: likewise for yaw (the WBC's max_omega)")
+
+
 class EStopIn(BaseModel):
     reason: str = ""
     source: str = Field("", description="Who pressed it (free text).")
@@ -132,6 +138,14 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
         if state not in ("on", "off"):
             raise HTTPException(400, "state must be 'on' or 'off'")
         return node.set_headless(state == "on")
+
+    @app.post("/top_speed", tags=["control"], summary="The top speed: the sticks' full deflection, the hint clamp and, "
+                                                       "while running, the WBC caps this lease asserts (restored at stop)")
+    async def set_top_speed(body: TopSpeedIn):
+        try:
+            return await asyncio.to_thread(node.set_top_speed, body.max_speed, body.max_omega)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.post("/stop", tags=["control"], summary="Stop teleop: stop sending, disable the WBC, release its lease")
     async def stop_teleop():

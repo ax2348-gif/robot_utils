@@ -13,6 +13,7 @@ Threads:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import threading
@@ -27,7 +28,8 @@ from ..common.hub import RowHub
 from ..common.lease import RequestError
 from ..common.server import EventLog
 from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, EpisodeButtons, LocalWbcClient,
-                     QuestReader, TeleopClient, WbcStream, close_wbc, open_wbc, quest_ctl, x_pressed)
+                     QuestReader, TeleopClient, WbcStream, assert_caps, close_wbc, open_wbc, quest_ctl,
+                     set_top_speed, top_speed_caps, x_pressed)
 from .episodes import RESET_TIMEOUT, Episodes
 from .eventlog import CAP_BYTES, TeleopEventLog
 from .oplog import OpLog
@@ -439,6 +441,26 @@ class QuestTeleopNode:
         self.hub.state_changed()
         return {"headless": self.cfg.headless}
 
+    def set_top_speed(self, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> dict:
+        """The top speed (m/s, rad/s; None keeps one): the sticks' full deflection, the hint clamp and, while teleop
+        runs, the WBC caps this lease asserts (restored at stop). Running, the WBC takes them only while the base is
+        still (disarmed, or the sticks at rest): otherwise 409 and nothing changes. ValueError beyond the bounds."""
+        trial = set_top_speed(dataclasses.replace(self.cfg), max_speed, max_omega)   # validates; nothing changed yet
+        with self.lock:
+            wbc = self.wbc if self.phase == "running" else None
+        if wbc is not None:
+            try:
+                assert_caps(wbc, top_speed_caps(trial))
+            except Exception as e:  # noqa: BLE001
+                msg = getattr(e, "detail", None) or str(e)
+                raise RequestError(409, f"the WBC refused the caps (disarm first: they change only while the base "
+                                        f"is still): {msg}") from None
+        set_top_speed(self.cfg, max_speed, max_omega)
+        self.events.add(f"top speed {self.cfg.stick_max_speed:g} m/s, {self.cfg.stick_max_omega:g} rad/s"
+                        + (" (WBC caps too)" if wbc is not None else " (the WBC caps at the next Start)"))
+        self.hub.state_changed()
+        return {"max_speed": self.cfg.stick_max_speed, "max_omega": self.cfg.stick_max_omega}
+
     def stop_teleop(self, reason: str = "requested") -> dict:
         with self.lock:
             if self.phase != "running":
@@ -792,6 +814,7 @@ class QuestTeleopNode:
                 "registration": core.status.registration if core else "",
                 "sent": dict(w.sent) if w else None, "renew_errors": w.renew_errors if w else None,
                 "transport": w.transport if w else None, "session": w.session if w else None,
+                "wbc_caps": dict(w.caps) if w else None,
                 "last_sent_age": None if self.last_sent_at is None or c is None
                 else round(self.clock() - self.last_sent_at, 3),
                 "stop_reason": self.stop_reason, "started_at": self.started_at if c else None}
@@ -819,7 +842,8 @@ class QuestTeleopNode:
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
-                       "head_walk": cfg.head_walk, "mode": cfg.mode, "headless": cfg.headless, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
+                       "head_walk": cfg.head_walk, "mode": cfg.mode, "headless": cfg.headless,
+                       "max_speed": cfg.stick_max_speed, "max_omega": cfg.stick_max_omega, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,

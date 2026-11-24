@@ -159,7 +159,8 @@ def test_start_teleop_stop_over_the_unix_socket_writing_nothing(env):
     assert r.status_code == 200 and r.json()["stopped"]
     assert http.get("/state").json()["state"] == "stopped"
 
-    assert fake.names() == ["lease", "hints", "enable", "session", "disable", "release"]
+    assert fake.names() == ["lease", "config", "hints", "enable", "session", "disable", "config", "release"]
+    assert fake.config["max_speed"] == 0.6 and fake.config["max_omega"] == 0.8   # restored for the next holder
     targets = [m for _, m in fake.datagrams if m["type"] == "target"]
     assert targets and fake.via == {"udp": 0, "unix": len(fake.datagrams)}    # local: the unix socket only
     # Start is not live: keep-alives with armed:false until the Y press; targets only armed (one press)
@@ -180,7 +181,8 @@ def test_start_refused_with_the_wbc_reason(env):
     assert r.status_code == 409 and "e-stop latched" in r.json()["detail"]
     s = http.get("/state").json()
     assert s["state"] == "stopped" and "e-stop latched" in s["error"]
-    assert fake.names() == ["lease", "hints", "enable", "disable", "release"]   # undone: lease given back
+    assert fake.names() == ["lease", "config", "hints", "enable", "disable", "config", "release"]   # undone
+    assert fake.config["max_speed"] == 0.6 and fake.config["max_omega"] == 0.8
 
 
 def test_estop_reaches_the_wbc_and_stops_teleop(env):
@@ -195,7 +197,7 @@ def test_estop_reaches_the_wbc_and_stops_teleop(env):
     wait_for(lambda: http.get("/state").json()["state"] == "stopped")
     s = http.get("/state").json()
     assert s["estop"]["latched"] and s["teleop"]["stop_reason"] == "e-stop"
-    assert fake.names()[-2:] == ["disable", "release"]
+    assert fake.names()[-3:] == ["disable", "config", "release"]
     # the landing page's fan-out: no body, no lease
     assert http.post("/estop").json()["latched"] is True
     assert files_under(*env["dirs"]) == []
@@ -315,3 +317,27 @@ def test_with_the_real_wbc_over_its_unix_socket(tmp_path, monkeypatch):
         stop((srv, th), (wsrv, wth), (arm_srv, arm_t))
         headset.close()
         arm.close()
+
+
+def test_top_speed_asserts_the_wbc_caps_only_while_the_base_is_still_and_stop_restores_the_original(env):
+    fake, http, headset, node = env["fake"], env["http"], env["headset"], env["node"]
+    # stopped: the client's top speed only (the WBC caps at the next Start)
+    assert http.post("/top_speed", json={"max_speed": 0.9}).json() == {"max_speed": 0.9, "max_omega": 1.0}
+    assert "config" not in fake.names()
+    assert http.post("/top_speed", json={"max_speed": 2.5}).status_code == 400          # beyond the hard limit
+    wait_for(lambda: headset.n_clients == 1 and node.stream.latest()[0] is not None)
+    assert http.post("/start").status_code == 200
+    assert fake.config["max_speed"] == 0.9 and fake.config["max_omega"] == 1.0
+    # running and enabled: the WBC refuses (the base may move): 409, nothing changes
+    r = http.post("/top_speed", json={"max_speed": 1.5})
+    assert r.status_code == 409 and "still" in r.json()["detail"]
+    assert node.cfg.stick_max_speed == 0.9 and fake.config["max_speed"] == 0.9
+    # disabled (X): taken, the WBC too
+    fake.enabled = False
+    assert http.post("/top_speed", json={"max_speed": 1.5, "max_omega": 0.7}).status_code == 200
+    assert fake.config["max_speed"] == 1.5 and fake.config["max_omega"] == 0.7
+    assert http.get("/state").json()["teleop"]["wbc_caps"]["previous"] == {"max_speed": 0.6, "max_omega": 0.8}
+    # someone else retunes max_omega meanwhile (POST /config needs no lease): theirs stays at stop
+    fake.config["max_omega"] = 0.5
+    assert http.post("/stop").status_code == 200
+    assert fake.config == {"max_speed": 0.6, "max_omega": 0.5, "wheel_speed": 1.0}     # the original speed back

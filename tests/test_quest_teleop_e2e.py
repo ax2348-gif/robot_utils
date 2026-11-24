@@ -105,10 +105,14 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
         wbc.close()
         headset.close()
 
-    # control plane: lease, session defaults, enable, session; disable and release at the end; renewed meanwhile
-    assert fake.names() == ["lease", "hints", "enable", "session", "disable", "release"]
+    # control plane: lease, the top speed as the WBC caps, session defaults, enable, session; disable, the caps
+    # restored and release at the end; renewed meanwhile
+    assert fake.names() == ["lease", "config", "hints", "enable", "session", "disable", "config", "release"]
     assert ("renew", None) in fake.calls
-    assert fake.calls[1][1]["base"] == {"mode": "locked"}
+    configs = [b for n, b in fake.calls if n == "config"]
+    assert configs == [{"max_speed": 0.8, "max_omega": 1.0}, {"max_speed": 0.6, "max_omega": 0.8}]
+    assert fake.config == {"max_speed": 0.6, "max_omega": 0.8, "wheel_speed": 1.0}
+    assert fake.calls[2][1]["base"] == {"mode": "locked"}
 
     dg = fake.datagrams
     msgs = [(t, m) for t, m in dg if m["type"] == "target"]
