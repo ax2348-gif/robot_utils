@@ -147,7 +147,8 @@ def test_client_drives_the_wbc_from_the_headset(wbc_peer):
     h1 = ph[1][1][-1][1]["base"]["target"]
     fwd = np.array([np.cos(base_yaw), np.sin(base_yaw)])
     offset = np.array([h1["pose"]["x"], h1["pose"]["y"]]) - [1.0, 2.0] - 0.5 * fwd
-    assert 0.08 < offset @ fwd < 0.2
+    V_STICK = Config().stick_max_speed
+    assert 0.08 * V_STICK / 0.45 < offset @ fwd < 0.2 * V_STICK / 0.45    # (bounds scale with the stick maximum)
     assert h1["heading"]["yaw"] == pytest.approx(base_yaw, abs=1e-6)
     # the EE target: the hand's reach and walk, moved with the same stick offset as the hint (no turn: a translation)
     np.testing.assert_allclose(last["pos"], ee_p + F.rot_z(base_yaw) @ [0.6, 0.0, 0.05] + [*offset, 0.0], atol=2e-3)

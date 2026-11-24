@@ -15,6 +15,8 @@ from quest_teleop.body_frozen import Config, RobotState, TeleopCore, body_frozen
 from quest_teleop.fake_headset import Headset, HeadsetState, head_r_op, to_local  # noqa: E402
 from quest_teleop.quest_stream import Frame, QuestGate  # noqa: E402
 
+V_STICK, W_STICK = Config().stick_max_speed, Config().stick_max_omega   # full deflection: m/s, rad/s
+
 RNG = np.random.default_rng(7)
 
 
@@ -417,8 +419,12 @@ def test_released_sticks_command_the_base_directly():
     c = rig.run(stick(IDLE, (-1.0, 0.5), 0.5))
     v = c["base"]["velocity"]
     assert c["base"]["mode"] == "commanded" and v["frame"] == "base" and v["ttl"] == 0.2
-    # the stream's own scaling: full scale 0.45 m/s and 0.8 rad/s
-    assert (v["vx"], v["vy"], v["omega"]) == (pytest.approx(0.45 * 0.5), pytest.approx(0.45), pytest.approx(-0.4))
+    # the native full scale (0.45 m/s, 0.8 rad/s) rescaled to the stick maxima, the translation clamped to a circle
+    want = V_STICK * np.array([0.5, 1.0]) / math.hypot(0.5, 1.0)
+    assert (v["vx"], v["vy"], v["omega"]) == (pytest.approx(want[0]), pytest.approx(want[1]),
+                                              pytest.approx(-0.5 * W_STICK))
+    v = rig.run(stick(IDLE, (0.0, 0.5)))["base"]["velocity"]                 # inside the circle: linear
+    assert (v["vx"], v["vy"], v["omega"]) == (pytest.approx(0.5 * V_STICK), 0.0, 0.0)
     assert rig.run(stick(IDLE, (0.1, 0.17)))["base"] == {"mode": "locked"}     # inside the 18 % dead zone
 
 
@@ -455,13 +461,13 @@ def test_engaged_sticks_integrate_an_offset_in_the_robot_frame_while_standing_st
         rig.frame(stick(GRIP, (0.0, 1.0)))
     c = rig.cmd()
     assert c["base"]["mode"] == "hint"                         # engaged: never commanded
-    np.testing.assert_allclose(rig.core.offset, [0.45 * math.cos(0.3), 0.45 * math.sin(0.3), 0.0], atol=0.01)
+    np.testing.assert_allclose(rig.core.offset, [V_STICK * math.cos(0.3), V_STICK * math.sin(0.3), 0.0], atol=0.02)
     rig.rob.base_yaw = 0.3 + math.pi / 2                       # the robot turned: stick forward = its new forward
     for _ in range(100):
         rig.frame(stick(GRIP, (0.0, 1.0), right_x=-1.0))
     c = rig.cmd()
-    expected = [0.45 * (math.cos(0.3) - math.sin(0.3)), 0.45 * (math.sin(0.3) + math.cos(0.3)), 0.8]
-    np.testing.assert_allclose(rig.core.offset, expected, atol=0.02)
+    expected = [V_STICK * (math.cos(0.3) - math.sin(0.3)), V_STICK * (math.sin(0.3) + math.cos(0.3)), W_STICK]
+    np.testing.assert_allclose(rig.core.offset, expected, atol=0.04)
     np.testing.assert_allclose(hint_of(c), np.array([1.0, 2.0, 0.3]) + rig.core.offset, atol=1e-9)
     assert rig.core.hint == c["base"]["target"]                # exposed for the status line
 
@@ -502,7 +508,7 @@ def test_walking_and_sticks_combine():
     c = rig.cmd()
     walk_ = F.rot_z(0.3)[:2, :2] @ [0.5, 0.0]
     np.testing.assert_allclose(hint_of(c)[:2], np.array([1.0, 2.0]) + walk_ + rig.core.offset[:2], atol=1e-9)
-    np.testing.assert_allclose(rig.core.offset[:2], F.rot_z(0.3)[:2, :2] @ [0.0, 0.45 * 0.5], atol=0.01)
+    np.testing.assert_allclose(rig.core.offset[:2], F.rot_z(0.3)[:2, :2] @ [0.0, V_STICK * 0.5], atol=0.02)
 
 
 def rigid(s: HeadsetState, head_pos, head_yaw, head_pitch=0.0, base: HeadsetState = None) -> HeadsetState:
@@ -620,7 +626,7 @@ def test_head_loss_and_reacquisition_do_not_move_the_robot():
         np.testing.assert_allclose(rel[1], rel_back[1], atol=1e-9)
 
 
-def turned_by_stick(mode, frames=196):
+def turned_by_stick(mode, frames=round(math.pi / 2 / (0.01 * W_STICK))):
     """Engaged at the robot's heading (yaw 0, operator yaw 0: the grip registers them), then the right stick
     turns the robot about 90 degrees while the operator stands still."""
     rig = Rig(Config(mode=mode))
@@ -833,7 +839,7 @@ def test_headless_left_stick_follows_the_operators_facing(headless):
         rig.frame(stick(g, (0.0, 1.0)))
     c = rig.run(g, n=1)
     d = 1.3 if headless else 0.3
-    np.testing.assert_allclose(hint_of(c)[:2] - h0[:2], 0.45 * np.array([math.cos(d), math.sin(d)]), atol=0.01)
+    np.testing.assert_allclose(hint_of(c)[:2] - h0[:2], V_STICK * np.array([math.cos(d), math.sin(d)]), atol=0.02)
 
 
 def test_headless_left_stick_released_commands_the_world_direction_in_the_base_frame():
@@ -843,7 +849,7 @@ def test_headless_left_stick_released_commands_the_world_direction_in_the_base_f
     rig.run(turned)
     rig.run(stick(turned, (0.0, 1.0)))                         # sticks seen neutral after arming, then forward
     v = rig.cmd()["base"]["velocity"]
-    np.testing.assert_allclose([v["vx"], v["vy"]], 0.45 * np.array([math.cos(1.0), math.sin(1.0)]), atol=1e-6)
+    np.testing.assert_allclose([v["vx"], v["vy"]], V_STICK * np.array([math.cos(1.0), math.sin(1.0)]), atol=1e-6)
     assert v["frame"] == "base"
 
 
@@ -1011,11 +1017,11 @@ def test_engaged_hint_carries_the_heads_velocity_plus_the_sticks():
     h = rig.cmd()["base"]["target"]
     np.testing.assert_allclose([h["pose"]["vx"], h["pose"]["vy"]], (F.rot_z(0.3) @ v)[:2], atol=1e-6)
     assert h["heading"]["omega"] == pytest.approx(0.0, abs=1e-9)
-    s = stick(moving(GRIP, 15, v_head=v), (0.0, 1.0))           # plus the left stick forward (0.45 m/s)
+    s = stick(moving(GRIP, 15, v_head=v), (0.0, 1.0))           # plus the left stick forward (full: V_STICK)
     rig.frame(s)
     h = rig.cmd()["base"]["target"]
-    want = (F.rot_z(0.3) @ v)[:2] + F.rot_z(0.3)[:2, :2] @ [0.45, 0.0]
-    want *= min(1.0, 0.6 / np.linalg.norm(want))                # clamped to the WBC's max_speed
+    want = (F.rot_z(0.3) @ v)[:2] + F.rot_z(0.3)[:2, :2] @ [V_STICK, 0.0]
+    want *= min(1.0, Config().hint_max_speed / np.linalg.norm(want))   # clamped to hint_max_speed
     np.testing.assert_allclose([h["pose"]["vx"], h["pose"]["vy"]], want, atol=0.02)
     # the head lost: its velocity is zero (the last contribution is kept)
     rig.frame(replace(moving(GRIP, 16, v_head=v), head_tracked=False))

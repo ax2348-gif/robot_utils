@@ -51,7 +51,8 @@ as base-frame components), which cancels the ~20 ms lag. Not the last target: th
 short of it.
 
 Base (the sticks are the intent's ``base_velocity``: left stick forward/left m/s, right stick X yaw rad/s, 18 %
-dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
+dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively; ``stick_velocity`` rescales that full scale to
+``Config.stick_max_speed`` / ``stick_max_omega``, the left stick's translation clamped to a circle):
 
 - **Released** (the arm's hand not engaged): no hint; only the sticks move the base: mode ``commanded`` with
   ``velocity`` in the base frame and a short ttl; sticks idle: ``locked`` (the base decelerates to a stop and holds).
@@ -91,6 +92,12 @@ from . import frames as F
 from .arming import button, sticks_neutral
 
 UP_LOCAL = F.C.T @ np.array([0.0, 0.0, 1.0])     # the up axis in OpenXR LOCAL (+Y)
+
+# The native stick scaling (quest_env native/teleop_core.h, Teleop::update: ``.45 * stick(..)`` / ``.8 * stick(..)``,
+# 18 % dead zone, not rescaled). MAGIC NUMBERS duplicated from the headset: they must match it until the scaling moves
+# to one place (a joint refactor with quest_env: send the raw normalised sticks and scale here only).
+NATIVE_STICK_SPEED = 0.45    # m/s, the native base_velocity forward / left at full deflection
+NATIVE_STICK_OMEGA = 0.8     # rad/s, the native base_velocity yaw at full deflection
 
 
 def _pl_compose(a, b) -> np.ndarray:
@@ -287,8 +294,10 @@ class Config:
     ff_window: float = 0.06           # s, the velocity fit's window (adds about half of it as lag)
     ff_max_speed: float = 1.0         # m/s, EE feedforward clamp
     ff_max_omega: float = 3.0         # rad/s, EE feedforward clamp
-    hint_max_speed: float = 0.6       # m/s, the hint velocity clamp (the WBC refuses more than its max_speed)
-    hint_max_omega: float = 0.8       # rad/s (the WBC's max_omega)
+    stick_max_speed: float = 1.2      # m/s, the left stick at full deflection (any direction: clamped to a circle)
+    stick_max_omega: float = 1.0      # rad/s, the right stick at full deflection
+    hint_max_speed: float = 1.2       # m/s, the hint velocity clamp (the WBC clamps to its own max_speed beyond)
+    hint_max_omega: float = 1.0       # rad/s (likewise the WBC's max_omega)
 
 
 def head_pose(frame: dict):
@@ -432,7 +441,8 @@ class TeleopCore:
 
     def stick_v(self, intent: dict) -> list:
         """The sticks' base velocity, zero until they were seen neutral after arming."""
-        return stick_velocity(intent) if self.sticks_live else [0.0, 0.0, 0.0]
+        return (stick_velocity(intent, self.cfg.stick_max_speed, self.cfg.stick_max_omega) if self.sticks_live
+                else [0.0, 0.0, 0.0])
 
     # -- engagement ------------------------------------------------------------------------------
 
@@ -832,10 +842,17 @@ def _rot_pose(pose, angle: float) -> tuple:
     return rz @ np.asarray(pose[0], float), rz @ np.asarray(pose[1], float)
 
 
-def stick_velocity(intent: dict) -> list:
-    """The intent's ``base_velocity`` (forward, left m/s; yaw rad/s), non-finite parts as 0."""
+def stick_velocity(intent: dict, max_speed: float = NATIVE_STICK_SPEED, max_omega: float = NATIVE_STICK_OMEGA) -> list:
+    """The intent's ``base_velocity`` (forward, left m/s; yaw rad/s), non-finite parts as 0, rescaled from the native
+    full scale (``NATIVE_STICK_*``) to ``max_speed`` / ``max_omega``; the translation's norm is clamped to
+    ``max_speed`` (the native per-axis scaling makes a square: a full diagonal would be sqrt 2 faster)."""
     v = intent.get("base_velocity") or [0, 0, 0]
-    return [float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3]]
+    vx, vy, w = (float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3])
+    vx, vy, w = vx * max_speed / NATIVE_STICK_SPEED, vy * max_speed / NATIVE_STICK_SPEED, w * max_omega / NATIVE_STICK_OMEGA
+    n = math.hypot(vx, vy)
+    if n > max_speed:
+        vx, vy = vx * max_speed / n, vy * max_speed / n
+    return [vx, vy, max(-max_omega, min(max_omega, w))]
 
 
 def _finite(x) -> bool:
