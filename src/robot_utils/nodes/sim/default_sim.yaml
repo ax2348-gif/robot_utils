@@ -38,7 +38,9 @@ floor:
 # (swerve/constants.py as setup_sparks.py configures the SPARKs: nodes/sim/limits.py), never from this file.
 base:
   steer: {kp: 300.0, kv: 6.0, armature: 0.02}    # servo stiffness / damping (sim only)
-  wheel: {kv: 4.0, armature: 0.01}
+  # rolling_resistance: coasting drag as a fraction of each wheel's load (tyre + gearbox + motor in coast; an estimate,
+  # not measured on the robot): ~0.3 m/s^2, so a coasting base stops within ~15 cm from 0.3 m/s instead of never
+  wheel: {kv: 4.0, armature: 0.01, rolling_resistance: 0.03}
   # Module compliance: soft wheel-floor contact so all four wheels stay loaded (solref: time constant, damping ratio)
   wheel_contact: {friction: [1.0, 0.01, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.002]}
   start: {xyz: [0.0, 0.0, 0.0], yaw: 0.0}

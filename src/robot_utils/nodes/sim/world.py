@@ -498,6 +498,13 @@ class World:
             self.mod.append({"sq": int(s.qposadr[0]), "sv": int(s.dofadr[0]), "wq": int(w.qposadr[0]),
                              "wv": int(w.dofadr[0]), "sa": m.actuator(f"steer_{n}").id,
                              "wa": m.actuator(f"wheel_{n}").id, "r": float(m.geom_size[geom][0])})
+        # rolling resistance: dry friction on each wheel's axle, the coefficient x the wheel's share of the robot's weight
+        # x the wheel radius (tyre hysteresis, gearbox and motor drag). Without it a coasting base (drive disabled: the
+        # SPARKs idle in coast) keeps any momentum forever: the arm's start-up jolt rolled it away at ~2 cm/s.
+        rr = float(self.cfg["base"]["wheel"].get("rolling_resistance", 0.0))
+        load = float(m.body_subtreemass[self.base_body]) * 9.81 / max(1, len(self.mod))
+        for ix in self.mod:
+            m.dof_frictionloss[ix["wv"]] = rr * load * ix["r"]
         self.has_arm = all(n in names for n in ARM_JOINTS)
         if self.has_arm:
             self.arm_q = np.array([m.joint(n).qposadr[0] for n in ARM_JOINTS])
