@@ -136,7 +136,7 @@ raw edges in valid frames, plus a refused A: `action`, `reason`), `armed` (`arm_
 `enabled` (`by`), `disabled` (`reason`), `episode_start` (`task`), `episode_stop`, `episode_abort` (`reason`, `why`),
 `estop` (`reason`, `source`), `fault` (`reason`), `hold` (`reason`: the WBC's hold reason when it changes),
 `stale` (`reason`: staleness / latency / rate; `why`), `teleop_start` (`session`, `transport`), `teleop_stop`
-(`reason`), `sim_reset` (`reset_seq`). Episode ids `YYYYMMDD-NNNN` (a counter per local day).
+(`reason`), `sim_reset` (`reset_seq`), `sim_pause` / `sim_resume` (auto pause: `reason`). Episode ids `YYYYMMDD-NNNN` (a counter per local day).
 
 One append-only file per local day, `<data dir>/events-YYYYMMDD.jsonl`; each line is flushed and fsynced as it is
 written. `seq` is gap-free for the node's life and continues across restarts (the newest file's last line is read
