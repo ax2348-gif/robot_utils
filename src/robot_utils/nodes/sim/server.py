@@ -84,6 +84,12 @@ class JointIn(_In):
     qvel0: Optional[float] = Field(None, allow_inf_nan=False,
                                    description="rad/s or m/s: its speed when the object is loaded and after every "
                                                "reset (e.g. a door given a spin); absent: at rest.")
+    stiffness: Optional[float] = Field(None, ge=0, allow_inf_nan=False,
+                                       description="N m/rad or N/m: a spring pulling the joint toward springref (e.g. "
+                                                   "a door closer); absent: none.")
+    springref: Optional[float] = Field(None, allow_inf_nan=False,
+                                       description="rad or m: where the spring is relaxed (default 0; beyond the "
+                                                   "range for a preload). Needs a stiffness.")
     mimic: Optional[str] = Field(None, description="An earlier link (same joint type) whose joint position this one "
                                                    "is held at: parts that move as one without sharing a body.")
 
@@ -112,6 +118,9 @@ class ObjectIn(_In):
     rpy: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="rad, orientation (URDF rpy).")
     yaw: Optional[float] = Field(None, description="rad, heading (when rpy is absent).")
     rgba: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="Colour, 0..1.")
+    condim: Optional[Literal[1, 3, 4, 6]] = Field(None, description="Its contacts' dimensions (MuJoCo condim; the "
+                                                                  "larger of the pair's applies); absent: "
+                                                                  "contact.objects.condim (4).")
 
 
 class MoveIn(_In):
@@ -204,6 +213,7 @@ class ObjectState(BaseModel):
     mass: float = Field(description="kg.")
     fixed: Optional[bool] = Field(None, description="Welded to the world (present only when true).")
     rgba: Optional[list[float]] = Field(None, description="Colour, 0..1.")
+    condim: Optional[int] = Field(None, description="Its contacts' dimensions, when set.")
     links: Optional[list[dict]] = Field(None, description="articulated: the links as given (defaults filled in).")
     joints: Optional[dict[str, float]] = Field(None, description="articulated: each jointed link's position (m | rad).")
     xyz: list[float] = Field(description="m.")
