@@ -46,6 +46,24 @@ FF_OPEN_MARGIN = 0.005               # m: the force-limit feedforward is off thi
 DEFAULT_MAX_FORCE = 50.0             # N squeeze
 HARD_MAX_FORCE = 120.0               # N
 
+# Damiao motor torque at the output shaft (N m): the peak (datasheet) and TMAX, the MIT frame's torque mapping range
+# (motorbridge's model table, motor_vendors/damiao/src/motor.rs: what a frame's tau_ff and the feedback can encode).
+# A motor delivers at most min(peak, TMAX). Which model each joint is comes from the gain profile's hardware file.
+MOTOR_TORQUE = {"4340P": {"peak": 27.0, "tmax": 28.0}, "4340": {"peak": 27.0, "tmax": 28.0},
+                "4310": {"peak": 7.0, "tmax": 10.0}, "4310P": {"peak": 7.0, "tmax": 10.0}}
+
+
+def motor_torque_limits(profile: str = DEFAULT_PROFILE) -> tuple:
+    """(arm joints' torque limits (6,), the gripper motor's) in N m at the output: min(datasheet peak, TMAX) of each
+    joint's motor model as the profile's hardware file names it (rebotarm_dm_*.yaml ``model``)."""
+    from reBotArm_control_py.actuator.rebotarm import load_cfg
+    joints = {j.name: j for j in load_cfg(PROFILES[profile])["joints"]}
+
+    def lim(name):
+        mt = MOTOR_TORQUE[str(joints[name].model)]
+        return min(mt["peak"], mt["tmax"])
+    return np.array([lim(f"joint{i}") for i in range(1, N + 1)]), lim("gripper")
+
 
 def gap_to_rad(gap_m: float) -> float:
     return -float(gap_m) / GAP_PER_RAD

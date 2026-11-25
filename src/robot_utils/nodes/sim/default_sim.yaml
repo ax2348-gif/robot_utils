@@ -40,7 +40,8 @@ base:
   wheel_contact: {friction: [1.0, 0.01, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.002]}
   start: {xyz: [0.0, 0.0, 0.0], yaw: 0.0}
 
-# Fidelity per component: kinematic (ideal tracking within the speed limits) | dynamic (not built yet)
+# Fidelity per component (docs/sim.md, "What the world is"). arm: kinematic (ideal tracking within the speed limits)
+# | dynamic (the Damiao motors' MIT law as joint torque: deploy/sim/sim_dynamic_arm.yaml)
 components:
   arm:
     fidelity: kinematic
@@ -52,6 +53,21 @@ components:
     watchdog: 0.1                # s without an MIT frame while enabled -> status 0xD (the Damiao motors' CAN timeout,
                                  # as the arm node expects it: node.py LATE_WARN)
     start_q: [0.0, -0.3, -0.6, 0.0, 0.0, 0.0]
+    # fidelity: dynamic only. Per physics step each motor applies the MIT law of its latest frame as joint torque,
+    #   tau = kp (q - q_m) + kd (qd - qd_m) + tau_ff, clamped at the motor's torque limit; no gravity feedforward of the
+    #   sim's own (the node's tau_ff is the only one). Off / disabled / after the watchdog: zero torque (the node's
+    #   "damping": the arm sinks against the joint friction below). The torque limits come from the robot config
+    #   (arm/config.py motor_torque_limits: 27 N m joints 1-3, 7 N m joints 4-6 and the gripper), never from here;
+    #   the gains are whatever the node sends. Everything below is a PHYSICAL ESTIMATE, not measured on the robot.
+    dynamic:
+      armature: [0.03, 0.03, 0.03, 0.001, 0.001, 0.001]    # kg m^2 at the output: rotor inertia x gear ratio^2
+                                                           # (4340P 40:1, 4310 10:1). ESTIMATE
+      viscous: [0.1, 0.1, 0.1, 0.02, 0.02, 0.02]           # N m s/rad, gearbox viscous friction. ESTIMATE
+      coulomb: [0.3, 0.3, 0.3, 0.05, 0.05, 0.05]           # N m, gearbox dry friction (MuJoCo frictionloss). ESTIMATE
+      gripper: {armature: 0.001, viscous: 0.1, coulomb: 0.05}   # the gripper motor, output side (rad, N m) like the
+                                                           # joints; ESTIMATE (viscous: stroke ~0.5 s as on the robot)
+      command_delay: 0.002       # s from the world receiving an MIT frame to the motor applying it (serial bridge +
+                                 # CAN). ESTIMATE; the node's own tick and pipelined read are modelled by the stack
 
 # Cameras (rendered offscreen): link = the model link the image is taken from (optical frame: x right, y down,
 # z out of the lens). Profiles as the camera node's catalog keys; delay = camera-to-host latency (measured).
