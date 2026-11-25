@@ -27,6 +27,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--profile", default="soft", choices=["soft", "safe"], help="gain profile at start (default soft)")
     p.add_argument("--channel", default=None, help="serial bridge (default: the hardware yaml's serial_by_id)")
+    p.add_argument("--timing", choices=("auto", "strict", "lenient"), default="auto",
+                   help="stall limits: strict = the robot's (a 50 ms reading gap or a 0.25 s silent control process "
+                        "faults); lenient = 0.5 s / 2 s, for a simulated arm only; auto (default) = lenient for a "
+                        "simulated arm on macOS (no real-time scheduling: it stalled that long under load)")
     p.add_argument("--sim", nargs="?", const="toy", default=None, metavar="world[=NAME|DIR]",
                    help="simulated arm (no hardware): alone, or on the sim world (--sim world; docs/sim.md)")
     p.add_argument("--control", choices=("process", "thread"), default="process",
@@ -59,7 +63,11 @@ def main() -> None:
     else:
         from .bus import HardwareBus
         factory = functools.partial(HardwareBus, C.PROFILES[args.profile], channel=args.channel)
-    kw = dict(profile=args.profile, settings=C.load_settings(),
+    try:
+        settings = C.apply_timing(C.load_settings(), args.timing, bool(args.sim), sys.platform)
+    except ValueError as e:
+        p.error(str(e))
+    kw = dict(profile=args.profile, settings=settings,
               joint_socket=socket_path(args.name + ".joint"))   # internal joint channel (docs/arm.md)
     if args.control == "process":
         from .proc_node import ProcNode
@@ -67,6 +75,8 @@ def main() -> None:
     else:
         from .node import ArmNode
         node = ArmNode(factory, **kw)
+    node.events.add(f"timing {settings.timing}: a {settings.stale_on * 1e3:.0f} ms reading gap or a "
+                    f"{settings.ctl_heartbeat:g} s silent control process faults")
     app = create_app(node, sim=bool(args.sim))
     kind = {None: "hardware", "toy": "sim"}.get(args.sim, f"sim {args.sim}")
     serve(app, args, banner=f"arm node {args.name!r} ({kind}, profile {args.profile}; control loop: {args.control})")
