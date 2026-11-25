@@ -104,9 +104,18 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8091)
     p.add_argument("--host", default="::1", help="listen address (default ::1: the agent's sandbox allows that host "
                                                   "only, so other stacks on 127.0.0.1 stay out of its reach)")
+    p.add_argument("--uds", default=None, help="listen on this unix socket instead of TCP (the agent's sandbox then "
+                                              "allows that one socket: no loopback TCP, so no other stack, is reachable)")
     p.add_argument("--log", required=True)
     a = p.parse_args()
-    uvicorn.run(make_app(a.upstream, a.log), host=a.host, port=a.port, log_level="warning")
+    app = make_app(a.upstream, a.log)
+    if a.uds:
+        import os
+        if os.path.exists(a.uds):
+            os.unlink(a.uds)
+        uvicorn.run(app, uds=a.uds, log_level="warning")
+    else:
+        uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":

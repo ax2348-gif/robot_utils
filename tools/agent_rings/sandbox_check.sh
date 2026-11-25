@@ -6,8 +6,10 @@
 H="$1"; RT="$2"
 t(){ local want="$1" what="$2"; shift 2; if out=$("$@" 2>&1); then r=ALLOWED; else r=BLOCKED; fi
      printf '%-8s (want %-7s) %-34s %s\n' "$r" "$want" "$what" "$(echo "$out" | tr '\n' ' ' | cut -c1-70)"; }
-t ALLOWED "robot proxy [::1]:8091"  curl -sf -m 5 -o /dev/null 'http://[::1]:8091/api/health'
-t BLOCKED "sim via proxy"           curl -sf -m 5 -o /dev/null 'http://[::1]:8091/nodes/sim/state'
+t ALLOWED "robot proxy socket"       curl -sf -m 5 -o /dev/null --unix-socket /tmp/ara/robot.sock http://robot/api/health
+t ALLOWED "py robot proxy socket"    .venv/bin/python -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('/tmp/ara/robot.sock')"
+t BLOCKED "[::1]:8091 tcp"           curl -sf -m 5 -o /dev/null 'http://[::1]:8091/api/health'
+t BLOCKED "sim via proxy"           curl -sf -m 5 -o /dev/null --unix-socket /tmp/ara/robot.sock http://robot/nodes/sim/state
 t BLOCKED "127.0.0.1:8080 (stack)"  curl -sf -m 5 -o /dev/null 'http://127.0.0.1:8080/api/health'
 t BLOCKED "127.0.0.1:8095"          curl -sf -m 5 -o /dev/null 'http://127.0.0.1:8095/api/health'
 t BLOCKED "localhost:8080"          curl -sf -m 5 -o /dev/null 'http://localhost:8080/api/health'

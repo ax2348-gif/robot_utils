@@ -16,8 +16,12 @@ cameras and by trying things.
 
 ## The robot
 
-- **Robot URL:** `http://[::1]:8091` (also in `$ROBOT_URL`; IPv6 loopback, the only host your sandbox reaches besides PyPI). Every robot node is at `/nodes/<name>/`; each node serves its API
-  documentation at `/nodes/<name>/docs` (OpenAPI) and a page at `/nodes/<name>/`.
+- **The robot is HTTP over a unix socket:** `/tmp/ara/robot.sock` (also in `$ROBOT_SOCKET`), the only thing your
+  sandbox connects to besides PyPI. Use any host name in URLs, e.g. `curl --unix-socket /tmp/ara/robot.sock
+  http://robot/api/nodes`, or in Python `httpx.Client(transport=httpx.HTTPTransport(uds="/tmp/ara/robot.sock"),
+  base_url="http://robot")`. Where the docs say `http://botcore/...`, use this instead. Every robot node is at
+  `/nodes/<name>/`; each node serves its API documentation at `/nodes/<name>/openapi.json` and a page at
+  `/nodes/<name>/`.
 - **Nodes:**
   - `agent_interface`: built for agents. Read its briefing first: `GET /nodes/agent_interface/guide.md`.
   - `arm`: the arm and gripper: servo, track and stream motions, IK, state, the lease.
