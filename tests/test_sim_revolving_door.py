@@ -103,8 +103,8 @@ def test_ratchet_holds_the_rotor_against_reverse_and_frees_it_forward(world):
         world.d.xfrc_applied[b] = [0, 0, 0, 0, 0, 20.0]
         world.step(1)
     world.d.xfrc_applied[b] = 0
-    # (20 - 1.2 N m friction) / 324 kg m^2 = 0.058 rad/s^2, less the damping: ~0.11 rad in 2 s
-    assert 0.08 < float(world.d.qpos[qa]) - q0 < 0.13
+    # 5 wings: (20 - 0.75 N m friction) / ~205 kg m^2 = 0.094 rad/s^2, less the damping: ~0.19 rad in 2 s
+    assert 0.14 < float(world.d.qpos[qa]) - q0 < 0.23
 
 
 def test_compartments_fit_the_robot_with_margins(world):
@@ -134,14 +134,14 @@ def test_compartments_fit_the_robot_with_margins(world):
 
 def test_passage_takes_most_of_a_turn():
     """A body the size of the base's inscribed disc (anything the robot does, it does too) cannot get from the near
-    side to the far side unless the rotor turns >= 270 deg; without the ratchet it could go back the short way."""
+    side to the far side unless the rotor turns >= 210 deg (5 wings); without the ratchet it could go back the short way."""
     from door_sweep import sweep
     from robot_utils.nodes.swerve.constants import FRAME
     door = S.revolving_door()
     ccw = sweep(door, FRAME / 2, step_deg=3)
     turns = [t for t in ccw["turns"] if t is not None]        # None: no compartment open to the entrance at q0
     assert len(turns) >= 0.8 * len(ccw["turns"]) and math.inf not in turns     # in at most q0, and out again
-    assert ccw["min"] >= 270 and max(turns) <= 330, ccw       # 280-320 deg measured (1 deg steps)
+    assert ccw["min"] >= 210 and max(turns) <= 330, ccw       # 5 wings: 232-292 deg measured (3 deg steps)
     cw = sweep(door, FRAME / 2, step_deg=3, reverse=True)
     assert cw["min"] < 30, cw                                 # why the ratchet: 4 deg the other way
 

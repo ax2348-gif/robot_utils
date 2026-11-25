@@ -314,12 +314,13 @@ def rings_scene(outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04, p
 
 # -- a revolving door: a passive one-way rotor in a drum, entrance and exit side by side -------------------------
 
-DOOR_WINGS = 8              # wings (compartments of 45 deg: each holds the robot snugly, so it rides with its wings)
+DOOR_WINGS = 5              # wings (compartments of 72 deg; owner: 8 left barely any room)
 DOOR_R = 1.50               # m, the drum's inner radius (the wings sweep to DOOR_R - WING_GAP): 3.06 m outside
 DOOR_WALL_T = 0.03          # m, the drum's wall (glass in a frame)
 DOOR_WALL_H = 2.20          # m, the drum's and the facade's height
 DOOR_DOORWAY = 0.70         # m, each doorway's chord at the drum's inner radius
-DOOR_JUNCTION = 0.40        # m, the closed drum wall between the doorways (chord), where the facade meets the drum
+DOOR_JUNCTION = 1.05        # m, the closed drum wall between the doorways (chord), where the facade meets the drum: with
+                            # 72 deg compartments below ~0.95 m one compartment spans both doorways (a 0 deg pass)
 FACADE_T = 0.10             # m, the facade (the dividing wall) thickness
 FACADE_L = 2.50             # m, how far the facade runs out from the drum on each side
 WING_T = 0.04               # m, a wing's thickness (glass in an aluminium frame)
@@ -329,8 +330,8 @@ HUB_R = 0.06                # m, the central post
 GLASS_KG_M2 = 15.0          # kg/m^2: 6 mm tempered glass (2500 kg/m^3)
 FRAME_KG_M = 1.2            # kg/m: a light aluminium frame round each wing
 DOOR_SPIN = 0.35            # rad/s, the start spin (3.3 rpm: an automatic revolving door's pace), counterclockwise
-DOOR_FRICTION = 1.20        # N m, the bearing's dry friction (frictionloss)
-DOOR_DAMPING = 1.20         # N m s/rad, its viscous friction
+DOOR_FRICTION = 0.75        # N m, the bearing's dry friction (frictionloss): 5/8 of the 8-wing door's, as its inertia
+DOOR_DAMPING = 0.75         # N m s/rad, its viscous friction (the same ~80 s spin-down)
 DOOR_RATCHET = 400.0        # N m, the anti-reverse ratchet's hold (more than the robot can push with)
 DOOR_GAP = 0.60             # m, from the base's front at the start pose to the drum's outer wall
 
