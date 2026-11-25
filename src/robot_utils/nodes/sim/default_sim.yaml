@@ -115,7 +115,11 @@ scene:
   cabinet: false                 # an articulated cabinet beside the table (two drawers, a door; scene.py)
   rings: false                   # two counter-rotating rings ahead of the robot, red and blue objects on them (scene.py)
   revolving_door: false          # a one-way revolving door ahead of the robot, spinning down from its start (scene.py)
-  view_anchor: null              # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
+  cart_door: false               # pull a castered cart into a room through a door that opens toward the robot (scenes/cart_door.py)
+  cart_door_setup:
+    closer: 3.0                  # N m, the door closer's moment holding it shut (0: no closer; the door stays where left)
+    cart_mass: 12.0              # kg, the cart in all
+  view_anchor: null             # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
   rings_setup:
     outer_rim_speed: 0.12        # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 3x the first 0.04)
     inner_rim_speed: -0.068      # m/s at the inner ring's outer edge

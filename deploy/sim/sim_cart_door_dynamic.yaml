@@ -1,0 +1,11 @@
+# The cart and door scene with the dynamic arm (docs/sim.md, "The cart and door scene"):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_cart_door_dynamic.yaml python -m robot_utils.nodes.sim.stack
+# A closed room 1.1 m ahead of the robot, its only way in a door that opens toward the robot (pull it open; a light
+# closer shuts it); a castered cart beside the robot on its right, the U-handle toward the door. Pull it into the room.
+scene:
+  tabletop: false
+  cart_door: true
+  view_anchor: [0.6, 0.0, 0.0]   # placed 1.6 m ahead: the robot ~1.0 m in front of the operator, the door and room beyond it
+components:
+  arm:
+    fidelity: dynamic
