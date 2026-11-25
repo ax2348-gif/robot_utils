@@ -95,7 +95,7 @@ class SimNode:
         self.t_start = time.monotonic()
         self.markers = viz.Markers()
         self.ghosts = viz.Ghosts()
-        self.view = {"style": "hidden_line", "role": "auto"}   # how headsets draw /scene3d (GET/POST /scene3d/view)
+        self.view = {"style": "flat", "role": "auto"}   # how headsets draw /scene3d (GET/POST /scene3d/view)
         self._ghost_lines = None             # (scene_id, rigid.Poses, compat.StateLines) for robot_state's ghosts
 
     # -- lifecycle ---------------------------------------------------------------------------------
@@ -203,7 +203,7 @@ class SimNode:
             out["markers"] = mk
         return out
 
-    VIEW_STYLES = ("hidden_line", "wire", "flat_edges", "flat")
+    VIEW_STYLES = ("flat", "flat_edges", "hidden_line", "wire")
     VIEW_ROLES = ("auto", "visual", "collision")
 
     def set_view(self, style: Optional[str] = None, role: Optional[str] = None, next_style: bool = False) -> dict:

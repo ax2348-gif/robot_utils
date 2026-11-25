@@ -69,7 +69,7 @@ table.ru-table td,table.ru-table th{font-size:12px}
         <button class="ru" id="reset" title="Time 0, robot at its start pose, objects back, commands dropped">Reset world</button></div>
       <div class="kv" id="clockkv" style="margin-top:6px"></div>
       <div class="ru-row" style="margin-top:6px">headset view <button class="ru" id="hview"
-        title="Cycle how the headset draws the scene: hidden-line, wire, flat + edges, flat">–</button>
+        title="Cycle how the headset draws the scene: flat, flat + edges, hidden-line, wire">–</button>
         <button class="ru" id="hrole" title="Robot geometry: the URDF's visual meshes, or what collides">–</button></div>
     </div>
     <div class="ru-card" data-panel="robot" data-role="telemetry"><b>Robot</b><div class="kv" id="robot"></div>
