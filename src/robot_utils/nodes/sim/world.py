@@ -499,7 +499,8 @@ class World:
     # -- state reset -----------------------------------------------------------------------------------
 
     def reset(self, start_scene: bool = False, count: bool = True) -> int:
-        """Time 0, the robot at its start pose, objects where they were added, every command dropped.
+        """Time 0, the robot at its start pose, objects where they were added, every command dropped;
+        the arm's motors keep their enable state (and fault), as real motors would.
         ``start_scene``: the scene the world started with (the default tabletop + config objects) instead.
         Every reset increments ``reset_seq`` (in /state and every robot_state.v1 record: the headset re-anchors its
         AR scene on a change; ``count=False`` only for the world's own initial reset); returns it."""
@@ -513,7 +514,10 @@ class World:
             d.qpos[self.base_q + 3:self.base_q + 7] = yaw_quat(float(st.get("yaw", 0.0)))
             for i, mod in enumerate(self.modules):
                 mod.__init__(mod.name)
+            prev = self.arm if self.has_arm else None
             if self.has_arm:
+                # the arm's motors don't power off on a reset (real ones wouldn't): a fresh Arm settles the
+                # pose (motors off, so no watchdog), then the enable state and fault carry over below
                 self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
                 d.qpos[self.arm_q] = self.arm.q_ref
             for name, o in self.objects.items():
@@ -528,6 +532,10 @@ class World:
             self.wrenches = []
             mujoco.mj_forward(m, d)
             self._settle()
+            if prev is not None:
+                a = self.arm
+                a.enabled, a.g_enabled, a.fault, a.frames = prev.enabled, prev.g_enabled, prev.fault, prev.frames
+                a.last_frame = 0.0       # the clock restarted at 0: the watchdog counts from the reset
             if count:
                 self.reset_seq += 1
             return self.reset_seq

@@ -181,6 +181,34 @@ def test_arm_kinematic_follows_q_within_speed_limit_and_watchdog(w):
     assert np.allclose(w.arm_op("read", {})["q"], q_hold, atol=2e-3)      # holds where it is
 
 
+def test_reset_keeps_the_arm_motors_on(w):
+    """A reset (an episode start) restarts the world, not the motors: an enabled arm stays enabled at the start
+    pose, takes frames right away and the watchdog counts from the reset (sim time restarts at 0)."""
+    q_start = np.array(w.cfg["components"]["arm"]["start_q"], float)
+    w.arm_op("enable", {})
+    goal = q_start + np.array([0.3, -0.2, 0.2, 0.0, 0.2, -0.3])
+
+    def send(q):
+        w.arm_op("send", {"q": list(q), "qd": [0] * 6, "kp": [30] * 6, "kd": [1] * 6, "tau": [0] * 6})
+    for _ in range(20):
+        send(goal)
+        w.step(20)
+    assert np.allclose(w.arm_op("read", {})["q"], goal, atol=2e-3)
+    w.reset()
+    r = w.arm_op("read", {})
+    assert r["status"][:7] == [1] * 7 and w.arm.cmd is None
+    assert np.allclose(r["q"], q_start, atol=2e-3) and np.allclose(r["q_ref"], q_start)
+    for _ in range(20):
+        send(goal)
+        w.step(20)
+    r = w.arm_op("read", {})
+    assert np.allclose(r["q"], goal, atol=2e-3) and r["status"][:6] == [1] * 6
+    w.step(150)                                               # the watchdog still runs after the reset
+    assert w.arm_op("read", {})["status"][:6] == [0xD] * 6
+    w.reset()                                                 # a fault latches across a reset too
+    assert w.arm.fault == 0xD and not w.arm.enabled
+
+
 def test_time_step_run_pause_rtf(w):
     t0 = w.t
     w.step(100)
