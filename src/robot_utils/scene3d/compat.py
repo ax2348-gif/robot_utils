@@ -22,27 +22,7 @@ from typing import Optional
 import numpy as np
 
 from .format import Frame
-
-
-def qmul(a, b) -> np.ndarray:
-    """Quaternion product a * b, both x, y, z, w."""
-    ax, ay, az, aw = a
-    bx, by, bz, bw = b
-    return np.array([aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
-                     aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz])
-
-
-def qrot(q, v) -> np.ndarray:
-    x, y, z, w = q
-    u = np.array([x, y, z])
-    v = np.asarray(v, float)
-    return v + 2 * np.cross(u, np.cross(u, v) + w * v)
-
-
-def compose(a, b) -> np.ndarray:
-    """Pose a then b, each [x, y, z, qx, qy, qz, qw]."""
-    a, b = np.asarray(a, float), np.asarray(b, float)
-    return np.concatenate([a[:3] + qrot(a[3:], b[:3]), qmul(a[3:], b[3:])])
+from .pose import compose, qmul, qrot  # noqa: F401 (re-exported: compat.compose)
 
 
 def _pick(geoms: list, role: str) -> list:
@@ -98,10 +78,17 @@ class StateLines:
                     self.static[b["name"]] = {"pose": b["pose"], "geom": geoms}
 
     def line(self, f: Frame, base=None, overlays: Optional[dict] = None) -> dict:
+        """The frame as a line; a colour override recolours the body's visuals (alpha 0: left out)."""
         objects = dict(self.static)
-        for name, geoms, p in zip(self.names, self.geoms, f.poses):
-            if geoms:
-                objects[name] = {"pose": [round(float(x), 6) for x in p], "geom": geoms}
+        for slot, (name, geoms, p) in enumerate(zip(self.names, self.geoms, f.poses)):
+            if not geoms:
+                continue
+            c = f.colors.get(slot)
+            if c is not None:
+                if c[3] <= 0:
+                    continue
+                geoms = [{**g, "rgba": [round(float(x), 3) for x in c]} for g in geoms]
+            objects[name] = {"pose": [round(float(x), 6) for x in p], "geom": geoms}
         out = {"schema": "robot_state.v1", "source": "rigid_scene", "seq": f.seq, "t": round(f.t, 4),
                "reset_seq": f.reset_seq, "model_version": self.scene_id, "frame": "world", "objects": objects}
         if base is not None:

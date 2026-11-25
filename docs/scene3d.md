@@ -48,9 +48,27 @@ The JSON index:
 ## Frames (`GET /scene3d/stream`, `GET /scene3d/frame`)
 
 `format=bin` (default): frames back to back, each a 32-byte little-endian header (`RSF1`, u32 seq, f64 t, u32
-reset_seq, u32 n, the first 8 bytes of scene_id) and n x 7 float32 `[x, y, z, qx, qy, qz, qw]` in `dynamic` order.
-`format=jsonl` and `/scene3d/frame` give the same as JSON. A new `scene_id` means: fetch the scene again (an object
+reset_seq, u16 n, u16 m, the first 8 bytes of scene_id), n x 7 float32 `[x, y, z, qx, qy, qz, qw]` in `dynamic`
+order, then m colour overrides (u32 slot, 4 x u8 rgba): this frame, every geom of dynamic body `slot` in that
+colour; alpha < 1 see-through, 0 hidden. Frames are stateless: no override, the geoms' own colours (whose alpha
+can be < 1 too: see-through objects). `format=jsonl` and `/scene3d/frame` give the same as JSON (`colors`: slot ->
+rgba 0..1). A new `scene_id` means: fetch the scene again (an object
 added or removed, a fixed one moved). `reset_seq` changes on a sim reset (the AR view re-anchors).
+
+## Ghosts (`/ghosts`)
+
+A copy of a body, by default with its subtree (the gripper: `arm_end_link` and its fingers), drawn at a goal pose in
+a colour the poster picks: `POST /ghosts {source, replace, ghosts: [{name, body, subtree, pose | relative, rgba,
+ttl}]}`. `pose`: the body's goal in the sim world; `relative`: the goal in the body's own frame now (the sim applies
+it to its own body, so a poster whose world is an estimate adds no drift). The first post declares the ghost (its
+bodies join the scene, kind `ghost`, named `ghost:<name>/<body>`: a scene change); after that each frame carries
+their poses and colour, alpha 0 once `ttl` lapses without a new post. `GET /ghosts`, `DELETE /ghosts[?source=]`,
+`DELETE /ghosts/{name}`. robot_state.v1 lists live ghosts as objects too, so today's AR view draws them (lines in
+the ghost's colour; it has no see-through).
+
+The teleop node posts the **end effector's goal** this way in the sim (docs/quest_teleop_node.md, "Sim aids"):
+green on target, yellow at half, red from 5 cm / 20°. Checked on the sim stack: a goal 5 cm along world x puts the
+ghost's TCP 5.0 cm from the real one (the WBC's estimate agreed with the sim within 0.2 mm).
 
 ## Simplification
 

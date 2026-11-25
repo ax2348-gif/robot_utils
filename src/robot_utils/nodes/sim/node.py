@@ -94,6 +94,8 @@ class SimNode:
         self.servers: dict = {}
         self.t_start = time.monotonic()
         self.markers = viz.Markers()
+        self.ghosts = viz.Ghosts()
+        self._ghost_lines = None             # (scene_id, rigid.Poses, compat.StateLines) for robot_state's ghosts
 
     # -- lifecycle ---------------------------------------------------------------------------------
 
@@ -200,9 +202,34 @@ class SimNode:
             out["markers"] = mk
         return out
 
+    def put_ghosts(self, ghosts: list, source: Optional[str] = None, replace: bool = False) -> dict:
+        with self.world.lock:
+            m = self.world.m
+            bodies = {m.body(i).name for i in range(1, m.nbody)}
+        if replace:
+            self.ghosts.remove(source=source)
+        names = self.ghosts.put(ghosts, bodies, source)
+        return {"names": names, "count": len(self.ghosts.list())}
+
+    def ghost_objects(self) -> dict:
+        """The live ghosts as robot_state.v1 objects (their bodies' primitives; meshes as boxes), so today's AR view
+        draws them: ``ghost:<name>/<body>``."""
+        decl = self.ghosts.declared()
+        if not decl:
+            return {}
+        from ...scene3d import compat
+        from . import rigid
+        index, _ = rigid.build(self.world, ghosts=decl)
+        if self._ghost_lines is None or self._ghost_lines[0] != index["scene_id"]:
+            self._ghost_lines = (index["scene_id"], rigid.Poses(index), compat.StateLines(index))
+        _, poses, lines = self._ghost_lines
+        line = lines.line(poses.frame(self.world, self.ghosts.live()))
+        return {k: {**v, "fixed": False} for k, v in line["objects"].items() if k.startswith("ghost:")}
+
     def robot_state(self) -> dict:
         """One robot_state.v1 record (docs/sim.md, "Robot state stream")."""
         s = viz.robot_state(self.world)
+        s["objects"].update(self.ghost_objects())
         sim = s.pop("sim")
         self._state_seq = getattr(self, "_state_seq", 0) + 1
         return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",

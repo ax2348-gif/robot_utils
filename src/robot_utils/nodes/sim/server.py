@@ -343,6 +343,37 @@ class VizFrame(BaseModel):
     markers: Optional[list[Marker]] = Field(None, description="Every live marker (in the stream: only when changed).")
 
 
+class GhostIn(_In):
+    name: str = Field(description="Ghost name (posting it again replaces it).")
+    body: str = Field(description="The model body it copies, e.g. `arm_end_link` (the gripper with `subtree`).")
+    subtree: bool = Field(True, description="The body's whole subtree (fingers included), or the body alone.")
+    pose: Optional[list[float]] = Field(None, min_length=7, max_length=7,
+                                        description="The body's goal in the sim world [x, y, z, qx, qy, qz, qw].")
+    relative: Optional[list[float]] = Field(None, min_length=7, max_length=7,
+                                            description="Or the goal in the body's own frame now (drift-free when the "
+                                                        "poster's world is an estimate).")
+    rgba: list[float] = Field([0.3, 0.9, 0.5, 0.4], min_length=4, max_length=4,
+                              description="Its colour, alpha < 1 see-through (the viewer draws it as given).")
+    ttl: Optional[float] = Field(None, gt=0, description="s: hidden unless posted again within it (null: until "
+                                                         "removed).")
+
+
+class GhostsIn(_In):
+    ghosts: list[GhostIn] = Field(description="Ghosts to add or replace (one bad ghost refuses the post).")
+    source: Optional[str] = Field(None, description="Who posts them (for replace / DELETE ?source=).")
+    replace: bool = Field(False, description="Remove the source's other ghosts first.")
+
+
+class GhostsOut(BaseModel):
+    ghosts: list[dict] = Field(description="Every ghost: name, body, subtree, pose | relative, rgba, ttl, source, "
+                                           "age (s since posted), live.")
+
+
+class GhostsPut(BaseModel):
+    names: list[str] = Field(description="Ghosts posted.")
+    count: int = Field(description="Ghosts now.")
+
+
 class S3Geom(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["box", "sphere", "capsule", "cylinder", "ellipsoid", "plane", "mesh"] = Field(description="Shape.")
@@ -362,7 +393,8 @@ class S3Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: int = Field(description="Body id (index).")
     name: str = Field(description="Name (an object's without `obj_`; an articulated part `object/link`).")
-    kind: Literal["world", "robot", "object"] = Field(description="What it belongs to.")
+    kind: Literal["world", "robot", "object", "ghost"] = Field(description="What it belongs to (ghost: a copy at a "
+                                                                          "goal, POST /ghosts).")
     parent: int = Field(description="Parent body id (-1: none). Informational: place bodies by their own poses.")
     dynamic: bool = Field(description="Moves (streamed); false: its `pose` is fixed.")
     pose: list[float] = Field(description="World pose [x, y, z, qx, qy, qz, qw] when the scene was made.")
@@ -399,6 +431,8 @@ class S3Scene(BaseModel):
     generation: int = Field(description="The sim model's generation.")
     cell: float = Field(description="m, visual mesh simplification (vertex clustering).")
     model_version: Optional[str] = Field(description="The description's model_version.")
+    ghosts: list[dict] = Field(description="Per declared ghost: {name, body, subtree, bodies (scene ids), sources "
+                                           "(the bodies they copy)}.")
 
 
 class S3Frame(BaseModel):
@@ -407,6 +441,8 @@ class S3Frame(BaseModel):
     reset_seq: int = Field(description="The world's resets since start.")
     scene_id: str = Field(description="The scene these poses index (fetch /scene3d again on a change).")
     poses: list[list[float]] = Field(description="Per dynamic body, in `dynamic` order: [x, y, z, qx, qy, qz, qw].")
+    colors: Optional[dict[str, list[float]]] = Field(None, description="Slot (index in `dynamic`) -> rgba 0..1: this "
+                                                                       "frame's colour for that body (alpha 0: hidden).")
 
 
 class S3CompatModel(BaseModel):
@@ -649,10 +685,31 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
                 await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
+    # -- ghosts --------------------------------------------------------------------------------------------
+
+    @app.get("/ghosts", response_model=GhostsOut, tags=["markers"], summary="Every ghost (a body copy at a goal)")
+    async def ghosts():
+        return {"ghosts": node.ghosts.list()}
+
+    @app.post("/ghosts", response_model=GhostsPut, tags=["markers"],
+              summary="Add or replace ghosts: a body (and its subtree) drawn at a goal pose in a colour you pick")
+    async def post_ghosts(body: GhostsIn):
+        gs = [g.model_dump(exclude_none=True) for g in body.ghosts]
+        return await call(node.put_ghosts, gs, body.source, body.replace)
+
+    @app.delete("/ghosts", response_model=MarkersRemoved, tags=["markers"],
+                summary="Remove every ghost, or one source's (`?source=`)")
+    async def clear_ghosts(source: Optional[str] = Query(None, description="Only this source's ghosts")):
+        return {"removed": node.ghosts.remove(source=source)}
+
+    @app.delete("/ghosts/{name:path}", response_model=MarkersRemoved, tags=["markers"], summary="Remove a ghost")
+    async def delete_ghost(name: str):
+        return {"removed": node.ghosts.remove(name)}
+
     # -- rigid scene (rigid_scene.v1, docs/scene3d.md) ---------------------------------------------------
 
     def s3(cell: float, crease: float):
-        return rigid.build(node.world, cell, crease)
+        return rigid.build(node.world, cell, crease, node.ghosts.declared())
 
     CELL = Query(rigid.DEFAULT_CELL, ge=0, le=0.05, description="m, visual mesh simplification (0: as compiled)")
     CREASE = Query(30.0, ge=0, le=180, description="deg, outline edges: faces at least this far apart")
@@ -687,11 +744,11 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
             have = rigid.Poses(index)
         return have
 
-    @app.get("/scene3d/frame", response_model=S3Frame, tags=["view"],
+    @app.get("/scene3d/frame", response_model=S3Frame, response_model_exclude_unset=True, tags=["view"],
              summary="The dynamic bodies' world poses now (JSON)")
     async def scene3d_frame(cell: float = CELL, crease_deg: float = CREASE):
         p = s3_poses(cell, crease_deg, None)
-        return p.frame(node.world).to_json()
+        return p.frame(node.world, node.ghosts.live()).to_json()
 
     @app.get("/scene3d/stream", tags=["view"], response_class=StreamingResponse,
              summary="Pose frames at `hz`: binary RSF1 frames back to back (format=bin), or JSON lines",
@@ -706,7 +763,7 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
             while True:
                 t0 = time.monotonic()
                 p = await asyncio.to_thread(s3_poses, cell, crease_deg, p)
-                f = p.frame(node.world)
+                f = p.frame(node.world, node.ghosts.live())
                 yield encode_frame(f) if format == "bin" else json.dumps(f.to_json(), separators=(",", ":")) + "\n"
                 await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
         return StreamingResponse(gen(), media_type="application/octet-stream" if format == "bin"
@@ -737,7 +794,7 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
                     lines = s3compat.StateLines(p.index, role)
                     base_i = next((k for k, i in enumerate(p.index["dynamic"])
                                    if p.index["bodies"][i]["name"] == "base_link"), None)
-                f = p.frame(node.world)
+                f = p.frame(node.world, node.ghosts.live())
                 base = None if base_i is None else f.poses[base_i]
                 yield json.dumps(lines.line(f, base, node.overlays()), separators=(",", ":")) + "\n"
                 await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))

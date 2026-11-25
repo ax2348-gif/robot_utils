@@ -58,12 +58,15 @@ def test_scene_builder_blob_round_trips_and_ids_follow_content():
 def test_frames_encode_compactly_and_decode():
     p = np.random.default_rng(0).normal(size=(30, 7))
     f = Frame(7, 12.5, 3, "0123456789abcdef", p)
-    data = encode_frame(f) + encode_frame(Frame(8, 12.6, 3, "0123456789abcdef", p[:2]))
-    assert len(data) == frame_bytes(30) + frame_bytes(2) and frame_bytes(30) == 872
+    data = encode_frame(f) + encode_frame(Frame(8, 12.6, 3, "0123456789abcdef", p[:2], {1: [1, 0.5, 0, 0.4]}))
+    assert len(data) == frame_bytes(30) + frame_bytes(2, 1) and frame_bytes(30) == 872
     g, used = decode_frame(data)
-    assert (g.seq, g.t, g.reset_seq, g.scene_id) == (7, 12.5, 3, "0123456789abcdef")
+    assert (g.seq, g.t, g.reset_seq, g.scene_id, g.colors) == (7, 12.5, 3, "0123456789abcdef", {})
     assert np.allclose(g.poses, p, atol=1e-5) and used == frame_bytes(30)
-    assert decode_frame(data[used:])[0].poses.shape == (2, 7)
+    h, _ = decode_frame(data[used:])
+    assert h.poses.shape == (2, 7) and list(h.colors) == [1]
+    assert np.allclose(h.colors[1], [1, 0.5, 0, 0.4], atol=1 / 255)
+    assert h.to_json()["colors"] == {"1": [1.0, 0.502, 0.0, 0.4]}
     with pytest.raises(ValueError):
         decode_frame(data[:40])
 
@@ -93,6 +96,16 @@ def test_compat_lines_put_every_body_as_primitives_in_its_frame():
     (box,) = compat.StateLines(idx, "visual").line(Frame(1, 0, 0, "", pose))["objects"]["arm"]["geom"]
     assert box["half_size"] == [0.1, 0.2, 0.3] and box["origin"]["xyz"] == [1, 0, 0]   # the mesh's bounds
     assert line["base"] == [1, 2, 0, 0, 0, 0, 1] and line["overlays"] == {"x": 1} and line["model_version"]
+
+
+def test_compat_colour_overrides_recolour_and_hide():
+    sb = SceneBuilder("t")
+    sb.add_body("a", "ghost", [0] * 6 + [1], True, geoms=[{"type": "sphere", "radius": 0.1, "rgba": [1, 1, 1, 1]}])
+    sb.add_body("b", "ghost", [0] * 6 + [1], True, geoms=[{"type": "sphere", "radius": 0.1}])
+    idx, _ = sb.build()
+    pose = np.tile([0, 0, 0, 0, 0, 0, 1.0], (2, 1))
+    o = compat.StateLines(idx).line(Frame(1, 0, 0, "", pose, {0: [1, 0, 0, 0.5], 1: [0, 0, 0, 0]}))["objects"]
+    assert list(o) == ["a"] and o["a"]["geom"][0]["rgba"] == [1, 0, 0, 0.5]
 
 
 def test_compose_matches_rotation_then_translation():
@@ -170,6 +183,43 @@ def test_articulated_object_validation(world):
             world.add_object({"name": "bad", "shape": "articulated", "links": links})
 
 
+def test_ghosts_copy_a_subtree_at_its_goal_and_hide_when_stale(world):
+    from robot_utils.nodes.sim import rigid
+    from robot_utils.nodes.sim.viz import Ghosts
+    from robot_utils.scene3d.pose import compose
+    t = [0.0]
+    gh = Ghosts(clock=lambda: t[0])
+    names = {world.m.body(i).name for i in range(world.m.nbody)}
+    with pytest.raises(ValueError):
+        gh.put([{"name": "g", "body": "nope", "relative": [0] * 6 + [1]}], names)
+    with pytest.raises(ValueError):
+        gh.put([{"name": "g", "body": "arm_end_link"}], names)          # no pose
+    delta = [0.05, 0, 0, 0, 0, np.sin(0.2), np.cos(0.2)]               # 5 cm along the link's x, turned 0.4 rad
+    gh.put([{"name": "goal", "body": "arm_end_link", "relative": delta, "rgba": [1, 0.8, 0, 0.4], "ttl": 0.5}],
+           names)
+    idx, _ = rigid.build(world, ghosts=gh.declared())
+    (g,) = idx["ghosts"]
+    assert len(g["bodies"]) >= 3                                       # the end link and the fingers
+    kinds = {idx["bodies"][i]["kind"] for i in g["bodies"]}
+    assert kinds == {"ghost"} and all(i in idx["dynamic"] for i in g["bodies"])
+    poses = rigid.Poses(idx)
+    f = poses.frame(world, gh.live())
+    m, d = world.m, world.d
+    x = lambda b: np.concatenate([d.xpos[b], d.xquat[b][[1, 2, 3, 0]]])  # noqa: E731
+    root = x(g["sources"][0])
+    for gid, src in zip(g["bodies"], g["sources"]):
+        slot = idx["dynamic"].index(gid)
+        # root * delta * inv(root) * link: inv(root) * link = (R^T (p - p_root), q_root^-1 q)
+        exp = compose(compose(root, delta), compose(np.concatenate([[0, 0, 0], root[3:] * [-1, -1, -1, 1]]),
+                                                    np.concatenate([x(src)[:3] - root[:3], x(src)[3:]])))
+        assert np.allclose(f.poses[slot][:3], exp[:3], atol=1e-6), m.body(src).name
+        assert f.colors[slot] == [1, 0.8, 0, 0.4]
+    t[0] = 1.0                                                         # not posted again within its ttl: hidden
+    f = poses.frame(world, gh.live())
+    assert all(f.colors[idx["dynamic"].index(i)][3] == 0 for i in g["bodies"])
+    assert rigid.build(world)[0]["scene_id"] != idx["scene_id"]       # without the ghost: another scene
+
+
 # -- HTTP ------------------------------------------------------------------------------------------------------
 
 @pytest.fixture
@@ -223,6 +273,31 @@ def test_http_scene_blob_frames_and_compat(api):
     assert line["model_version"] == idx["scene_id"] and len(line["base"]) == 7
     assert {"cabinet/drawer_high", "table", "base_link", "cube"} <= set(line["objects"])
     assert "markers" in line["overlays"]
+
+
+def test_http_ghosts_in_scene_frames_compat_and_robot_state(api):
+    c, node = api
+    assert c.post("/ghosts", json={"ghosts": [{"name": "g", "body": "nope", "relative": [0] * 6 + [1]}]}).status_code == 400
+    r = c.post("/ghosts", json={"source": "t", "ghosts": [{"name": "goal", "body": "arm_end_link",
+                                                          "relative": [0.02, 0, 0, 0, 0, 0, 1], "rgba": [1, 0, 0, 0.3],
+                                                          "ttl": 30}]})
+    assert r.json() == {"names": ["goal"], "count": 1}
+    idx = c.get("/scene3d").json()
+    gb = idx["ghosts"][0]["bodies"]
+    assert all(idx["bodies"][i]["kind"] == "ghost" for i in gb)
+    f = c.get("/scene3d/frame").json()
+    slot = idx["dynamic"].index(gb[0])
+    assert f["colors"][str(slot)] == [1, 0, 0, 0.3]
+    (fb,) = read_stream(c, "/scene3d/stream?hz=100", 1, True)
+    assert np.allclose(fb.colors[slot], [1, 0, 0, 0.3], atol=1 / 255)
+    (line,) = read_stream(c, "/scene3d/compat/stream?hz=100", 1, False)
+    ghost = [k for k in line["objects"] if k.startswith("ghost:goal/")]
+    assert ghost and line["objects"][ghost[0]]["geom"][0]["rgba"] == [1, 0, 0, 0.3]
+    rs = c.get("/robot_state").json()
+    assert set(ghost) <= set(rs["objects"]) and rs["objects"][ghost[0]]["fixed"] is False
+    assert c.get("/ghosts").json()["ghosts"][0]["live"] is True
+    assert c.delete("/ghosts", params={"source": "t"}).json() == {"removed": 1}
+    assert not any(k.startswith("ghost:") for k in c.get("/robot_state").json()["objects"])
 
 
 def test_http_articulated_object_and_robot_state_links(api):

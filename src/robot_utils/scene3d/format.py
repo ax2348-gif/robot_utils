@@ -16,9 +16,12 @@
   (m) from the simulated surface the mesh may be off by after simplification, when known.
 - ``dynamic``: the ids of the bodies that move, in the order of the pose stream.
 
-**Frame** (streamed): the dynamic bodies' world poses. Binary, little-endian, 32-byte header ``RSF1``, u32 seq,
-f64 t (the publisher's clock), u32 reset_seq, u32 n, the first 8 bytes of ``scene_id`` (hex-decoded); then n x 7
-float32 (x, y, z, qx, qy, qz, qw). A viewer whose scene_id differs fetches the scene again.
+**Frame** (streamed): the dynamic bodies' world poses, and colour overrides. Binary, little-endian, 32-byte header
+``RSF1``, u32 seq, f64 t (the publisher's clock), u32 reset_seq, u16 n, u16 m, the first 8 bytes of ``scene_id``
+(hex-decoded); then n x 7 float32 (x, y, z, qx, qy, qz, qw); then m x (u32 slot, 4 x u8 rgba): for this frame,
+every geom of dynamic body ``slot`` (its index in ``dynamic``) is drawn in that colour. Alpha < 255 is see-through,
+0 hidden. Frames are stateless: a body without an override is drawn in its geoms' own colours. A viewer whose
+scene_id differs fetches the scene again.
 
 Conventions: z up, metres, quaternions x, y, z, w (as robot_state.v1).
 """
@@ -27,14 +30,14 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 
 SCHEMA = "rigid_scene.v1"
 FRAME_MAGIC = b"RSF1"
-_HEADER = struct.Struct("<4sIdII8s")
+_HEADER = struct.Struct("<4sIdIHH8s")
 CONVENTIONS = {"up": "+z", "units": "m", "quat": "xyzw"}
 GEOM_TYPES = ("box", "sphere", "capsule", "cylinder", "ellipsoid", "plane", "mesh")
 ROLES = ("collision", "visual", "both")
@@ -163,34 +166,50 @@ class Frame:
     reset_seq: int
     scene_id: str
     poses: np.ndarray            # (n, 7): x, y, z, qx, qy, qz, qw
+    colors: dict = field(default_factory=dict)   # dynamic slot -> rgba (0..1), this frame only
 
     def to_json(self) -> dict:
-        return {"seq": self.seq, "t": round(self.t, 4), "reset_seq": self.reset_seq, "scene_id": self.scene_id,
-                "poses": [_r(p) for p in self.poses]}
+        out = {"seq": self.seq, "t": round(self.t, 4), "reset_seq": self.reset_seq, "scene_id": self.scene_id,
+               "poses": [_r(p) for p in self.poses]}
+        if self.colors:
+            out["colors"] = {str(k): _r(v, 3) for k, v in sorted(self.colors.items())}
+        return out
+
+
+def _u8(c) -> bytes:
+    return bytes(int(round(min(1.0, max(0.0, float(x))) * 255)) for x in c)
 
 
 def encode_frame(f: Frame) -> bytes:
     p = np.asarray(f.poses, dtype="<f4").reshape(-1, 7)
+    if len(p) > 0xFFFF or len(f.colors) > 0xFFFF:
+        raise ValueError("a frame holds at most 65535 bodies and colour overrides")
+    cols = b"".join(struct.pack("<I", int(k)) + _u8(v) for k, v in sorted(f.colors.items()))
     return _HEADER.pack(FRAME_MAGIC, f.seq & 0xFFFFFFFF, float(f.t), f.reset_seq & 0xFFFFFFFF, len(p),
-                        bytes.fromhex(f.scene_id[:16].ljust(16, "0"))) + p.tobytes()
+                        len(f.colors), bytes.fromhex(f.scene_id[:16].ljust(16, "0"))) + p.tobytes() + cols
 
 
 def decode_frame(data: bytes) -> tuple[Frame, int]:
     """(the frame, bytes used) from the start of ``data``; ValueError if it is not a whole frame."""
     if len(data) < _HEADER.size:
         raise ValueError("short frame header")
-    magic, seq, t, reset_seq, n, sid = _HEADER.unpack_from(data)
+    magic, seq, t, reset_seq, n, m, sid = _HEADER.unpack_from(data)
     if magic != FRAME_MAGIC:
         raise ValueError(f"bad frame magic {magic!r}")
-    end = _HEADER.size + n * 28
+    end = frame_bytes(n, m)
     if len(data) < end:
         raise ValueError("short frame body")
     poses = np.frombuffer(data, dtype="<f4", count=n * 7, offset=_HEADER.size).reshape(n, 7).astype(float)
-    return Frame(seq, t, reset_seq, sid.hex(), poses), end
+    colors, at = {}, _HEADER.size + 28 * n
+    for _ in range(m):
+        (slot,) = struct.unpack_from("<I", data, at)
+        colors[slot] = [b / 255 for b in data[at + 4:at + 8]]
+        at += 8
+    return Frame(seq, t, reset_seq, sid.hex(), poses, colors), end
 
 
-def frame_bytes(n: int) -> int:
-    return _HEADER.size + 28 * n
+def frame_bytes(n: int, m: int = 0) -> int:
+    return _HEADER.size + 28 * n + 8 * m
 
 
 def mesh_arrays(index: dict, blob: bytes, i: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

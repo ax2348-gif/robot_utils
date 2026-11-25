@@ -58,6 +58,11 @@ def main() -> None:
                                                  "it before an episode; 'none' (the robot) = no reset")
     p.add_argument("--reset-timeout", type=float, default=5.0,
                    help="s: a sim reset waits this long for the estimator's reset in the WBC stream")
+    p.add_argument("--auto-pause", action="store_true",
+                   help="sim only: sim time stops while the operator is neither clutched nor driving the base, and "
+                        "runs at the next grip or stick (switchable on the page)")
+    p.add_argument("--no-ghost", action="store_true",
+                   help="sim only: no gripper ghost at the end effector's goal (on by default; switchable on the page)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "quest_teleop")
     a = p.parse_args()
@@ -67,6 +72,7 @@ def main() -> None:
     from .client import Config, set_top_speed
     from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
+    from .sim_aids import AidsConfig
     from .server import create_app
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=not a.no_headless, gripper=not a.no_gripper)
     try:
@@ -79,7 +85,8 @@ def main() -> None:
                            min_rate=a.min_rate, ar=a.ar, scheme=a.scheme, ctl_timeout=a.ctl_timeout,
                            wait=a.wait, name=a.name, data_dir=a.data_dir or DATA_DIR,
                            log_cap_bytes=int(a.log_cap_mb * 1024 * 1024), sim=off(a.sim),
-                           reset_timeout=a.reset_timeout)
+                           reset_timeout=a.reset_timeout,
+                           aids=AidsConfig(ghost=not a.no_ghost, auto_pause=a.auto_pause))
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "
                                       f"ssh {a.ssh_host}, AR {a.ar})")
 

@@ -33,7 +33,7 @@ MEMORY_LINES = 100000
 FILE_RE = re.compile(r"^events-(\d{8})\.jsonl$")
 EPISODE_RE = re.compile(r"^(\d{8})-(\d{4,})$")
 KINDS = ("button", "armed", "disarmed", "enabled", "disabled", "episode_start", "episode_stop", "episode_abort",
-         "estop", "fault", "hold", "stale", "teleop_start", "teleop_stop", "sim_reset")
+         "estop", "fault", "hold", "stale", "teleop_start", "teleop_stop", "sim_reset", "sim_pause", "sim_resume")
 
 
 def day_of(wall: float) -> str:

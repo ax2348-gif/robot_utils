@@ -114,6 +114,16 @@ the event log; the Pi records nothing else).
   the pending episode (`reset`, its id in `episode`) and leaves the WBC disabled (Y enables and arms, as after X); X,
   an e-stop, a fault, stale input, a B tap or stopping teleop during the sequence cancel it the same way (an enable
   already made is undone). On the robot (no `--sim`) A starts the episode at once, armed.
+- **Sim aids** (`--sim`; `nodes/quest_teleop/sim_aids.py`, the page's sim row, `POST /sim/ghost/{on|off}`,
+  `POST /sim/auto_pause/{on|off}`, `/state` `sim_aids`):
+  - **Goal ghost** (on; `--no-ghost`): the gripper drawn at the WBC's target, coloured by target − measured
+    (green, yellow at half, red from 5 cm or 20°), see-through. Posted to the sim relative to the measured end
+    link (tcp · meas⁻¹ · tgt · tcp⁻¹), so estimator drift cancels; hidden while there is no target.
+  - **Auto pause** (off; `--auto-pause`): sim time stops while the operator is neither clutched nor touching a
+    stick for 0.25 s, and runs again at the next grip or stick. Only while teleop runs, never during an episode's
+    sim reset (it waits on the estimator); the node only resumes what it paused. Events `sim_pause` / `sim_resume`
+    mark the frozen spans for recordings. Measured: 4 s paused leaves the WBC enabled, the estimator healthy and the
+    arm servoing.
 - **Headset (not yet changed):** in body-frozen mode the headset still realigns on A (a new operator-frame revision:
   a discontinuity, which disarms and spoils the press). The plan's *headset* change (A no longer realigns in
   body-frozen mode) is needed before A starts episodes on the real headset.

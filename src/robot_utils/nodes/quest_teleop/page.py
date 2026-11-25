@@ -63,6 +63,8 @@ canvas.ru-plot{width:100%;height:70px}
       <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
       <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
+      <div class="ctl" id="simaids" hidden><button class="ru" id="ghost">Goal ghost: on</button>
+        <button class="ru" id="autopause">Auto pause: off</button><span class="ru-muted" id="aidsnote"></span></div>
       <div class="ctl">top speed <input type="number" id="vmax" step="0.1" min="0.1" max="2" style="width:64px"> m/s
         <input type="number" id="wmax" step="0.1" min="0.1" max="4" style="width:64px"> rad/s
         <button class="ru" id="setspeed">Set</button></div>
@@ -111,6 +113,9 @@ $("#mode3").onclick = () => call("mode/third");
 let headlessOn = true;
 $("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
 $("#mode1").onclick = () => call("mode/first");
+let ghostOn = true, pauseOn = false;
+$("#ghost").onclick = () => call("sim/ghost/" + (ghostOn ? "off" : "on"));
+$("#autopause").onclick = () => call("sim/auto_pause/" + (pauseOn ? "off" : "on"));
 $("#setspeed").onclick = async () => {
   try { err(""); await RU.api("top_speed", {method: "POST", body: {max_speed: +$("#vmax").value, max_omega: +$("#wmax").value}}); }
   catch(e){ err(e.message); }
@@ -147,6 +152,15 @@ RU.sse("events", s => {
   $("#headless").textContent = "Headless left stick: " + (headlessOn ? "on" : "off");
   $("#headless").classList.toggle("live", headlessOn);
   $("#headless").disabled = s.config.mode !== "third";
+  const A = s.sim_aids;
+  $("#simaids").hidden = !A;
+  if (A){
+    ghostOn = A.ghost; pauseOn = A.auto_pause;
+    $("#ghost").textContent = "Goal ghost: " + (ghostOn ? "on" : "off"); $("#ghost").classList.toggle("live", ghostOn);
+    $("#autopause").textContent = "Auto pause: " + (pauseOn ? "on" : "off"); $("#autopause").classList.toggle("live", pauseOn);
+    $("#aidsnote").textContent = (pauseOn ? (A.paused ? "sim paused (idle)" : "sim time stops when neither clutched nor driving") : "")
+      + (A.error ? " · " + A.error : "");
+  }
   $("#mode3").classList.toggle("live", s.config.mode === "third"); $("#mode1").classList.toggle("live", s.config.mode === "first");
   $("#sending").textContent = running ? (T.sending ? `sending · ${T.sent ? T.sent.target : 0} targets` : "silent (holding)") : (T.stop_reason ? "stopped: " + T.stop_reason : "");
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");

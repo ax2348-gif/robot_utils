@@ -31,6 +31,7 @@ from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, 
                      QuestReader, TeleopClient, WbcStream, assert_caps, close_wbc, open_wbc, quest_ctl,
                      set_top_speed, top_speed_caps, x_pressed)
 from .episodes import RESET_TIMEOUT, Episodes
+from .sim_aids import AidsConfig, SimAids
 from .eventlog import CAP_BYTES, TeleopEventLog
 from .oplog import OpLog
 
@@ -208,7 +209,8 @@ class QuestTeleopNode:
                  runner_factory: Optional[Callable] = None, probe: Optional[Callable] = None,
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
-                 log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT):
+                 log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
+                 aids: Optional[AidsConfig] = None):
         """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
         keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it."""
         self.name = name
@@ -239,6 +241,7 @@ class QuestTeleopNode:
         self.eventlog.listeners.append(lambda line: self.hub.state_changed())
         self.episodes = Episodes(self, sim, reset_timeout)
         self.sim = sim
+        self.aids = SimAids(self, sim, aids) if sim else None   # the goal ghost, auto pause (sim_aids.py)
         self.buttons: Optional[EpisodeButtons] = None
         self.wbc_enabled: Optional[bool] = None   # as this node knows it (its own requests, the 1 Hz poll)
         self._known_lock = threading.Lock()
@@ -276,11 +279,15 @@ class QuestTeleopNode:
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
+        if self.aids is not None:
+            self.aids.start()
         self.events.add(f"headset stream {self.quest_host}:{self.quest_port}, ssh host {self.ssh_host!r}, "
                         f"WBC {self.wbc_target}")
 
     def close(self) -> None:
         self.stop_teleop("node shutting down")
+        if self.aids is not None:
+            self.aids.close()
         self._stop.set()
         for t in self._threads:
             t.join(2)
@@ -847,6 +854,7 @@ class QuestTeleopNode:
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,
+            "sim_aids": None if self.aids is None else self.aids.info(),
             "episode": self.episodes.open_episode(),
             "episodes": self.episodes.info(),
             "task": self.episodes.task,

@@ -12,6 +12,8 @@ moving body's pose.
   the cell's diagonal, so ``error`` = cell * sqrt(3) bounds how far the drawn surface's vertices are from the
   model's (a bound on vertex displacement; a measured surface distance is the planned replacement). Hulls are
   exported as MuJoCo computed them (error 0).
+- **Ghosts** (viz.Ghosts): copies of a body subtree (e.g. the gripper) at a goal pose, in the poster's colour:
+  scene bodies of kind ``ghost`` whose poses and colours come with every frame.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ import mujoco
 import numpy as np
 
 from ...scene3d import Frame, SceneBuilder
+from ...scene3d.pose import compose, inverse
 from .viz import GEOM_TYPES, body_kind, cluster
 
 DEFAULT_CELL = 0.002
@@ -57,13 +60,15 @@ def _dims(t: str, size) -> dict:
     return {}
 
 
-def build(world, cell: float = DEFAULT_CELL, crease_deg: float = 30.0) -> tuple[dict, bytes]:
-    """(index, blob) of the world now. Cached per (model generation, cell, static poses): fixed objects can be
-    moved without a recompile, and a static body's pose is part of the scene."""
+def build(world, cell: float = DEFAULT_CELL, crease_deg: float = 30.0, ghosts: tuple = ()) -> tuple[dict, bytes]:
+    """(index, blob) of the world now. Cached per (model generation, cell, static poses, ghosts): fixed objects can
+    be moved without a recompile, and a static body's pose is part of the scene. ``ghosts``: (name, body, subtree)
+    per declared ghost (viz.Ghosts.declared): each adds copies of the body (and its subtree), kind ``ghost``, named
+    ``ghost:<name>/<body>``, after the world's bodies; ``index["ghosts"]`` maps them back."""
     with world.lock:
         m, d = world.m, world.d
         static = [b for b in range(m.nbody) if int(m.body_weldid[b]) == 0]
-        key = (world.generation, round(float(cell), 6), float(crease_deg),
+        key = (world.generation, round(float(cell), 6), float(crease_deg), tuple(ghosts),
                np.round(np.concatenate([d.xpos[static].reshape(-1), d.xquat[static].reshape(-1)]), 6).tobytes())
         cached = getattr(world, "_rigid_cache", None)
         if cached is not None and cached[0] == key:
@@ -87,33 +92,16 @@ def build(world, cell: float = DEFAULT_CELL, crease_deg: float = 30.0) -> tuple[
                     meshes[k] = sb.add_mesh(name, v, f, error=cell * math.sqrt(3) if cell > 0 else 0.0)
             return meshes[k]
 
-        for b in range(m.nbody):
-            name = m.body(b).name
-            kind = body_kind(name)
-            dyn = int(m.body_weldid[b]) != 0
-            pose = list(d.xpos[b]) + _xyzw(d.xquat[b])
-            joint = None
-            if m.body_jntnum[b] == 1:
-                j = int(m.body_jntadr[b])
-                jt = mujoco.mjtJoint(m.jnt_type[j])
-                if jt in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
-                    joint = {"name": m.joint(j).name, "type": "hinge" if jt == mujoco.mjtJoint.mjJNT_HINGE else "slide",
-                             **({"range": [float(x) for x in m.jnt_range[j]]} if m.jnt_limited[j] else {})}
-            bid = sb.add_body(name[4:] if kind == "object" else name, kind, pose, dyn,
-                              parent=int(m.body_parentid[b]) if b else -1, joint=joint)
+        def add_geoms(bid: int, b: int) -> None:
+            """MuJoCo body ``b``'s geoms onto scene body ``bid``."""
             for g in np.flatnonzero(m.geom_bodyid == b):
-                t = GEOM_TYPES.get(mujoco.mjtGeom(m.geom_type[g]))
                 gt = mujoco.mjtGeom(m.geom_type[g])
-                if gt == mujoco.mjtGeom.mjGEOM_PLANE:
-                    t = "plane"
+                t = "plane" if gt == mujoco.mjtGeom.mjGEOM_PLANE else GEOM_TYPES.get(gt)
                 if t is None:
                     continue
                 rgba = m.geom_rgba[g] if m.geom_matid[g] < 0 else m.mat_rgba[m.geom_matid[g]]
                 common = {"pos": m.geom_pos[g], "quat": _xyzw(m.geom_quat[g]), "rgba": rgba}
-                if visual[g]:
-                    role = "visual"
-                else:
-                    role = "collision" if b in has_visual else "both"
+                role = "visual" if visual[g] else ("collision" if b in has_visual else "both")
                 if t == "plane":
                     sb.add_geom(bid, "plane", role=role, half_extents=[float(x) for x in m.geom_size[g][:2]], **common)
                 elif t == "mesh":
@@ -126,27 +114,87 @@ def build(world, cell: float = DEFAULT_CELL, crease_deg: float = 30.0) -> tuple[
                             sb.add_geom(bid, "mesh", role="visual", mesh=mesh(mid, False), **common)
                 else:
                     sb.add_geom(bid, t, role=role, **_dims(t, m.geom_size[g]), **common)
+
+        for b in range(m.nbody):
+            name = m.body(b).name
+            kind = body_kind(name)
+            joint = None
+            if m.body_jntnum[b] == 1:
+                j = int(m.body_jntadr[b])
+                jt = mujoco.mjtJoint(m.jnt_type[j])
+                if jt in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                    joint = {"name": m.joint(j).name, "type": "hinge" if jt == mujoco.mjtJoint.mjJNT_HINGE else "slide",
+                             **({"range": [float(x) for x in m.jnt_range[j]]} if m.jnt_limited[j] else {})}
+            bid = sb.add_body(name[4:] if kind == "object" else name, kind, list(d.xpos[b]) + _xyzw(d.xquat[b]),
+                              int(m.body_weldid[b]) != 0, parent=int(m.body_parentid[b]) if b else -1, joint=joint)
+            add_geoms(bid, b)
+        gmap = []
+        for gname, root, subtree in ghosts:
+            r = m.body(root).id
+            src = [b for b in range(m.nbody) if b == r or (subtree and _descends(m, b, r))]
+            ids = []
+            for b in src:
+                ids.append(sb.add_body(f"ghost:{gname}/{m.body(b).name}", "ghost",
+                                       list(d.xpos[b]) + _xyzw(d.xquat[b]), True))
+                add_geoms(ids[-1], b)
+            gmap.append({"name": gname, "body": root, "subtree": bool(subtree), "bodies": ids, "sources": src})
         index, blob = sb.build()
         index["generation"] = world.generation
         index["cell"] = float(cell)
         index["model_version"] = world.model_info.get("model_version")
+        index["ghosts"] = gmap
     world._rigid_cache = (key, index, blob)
     return index, blob
 
 
+def _descends(m, b: int, root: int) -> bool:
+    while b > 0:
+        b = int(m.body_parentid[b])
+        if b == root:
+            return True
+    return False
+
+
 class Poses:
-    """Frames of one scene: the dynamic bodies' poses from the world now. The scene's body ids are MuJoCo's body
-    ids (the builder adds every body in order)."""
+    """Frames of one scene: the dynamic bodies' poses from the world now (scene body ids below m.nbody are MuJoCo's
+    body ids: the builder adds every body in order), the ghosts' from their posts."""
 
     def __init__(self, index: dict):
         self.index = index
-        self.ids = np.array(index["dynamic"], dtype=int)
+        self.dynamic = list(index["dynamic"])
+        self.slot = {b: k for k, b in enumerate(self.dynamic)}
+        self.ghosts = index.get("ghosts") or []
+        ghost_ids = {i for g in self.ghosts for i in g["bodies"]}
+        self.world_slots = [k for k, b in enumerate(self.dynamic) if b not in ghost_ids]
+        self.world_ids = np.array([self.dynamic[k] for k in self.world_slots], dtype=int)
         self.seq = 0
 
-    def frame(self, world) -> Frame:
+    def frame(self, world, live: dict | None = None) -> Frame:
+        """``live``: name -> ghost (viz.Ghosts.live); a declared ghost that is not live is hidden (alpha 0)."""
+        live = live or {}
         with world.lock:
             d = world.d
-            p = np.concatenate([d.xpos[self.ids], d.xquat[self.ids][:, [1, 2, 3, 0]]], axis=1)
+            p = np.zeros((len(self.dynamic), 7))
+            if len(self.world_ids):
+                p[self.world_slots] = np.concatenate([d.xpos[self.world_ids], d.xquat[self.world_ids][:, [1, 2, 3, 0]]],
+                                                     axis=1)
+            colors = {}
+            for g in self.ghosts:
+                gl = live.get(g["name"])
+                xs = [np.concatenate([d.xpos[b], _xyzw(d.xquat[b])]) for b in g["sources"]]
+                if gl is None:
+                    for i, x in zip(g["bodies"], xs):
+                        p[self.slot[i]] = x
+                        colors[self.slot[i]] = [0.0, 0.0, 0.0, 0.0]
+                    continue
+                root = np.concatenate([d.xpos[g["sources"][0]], _xyzw(d.xquat[g["sources"][0]])])
+                if gl["mode"] == "pose":
+                    G = compose(gl["value"], inverse(root))
+                else:                                   # relative: the goal in the root body's own frame
+                    G = compose(compose(root, gl["value"]), inverse(root))
+                for i, x in zip(g["bodies"], xs):
+                    p[self.slot[i]] = compose(G, x)
+                    colors[self.slot[i]] = list(gl["rgba"])
             t, rs = float(d.time), int(world.reset_seq)
         self.seq += 1
-        return Frame(self.seq, t, rs, self.index["scene_id"], p)
+        return Frame(self.seq, t, rs, self.index["scene_id"], p, colors)
