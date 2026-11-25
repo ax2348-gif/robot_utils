@@ -14,6 +14,9 @@ lights and scene objects. Every physics step it first runs the per-component con
   arm node's hard joint speed caps (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
   (``qfrc_bias`` as a joint torque, so the chassis carries the arm's weight) keeps the joints on it.
   The gripper's reference follows its goal at ``gripper_speed``; the fingers are force-capped.
+- **arm** (dynamic fidelity, opt-in): each motor applies its MIT frame as joint torque (kp, kd, tau_ff as the node
+  sends them, clamped at the robot config's torque limits; no gravity feedforward of the sim's own), the gripper
+  motor likewise on the finger; off / disabled / watchdog: zero torque (``_arm_dynamic``).
 
 Time: ``step(n)`` advances by hand (paused); ``run(rtf)`` locks the sim clock to the wall clock in a
 thread. The world never touches a node: backends reach it through ``protocol`` sockets (node.py).

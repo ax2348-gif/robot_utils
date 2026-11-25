@@ -44,11 +44,59 @@ The robot never collides with itself; it collides with the floor and objects.
 | base | hybrid (decided) | per module a steer position servo and a wheel velocity servo, each torque-capped at what the SPARK's duty and current limits allow (9.0 N m steer, 3.5 N m wheel). Their references follow the SPARK setpoints within the robot's own limits: steer rate 7.4 rad/s, wheel speed 1.87 m/s, wheel acceleration 10.7 m/s² (see "Limits come from the robot config"). The chassis is a free body moved by wheel–floor friction; soft wheel contact (`solref 0.02 s`) is the modules' compliance (all four wheels stay loaded, tested). A disabled drive coasts (no torque), a disabled steer holds its angle; no setpoints for 0.1 s disables every module (a lost heartbeat). |
 | arm | kinematic | the reference follows each MIT position setpoint within the arm node's hard joint speed caps (2, 2, 2, 6, 6, 6 rad/s); a joint sent kp = 0 holds where it is. A stiff servo plus a `qfrc_bias` feedforward applied as joint torque keeps the joints on it, so the chassis carries the arm's weight and reaction. No MIT frame for 0.1 s while enabled: status 0xD (the motors' CAN watchdog); a lost backend connection likewise. |
 | gripper | kinematic | the motor angle follows its goal (kp > 0), or closes / opens under a torque command, at `gripper_speed`; the fingers (gap = −q · 16 mm/rad) are force-capped, so they stop on an object. |
+| arm | **dynamic** (opt-in) | each Damiao motor applies its latest MIT frame as joint torque every physics step (1 kHz): `tau = kp (q − q_m) + kd (qd − qd_m) + tau_ff`, clamped at the motor's torque limit (27 N m joints 1–3, 7 N m joints 4–6: robot config). **No gravity feedforward of the sim's own**: the node's `tau_ff` is the only one, so its model error shows as droop. kp = 0 floats (kd and `tau_ff` only). Off, disabled or after the watchdog: zero torque (the node's "damping"): the arm sinks against the joint friction onto its stops. Watchdog, status codes and the enable state across a reset as kinematic. Below: "Dynamic arm". |
+| gripper | **dynamic** (with the arm) | the gripper motor's MIT law drives the left finger (x = −q · 8 mm; the right one follows through the mimic), clamped at the 4310's 7 N m (875 N on the finger); off: zero torque. |
 | cameras | rendered | head and wrist: colour (JPEG, as the camera's MJPG) and depth (Y16 mm, 0 outside `depth_range`) at the configured size / rate / field of view, rendered from the links `<camera>_color_optical` / `_depth_optical`. `t_sensor` = the host time of the rendered state, `t_capture` = `t_sensor` + the measured delay (head colour 30 ms, depth 17 ms, wrist 47 ms). No noise or exposure yet. |
 | IMU | MuJoCo sensors | the head camera's (`cameras.camera.imu`): accelerometer (specific force: +9.81 m/s² up at rest) and gyro at the link's origin, in its frame (the depth optical frame), sampled every physics step (1 kHz); `t_sensor` = the host time the sample stands for (real-time mode: the wall-clock anchor), `t_capture` = + `delay` (2 ms). No bias, noise or temperature model. The camera node's attitude filter and the estimator's fused heading run on it unchanged. The wrist camera has none (as the Gemini 305). |
 
-`dynamic` fidelity (MIT motors, backlash, friction, gripper contact law) is the next step: the config already
-has `components.arm.fidelity`; anything but `kinematic` is refused for now.
+`components.arm.fidelity` is `kinematic` (the default, unchanged) or `dynamic`
+(`deploy/sim/sim_dynamic_arm.yaml`; `ROBOT_SIM_CONFIG=deploy/sim/sim_dynamic_arm.yaml python -m
+robot_utils.nodes.sim.stack`); anything else is refused. `hello` on `arm.sock` reports it.
+
+### Dynamic arm
+
+What becomes physical: the commanded-vs-measured deflection (`q_cmd − q`: effort / kp), contact forces at handles
+and objects (a push gives deflection ≈ contact torque / kp), the WBC's lead bound (its `lead_tau` is now a real
+torque), the droop from the node's gravity model.
+
+- **The law.** One affine MuJoCo actuator per joint, `force = ctrl + b1 q + b2 qd` with, per step, `b1 = −kp`,
+  `b2 = −kd`, `ctrl = kp q_des + kd qd_des + tau_ff`: exactly the MIT law, with kd treated implicitly by
+  `implicitfast` (the wrist's kd 2 on its ~1e-3 kg m² is unstable explicitly at 1 kHz). `forcerange` is the torque
+  clamp. The reading's `tau` is the motor's (clamped) torque; `g_tau` the gripper motor's, MIT sign (closing > 0).
+- **Transport.** A frame reaches the motor `command_delay` (2 ms, ESTIMATE: serial bridge + CAN) after the world
+  receives it (a per-frame queue); the watchdog counts from receipt. The rest of the end-to-end lag (the node's 10 ms
+  tick, its pipelined read) comes from the stack itself, so the 19–29 ms end-to-end figure is not put in here.
+- **Reset.** The settle (0.3 s) holds the arm at the start pose with the kinematic servo (a teleport); then the
+  motors' enable state carries over as before, with no frame until the node sends one (zero torque meanwhile).
+- **URDF effort limits** (MuJoCo's per-joint `actuatorfrcrange`) are lifted in dynamic mode: the actuator carries the
+  motor's limit. They equal it on the arm (27 / 7 N m); the finger's URDF effort (8 N) is no motor limit.
+
+| parameter | value | source |
+|---|---|---|
+| torque limit | 27, 27, 27, 7, 7, 7 N m; gripper 7 N m | robot config: each joint's motor model in the gain profile's hardware file (`rebotarm_dm_soft.yaml`: 4340P, 4310) → `arm/config.py` `MOTOR_TORQUE`: min(datasheet peak, TMAX of the MIT frame, motorbridge's model table 28 / 10) (`motor_torque_limits()`, `limits.py`); agrees with the URDF's effort limits |
+| kp, kd, tau_ff | whatever the node sends (soft: kp 72, 72, 96, 18, 18, 18, kd 8, 8, 8, 2, 2, 2; gripper 1.0 / 0.05) | the node (its profile, its gravity model × `tau_scale`) |
+| `armature` | 0.03, 0.03, 0.03, 0.001, 0.001, 0.001 kg m²; gripper 0.001 | ESTIMATE (rotor inertia × ratio², 4340P 40:1, 4310 10:1) |
+| `viscous` | 0.1 ×3, 0.02 ×3 N m s/rad; gripper 0.1 | ESTIMATE (gripper: about the ~0.5 s stroke seen on the robot) |
+| `coulomb` | 0.3 ×3, 0.05 ×3 N m; gripper 0.05 | ESTIMATE (MuJoCo `frictionloss`) |
+| `command_delay` | 2 ms | ESTIMATE |
+| watchdog, reply latency | 0.1 s, 7 ms | as kinematic |
+
+**Measured (MacBook, 2026-11-24).** Holding the start pose (0, −0.3, −0.6, 0, 0, 0) on the soft profile:
+with MuJoCo's own gravity as `tau_ff` within the friction deadband (< 0.002 rad); with the node's model
+(pinocchio × `tau_scale`, 0.84 on joints 4, 5) the wrist pitch droops 0.033–0.037 rad (~2°) and the elbow
+0.007–0.009 rad (MuJoCo's model carries more on joints 3, 4: 7.14 / 2.16 N m against the node's 6.39 / 1.53);
+without `tau_ff` 0.13 rad on the wrist (g / kp). Pushing the hand into a fixed box with joint 1: 0.126 rad of
+deflection, 9.0 N m motor torque, 8.8 N m carried by the contact (the rest is joint friction). In the stack (arm,
+WBC enabled and holding, gripper check passed, no fault): `/state.arm.lead` `torque` at rest −0.58 N m (joint 3),
+−0.36 N m (joint 4) of the 6 / 1.5 N m budgets, `binding` false. Physics cost: ~25 k steps/s alone.
+
+**What the node and WBC show against a compliant arm** (not bugs of the sim):
+- an arm that was never enabled (the stack's start: uninitialized, motors off) sinks onto its joint stops before the
+  first enable, as the real one would;
+- floating (kp = 0 with the node's gravity feedforward) drifts: the model error is not held by anything but friction
+  (tens of degrees within seconds on the wrist at these friction estimates);
+- the WBC seeds its commanded joints from the measured ones at enable, so every enable steps the hold down by the
+  current droop (~0.02 rad on the wrist each time).
 
 ## The default scene
 
@@ -114,14 +162,17 @@ their own, tighter settings on top, as on the robot.
 | steer torque | 9.0 N m | min(`STEER_MAX_OUTPUT` × NEO 550 stall torque, `STEER_CURRENT_LIMIT` (20 A) × its torque per amp) × `STEER_REDUCTION` |
 | arm joint speeds | 2, 2, 2, 6, 6, 6 rad/s | `arm/config.py` `HARD.joint_vel`, as the arm node loads it (`load_settings()`: `~/.config/robot_utils/arm.yaml` `joint_vel_max` overrides) |
 | gripper force | 120 N per finger | `arm/config.py` `HARD_MAX_FORCE` |
+| arm motor torque (dynamic) | 27, 27, 27, 7, 7, 7 N m; gripper 7 N m | `arm/config.py` `motor_torque_limits()`: the profile's motor models (4340P, 4310), min(datasheet peak, MIT TMAX) |
 
 The motor figures (`VORTEX_STALL_TORQUE` / `_CURRENT`, `NEO550_FREE_RPM`, `NEO550_STALL_TORQUE` / `_CURRENT`,
 `STEER_REDUCTION`) are REV datasheet values, added to `swerve/constants.py` next to the existing `VORTEX_FREE_RPM`.
 The simulated SPARK is a speed clamp plus a torque cap (the two ends of the duty cap's torque–speed line, slightly
 stronger than the motor in between). Not from the robot config, so listed as estimates: `gripper_speed` (6 rad/s of
 the gripper motor: the robot sets no speed, the node sends the goal through MIT PD; ~0.5 s full stroke), the arm's
-`watchdog` (0.1 s: the Damiao motors' CAN timeout) and `reply_latency` (7 ms, measured). Sim-only keys:
-servo stiffness / damping and armatures, contact and friction.
+`watchdog` (0.1 s: the Damiao motors' CAN timeout) and `reply_latency` (7 ms, measured), the dynamic arm's
+`components.arm.dynamic` (armature, friction, command delay: "Dynamic arm"). The Damiao peak torques (27 / 7 N m) are
+datasheet values added to `arm/config.py`, as the REV ones. Sim-only keys: servo stiffness / damping and armatures,
+contact and friction.
 
 Before this (2026-11-21) the sim used the pose_servo planner's caps (4π rad/s steering, 3 m/s, 0.85 m/s²) and
 stall-torque estimates: it steered faster and pushed harder than the robot can.
@@ -363,7 +414,8 @@ with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 ## Config (`default_sim.yaml`)
 
 `physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (servo gains, armature, wheel contact,
-start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
+start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose; `dynamic`: armature,
+viscous, coulomb, gripper, command_delay), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
 `delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene.objects`,
 `time` (`run`, `rtf`).
 
@@ -380,7 +432,9 @@ macOS's GL lacks `ARB_clip_control`, so MuJoCo warns that depth precision is lim
 
 ## Not done yet
 
-- Dynamic fidelity (MIT PD motors, torque limits, backlash, friction, gripper force law), sensor noise (camera,
+- The dynamic arm's estimates measured on the robot (joint friction, rotor inertia, transport delay, the passive
+  arm's sink rate); backlash; the motors' torque–speed line (back-EMF: only the peak torque is a limit); the
+  motor's own fault codes (overcurrent, overtemperature); sensor noise (camera,
   IMU bias / noise), fault injection (dropped motor replies, camera stalls), friction / mass changes at run time.
 - The Docker stack's GPU override and Tailscale sidecar are written but untested (no NVIDIA host / auth key here).
 - Rendering parallelism (all four streams at 30 fps with the full meshes); the 3D view's own mesh rendering is
