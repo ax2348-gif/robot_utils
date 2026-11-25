@@ -1,6 +1,6 @@
 # The rings agent's stack (tools/agent_rings/README.md): the sim stack's registry (robot_utils/nodes/sim/
-# stack_nodes.yaml) without the whole-body controller (its UDP target port would bypass the agent's proxy, and it
-# shares leases with pose_servo) and without the headset teleop. Run socket-only (--port 0) under its own runtime dir.
+# stack_nodes.yaml) without the headset teleop, and the whole-body controller with UDP off (its targets come through
+# dgram_relay.py's socket only). Run socket-only (--port 0) under its own runtime dir.
 nodes:
   - {name: description, kind: description, start: {module: robot_utils.nodes.description,
                                                    args: [--data-dir, ~/.local/share/robot_utils/sim/description]}}
@@ -12,6 +12,8 @@ nodes:
   - {name: power, kind: power, start: {module: robot_utils.nodes.power, args: [--fake]}}
   - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
+  # whole-body control (docs/wbc.md): it and pose_servo hold the same leases while enabled, one at a time
+  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc, args: [--udp-host, none, --timing, lenient]}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d, args: [--allow-nominal]}}
   - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface,
                                                            args: [--no-require-imu]}}

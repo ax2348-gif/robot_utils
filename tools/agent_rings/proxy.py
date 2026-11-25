@@ -26,7 +26,7 @@ import httpx
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 BLOCKED = [
@@ -36,6 +36,7 @@ BLOCKED = [
     re.compile(r"^/api/frontend/restart$"),
     re.compile(r"^/api/observe"),
 ]
+SESSION = re.compile(r"^/nodes/wbc/session/?$")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "host", "content-length"}
 
@@ -51,7 +52,7 @@ def blocked(path: str) -> bool:
     return any(p.search(path.lower()) for p in BLOCKED)
 
 
-def make_app(upstream: str, log_path: str) -> Starlette:
+def make_app(upstream: str, log_path: str, rewrite_session: str | None = None) -> Starlette:
     if upstream.startswith("unix:"):
         transport = httpx.AsyncHTTPTransport(uds=upstream[5:])
         base = "http://robot"
@@ -80,6 +81,19 @@ def make_app(upstream: str, log_path: str) -> Starlette:
             write({**rec, "status": 502, "error": str(e)[:200]})
             return JSONResponse({"detail": f"robot unreachable: {e}"}, 502)
         out_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP}
+        if rewrite_session and SESSION.match(path) and up.status_code == 200:
+            # the WBC's session names its own target socket (out of the agent's reach): name the relay's instead
+            raw = await up.aread()
+            await up.aclose()
+            try:
+                body = json.loads(raw)
+                body["unix_socket"] = rewrite_session
+                body["udp_port"] = None
+                raw = json.dumps(body).encode()
+            except ValueError:
+                pass
+            write({**rec, "status": up.status_code, "bytes": len(raw), "ms": round((time.time() - t0) * 1e3, 1)})
+            return Response(raw, status_code=up.status_code, media_type="application/json")
         size = [0]
 
         async def body_iter():
@@ -107,8 +121,10 @@ def main() -> None:
     p.add_argument("--uds", default=None, help="listen on this unix socket instead of TCP (the agent's sandbox then "
                                               "allows that one socket: no loopback TCP, so no other stack, is reachable)")
     p.add_argument("--log", required=True)
+    p.add_argument("--wbc-socket", default=None,
+                   help="the target socket to name in the WBC's POST /session reply (dgram_relay.py's)")
     a = p.parse_args()
-    app = make_app(a.upstream, a.log)
+    app = make_app(a.upstream, a.log, a.wbc_socket)
     if a.uds:
         import os
         if os.path.exists(a.uds):

@@ -25,6 +25,10 @@ cameras and by trying things.
 - **Nodes:**
   - `agent_interface`: built for agents. Read its briefing first: `GET /nodes/agent_interface/guide.md`.
   - `arm`: the arm and gripper: servo, track and stream motions, IK, state, the lease.
+  - `wbc`: whole-body control: the arm and base together toward end-effector targets in the world frame (streamed
+    targets, feedforward twists, chunks). Its HTTP API is at `/nodes/wbc/` like the others; its **target datagrams**
+    go to the unix datagram socket `/tmp/ara/wbc.target.sock` (also in `$WBC_TARGET_SOCKET`; `POST /session` names
+    it). There is no UDP. The WBC and `pose_servo` take the same leases: use one at a time.
   - `pose_servo`: base motion goals.
   - `swerve`: the base's wheels; low level, mostly for reading.
   - `estimator`: the base's pose.
