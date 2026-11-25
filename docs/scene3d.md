@@ -116,6 +116,29 @@ edge at y -1.25: drive right to it): two drawers sliding out 28 cm and a door hi
 ~110 deg, each with a 12 mm bar handle 35 mm off the front (inside the gripper's 49.6 mm), and a cube in the upper
 drawer.
 
+## Measured headset budget (Quest 3S, 2026-11-24)
+
+quest_env `render_bench` (raw: quest_env `bench_results/quest3s-20261124-194313.jsonl`): 100 moving bodies over
+passthrough, stereo, 1280 x 1340 per eye, 72 Hz, GPU time of our draws per frame (both eyes):
+
+| triangles (edges) | wire | hidden-line | flat |
+|---|---|---|---|
+| 96 k (79 k) | 1.3 ms | 1.8 ms | 0.6 ms |
+| 198 k (176 k) | 3.0 ms | 4.0 ms | 1.2 ms |
+| 391 k (354 k) | 5.0 ms | 5.9 ms | 2.4 ms |
+| 783 k (715 k) | 8.5 ms, **26 % frames missed** | 11.6 ms, **44 % missed** | (run invalid) |
+| 1.59 M (1.45 M) | 16 ms, 63 % missed | 22 ms, 69 % missed | 6.0 ms, 0 missed |
+
+- **Lines are the cost, not triangles**: 1.6 M flat-shaded triangles take 6 ms; 1.45 M lines take 16. The budget is
+  set by outline edges: ~350 k edges (hidden-line, ~400 k triangles) runs with no missed frames.
+- **Frames go missing from ~8 ms of our GPU time**, well under the 13.9 ms frame: the compositor and passthrough
+  share the GPU. Budget ~6 ms of drawing.
+- **Draw calls**: ~2 µs of CPU each (1000 per eye: 3.2 ms, 4000 per eye: 8.6 ms, still no misses). Past ~1000
+  bodies, batch or instance them.
+- The test meshes are noisy spheres with an edge for nearly every triangle; decimated CAD at a 30° crease has far
+  fewer (the sim's robot: 0.6 edges per triangle), so real scenes fit more triangles per edge budget. 90 Hz is not
+  measured (the frame there is 11.1 ms).
+
 ## Next
 
 - **Headset renderer** (quest_env): fetch and cache the scene by `scene_id`, meshes and edges in GPU buffers, one
