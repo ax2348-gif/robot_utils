@@ -190,9 +190,11 @@ class Cameras:
                 if now > c.active_until or not c.streams:
                     continue
                 for s in sorted(c.streams):
+                    period = 1.0 / float(c.cfg[s]["fps"])
+                    if c.next_due[s] > t + period:     # sim time went back (a reset to 0): restart the schedule, or the
+                        c.next_due[s] = t              # stream waits as long as the world had run (seen 2026-11-24)
                     if t + 1e-9 < c.next_due[s]:
                         continue
-                    period = 1.0 / float(c.cfg[s]["fps"])
                     nxt = c.next_due[s] + period
                     c.next_due[s] = nxt if 0 < c.next_due[s] and nxt > t else t + period   # behind: skip, never burst
                     try:
