@@ -5,14 +5,18 @@ effector the commanded joints, the target of this tick and its hints) and gets a
 the arm joint steps of this tick, the solve status, what limited the motion, diagnostics; optionally a planned
 trajectory). Model, target buffers, blending, hints, safety and I/O stay in the node.
 
-**QP (v1).** Decision vector: the velocity ``x`` of ``[x, y, yaw (world), arm joints]`` (the step is ``x dt``).
+**QP (v1).** One QP per tick (no second stage; docs/plans/wbc_v1.md "Formulation"). Decision vector: the velocity
+``x`` of ``[x, y, yaw (world), arm joints]`` (the step is ``x dt``), plus four auxiliary variables (the two band
+slacks, the base speed and yaw-rate norms of the flat cost).
 
 Costs: per EE pose tracking ``|W (J x - (v_ff + K e))|²`` (separate position / orientation weights, the
 orientation rows in the TCP's own axes so a mask can drop one, Levenberg–Marquardt damping ``lm |W e|²`` plus
-adaptive damping on the arm growing as its manipulability falls); base regularisation scheduled by the EE's
-distance to its target (geometric from ``w_base_near`` to ``w_base_far``, times ``arm_vs_base``); arm
-regularisation; the arm posture; the arm-only manipulability gradient (of ``log w``); base heading and base pose
-hints (mode ``hint``, no cost inside ``tol``).
+adaptive damping on the arm growing as its manipulability falls); the base reference: the base twist pulled toward
+``v_des = v_ref + k (pose_ref - pose)`` (heading likewise; no error inside the hint's ``tol``) with ``w_base_ref``
+when the mode gives a reference (``hint``, ``commanded``), toward zero with ``w_base_free`` otherwise, times
+``arm_vs_base``: the arm / base split follows from these weights against the EE task's; arm regularisation; the arm
+posture; the arm-only manipulability gradient (of ``log w``); a flat (L1) cost of moving the base
+(``w_base_flat``, off by default).
 
 Constraints (hard; the costs above, base hints included, yield to them):
 
@@ -28,14 +32,20 @@ Constraints (hard; the costs above, base hints included, yield to them):
 - **manipulability floor**: the arm-only manipulability ``w``: ``grad w . q' >= -xi w_i (w - w_min) /
   (w_i - w_min)`` below ``w_i`` (bounded by what the joint box allows, so always feasible).
 - base speed (inscribed octagon), yaw rate, base twist rate (octagon + yaw), every wheel's speed (inscribed
-  octagon, 8 rows each: the wheel velocity is linear in the twist). Modes ``locked`` / ``commanded`` and holds
-  fix the base velocity (an equality, computed within the rate and wheel limits).
+  octagon, 8 rows each: the wheel velocity is linear in the twist). Mode ``locked``, a hold and no base fix the
+  base velocity (an equality: braking to zero within the rate limit); ``commanded`` and ``hint`` are references
+  (costs, above) inside the bands below.
+- base bands around the reference (with an L1 slack, ``w_slack``, so always feasible): the pose within ``band_pos``
+  / ``band_yaw`` (the deviation grows at most at ``k_band`` (band - deviation)); the twist in
+  conv{0, octagon(v_des, band_twist)} and the yaw rate likewise (it may lag the reference down to zero, never exceed
+  it by more than the band: fast EE motion goes to the arm).
 
-Deadband with hysteresis: a first solve without the twist-rate rows gives the base's *desired* twist; a stopped
-base starts only above ``deadband_*_on``, a moving one brakes below ``deadband_*_off`` (then the base velocity is
-fixed to the braking step and the arm takes the motion). If the desired solution breaks a rate row, a second
-solve with the rate rows gives the command. An infeasible or failed solve returns ``status`` infeasible / error
-with zero velocity: the node holds and raises a fault.
+Start charge (no deadband): at rest (below ``rest_lin`` / ``rest_ang``) two solves without the twist-rate rows
+compare the base held (braking to zero) and free; it starts only if free + ``base_start_charge`` costs less, then
+the command is solved (``Output.base_fixed`` "at rest (start charge)" when held; ``Output.deadband`` is always
+False). If the free solve is infeasible (e.g. caps lowered while faster), the base brakes within the rate limit
+(``rate fallback``). An infeasible or failed solve returns ``status`` infeasible / error with zero velocity: the
+node holds and raises a fault.
 
 - **lead bound** (per arm joint): the next command within ``lead`` (= ``lead_torque / kp``, at most the arm's
   ``max_lead``) of ``q_ref``, the measured joints extrapolated by their measured velocity over the measurement's

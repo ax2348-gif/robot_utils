@@ -277,33 +277,43 @@ ees:
 ```
 
 **Velocity feedforward on the hint targets** (`vx`, `vy` on the pose, world m/s; `omega` on the heading, rad/s;
-optional, default 0, bounded by `max_speed` / `max_omega`): the hint stage tracks `v_ff + k_base_pose · error`
+optional, default 0, bounded by `max_speed` / `max_omega`): the base reference becomes `v_ff + k_base_pose · error`
 (`omega + k_heading · error` for the heading) instead of the error alone, within the caps, so a moving hint target
 (a walking operator) is followed without the `v / k` lag; with no velocity it is the position-only behaviour. The
 feedforward fades like the EE twist: full for `ff_timeout` after the hint was given (a datagram's `base.target`, or
-`POST /hints`), zero at twice that (diagnostic `hint_ff_scale`). Measured in the QP (`test_wbc_controller.py`), walking
+`POST /hints`), zero at twice that. Measured in the QP (`test_wbc_controller.py`), walking
 at 0.5 m/s with the EE target and a base pose hint moving together: the EE 142 mm behind without its twist, 0.9 mm
 with; the base 250 mm behind its hint without the velocity, 18 mm with.
 
-`locked` brakes the base to zero within its rate limit and holds it there; `commanded` follows the velocity (zero
-after `ttl`) or drives to the pose (P, capped), the arm compensating. **Base hints yield**: they are solved in a
-second, lower-priority stage that may only use the freedom the EE tasks leave (their velocities fixed to the first
-stage's), so a hint never costs tracking; where a limit binds (reach, manipulability, joint limits) the base stops
-at the boundary.
+`locked` (and a hold, or no base) brakes the base to zero within its rate limit and holds it there: the only modes
+that fix the base velocity. `hint` and `commanded` give the base a **reference** in the same QP as the EE tasks
+("The controller" below): `commanded` a velocity (zero after `ttl`) or a pose (P, capped), `hint` the pose / heading
+targets with their feedforward; `free` none (the base is regularised toward zero, weakly). A reference is a cost
+weighed against EE tracking, not a priority level: there is **one QP, no second stage**. What keeps the base with
+its reference is the weighting (`w_base_ref` × `arm_vs_base`) and the **bands** (hard, with a penalised slack): the
+base stays within `band_pos` (0.15 m) / `band_yaw` (20°) of the reference pose, and its twist may lag the reference
+down to zero but exceed it by at most `band_twist` (0.1 m/s) / `band_omega` (0.3 rad/s), so fast EE motion goes to
+the arm. Within those bands the base moves to help the EE tasks; where a limit binds (reach, manipulability, joint
+limits) the base stops at the boundary.
 
 ## The controller
 
 `controller.Controller` is the swap point (QP now, MPC later): `step(Snapshot) -> Output` (base twist, arm joint
 steps, status, `limited_by`, diagnostics, an optional plan). The QP (`QPController`, pinocchio + qpsolvers/daqp)
-solves for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick:
+solves **one QP** for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick (docs/plans/wbc_v1.md,
+"Formulation"):
 
 - **Costs:** EE tracking `|W (J q' - (v_ff + K e))|²` (`k_pos`, `k_rot` 4/s, errors clipped at `max_err_pos` /
   `max_err_rot`; orientation rows in the TCP's axes with the mask; Levenberg–Marquardt `lm |W e|²` plus adaptive
-  damping on the arm growing as its manipulability falls below `w_influence`); base regularisation scheduled by
-  the EE's distance to its target (from `w_base_near` within `near_dist` to `w_base_far` beyond `far_dist`,
-  geometric, × `arm_vs_base`; yaw weighted at `base_yaw_radius`); arm regularisation; posture and the arm-only
+  damping on the arm growing as its manipulability falls below `w_influence`); the **base reference**: the base
+  twist pulled toward `v_des = v_ref + k (pose_ref - pose)` (tolerance `tol` inside which the error counts as zero)
+  with weight `w_base_ref` (1.0) when the mode gives a reference (`hint`, `commanded`), toward zero with
+  `w_base_free` (0.001) when it does not (`free`), × `arm_vs_base`, yaw weighted at `base_yaw_radius`: the arm / base
+  split of EE motion follows from these weights against the EE task's; arm regularisation; posture and the arm-only
   manipulability gradient (of log w) as **tie-breakers**, scaled by the desired EE speed (`tie_speed`), so a
-  satisfied target produces no self-motion (measured: no drift over 10 s); base hints (second stage, above).
+  satisfied target produces no self-motion (measured: no drift over 10 s). A flat (L1) cost of moving the base at
+  all (`w_base_flat`, `w_base_flat_yaw`) exists and is off (0): it biased the walking speed (a constant 5 cm lag at
+  0.10); the start charge below replaced it.
 - **Hard constraints:** per arm joint a velocity box from the speed cap, the acceleration limit around the
   previous velocity, a position damper (`limit_gain` of the distance per step) and the braking distance
   `sqrt(2 a d)` (beyond a limit: back toward it), always feasible (the acceleration limit wins); **reach**: the
@@ -312,11 +322,18 @@ solves for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick:
   it only ever stops motion, never starts it; **manipulability floor**: `∇w·q' ≥ -xi w_i (w - w_min)/(w_i -
   w_min)` below `w_influence` (0.002; `w_min` 0.0008; the home pose has ~0.005), never below what the joint box
   allows; base speed (inscribed octagon), yaw rate, twist rate (octagon + yaw), every wheel's speed (inscribed
-  octagon, 8 rows each; the swerve modules from `swerve/constants.py`); the **lead bound** per arm joint (above).
-- **Deadband with hysteresis** on the base: a solve without the acceleration limits gives the desired twist; a
-  stopped base starts above `deadband_*_on` (0.02 m/s, 0.06 rad/s), a moving one brakes below `*_off`; otherwise
-  the base velocity is fixed to the braking step and the arm takes the motion. A second solve with the
-  twist-rate rows runs only when the first breaks them. 1–4 QPs per tick.
+  octagon, 8 rows each; the swerve modules from `swerve/constants.py`); the **lead bound** per arm joint (above);
+  the **base bands** around the reference (pose: the deviation grows at most at `k_band` × (band − deviation), never
+  forced back faster; twist: conv{0, octagon(v_des, band_twist)}), each with an L1 slack penalised by `w_slack` (1e3)
+  so the QP stays feasible.
+- **Start charge** (no deadband): with the base at rest (below `rest_lin` 0.02 m/s / `rest_ang` 0.05 rad/s), two
+  QPs without the twist-rate rows compare the base **held** (braking to zero) and **free**; the base starts only if
+  the free solution's cost plus `base_start_charge` (0.01, objective units) is lower, so tiny motions (sway, small EE
+  pushes: swerve chatter) are never worth starting; then the command is solved (held, or free with the rate rows).
+  Exact (two discrete outcomes), no bias while moving. The controller's `Output` records the decision
+  (`base_fixed` "at rest (start charge)", `diag.start_charge` with both costs); neither reaches the stream or
+  `/state` yet. 1 QP per tick while the base moves or is fixed, 3 at rest, +1 if the
+  base must brake into lowered caps (`rate fallback`).
 - **Failure:** an infeasible or failed solve outputs zero velocity → the node faults and holds.
 
 Arm output: integrated from the previous **commanded** joints; resynced to the measured ones only past `resync`
@@ -325,8 +342,8 @@ the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
 
 Known limits of v1 (measured in the tests): a velocity-level QP can end in a local minimum with the arm at a joint
 limit (a target behind and below the base): the error stays, reported (`limited_by` joint_limit), no yank. With
-the arm limited and the base stopped, up to `deadband_lin_on / k_pos` ≈ 5 mm of error can remain (that
-correction would need the base). Sliding along the reach boundary under a base hint gave a 15 mm transient.
+the arm limited and the base at rest, a small error can remain when moving the base would not be worth the start
+charge (that correction would need the base; not re-measured since the start charge replaced the deadband). Sliding along the reach boundary under a base hint gave a 15 mm transient.
 
 ## Safety and faults
 
@@ -349,7 +366,8 @@ frame**: forward, left, yaw rate — as the swerve command and the velocity hint
 commanded this tick, world: anchor relative targets to it), `<ee>_meas_x..qw` (the arm's measured q at the base
 pose used), `<ee>_twist_vx..wz` (commanded, world axes), `<ee>_gripper`; `arm_age`, `est_age`, `target_age`.
 Appended: `limited`, `limited_by` (0 none, 1 reach, 2 manipulability, 3 fence, 4 joint_limit, 5 base_limit,
-6 base_band, 7 lead), `input_age`, `hold`, `deadband`, `solves`, `wheel_max`, per EE the target (`_tgt_*`),
+6 base_band, 7 lead), `input_age`, `hold`, `deadband` (always 0 since the start charge replaced the deadband; the
+start charge's decision is not streamed), `solves`, `wheel_max`, per EE the target (`_tgt_*`),
 `_err_pos`, `_err_rot`, `_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`; then `armed`,
 `tick_period` (ms), `tick_compute` (ms), `overruns`, `late_ticks`; then per EE `_err_meas_pos`, `_err_meas_rot`,
 `_lead_pos`, `_lead_rot`, `_lead_tau1..6` (above: "Three error numbers"). `/state` shows `armed`,
@@ -367,7 +385,8 @@ or lock it first); a value equal to the one in force is not a change. Structural
 ## Performance (MacBook M5, 2026-11-21, measured)
 
 Per control tick (all QPs, the model, the constraints): free base reaching 0.6 m: p50 0.18 ms, p99 0.26 ms
-(2.2 QPs per tick); base locked: p50 0.15 ms (1 QP); with a base hint (two stages): p50 0.21 ms, p99 0.28 ms.
+(2.2 QPs per tick); base locked: p50 0.15 ms (1 QP); with a base hint: p50 0.21 ms, p99 0.28 ms. (Measured before
+the one-QP formulation with bands and the start charge; not re-measured since.)
 The manipulability gradient (forward differences, 7 Jacobians) is 0.03 ms. Estimate for the Pi 5 (4–6× slower
 in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
 
@@ -401,5 +420,5 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
 
 ## Not done yet
 
-The base fence; the MPC; a measured `ff_timeout` / `hold_timeout` / deadband from teleop sessions; `--udp-host` on
+The base fence; the MPC; a measured `ff_timeout` / `hold_timeout` / `base_start_charge` from teleop sessions; `--udp-host` on
 the robot (the LAN address in `nodes.yaml`).
