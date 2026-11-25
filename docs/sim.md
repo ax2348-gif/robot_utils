@@ -80,6 +80,48 @@ slide / hinge joints; `scene: {cabinet: true}` (or `ROBOT_SIM_CONFIG=deploy/sim/
 with two drawers and a door beside the table, a cube in its upper drawer. docs/scene3d.md, which also covers
 `/scene3d`: the world as rigid bodies (geometry once, poses streamed) for the headset.
 
+### The rings scene (dynamic sorting)
+
+`scene: {tabletop: false, rings: true}` (or `ROBOT_SIM_CONFIG=deploy/sim/sim_rings.yaml`): two concentric horizontal
+rings turning in opposite directions about a vertical axis, red and blue objects scattered on both (`scene.py`
+`rings_scene`), for sorting moving objects. Derived like the table:
+
+- **size**: outer ring ⌀ **2.0 m**, **20 cm** wide (r 0.80–1.00); a 1 cm gap; inner ring **30 cm** wide (r 0.49–0.79);
+  the centre is **hollow** (r < 0.49): an object knocked off the inner edge falls to the floor.
+- **height**: the surface is at the table's **0.302 m** (the mount + 0.08 m): above the chassis top (0.222 m), in the
+  arm's best top-down band.
+- **placement**: the outer edge **4 cm ahead of the base's front** (x 0.256 m) at the start pose, the centre on the
+  arm mount's line (y −0.146 m, the mount plate is flush with the right face), so the arm reaches radially over the
+  outer ring onto the inner one. Along that line the outer ring spans x 0.256–0.456 and the inner ring x 0.466–0.766.
+- **reach** (IK on the model's joint ranges, fingertip 5 mm above the surface at the mount's y, no arm geom touching
+  the ring surface): straight down to **x 0.60 m** (the first **13 cm** of the inner ring), tilted 15° outward to
+  **x 0.68 m** (21 cm). The same at other surface heights: 0.26 m → 0.62 / 0.68, 0.34 m → 0.58 / 0.66, 0.38 m →
+  0.52 / 0.62 (down / 15°), so 0.302 m keeps the table's height. The inner ring's far half is out of reach by design:
+  the rings bring everything past.
+- **rotation**: `scene.rings_setup`: `outer_rim_speed` **+0.04 m/s** (counterclockwise seen from above, 0.04 rad/s, a
+  turn in 2.6 min), `inner_rim_speed` **−0.04 m/s** at its outer edge (0.051 rad/s). Each ring is driven by velocity
+  servos (`drive`, below) capped at 20 N m in all with a gain of 1000 N m s/rad (a 10 N m brake costs 0.01 rad/s); it
+  stalls rather than shove the robot. Objects ride along by friction.
+- **objects**: `per_ring` (default **8**) on each ring, half red, half blue, at `seed`-ed random angles (≥ 10 cm
+  apart), radii (≥ 3.5 cm from the edges) and headings, named `red_outer3`, `blue_inner5`, …: 35 mm cubes, cylinders
+  ⌀ 35 × 60 mm and 25 × 35 × 50 mm blocks (each horizontal width < 0.8 × `GAP_MAX` = 39.7 mm), 0.05–0.08 kg, the
+  objects' friction (as the tabletop's). The same seed gives the same scene.
+- **geometry**: each ring is **16 sector bodies**, each a few boxes with coplanar tops (edges within 3 mm of the
+  circle, the boxes overlapping inward so there are no gaps) and 0.5 mm radial slits between sectors. Each sector
+  has its own drive and is held at the first sector's angle (`mimic`), so the ring turns as one. One body per ring
+  would couple every contact on it in the solver (with `noslip_iterations` that cost ~0.9 ms per step at 16 objects);
+  sectors keep the coupling local. Each ring rides 5 mm above a thin cylindrical support wall (the outer one under
+  the outer ring's inner part, 17 cm in from its edge, clear of the base's approach; the inner one 10 cm outside the
+  hollow).
+- **cost**: ~0.6 ms per physics step (the tabletop: ~0.12 ms); measured live at `rtf_measured` 1.0, `step_rate`
+  ~1000 /s with occasional `behind` re-anchors on a loaded MacBook (2026-11-24). Fewer objects (`per_ring`) is the
+  knob if the physics falls behind.
+
+**Joint drives and mimics** (any articulated object): a link's `joint` may carry `drive: {velocity, max_torque,
+gain}` (a MuJoCo velocity actuator: rad/s or m/s, N m or N, default gain 1000) and `mimic: <earlier link>` (a joint
+equality holding it at that link's joint position). Both are validated like the other link fields, accepted by
+`POST /scene/objects`, kept by save / load, and a reset restarts the drives at their velocity with the joints at 0.
+
 ## Grasping
 
 - **Jaw collision**: in every model variant the finger links collide as the **jaw boxes** (`arm/geometry.py`

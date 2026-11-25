@@ -1,0 +1,5 @@
+# The sim with the rings sorting scene and no table (docs/sim.md, "The rings scene"):
+# ROBOT_SIM_CONFIG=deploy/sim/sim_rings.yaml. Speeds, the object count and the seed: scene.rings_setup.
+scene:
+  tabletop: false
+  rings: true

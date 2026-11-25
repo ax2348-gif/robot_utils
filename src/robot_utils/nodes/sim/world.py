@@ -49,6 +49,7 @@ INTEGRATORS = {"euler": mujoco.mjtIntegrator.mjINT_EULER, "rk4": mujoco.mjtInteg
                "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT, "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST}
 SHAPES = ("box", "cylinder", "articulated")
 JOINT_TYPES = {"slide": mujoco.mjtJoint.mjJNT_SLIDE, "hinge": mujoco.mjtJoint.mjJNT_HINGE}
+DRIVE_GAIN = 1000.0                  # N m s/rad (N s/m): an object joint drive's default velocity gain
 IMU_BUFFER = 2000                    # samples kept per IMU (2 s at 1 kHz)
 
 
@@ -347,11 +348,14 @@ class World:
                 pass
         self.obj_idx = {}
         self.obj_joints = {}                # articulated object -> {link: (qpos adr, dof adr)}
+        self.obj_drives = []                # (actuator id, velocity) of every driven object joint
         for name, o in self.objects.items():
             if o["shape"] == "articulated":
                 self.obj_joints[name] = {ln["name"]: (int(m.joint(f"obj_{name}/{ln['name']}").qposadr[0]),
                                                       int(m.joint(f"obj_{name}/{ln['name']}").dofadr[0]))
                                          for ln in o["links"] if ln.get("joint")}
+                self.obj_drives += [(m.actuator(f"obj_{name}/{ln['name']}").id, ln["joint"]["drive"]["velocity"])
+                                    for ln in o["links"] if (ln.get("joint") or {}).get("drive")]
             if o.get("fixed"):
                 self.obj_idx[name] = (m.body(f"obj_{name}").id, None, None)
             else:
@@ -368,6 +372,9 @@ class World:
         if sc.get("cabinet"):
             from .scene import cabinet_scene
             out += cabinet_scene()
+        if sc.get("rings"):
+            from .scene import rings_scene
+            out += rings_scene(**(sc.get("rings_setup") or {}))
         return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
@@ -435,7 +442,7 @@ class World:
                 raise SimError(f"{obj}/{nm}: parent must be an earlier link (got {parent!r})")
             j = ln.get("joint")
             if j is not None:
-                j = dict(j)
+                j = j_in = dict(j)
                 if j.get("type") not in JOINT_TYPES:
                     raise SimError(f"{obj}/{nm}: joint type is slide or hinge")
                 axis = [float(v) for v in j.get("axis", [1, 0, 0])]
@@ -451,6 +458,13 @@ class World:
                      "damping": float(j.get("damping", 2.0)), "frictionloss": float(j.get("frictionloss", 0.0))}
                 if j["damping"] < 0 or j["frictionloss"] < 0:
                     raise SimError(f"{obj}/{nm}: damping and frictionloss are >= 0")
+                if j_in.get("drive") is not None:
+                    j["drive"] = self._check_drive(f"{obj}/{nm}", j_in["drive"])
+                if j_in.get("mimic") is not None:          # held at the position of an earlier link's joint
+                    lead = next((x for x in out if x["name"] == j_in["mimic"]), None)
+                    if lead is None or (lead.get("joint") or {}).get("type") != j["type"]:
+                        raise SimError(f"{obj}/{nm}: mimic names an earlier link with a {j['type']} joint")
+                    j["mimic"] = lead["name"]
             geoms = []
             for g in ln.get("geoms") or []:
                 g = dict(g)
@@ -469,6 +483,22 @@ class World:
                         "rpy": [float(v) for v in ln.get("rpy", [0, 0, 0])],
                         **({"joint": j} if j else {}), "geoms": geoms})
             names.add(nm)
+        return out
+
+    @staticmethod
+    def _check_drive(where: str, dr) -> dict:
+        """A joint's drive: a velocity servo (MuJoCo velocity actuator) holding ``velocity`` (rad/s or m/s) with up to
+        ``max_torque`` (N m or N) at ``gain`` (N m s/rad or N s/m of torque per unit of speed error)."""
+        if not isinstance(dr, dict):
+            raise SimError(f"{where}: drive is {{velocity, max_torque, gain}}")
+        try:
+            out = {"velocity": float(dr["velocity"]), "max_torque": float(dr["max_torque"]),
+                   "gain": float(dr.get("gain", DRIVE_GAIN))}
+        except (KeyError, TypeError, ValueError):
+            raise SimError(f"{where}: drive needs a numeric velocity and max_torque") from None
+        if not math.isfinite(out["velocity"]) or not out["max_torque"] > 0 or not out["gain"] > 0 \
+                or not math.isfinite(out["max_torque"] + out["gain"]):
+            raise SimError(f"{where}: drive velocity is finite, max_torque and gain are > 0")
         return out
 
     def _add_part(self, body, g: dict, rgba) -> None:
@@ -510,14 +540,34 @@ class World:
                                     frictionloss=j["frictionloss"])
                 if "range" in j:
                     mj.limited, mj.range = mujoco.mjtLimited.mjLIMITED_TRUE, j["range"]
+                if "drive" in j:                    # a velocity servo; its ctrl (the velocity) is set by _drive
+                    self._servo(self.spec, mj.name, mj.name, 0.0, j["drive"]["gain"], j["drive"]["max_torque"],
+                                velocity=True)
+                if "mimic" in j:                    # q = q of the leader (a joint equality)
+                    e = self.spec.add_equality(type=mujoco.mjtEq.mjEQ_JOINT, name=mj.name, name1=mj.name,
+                                               name2=f"obj_{o['name']}/{j['mimic']}")
+                    e.data[:5] = [0.0, 1.0, 0.0, 0.0, 0.0]
             for g in ln["geoms"]:
                 self._add_part(body, {**g, "friction": o["friction"]}, o["rgba"])
             bodies[ln["name"]] = body
         self.objects[o["name"]] = o
 
+    def _unspec(self, name: str) -> None:
+        """Delete an object from the spec: its body tree, its joints' drives and mimics."""
+        for a in list(self.spec.actuators) + list(self.spec.equalities):
+            if (a.name or "").startswith(f"obj_{name}/"):
+                self.spec.delete(a)
+        self.spec.delete(self.spec.body(f"obj_{name}"))
+
+    def _drive(self) -> None:
+        """The driven object joints' velocity references (after a compile or a reset zeroes ctrl)."""
+        for a, v in self.obj_drives:
+            self.d.ctrl[a] = v
+
     def _recompile(self) -> None:
         self.m, self.d = self.spec.recompile(self.m, self.d)
         self._index()
+        self._drive()
         mujoco.mj_forward(self.m, self.d)
         self.generation += 1
 
@@ -528,7 +578,7 @@ class World:
             try:
                 self._recompile()
             except Exception:
-                self.spec.delete(self.spec.body(f"obj_{o['name']}"))
+                self._unspec(o["name"])
                 del self.objects[o["name"]]
                 raise
             self._place(o["name"], o["xyz"], rpy_quat(o["rpy"]))
@@ -538,7 +588,7 @@ class World:
         with self.lock:
             if name not in self.objects:
                 raise KeyError(f"no object {name!r}")
-            self.spec.delete(self.spec.body(f"obj_{name}"))
+            self._unspec(name)
             del self.objects[name]
             self.wrenches = []
             self._recompile()
@@ -593,7 +643,7 @@ class World:
             raise SimError("object names must be unique")
         with self.lock:
             for n in list(self.objects):
-                self.spec.delete(self.spec.body(f"obj_{n}"))
+                self._unspec(n)
             self.objects = {}
             for o in new:
                 self._spec_object(o)
@@ -615,6 +665,7 @@ class World:
         with self.lock:
             m, d = self.m, self.d
             mujoco.mj_resetData(m, d)
+            self._drive()
             st = self.cfg["base"]["start"]
             d.qpos[self.base_q:self.base_q + 3] = [float(v) for v in st["xyz"]]
             d.qpos[self.base_q + 3:self.base_q + 7] = yaw_quat(float(st.get("yaw", 0.0)))

@@ -56,6 +56,13 @@ class PartIn(_In):
     rgba: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="Colour (default: the object's).")
 
 
+class DriveIn(_In):
+    velocity: float = Field(description="rad/s (hinge) or m/s (slide), held by a velocity servo.")
+    max_torque: float = Field(gt=0, description="N m (hinge) or N (slide): the servo's cap.")
+    gain: Optional[float] = Field(None, gt=0, description="N m s/rad or N s/m of torque per unit of speed error "
+                                                          "(default 1000).")
+
+
 class JointIn(_In):
     type: Literal["slide", "hinge"] = Field(description="slide (m along axis) or hinge (rad about axis).")
     axis: list[float] = Field([1.0, 0.0, 0.0], min_length=3, max_length=3, description="In the link frame.")
@@ -63,6 +70,10 @@ class JointIn(_In):
     pos: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="m, the hinge axis' point.")
     damping: float = Field(2.0, ge=0, description="N s/m or N m s/rad.")
     frictionloss: float = Field(0.0, ge=0, description="N or N m: dry friction holding it in place.")
+    drive: Optional[DriveIn] = Field(None, description="A motor holding the joint at a velocity (e.g. a turntable); "
+                                                       "absent: passive.")
+    mimic: Optional[str] = Field(None, description="An earlier link (same joint type) whose joint position this one "
+                                                   "is held at: parts that move as one without sharing a body.")
 
 
 class LinkIn(_In):
