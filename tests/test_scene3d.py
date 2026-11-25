@@ -337,3 +337,25 @@ def test_http_headset_view_setting_cycles_and_validates(api):
         c.post("/scene3d/view/next")
     assert c.get("/scene3d/view").json()["style"] == "flat"
     node.set_view("flat", "auto")
+
+
+def test_http_task_list_switch_and_saved_scenes(api):
+    """The sim page's task picker: GET /scene/tasks, POST /scene/task (objects + headset anchor; no world reset),
+    GET /scene/saved for Load."""
+    c, node = api
+    t = c.get("/scene/tasks").json()
+    names = [x["name"] for x in t["tasks"]]
+    assert {"tabletop", "cabinet", "rings", "revolving_door", "empty"} <= set(names)
+    t0 = c.get("/state").json()["t"]
+    r = c.post("/scene/task", json={"name": "revolving_door"}).json()
+    assert r["task"] == "revolving_door" and r["view"]["anchor"] == [0.6, 0.0, 0.0]
+    objs = [o["name"] for o in c.get("/scene").json()["objects"]]
+    assert objs == ["revolving_door"]
+    assert c.get("/state").json()["t"] >= t0                       # not reset
+    assert c.get("/scene/tasks").json()["current"] == "revolving_door"
+    assert c.post("/scene/task", json={"name": "nope"}).status_code == 404
+    c.post("/scene/task", json={"name": "tabletop"})
+    assert c.get("/scene3d/view").json()["anchor"] is None
+    assert c.get("/scene/saved").json() == {"names": []}
+    c.post("/scene/save", json={"name": "mine"})
+    assert c.get("/scene/saved").json()["names"] == ["mine"]

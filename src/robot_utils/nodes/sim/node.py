@@ -176,6 +176,33 @@ class SimNode:
         self.events.add(f"scene saved: {path} ({len(objs)} objects)")
         return {"name": name, "path": path, "objects": objs}
 
+    def saved_scenes(self) -> list:
+        """The saved scenes' names (POST /scene/save), newest first."""
+        if not os.path.isdir(self.scene_dir):
+            return []
+        files = [f for f in os.listdir(self.scene_dir) if f.endswith(".yaml")]
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(self.scene_dir, f)), reverse=True)
+        return [f[:-5] for f in files]
+
+    def tasks(self) -> dict:
+        from .scene import tasks
+        return {"tasks": [{"name": k, "title": v["title"]} for k, v in tasks(self.world.cfg.get("scene")).items()],
+                "current": getattr(self, "task", None)}
+
+    def set_task(self, name: str) -> dict:
+        """Switch to a task: its objects replace the scene's, the headset view goes to its anchor. The world is not
+        reset (that would leave the estimator behind: a reset belongs with the teleop's A, which resets both)."""
+        from .scene import tasks
+        ts = tasks(self.world.cfg.get("scene"))
+        if name not in ts:
+            raise KeyError(f"no task {name!r} (one of {', '.join(ts)})")
+        out = self.world.load_scene(ts[name]["objects"]())
+        self.set_view(anchor=ts[name]["view_anchor"])
+        self.task = name
+        self.events.add(f"task: {ts[name]['title']} ({len(out['objects'])} objects); press A (or Start) to reset "
+                        "the robot to its start pose")
+        return {"task": name, "objects": len(out["objects"]), "view": dict(self.view)}
+
     def load_scene(self, name: Optional[str] = None, objects: Optional[list] = None) -> dict:
         if objects is None:
             path = os.path.join(self.scene_dir, f"{name}.yaml")

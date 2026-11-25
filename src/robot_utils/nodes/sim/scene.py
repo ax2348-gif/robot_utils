@@ -415,3 +415,22 @@ def revolving_door(name: str = "revolving_door", xyz=None, yaw: float = 0.0, r: 
 def revolving_door_scene() -> list[dict]:
     """The revolving door ahead of the robot (``revolving_door()``)."""
     return [revolving_door()]
+
+
+
+# -- tasks: the scenes an operator picks from (the sim page's task list, POST /scene/task) -----------------------
+
+def tasks(setup: dict | None = None) -> dict:
+    """Every task: name -> {title, objects() -> list, view_anchor ([x, y, yaw_deg] or None: the origin)}.
+    ``setup``: the config's ``scene`` block (``rings_setup`` etc.), so a task matches what the flags would build."""
+    sc = setup or {}
+    near = [0.6, 0.0, 0.0]               # the robot ~1 m in front of the operator, the task beyond it
+    return {
+        "tabletop": {"title": "Tabletop (pick and place)", "objects": tabletop, "view_anchor": None},
+        "cabinet": {"title": "Cabinet (drawers, a door) by the table",
+                    "objects": lambda: tabletop() + cabinet_scene(), "view_anchor": None},
+        "rings": {"title": "Counter-rotating rings (sorting)",
+                  "objects": lambda: rings_scene(**(sc.get("rings_setup") or {})), "view_anchor": near},
+        "revolving_door": {"title": "Revolving door", "objects": revolving_door_scene, "view_anchor": near},
+        "empty": {"title": "Empty floor", "objects": list, "view_anchor": None},
+    }
