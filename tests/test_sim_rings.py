@@ -12,7 +12,8 @@ from robot_utils.nodes.sim import scene as S
 
 @pytest.fixture(scope="module")
 def world():
-    w = make_world(scene={"tabletop": False, "rings": True})
+    w = make_world(scene={"tabletop": False, "rings": True,          # the mechanics at the first speeds and count
+                          "rings_setup": {"outer_rim_speed": 0.04, "inner_rim_speed": -0.04, "per_ring": 8}})
     yield w
     w.close()
 

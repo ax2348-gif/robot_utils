@@ -115,9 +115,9 @@ scene:
   cabinet: false                 # an articulated cabinet beside the table (two drawers, a door; scene.py)
   rings: false                   # two counter-rotating rings ahead of the robot, red and blue objects on them (scene.py)
   rings_setup:
-    outer_rim_speed: 0.04        # m/s at the outer ring's outer edge; + counterclockwise seen from above
-    inner_rim_speed: -0.04       # m/s at the inner ring's outer edge
-    per_ring: 8                  # objects on each ring (half red, half blue)
+    outer_rim_speed: 0.068       # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 1.7x the first 0.04)
+    inner_rim_speed: -0.068      # m/s at the inner ring's outer edge
+    per_ring: 40                 # objects on each ring (half red, half blue; owner: 5x the first 8)
     seed: 0                      # their placement
   objects: []
 
