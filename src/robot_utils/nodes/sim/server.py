@@ -209,6 +209,8 @@ class SimState(BaseModel):
     arm: Optional[ArmState] = Field(None, description="The arm (absent without one).")
     cameras: dict[str, CameraState] = Field(description="Rendered cameras by name.")
     backends: dict[str, BackendState] = Field(description="Backend sockets: arm, swerve, camera-<name>.")
+    timing: Optional[dict] = Field(None, description="The watchdogs enforced: {lenient, why, arm_watchdog, "
+                                                  "swerve_heartbeat} (s); lenient on macOS by default.")
     events: list[Event] = Field(description="Latest events, oldest first.")
 
 

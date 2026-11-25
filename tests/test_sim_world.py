@@ -181,6 +181,26 @@ def test_arm_kinematic_follows_q_within_speed_limit_and_watchdog(w):
     assert np.allclose(w.arm_op("read", {})["q"], q_hold, atol=2e-3)      # holds where it is
 
 
+def test_timing_is_the_robots_unless_lenient_and_auto_is_macos_only():
+    from robot_utils.nodes.sim.world import default_config, resolve_timing
+    cfg = default_config()
+    assert resolve_timing(cfg, "linux") == {"lenient": False, "why": "auto: not macOS", "arm_watchdog": 0.1,
+                                            "swerve_heartbeat": 0.1}
+    mac = resolve_timing(cfg, "darwin")
+    assert mac["lenient"] and mac["arm_watchdog"] == 0.5 and mac["swerve_heartbeat"] == 0.5
+    assert not resolve_timing({**cfg, "timing": {"lenient": False}}, "darwin")["lenient"]
+    w = make_world(timing={"lenient": True})
+    try:
+        w.arm_op("enable", {})
+        w.step(300)                                           # 0.3 s without frames: forgiven
+        assert w.arm_op("read", {})["status"][:6] == [1] * 6
+        w.step(250)                                           # past 0.5 s: the watchdog still trips
+        assert w.arm_op("read", {})["status"][:6] == [0xD] * 6
+        assert w.snapshot()["timing"]["lenient"] is True
+    finally:
+        w.close()
+
+
 def test_time_step_run_pause_rtf(w):
     t0 = w.t
     w.step(100)
