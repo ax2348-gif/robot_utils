@@ -59,6 +59,11 @@ def main() -> None:
                                                  "it before an episode; 'none' (the robot) = no reset")
     p.add_argument("--reset-timeout", type=float, default=5.0,
                    help="s: a sim reset waits this long for the estimator's reset in the WBC stream")
+    p.add_argument("--autostart", action="store_true",
+                   help="sim only: start teleop by itself once the WBC answers (the sim stack passes it), as if Start "
+                        "were pressed: the sim resets, recording starts")
+    p.add_argument("--estimator", default="estimator",
+                   help="the estimator instance a sim reset resets with it (default %(default)s)")
     p.add_argument("--auto-pause", action="store_true",
                    help="sim only: sim time stops while the operator is neither clutched nor driving the base, and "
                         "runs at the next grip or stick (switchable on the page)")
@@ -85,6 +90,8 @@ def main() -> None:
     from .node import QuestTeleopNode
     from .sim_aids import AidsConfig
     from .server import create_app
+    if a.autostart and a.sim in ("none", ""):
+        p.error("--autostart is for a sim stack only (--sim)")
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=not a.no_headless, gripper=not a.no_gripper)
     try:
         set_top_speed(cfg, a.max_speed, a.max_omega)
@@ -98,6 +105,7 @@ def main() -> None:
                            log_cap_bytes=int(a.log_cap_mb * 1024 * 1024), sim=off(a.sim),
                            reset_timeout=a.reset_timeout,
                            aids=AidsConfig(ghost=not a.no_ghost, auto_pause=a.auto_pause),
+                           autostart=a.autostart, estimator=off(a.estimator),
                            record=None if a.no_record else RecordConfig(out=a.record, robot=a.record_robot,
                                                                         streams=a.record_streams))
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "

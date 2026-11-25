@@ -211,7 +211,8 @@ class QuestTeleopNode:
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
                  log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
-                 aids: Optional[AidsConfig] = None, record: Optional[RecordConfig] = None,
+                 aids: Optional[AidsConfig] = None, autostart: bool = False, estimator: Optional[str] = "estimator",
+                 record: Optional[RecordConfig] = None,
                  recorder_factory: Callable = SimRecorder):
         """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
         keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it;
@@ -242,7 +243,8 @@ class QuestTeleopNode:
         self.eventlog = TeleopEventLog(data_dir, log_cap_bytes, clock=clock)
         self.eventlog.listeners.append(self.oplog.event)
         self.eventlog.listeners.append(lambda line: self.hub.state_changed())
-        self.episodes = Episodes(self, sim, reset_timeout)
+        self.episodes = Episodes(self, sim, reset_timeout, estimator=estimator)
+        self.autostart = bool(autostart and sim)     # the sim: start teleop by itself once the WBC answers
         self.sim = sim
         self.aids = SimAids(self, sim, aids) if sim else None   # the goal ghost, auto pause (sim_aids.py)
         self.recorder = recorder_factory(self, sim, record) if sim and record is not None else None
@@ -285,8 +287,25 @@ class QuestTeleopNode:
             self._threads.append(t)
         if self.aids is not None:
             self.aids.start()
+        if self.autostart:
+            t = threading.Thread(target=self._autostart, name="quest-autostart", daemon=True)
+            t.start()
+            self._threads.append(t)
         self.events.add(f"headset stream {self.quest_host}:{self.quest_port}, ssh host {self.ssh_host!r}, "
                         f"WBC {self.wbc_target}")
+
+    def _autostart(self) -> None:
+        """--autostart (sim only): Start as soon as the WBC accepts it, retrying every 2 s; once, at node start (a
+        later Stop is the operator's)."""
+        while not self._stop.wait(2.0):
+            if self.phase != "stopped":
+                return
+            try:
+                self.start_teleop()
+                self.events.add("teleop started automatically (--autostart)")
+                return
+            except Exception as e:  # noqa: BLE001 (the WBC or the sim not up yet: try again)
+                log.info("autostart: %s", getattr(e, "detail", None) or e)
 
     def close(self) -> None:
         self.stop_teleop("node shutting down")
@@ -408,6 +427,18 @@ class QuestTeleopNode:
                 raise RequestError(409, f"teleop is {self.phase}")
             self.phase, self.error, self.stop_reason = "starting", None, None
         self.hub.state_changed()
+        if self.sim:                       # the sim: every run starts from the start scene's state (and is recorded so)
+            try:
+                from .episodes import reset_world
+                with NodeClient.for_instance(self.sim, timeout=3.0) as sim:
+                    out = reset_world(sim, self.episodes.estimator)
+                self.events.add(f"sim reset for the start (reset_seq {out.get('reset_seq')})")
+            except Exception as e:  # noqa: BLE001 (no reset, no start: the run would not start where it should)
+                msg = getattr(e, "detail", None) or str(e)
+                with self.lock:
+                    self.phase, self.error = "stopped", f"start refused: sim reset failed: {msg}"
+                self.events.add(f"start refused: sim reset failed: {msg}", "warn")
+                raise RequestError(409, f"the sim reset failed: {msg}") from None
         wbc = self.wbc_client_factory(self.wbc_target, client_name=CLIENT_NAME)
         try:
             info = open_wbc(wbc, self.cfg)

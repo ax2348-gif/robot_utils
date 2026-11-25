@@ -45,10 +45,27 @@ def _num(v) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def reset_world(sim, estimator: Optional[str] = "estimator", timeout: float = 3.0) -> dict:
+    """The sim's world reset (``POST /scene/reset``), then the estimator's (``POST /reset`` at the base's start pose):
+    the estimator does not see a sim reset as one (the wheel encoders jumping back to 0 are skipped as an odometry
+    discontinuity), so without this its pose and ``reset_id`` stay where they were and nothing waiting for a new
+    estimator frame (the WBC's ``est_reset``) ever sees one. ``sim``: an open NodeClient of the sim. Returns the
+    sim's reply (``reset_seq``)."""
+    out = sim.post("/scene/reset", {}) or {}
+    if estimator:
+        b = (sim.get("/state") or {}).get("base") or {}
+        xyz, rpy = b.get("xyz") or [0.0, 0.0, 0.0], b.get("rpy") or [0.0, 0.0, 0.0]
+        with NodeClient.for_instance(estimator, timeout=timeout) as est:
+            est.post("/reset", {"x": float(xyz[0]), "y": float(xyz[1]), "theta": float(rpy[2])})
+    return out
+
+
 class Episodes:
-    def __init__(self, node, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT):
+    def __init__(self, node, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
+                 estimator: Optional[str] = "estimator"):
         self.node = node
         self.sim = sim
+        self.estimator = estimator
         self.reset_timeout = reset_timeout
         self.lock = threading.RLock()
         self.state = "idle"                    # idle | resetting | recording
@@ -192,7 +209,7 @@ class Episodes:
                 wbc.disable()
                 node.set_enabled(False, "sim reset")
                 self._check()
-                out = sim.post("/scene/reset", {})
+                out = reset_world(sim, self.estimator)
             node.emit("sim_reset", {"reset_seq": (out or {}).get("reset_seq")})
             deadline = node.clock() + self.reset_timeout
             while True:
