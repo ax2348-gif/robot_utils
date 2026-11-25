@@ -95,6 +95,7 @@ class SimNode:
         self.t_start = time.monotonic()
         self.markers = viz.Markers()
         self.ghosts = viz.Ghosts()
+        self.view = {"style": "hidden_line", "role": "auto"}   # how headsets draw /scene3d (GET/POST /scene3d/view)
         self._ghost_lines = None             # (scene_id, rigid.Poses, compat.StateLines) for robot_state's ghosts
 
     # -- lifecycle ---------------------------------------------------------------------------------
@@ -202,6 +203,25 @@ class SimNode:
             out["markers"] = mk
         return out
 
+    VIEW_STYLES = ("hidden_line", "wire", "flat_edges", "flat")
+    VIEW_ROLES = ("auto", "visual", "collision")
+
+    def set_view(self, style: Optional[str] = None, role: Optional[str] = None, next_style: bool = False) -> dict:
+        if next_style:
+            i = self.VIEW_STYLES.index(self.view["style"])
+            style = self.VIEW_STYLES[(i + 1) % len(self.VIEW_STYLES)]
+        if style is not None:
+            if style not in self.VIEW_STYLES:
+                raise ValueError(f"style: one of {', '.join(self.VIEW_STYLES)}")
+            self.view["style"] = style
+        if role is not None:
+            if role not in self.VIEW_ROLES:
+                raise ValueError(f"role: one of {', '.join(self.VIEW_ROLES)}")
+            self.view["role"] = role
+        self.events.add(f"headset view: {self.view['style']}, {self.view['role']} geometry")
+        self.hub.state_changed()
+        return dict(self.view)
+
     def put_ghosts(self, ghosts: list, source: Optional[str] = None, replace: bool = False) -> dict:
         with self.world.lock:
             m = self.world.m
@@ -265,4 +285,5 @@ class SimNode:
                 **snap, "cameras": cams,
                 "backends": {k: {"socket": str(s.path), "clients": s.clients, "requests": s.requests}
                              for k, s in self.servers.items()},
+                "view": dict(self.view),
                 "events": self.events.list()}

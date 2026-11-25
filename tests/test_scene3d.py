@@ -321,3 +321,16 @@ def test_http_articulated_object_and_robot_state_links(api):
     bad = c.post("/scene/objects", json={"name": "x", "shape": "articulated",
                                          "links": [{"name": "a", "geoms": [{"shape": "sphere"}]}]})
     assert bad.status_code == 422
+
+
+def test_http_headset_view_setting_cycles_and_validates(api):
+    c, node = api
+    assert c.get("/scene3d/view").json() == {"style": "hidden_line", "role": "auto"}
+    assert c.post("/scene3d/view/next").json()["style"] == "wire"
+    assert c.post("/scene3d/view", json={"role": "collision"}).json() == {"style": "wire", "role": "collision"}
+    assert c.post("/scene3d/view", json={"style": "sparkly"}).status_code == 422
+    assert c.get("/state").json()["view"] == {"style": "wire", "role": "collision"}
+    for _ in range(3):
+        c.post("/scene3d/view/next")
+    assert c.get("/scene3d/view").json()["style"] == "hidden_line"
+    node.set_view("hidden_line", "auto")

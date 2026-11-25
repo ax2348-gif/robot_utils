@@ -64,7 +64,9 @@ canvas.ru-plot{width:100%;height:70px}
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
       <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
       <div class="ctl" id="simaids" hidden><button class="ru" id="ghost">Goal ghost: on</button>
-        <button class="ru" id="autopause">Auto pause: off</button><span class="ru-muted" id="aidsnote"></span></div>
+        <button class="ru" id="autopause">Auto pause: off</button>
+        <button class="ru" id="hview" title="Cycle how the headset draws the sim (the sim node's /scene3d/view)">Headset view</button>
+        <span class="ru-muted" id="aidsnote"></span></div>
       <div class="ctl">top speed <input type="number" id="vmax" step="0.1" min="0.1" max="2" style="width:64px"> m/s
         <input type="number" id="wmax" step="0.1" min="0.1" max="4" style="width:64px"> rad/s
         <button class="ru" id="setspeed">Set</button></div>
@@ -116,6 +118,13 @@ $("#mode1").onclick = () => call("mode/first");
 let ghostOn = true, pauseOn = false;
 $("#ghost").onclick = () => call("sim/ghost/" + (ghostOn ? "off" : "on"));
 $("#autopause").onclick = () => call("sim/auto_pause/" + (pauseOn ? "off" : "on"));
+let simNode = null;
+$("#hview").onclick = async () => {
+  if (!simNode) return;
+  try { err(""); const r = await fetch("/nodes/" + simNode + "/scene3d/view/next", {method: "POST"});
+        const v = await r.json(); $("#hview").textContent = "Headset view: " + v.style.replace("_", " "); }
+  catch(e){ err("headset view: " + e.message); }
+};
 $("#setspeed").onclick = async () => {
   try { err(""); await RU.api("top_speed", {method: "POST", body: {max_speed: +$("#vmax").value, max_omega: +$("#wmax").value}}); }
   catch(e){ err(e.message); }
@@ -154,6 +163,8 @@ RU.sse("events", s => {
   $("#headless").disabled = s.config.mode !== "third";
   const A = s.sim_aids;
   $("#simaids").hidden = !A;
+  simNode = s.config.sim && !s.config.sim.includes("/") ? s.config.sim : null;
+  $("#hview").hidden = !simNode;
   if (A){
     ghostOn = A.ghost; pauseOn = A.auto_pause;
     $("#ghost").textContent = "Goal ghost: " + (ghostOn ? "on" : "off"); $("#ghost").classList.toggle("live", ghostOn);

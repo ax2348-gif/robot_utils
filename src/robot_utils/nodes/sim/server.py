@@ -245,6 +245,7 @@ class SimState(BaseModel):
     arm: Optional[ArmState] = Field(None, description="The arm (absent without one).")
     cameras: dict[str, CameraState] = Field(description="Rendered cameras by name.")
     backends: dict[str, BackendState] = Field(description="Backend sockets: arm, swerve, camera-<name>.")
+    view: Optional[dict] = Field(None, description="How headsets draw /scene3d: {style, role} (GET /scene3d/view).")
     events: list[Event] = Field(description="Latest events, oldest first.")
 
 
@@ -341,6 +342,20 @@ class VizFrame(BaseModel):
     base: VizBase
     markers_version: int = Field(description="Bumps when markers change.")
     markers: Optional[list[Marker]] = Field(None, description="Every live marker (in the stream: only when changed).")
+
+
+class ViewIn(_In):
+    style: Optional[Literal["hidden_line", "wire", "flat_edges", "flat"]] = Field(
+        None, description="hidden_line: surfaces hide the lines behind them (see-through to passthrough); wire: every "
+                          "line; flat: shaded surfaces; flat_edges: both.")
+    role: Optional[Literal["auto", "visual", "collision"]] = Field(
+        None, description="auto: the robot's visual meshes (the URDF's), everything else's collision geometry (what the "
+                          "physics touches); or one role everywhere.")
+
+
+class ViewOut(BaseModel):
+    style: str = Field(description="hidden_line | wire | flat_edges | flat.")
+    role: str = Field(description="auto | visual | collision.")
 
 
 class GhostIn(_In):
@@ -743,6 +758,19 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
         if have is None or have.index["scene_id"] != index["scene_id"]:
             have = rigid.Poses(index)
         return have
+
+    @app.get("/scene3d/view", response_model=ViewOut, tags=["view"],
+             summary="How headsets draw the scene (style, which geometry); they read it every second")
+    async def scene3d_view():
+        return node.view
+
+    @app.post("/scene3d/view", response_model=ViewOut, tags=["view"], summary="Set the headset view (style, role)")
+    async def set_scene3d_view(body: ViewIn):
+        return await call(node.set_view, body.style, body.role)
+
+    @app.post("/scene3d/view/next", response_model=ViewOut, tags=["view"], summary="Cycle the headset's style")
+    async def next_scene3d_view():
+        return await call(node.set_view, next_style=True)
 
     @app.get("/scene3d/frame", response_model=S3Frame, response_model_exclude_unset=True, tags=["view"],
              summary="The dynamic bodies' world poses now (JSON)")

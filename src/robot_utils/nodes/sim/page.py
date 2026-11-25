@@ -68,6 +68,9 @@ table.ru-table td,table.ru-table th{font-size:12px}
       <div class="ru-row" style="margin-top:6px"><button class="ru" id="step">Step</button><input type="number" id="stepms" value="100" min="1"> ms
         <button class="ru" id="reset" title="Time 0, robot at its start pose, objects back, commands dropped">Reset world</button></div>
       <div class="kv" id="clockkv" style="margin-top:6px"></div>
+      <div class="ru-row" style="margin-top:6px">headset view <button class="ru" id="hview"
+        title="Cycle how the headset draws the scene: hidden-line, wire, flat + edges, flat">–</button>
+        <button class="ru" id="hrole" title="Robot geometry: the URDF's visual meshes, or what collides">–</button></div>
     </div>
     <div class="ru-card" data-panel="robot" data-role="telemetry"><b>Robot</b><div class="kv" id="robot"></div>
       <table class="ru-table" id="mods"></table></div>
@@ -122,6 +125,11 @@ async function api(method, path, body) {
 function kv(el, rows) { el.innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join(""); }
 let cams = [], objNames = "";
 function render(s) {
+  if (s.view){
+    $("#hview").textContent = s.view.style.replace("_", " ");
+    hrole = s.view.role;
+    $("#hrole").textContent = {auto: "robot meshes", visual: "visual everywhere", collision: "collision everywhere"}[hrole];
+  }
   $("#state").textContent = s.state;
   $("#state").className = "ru-pill " + (s.state === "running" ? "ru-ok" : "ru-warn");
   kv($("#clockkv"), [["rtf", `${s.rtf} (measured ${s.rtf_measured})`], ["steps/s", s.step_rate], ["fell behind", s.behind],
@@ -174,6 +182,9 @@ $("#run").onclick = () => api("POST", "run", {rtf: +$("#rtf").value});
 $("#pause").onclick = () => api("POST", "pause");
 $("#step").onclick = () => api("POST", "step", {seconds: +$("#stepms").value / 1000}).then(snap);
 $("#reset").onclick = () => api("POST", "scene/reset").then(snap);
+let hrole = "auto";
+$("#hview").onclick = () => api("POST", "scene3d/view/next");
+$("#hrole").onclick = () => api("POST", "scene3d/view", {role: {auto: "collision", collision: "visual", visual: "auto"}[hrole]});
 function objSpec() {
   const sz = +$("#osize").value, shape = $("#oshape").value;
   return {name: $("#oname").value, shape, mass: +$("#omass").value, xyz: [+$("#ox").value, +$("#oy").value, +$("#oz").value],
