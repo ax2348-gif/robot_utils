@@ -366,11 +366,16 @@ class ViewIn(_In):
     role: Optional[Literal["auto", "visual", "collision"]] = Field(
         None, description="auto: the robot's visual meshes (the URDF's), everything else's collision geometry (what the "
                           "physics touches); or one role everywhere.")
+    anchor: Optional[list[float]] = Field(None, min_length=3, max_length=3,
+                                          description="[x, y, yaw_deg] in the sim world: placed in front of the operator.")
+    clear_anchor: bool = Field(False, description="Back to the world origin.")
 
 
 class ViewOut(BaseModel):
     style: str = Field(description="hidden_line | wire | flat_edges | flat.")
     role: str = Field(description="auto | visual | collision.")
+    anchor: Optional[list[float]] = Field(None, description="[x, y, yaw_deg]: the sim-world point the headset places in "
+                                                            "front of the operator; null: the world origin.")
 
 
 class GhostIn(_In):
@@ -781,7 +786,8 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
 
     @app.post("/scene3d/view", response_model=ViewOut, tags=["view"], summary="Set the headset view (style, role)")
     async def set_scene3d_view(body: ViewIn):
-        return await call(node.set_view, body.style, body.role)
+        anchor = None if body.clear_anchor else (body.anchor if body.anchor is not None else False)
+        return await call(node.set_view, body.style, body.role, False, anchor)
 
     @app.post("/scene3d/view/next", response_model=ViewOut, tags=["view"], summary="Cycle the headset's style")
     async def next_scene3d_view():

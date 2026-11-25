@@ -325,11 +325,14 @@ def test_http_articulated_object_and_robot_state_links(api):
 
 def test_http_headset_view_setting_cycles_and_validates(api):
     c, node = api
-    assert c.get("/scene3d/view").json() == {"style": "flat", "role": "auto"}
+    assert c.get("/scene3d/view").json() == {"style": "flat", "role": "auto", "anchor": None}
+    assert c.post("/scene3d/view", json={"anchor": [1.0, 0, 0]}).json()["anchor"] == [1.0, 0.0, 0.0]
+    assert c.post("/scene3d/view", json={"clear_anchor": True}).json()["anchor"] is None
     assert c.post("/scene3d/view/next").json()["style"] == "flat_edges"
-    assert c.post("/scene3d/view", json={"role": "collision"}).json() == {"style": "flat_edges", "role": "collision"}
+    assert c.post("/scene3d/view", json={"role": "collision"}).json() == {"style": "flat_edges", "role": "collision",
+                                                                           "anchor": None}
     assert c.post("/scene3d/view", json={"style": "sparkly"}).status_code == 422
-    assert c.get("/state").json()["view"] == {"style": "flat_edges", "role": "collision"}
+    assert c.get("/state").json()["view"] == {"style": "flat_edges", "role": "collision", "anchor": None}
     for _ in range(3):
         c.post("/scene3d/view/next")
     assert c.get("/scene3d/view").json()["style"] == "flat"

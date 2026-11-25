@@ -7,6 +7,7 @@ their backends over ``protocol`` sockets: ``arm.sock``, ``swerve.sock``, ``camer
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 import time
@@ -95,7 +96,11 @@ class SimNode:
         self.t_start = time.monotonic()
         self.markers = viz.Markers()
         self.ghosts = viz.Ghosts()
-        self.view = {"style": "flat", "role": "auto"}   # how headsets draw /scene3d (GET/POST /scene3d/view)
+        # how headsets draw /scene3d (GET/POST /scene3d/view); anchor: the sim-world point [x, y, yaw deg] the headset
+        # places in front of the operator (null: the world origin, the robot's start)
+        anchor = (world.cfg.get("scene") or {}).get("view_anchor")
+        self.view = {"style": "flat", "role": "auto",
+                     "anchor": None if anchor is None else [float(v) for v in anchor]}
         self._ghost_lines = None             # (scene_id, rigid.Poses, compat.StateLines) for robot_state's ghosts
 
     # -- lifecycle ---------------------------------------------------------------------------------
@@ -206,7 +211,8 @@ class SimNode:
     VIEW_STYLES = ("flat", "flat_edges", "hidden_line", "wire")
     VIEW_ROLES = ("auto", "visual", "collision")
 
-    def set_view(self, style: Optional[str] = None, role: Optional[str] = None, next_style: bool = False) -> dict:
+    def set_view(self, style: Optional[str] = None, role: Optional[str] = None, next_style: bool = False,
+                 anchor=False) -> dict:
         if next_style:
             i = self.VIEW_STYLES.index(self.view["style"])
             style = self.VIEW_STYLES[(i + 1) % len(self.VIEW_STYLES)]
@@ -218,7 +224,12 @@ class SimNode:
             if role not in self.VIEW_ROLES:
                 raise ValueError(f"role: one of {', '.join(self.VIEW_ROLES)}")
             self.view["role"] = role
-        self.events.add(f"headset view: {self.view['style']}, {self.view['role']} geometry")
+        if anchor is not False:                     # None clears it
+            if anchor is not None and (len(anchor) != 3 or not all(math.isfinite(float(v)) for v in anchor)):
+                raise ValueError("anchor is [x, y, yaw_deg]")
+            self.view["anchor"] = None if anchor is None else [float(v) for v in anchor]
+        self.events.add(f"headset view: {self.view['style']}, {self.view['role']} geometry, anchor "
+                        f"{self.view['anchor'] or 'origin'}")
         self.hub.state_changed()
         return dict(self.view)
 
