@@ -32,8 +32,8 @@ import numpy as np
 
 from ..records import HEADER_TIME_FIELDS, ROW_TIME_FIELDS, event_line
 
-INDEX_VERSION = 3
-KINDS = {"rows": 1, "frame": 2, "headset": 3, "sent": 4, "event": 5, "imu": 6}
+INDEX_VERSION = 4
+KINDS = {"rows": 1, "frame": 2, "headset": 3, "sent": 4, "event": 5, "imu": 6, "scene3d": 7}
 KIND_NAMES = {v: k for k, v in KINDS.items()}
 _LEN = struct.Struct(">I")
 _ARRAYS = ("file", "kind", "hoff", "hlen", "poff", "plen", "t0", "t1", "n", "schema", "width", "height", "jpeg")
@@ -171,8 +171,8 @@ def scan_file(path: Path, file_ix: int, b: _Builder) -> None:
 
 
 class StreamIndex:
-    """The index of one stream (see the module docstring). ``kind``: ``rows`` | ``frames`` | ``oplog`` | ``other``,
-    from what the stream holds."""
+    """The index of one stream (see the module docstring). ``kind``: ``rows`` | ``frames`` | ``oplog`` | ``scene3d``
+    (rigid-scene pose frames, dated by ``t_rx``) | ``other``, from what the stream holds."""
 
     def __init__(self, name: str, files: Sequence[Path], arrays: dict, meta: dict):
         self.name = name
@@ -233,6 +233,8 @@ class StreamIndex:
             return "oplog"
         if types.get("frame"):
             return "frames"
+        if types.get("scene3d"):
+            return "scene3d"
         if types.get("rows") or types.get("imu"):
             return "rows"
         return "other"

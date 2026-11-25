@@ -293,3 +293,178 @@ def test_recorded_description_wins(tmp_path):
         assert recorded_model(d)[1]["model_version"] == "abc123"
     desc, how = load_description(str(other), tmp_path / "old")        # not recorded: the flag
     assert desc["tag"] == "flag" and "not recorded" in how
+
+
+# -- the recorded rigid scene (browse/scene.py) ------------------------------------------------------------------
+
+def _scene(ghost: bool):
+    from robot_utils.scene3d.format import SceneBuilder
+    b = SceneBuilder("test")
+    b.add_body("world", "world", [0, 0, 0, 0, 0, 0, 1], False,
+               geoms=[{"type": "plane", "half_extents": [0, 0], "rgba": [1, 1, 1, 1]}])
+    m = b.add_mesh("link", [[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]], [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
+    b.add_body("base_link", "robot", [0, 0, 0, 0, 0, 0, 1], True,
+               geoms=[{"type": "box", "half_extents": [0.2, 0.2, 0.05], "role": "visual"},
+                      {"type": "box", "half_extents": [0.25, 0.25, 0.1], "role": "collision"}])
+    b.add_body("arm_link1", "robot", [0, 0, 0.3, 0, 0, 0, 1], True, parent=1,
+               geoms=[{"type": "mesh", "mesh": m, "role": "visual"}, {"type": "sphere", "radius": 0.05, "role": "collision"}])
+    b.add_body("door", "object", [2, 0, 1, 0, 0, 0, 1], False,
+               geoms=[{"type": "box", "half_extents": [0.5, 0.02, 1], "rgba": [0.6, 0.8, 0.9, 0.25], "role": "both"},
+                      {"type": "cylinder", "radius": 0.02, "half_length": 0.5, "role": "visual"}])
+    if ghost:
+        b.add_body("ghost:ee_goal/arm_link1", "ghost", [0, 0, 0.5, 0, 0, 0, 1], True,
+                   geoms=[{"type": "mesh", "mesh": m, "role": "visual"}])
+    return b.build()
+
+
+SCENE_T0, SCENE_SWITCH, SCENE_HZ = 5000.0, 5003.0, 30.0
+GHOST_GREEN = (0.2, 0.9, 0.3, 0.6)
+
+
+@pytest.fixture(scope="module")
+def scene_session(tmp_path_factory):
+    """A session with only a rigid-scene stream, wrapped by the recorder's own splitter (Rsf1Splitter: t_rx from its
+    clock): 6 s at 30 Hz; the sim time (t_sim) restarts at 0 at a reset at 2 s; a ghost is declared at 3 s (a new
+    scene_id: 2 -> 3 dynamic bodies); the ghost green, then hidden (alpha 0) from 4.5 s."""
+    from robot_utils.collect.records import Rsf1Splitter
+    from robot_utils.scene3d.format import Frame, encode_frame
+    root = tmp_path_factory.mktemp("scenes")
+    d = root / "sim1"
+    (d / "scene3d").mkdir(parents=True)
+    a, b = _scene(False), _scene(True)
+    lines = []
+    for (idx, blob), t in ((a, SCENE_T0), (b, SCENE_SWITCH)):
+        (d / "scene3d" / f"{idx['scene_id']}.json").write_text(json.dumps(idx))
+        (d / "scene3d" / f"{idx['scene_id']}.blob").write_bytes(blob)
+        lines.append({"scene_id": idx["scene_id"], "t_rx": t, "view": {"style": "flat", "role": "auto"},
+                      "files": [f"{idx['scene_id']}.json", f"{idx['scene_id']}.blob"]})
+    lines.append({"scene_id": "00000000deadbeef", "t_rx": SCENE_SWITCH, "missed": "gone"})
+    (d / "scene3d" / "scenes.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    (d / "session.json").write_text(json.dumps({"robot": "test", "streams": [
+        {"spec": "sim/scene3d/stream", "name": "sim.scene3d", "params": {"format": "bin"}, "framing": "rsf1"}]}))
+    now = [0.0]
+    sp = Rsf1Splitter(clock=lambda: now[0])
+    truth = []
+    with open(d / "sim.scene3d.000.bin", "wb") as f:
+        for k in range(int(6 * SCENE_HZ)):
+            t = SCENE_T0 + k / SCENE_HZ
+            ghost = t >= SCENE_SWITCH
+            idx = (b if ghost else a)[0]
+            n = len(idx["dynamic"])
+            poses = np.zeros((n, 7))
+            poses[:, 6] = 1
+            poses[0, :2] = [0.1 * k, -0.05 * k]                         # base_link
+            colors = {}
+            if ghost:
+                colors[n - 1] = GHOST_GREEN if t < SCENE_T0 + 4.5 else (0.2, 0.9, 0.3, 0.0)
+            t_sim = (t - SCENE_T0) if t < SCENE_T0 + 2 else (t - SCENE_T0 - 2)     # restarts at the reset
+            fr = Frame(k, t_sim, 0 if t < SCENE_T0 + 2 else 1, idx["scene_id"], poses, colors)
+            now[0] = t
+            for raw, h in sp.feed(encode_frame(fr)):
+                f.write(raw)
+                truth.append((h["t_rx"], idx["scene_id"], poses, colors))
+    return root, a[0]["scene_id"], b[0]["scene_id"], truth
+
+
+def _frames(c, key, t0, t1, **kw):
+    from robot_utils.scene3d.format import decode_frame
+    buf = c.get("/api/scene3d/frames", params={"key": key, "t0": t0, "t1": t1, **kw}).content
+    hl = struct.unpack(">I", buf[:4])[0]
+    assert (4 + hl) % 8 == 0
+    n = json.loads(buf[4:4 + hl])["n"]
+    t = np.frombuffer(buf, "<f8", n, 4 + hl)
+    off = np.frombuffer(buf, "<u4", n, 4 + hl + 8 * n)
+    base = 4 + hl + 12 * n
+    assert base % 4 == 0 and np.all(off % 4 == 0)                    # the page reads the float32 poses in place
+    return t, [decode_frame(buf[base + int(o):])[0] for o in off]
+
+
+def _scene_client(root):
+    from fastapi.testclient import TestClient
+    from robot_utils.collect.browse.server import build_app
+    return TestClient(build_app(Library(root), X.Exporter(None, root / "exports")))
+
+
+def test_scene_index_blob_and_draw_rule(scene_session, cache):
+    root, sa, sb, _ = scene_session
+    c = _scene_client(root)
+    rec = c.get("/api/recording", params={"key": "sim1"}).json()
+    s3 = rec["scene3d"]
+    assert s3["stream"] == "sim.scene3d" and s3["frames"] == 180
+    assert [(x["scene_id"], x["saved"]) for x in s3["scenes"]] == [(sa, True), (sb, True), ("00000000deadbeef", False)]
+    assert rec["streams"]["sim.scene3d"]["kind"] == "scene3d" and "fields" not in rec["streams"]["sim.scene3d"]
+    r = c.get("/api/scene3d/index", params={"key": "sim1", "scene_id": sb})
+    assert "immutable" in r.headers["cache-control"]
+    draw = {b["name"]: b["draw"] for b in r.json()["bodies"]}
+    # the headset's rule (auto): robot and ghosts visual, objects collision ("both" counts), planes never
+    assert draw == {"world": [], "base_link": [0], "arm_link1": [0], "door": [0], "ghost:ee_goal/arm_link1": [0]}
+    blob = c.get("/api/scene3d/blob", params={"key": "sim1", "scene_id": sb})
+    assert blob.content == (root / "sim1" / "scene3d" / f"{sb}.blob").read_bytes()
+    assert c.get("/api/scene3d/index", params={"key": "sim1", "scene_id": "00000000deadbeef"}).status_code == 404
+    assert c.get("/api/scene3d/blob", params={"key": "sim1", "scene_id": "../session"}).status_code == 404
+
+
+def test_scene_draw_rule_is_shared_with_the_replay():
+    from robot_utils.replay import render
+    from robot_utils.scene3d.view import select_geoms
+    assert render.select_geoms is select_geoms
+    idx, _ = _scene(True)
+    door = next(b for b in idx["bodies"] if b["name"] == "door")
+    assert [g["type"] for g in select_geoms(door, "visual")] == ["box", "cylinder"]
+    assert [g["type"] for g in select_geoms(door, "auto")] == ["box"]
+
+
+def test_scene_frames_aligned_by_arrival_time(scene_session, cache):
+    """Frames are dated by the recorder's t_rx (the other streams' time base), not their own sim time (which restarts
+    at a reset); the window is exact; hz decimates."""
+    root, sa, sb, truth = scene_session
+    c = _scene_client(root)
+    a, b = SCENE_T0 + 1.5, SCENE_T0 + 2.5
+    t, frames = _frames(c, "sim1", a, b)
+    want = [x for x in truth if a <= x[0] <= b]
+    np.testing.assert_array_equal(t, [x[0] for x in want])
+    assert [f.seq for f in frames] == [int(round((x[0] - SCENE_T0) * SCENE_HZ)) for x in want]
+    assert any(f.t < 0.6 for f in frames) and any(f.t > 1.4 for f in frames)        # t_sim jumps back: not used
+    for f, x in zip(frames, want):
+        np.testing.assert_allclose(f.poses, x[2], atol=1e-6)
+    t2, _ = _frames(c, "sim1", SCENE_T0, SCENE_T0 + 6, hz=5)
+    assert 25 <= len(t2) <= 31 and np.all(np.diff(np.floor(t2 * 5)) >= 1)
+    assert len(_frames(c, "sim1", SCENE_T0 - 10, SCENE_T0 - 5)[0]) == 0
+
+
+def test_scene_change_mid_session(scene_session, cache):
+    root, sa, sb, _ = scene_session
+    c = _scene_client(root)
+    t, frames = _frames(c, "sim1", SCENE_SWITCH - 0.5, SCENE_SWITCH + 0.5)
+    before = [f for tt, f in zip(t, frames) if tt < SCENE_SWITCH]
+    after = [f for tt, f in zip(t, frames) if tt >= SCENE_SWITCH]
+    assert before and after
+    assert {f.scene_id for f in before} == {sa} and {len(f.poses) for f in before} == {2}
+    assert {f.scene_id for f in after} == {sb} and {len(f.poses) for f in after} == {3}
+    idx_b = c.get("/api/scene3d/index", params={"key": "sim1", "scene_id": sb}).json()
+    assert len(idx_b["dynamic"]) == 3
+
+
+def test_scene_ghost_colours_and_alpha_pass_through(scene_session, cache):
+    root, sa, sb, _ = scene_session
+    c = _scene_client(root)
+    _, frames = _frames(c, "sim1", SCENE_T0 + 3.5, SCENE_T0 + 5.5)
+    green = [f.colors[2] for f in frames if f.t < 2.5]          # t_sim = t - 2 after the reset
+    hidden = [f.colors[2] for f in frames if f.t >= 2.5]
+    assert green and hidden
+    np.testing.assert_allclose(green[0], GHOST_GREEN, atol=1 / 255)
+    assert all(h[3] == 0 for h in hidden)
+
+
+def test_scene_toggle_and_recordings_without_one(session, cache):
+    """A recording without a scene lists none and answers 404; the page offers the layer only when there is one, on
+    by default (vis.scene unset), and the export waits for it."""
+    from robot_utils.collect.browse.page import PAGE_HTML
+    root, *_ = session
+    c = _scene_client(root)
+    assert c.get("/api/recording", params={"key": "s1"}).json()["scene3d"] is None
+    assert c.get("/api/scene3d/frames", params={"key": "s1", "t0": 0, "t1": 1}).status_code == 404
+    assert 'if (hasScene()) opt("scene", "sim scene")' in PAGE_HTML
+    assert "const sceneOn = () => hasScene() && vis.scene !== false;" in PAGE_HTML
+    assert "function sceneState(t){ if (!sceneOn()) return null;" in PAGE_HTML
+    assert "if (vis.robot !== false) ps.push(sceneEnsure(t));" in PAGE_HTML

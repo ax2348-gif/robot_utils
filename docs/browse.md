@@ -33,6 +33,7 @@ python -m robot_utils.collect browse ~/data/20261122-143000 --export-camera came
 | `collect/browse/oplog.py` | the operator stream as tables (`oplog.headset`, `oplog.sent`), the clutch anchors |
 | `collect/browse/dataset.py` | `Recording` (a session or an episode), `Library` (what a path holds) |
 | `collect/browse/model.py` | the description and the arm's kinematic chain for the 3D view |
+| `collect/browse/scene.py` | the recorded rigid scene: scenes, index (with the geoms drawn), blob, pose frames by time |
 | `collect/browse/export.py` | ffmpeg discovery, presets, size estimate / target, the encode jobs |
 | `collect/browse/server.py` / `page.py` | the HTTP API and the page |
 | `collect/browse/synth.py` | a synthetic session in the recorder's exact layout (tests, performance) |
@@ -51,6 +52,31 @@ python -m robot_utils.collect browse ~/data/20261122-143000 --export-camera came
   datagrams (dashed footprint), the **frozen platform frame** and the **EE anchor** (dashed). Corner text: armed /
   WBC state / limit, `cmd-tgt` and `meas-tgt` errors. Drag to orbit, shift-drag to pan, wheel to zoom, double-click
   to reset; `follow` keeps the robot centred; `3D` / `top` / `side`.
+- **The sim scene** (a sim recording, on by default; "sim scene" in View turns it off): the recorded rigid scene
+  (docs/scene3d.md; recorded with `--scene3d` or the teleop node's own recorder, docs/collect.md "The rigid scene")
+  in the robot view: every body at its pose in the frame shown at the playhead (below), as **lines only**: mesh
+  outline edges and primitive wireframes, no fills. The geometry is the headset's: the robot's and the ghosts'
+  visual geoms, everything else's collision geoms, planes never (`scene3d/view.py`, the one rule the headset, the
+  offscreen replay and the browser share; the role the headset used, from `scenes.jsonl`). Objects in their geom
+  colour pulled halfway to the ink (readable on either theme) at the geom's alpha (see-through glass stays faint);
+  the frames' **colour overrides** as recorded: the EE-goal ghost green / yellow / red, a body at alpha 0 hidden.
+  **The robot is drawn from the scene** (faint ink lines, the arm green while armed) and the description's
+  wireframe robot is left out: in a sim recording the scene's robot bodies are the simulated robot itself (its
+  links where the physics had them, the real meshes), so they can never disagree with the door the robot touches;
+  with the layer off, or a real-robot recording, the description's robot is drawn as before.
+  - **Frame alignment.** Each pose frame is dated by the recorder's arrival time `t_rx`, the time base of every
+    other stream (the frame's own `t` is sim time, which stops on a pause and restarts at a reset: never used). The
+    frame shown is the newest at or before the playhead (held up to 2 s). Each frame names its scene; a new
+    `scene_id` mid-recording (an object added, a ghost declared) switches the geometry at that frame.
+  - **World frame.** The scene is in the sim world; the WBC's poses (and the estimator's) are in the estimator's,
+    which the teleop node resets to the sim pose at every world reset but which then drifts with the odometry:
+    measured on `~/data/sim/20261124-215714`: under 4 mm through the short episodes 0005 / 0006, up to 10 cm by the end of
+    `20261124-0007` (3.7 m through the revolving door), a steady 7.7 cm afterwards. With a scene, the view is the
+    sim world and everything the robot's streams draw (EE references, the commanded-arm ghost, the base hint, the
+    anchors, the paths) is mapped by the planar offset between the WBC's base pose and the scene's own `base_link`
+    at the playhead: exact at the base, and the EE references keep their place relative to the robot. The corner
+    text gives that offset (`drawn in the sim scene (10.5 cm off)`). The whole-recording base path is mapped by the
+    current offset, so its far parts are only approximate.
 - **Cameras**: every JPEG stream (`camera.color`, `wrist_camera.color`), the frame shown is the newest at or before the
   playhead (`t_sensor`); the label gives the fps and the stream's dropped count.
 - **Operator · headset frame**: the headset LOCAL frame in operator FLU axes (`frames.C`; origin = where tracking
@@ -67,7 +93,7 @@ python -m robot_utils.collect browse ~/data/20261122-143000 --export-camera came
   the values at the playhead beside it; armed as a band at the bottom. Defaults: EE errors, EE z (target / command /
   measured), the base twist, the joints, the gripper, the operator's grip / trigger / engaged. "add a plot": any
   stream, any fields (comma-separated; the list filters as you type). The plot set is remembered (localStorage).
-- **View**: show / hide each panel and the commanded-arm ghost.
+- **View**: show / hide each panel, the sim scene and the commanded-arm ghost.
 
 ## Data access (performance)
 
@@ -82,6 +108,12 @@ python -m robot_utils.collect browse ~/data/20261122-143000 --export-camera came
 - **Frames on demand.** The page fetches the frame list of a 4 s chunk, then single JPEGs by record index (served as
   stored, cacheable forever); the browser decodes them lazily (`createImageBitmap`), keeps ~150 per camera and
   prefetches the next ~0.5 s of frames (scaled by the rate). A frame not decoded yet leaves the previous one up.
+- **The sim scene** (`browse/scene.py`): the pose stream is indexed like any other (one record per frame, dated by
+  `t_rx`); the page fetches 4 s chunks of frames as the recorded RSF1 bytes (`/api/scene3d/frames`: ~30 frames/s ×
+  ~0.85 KB for the 29 bodies of the revolving-door scene, ~100 KB a chunk; `hz=` decimates), keeps ~60 chunks, and
+  fetches each scene's index and mesh blob once per `scene_id` (immutable, cached by the browser; 1.2 MB for the
+  door scene). Mesh edges are turned into body-frame segments once per scene; a frame then costs one affine
+  transform per body (~35 k segments for the door scene; a 1280×720 export frame in ~4 ms).
 - **The operator stream** is JSON, so its records are parsed once into the two tables (cached like the index).
 
 ## Clutch anchors (body-frozen)
@@ -182,8 +214,8 @@ read per window, and the page keeps a bounded number of chunks and decoded frame
 
 ## Known limits
 
-- The 3D views are orthographic wireframes on a 2D canvas (no WebGL, no meshes): light and dependency-free, but
-  the arm is boxes and the robot has no textures.
+- The 3D views are orthographic wireframes on a 2D canvas (no WebGL): light and dependency-free. Without a sim
+  scene the arm is boxes; the scene's meshes are drawn as outline edges with no hidden-line removal.
 - The export renders in the page: keep the tab open while it runs (it does not need to be in front).
 - The WBC's pose fields are in the estimator's world; after an estimator reset (`est_reset` changes) the world
   jumps and so do the trails.

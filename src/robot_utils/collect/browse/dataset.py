@@ -2,7 +2,8 @@
 
 - ``Recording``: one session directory (``session.json``, rotated ``<name>.NNN.bin``) or one episode directory
   (``episode.json``, ``<name>.bin``): its streams (``StreamIndex`` each; the operator stream also as the
-  ``oplog.headset`` / ``oplog.sent`` tables), its episodes and events, its time range.
+  ``oplog.headset`` / ``oplog.sent`` tables), its episodes and events, its time range, and the recorded rigid scene
+  (``scene``: scene.py) when it has one.
 - ``Library``: what a path holds: ``items()`` lists every session (with its episodes and any cut episode
   directories) and loose episode directories under the path (one level of nesting below a root, as
   ``collect run --out`` lays them out); ``open(key)`` opens one ``Recording`` (cached).
@@ -20,6 +21,7 @@ from ..episodes import read_episodes
 from ..streams import rotated_files
 from .index import StreamIndex
 from .oplog import OplogTables
+from .scene import SceneTrack, find_track
 
 
 def _read_json(p: Path) -> dict:
@@ -74,6 +76,7 @@ class Recording:
                 self.streams["oplog.sent"] = self.oplog.sent
             else:
                 self.streams[name] = idx
+        self.scene: Optional[SceneTrack] = find_track(self.path, self.raw)
 
     def _stream_files(self) -> dict[str, list[Path]]:
         if self.kind == "episode":
@@ -140,13 +143,14 @@ class Recording:
                     tf = idx.a["t0"][frames]
                     info["fps"] = float((len(tf) - 1) / max(1e-9, tf[-1] - tf[0]))
                 info["bytes"] = int(idx.a["plen"][frames].sum())
-            else:
+            elif info["kind"] != "scene3d":
                 info["fields"] = [[f, u] for f, u in s.fields()]
             streams[name] = info
         return {"path": str(self.path), "kind": self.kind, "meta": self.meta, "t0": t0, "t1": t1,
                 "streams": streams, "episodes": self.episodes(), "cut_episodes": self.cut_episodes()
                 if self.kind == "session" else [], "events": self.events(), "gaps": self.gaps(),
-                "anchors": self.oplog.anchors() if self.oplog else []}
+                "anchors": self.oplog.anchors() if self.oplog else [],
+                "scene3d": self.scene.summary() if self.scene else None}
 
 
 class Library:

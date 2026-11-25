@@ -1,6 +1,7 @@
 """The browser page (one HTML string): library, the replay stage (robot 3D, cameras, operator 3D), transport,
 timeline, plots and the export panel. Plain JS, no external libraries; the shared toolkit and ``RU.viz``
-(``common/ui.css``, ``common/viz.js``: the arm wireframe) come from the node assets. docs/browse.md describes it.
+(``common/ui.css``, ``common/viz.js``: the arm wireframe) come from the node assets. A sim recording's rigid scene
+(scene.py) is drawn in the robot view, which is then the sim world. docs/browse.md describes it.
 """
 
 PAGE_HTML = r"""<!doctype html>
@@ -224,6 +225,129 @@ class Frames {
 }
 const F = {};
 
+// ---- the recorded rigid scene (scene.py; docs/scene3d.md): geometry once per scene_id, pose frames in 4 s chunks ----
+// Frames are dated by the recorder's arrival time t_rx (as every other stream), never by their own sim time; each
+// names its scene, so a new scene_id mid-recording switches the geometry. Drawn as outline edges and primitive
+// wireframes (no fills): the robot's and ghosts' visual geoms, everything else's collision geoms (the server marks
+// them: the headset's rule, scene3d/view.py), planes never.
+const SCN = {geo: new Map(), gpend: new Map(), chunks: new Map(), cpend: new Map()};
+const hasScene = () => !!(S.rec && S.rec.scene3d && S.rec.scene3d.frames);
+const sceneOn = () => hasScene() && vis.scene !== false;
+function sceneReset(){ SCN.geo.clear(); SCN.gpend.clear(); SCN.chunks.clear(); SCN.cpend.clear(); }
+function sceneChunk(k){
+  if (SCN.chunks.has(k) || SCN.cpend.has(k)) return SCN.cpend.get(k);
+  const key = S.key;
+  const p = api("api/scene3d/frames?" + qs({key, t0: k * CH, t1: (k + 1) * CH - 1e-9})).then(r => r.arrayBuffer()).then(buf => {
+    SCN.cpend.delete(k); if (key !== S.key) return;
+    const dv = new DataView(buf), hl = dv.getUint32(0, false), n = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl))).n;
+    SCN.chunks.set(k, {t: new Float64Array(buf, 4 + hl, n), off: new Uint32Array(buf, 4 + hl + 8 * n, n), base: 4 + hl + 12 * n, buf, dec: new Map(), at: performance.now()});
+    if (SCN.chunks.size > 60){ const ks = [...SCN.chunks.entries()].sort((a, b) => a[1].at - b[1].at); for (let i = 0; i < ks.length - 60; i++) SCN.chunks.delete(ks[i][0]); }
+    S.dirty = true;
+  }).catch(e => { SCN.cpend.delete(k); console.warn("scene3d", e); });
+  SCN.cpend.set(k, p); return p;
+}
+// one RSF1 frame (scene3d/format.py): 32-byte header, n x 7 float32 poses, m colour overrides (u32 slot, rgba u8)
+function rsf1(c, i){
+  let f = c.dec.get(i); if (f) return f;
+  const o = c.base + c.off[i], dv = new DataView(c.buf, o), n = dv.getUint16(20, true), m = dv.getUint16(22, true);
+  let sid = ""; for (let j = 0; j < 8; j++) sid += dv.getUint8(24 + j).toString(16).padStart(2, "0");
+  const colors = new Map();
+  for (let j = 0; j < m; j++){ const a = 32 + 28 * n + 8 * j; colors.set(dv.getUint32(a, true), [0, 1, 2, 3].map(k => dv.getUint8(a + 4 + k) / 255)); }
+  f = {t: c.t[i], reset: dv.getUint32(16, true), sid, n, poses: new Float32Array(c.buf, o + 32, n * 7), colors}; c.dec.set(i, f); return f;
+}
+// the frame shown at t: the newest at or before t (held up to 2 s)
+function sceneFrame(t){
+  for (let k = Math.floor(t / CH), d = 0; d < 2; d++, k--){ const c = SCN.chunks.get(k); if (!c){ if (d === 0) sceneChunk(k); continue; }
+    let lo = 0, hi = c.t.length; while (lo < hi){ const m = (lo + hi) >> 1; if (c.t[m] <= t) lo = m + 1; else hi = m; }
+    if (lo > 0) return t - c.t[lo - 1] <= 2.0 ? rsf1(c, lo - 1) : null; }
+  return null;
+}
+function sceneGeom(sid){
+  if (SCN.geo.has(sid)) return SCN.geo.get(sid);
+  if (!SCN.gpend.has(sid)){ const key = S.key, q = qs({key, scene_id: sid});
+    SCN.gpend.set(sid, Promise.all([api("api/scene3d/index?" + q).then(r => r.json()), api("api/scene3d/blob?" + q).then(r => r.arrayBuffer())])
+      .then(([idx, blob]) => { if (key === S.key) SCN.geo.set(sid, buildScene(idx, blob)); }).catch(e => { if (key === S.key) SCN.geo.set(sid, {failed: e.message, bodies: []}); })
+      .finally(() => { SCN.gpend.delete(sid); S.dirty = true; })); }
+  return null;
+}
+async function sceneEnsure(t){ if (!sceneOn()) return; const k = Math.floor(t / CH); await Promise.all([sceneChunk(k), sceneChunk(k - 1)]);
+  const f = sceneFrame(t); if (f && !sceneGeom(f.sid) && SCN.gpend.has(f.sid)) await SCN.gpend.get(f.sid); }
+// a geom's wire as segment end points (x, y, z pairs) in its own frame
+function circ(out, n, fn){ for (let i = 0; i < n; i++){ const a = 2 * Math.PI * i / n, b = 2 * Math.PI * (i + 1) / n; out.push(fn(a), fn(b)); } }
+function wire(g, idx, blob){
+  const o = [], N = 20, t = g.type;
+  if (t === "box"){ const [x, y, z] = g.half_extents, Q = []; for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) Q.push([i * x, j * y, k * z]);
+    for (const [a, b] of [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]]) o.push(Q[a], Q[b]); }
+  else if (t === "cylinder" || t === "capsule"){ const r = g.radius, h = g.half_length;
+    for (const z of [-h, h]) circ(o, N, a => [r * Math.cos(a), r * Math.sin(a), z]);
+    for (let i = 0; i < 4; i++){ const a = i * Math.PI / 2; o.push([r * Math.cos(a), r * Math.sin(a), -h], [r * Math.cos(a), r * Math.sin(a), h]); }
+    if (t === "capsule") for (const s of [-1, 1]) for (const ax of [0, 1]) for (let i = 0; i < N / 2; i++){ const a = Math.PI * i / (N / 2), b = Math.PI * (i + 1) / (N / 2);
+      const p = u => { const c = r * Math.cos(u), z = s * (h + r * Math.sin(u)); return ax ? [0, c, z] : [c, 0, z]; }; o.push(p(a), p(b)); } }
+  else if (t === "sphere" || t === "ellipsoid"){ const [a, b, c] = t === "sphere" ? [g.radius, g.radius, g.radius] : g.radii;
+    circ(o, N, u => [a * Math.cos(u), b * Math.sin(u), 0]); circ(o, N, u => [a * Math.cos(u), 0, c * Math.sin(u)]); circ(o, N, u => [0, b * Math.cos(u), c * Math.sin(u)]); }
+  else if (t === "mesh"){ const m = idx.meshes[g.mesh]; if (!m) return o;
+    const v = new Float32Array(blob, m.vert_offset, m.nvert * 3), e = m.index === "u16" ? new Uint16Array(blob, m.edge_offset, m.nedge * 2) : new Uint32Array(blob, m.edge_offset, m.nedge * 2);
+    for (let i = 0; i < e.length; i++){ const j = 3 * e[i]; o.push([v[j], v[j + 1], v[j + 2]]); } }
+  return o;
+}
+// the scene as bodies of line groups (one per geom colour), each group's segments in the body frame
+function buildScene(idx, blob){
+  const dyn = idx.dynamic || [], bodies = [];
+  for (const b of idx.bodies || []){
+    const groups = new Map();
+    for (const k of b.draw || []){ const g = b.geoms[k], pts = wire(g, idx, blob); if (!pts.length) continue;
+      const R = qToR(g.quat || [0, 0, 0, 1]), p = g.pos || [0, 0, 0], key = (g.rgba || []).join(",") + (g.type === "mesh" ? "m" : "p");
+      let G = groups.get(key); if (!G){ G = {rgba: g.rgba || [0.7, 0.7, 0.7, 1], mesh: g.type === "mesh", pts: []}; groups.set(key, G); }
+      for (const q of pts) G.pts.push(p[0] + R[0][0] * q[0] + R[0][1] * q[1] + R[0][2] * q[2], p[1] + R[1][0] * q[0] + R[1][1] * q[1] + R[1][2] * q[2], p[2] + R[2][0] * q[0] + R[2][1] * q[1] + R[2][2] * q[2]); }
+    if (!groups.size) continue;
+    bodies.push({id: b.id, name: b.name, kind: b.kind, slot: dyn.indexOf(b.id), pose: b.pose || [0, 0, 0, 0, 0, 0, 1],
+                 groups: [...groups.values()].map(G => ({rgba: G.rgba, mesh: G.mesh, pts: Float32Array.from(G.pts)}))});
+  }
+  const base = (idx.bodies || []).find(b => b.name === "base_link" && b.kind === "robot");
+  return {id: idx.scene_id, bodies, baseSlot: base ? dyn.indexOf(base.id) : -1, hasRobot: bodies.some(b => b.kind === "robot")};
+}
+// the planar pose (x, y, yaw) of the scene's base_link in a frame, or null
+function sceneBase(f, G){ if (!G || G.baseSlot < 0 || G.baseSlot >= f.n) return null; const o = 7 * G.baseSlot, p = f.poses;
+  const [x, y, z, w] = [p[o + 3], p[o + 4], p[o + 5], p[o + 6]]; return [p[o], p[o + 1], Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))]; }
+// what the robot view draws of the scene at t: {f, G, base} or null (no scene, toggled off, no frame yet)
+function sceneState(t){ if (!sceneOn()) return null; const f = sceneFrame(t); if (!f) return null;
+  const G = sceneGeom(f.sid); return {f, G: G && !G.failed ? G : null, failed: G && G.failed, base: sceneBase(f, G)}; }
+function rgbOf(css){ css = (css || "").trim(); let m = css.match(/^#([0-9a-f]{3})$/i); if (m) return [...m[1]].map(c => parseInt(c + c, 16) / 255);
+  m = css.match(/^#([0-9a-f]{6})/i); if (m) return [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16) / 255);
+  m = css.match(/rgba?\(([^)]+)\)/); if (m) return m[1].split(/[ ,/]+/).slice(0, 3).map(v => parseFloat(v) / 255); return [0.5, 0.5, 0.5]; }
+const css3 = c => `rgb(${c.map(v => Math.round(255 * Math.min(1, Math.max(0, v)))).join(",")})`;
+// draw the scene's frame f with the affine projector P0 (the sim world). Objects: their geom colour pulled halfway to
+// the ink (readable on either theme), at the geom's alpha (see-through stays faint); ghosts and any overridden body:
+// the frame's colour, hidden at alpha 0; the robot (opts.robot): faint ink lines, the arm in opts.armCol if given.
+function drawScene(g, P0, f, G, opts){
+  const c = P0([0, 0, 0]), ex = P0([1, 0, 0]), ey = P0([0, 1, 0]), ez = P0([0, 0, 1]);
+  const J = [[ex[0] - c[0], ey[0] - c[0], ez[0] - c[0]], [ex[1] - c[1], ey[1] - c[1], ez[1] - c[1]]], ink = rgbOf(C.ink);
+  g.setLineDash([]); g.lineJoin = "round";
+  for (const b of G.bodies){
+    if (b.kind === "robot" && !opts.robot) continue;
+    let pose = b.pose, ov = null;
+    if (b.slot >= 0){ if (b.slot >= f.n) continue; pose = f.poses.subarray(7 * b.slot, 7 * b.slot + 7); ov = f.colors.get(b.slot) || null; }
+    if (ov && ov[3] <= 0.004) continue;
+    const R = qToR([pose[3], pose[4], pose[5], pose[6]]);
+    const a00 = J[0][0] * R[0][0] + J[0][1] * R[1][0] + J[0][2] * R[2][0], a01 = J[0][0] * R[0][1] + J[0][1] * R[1][1] + J[0][2] * R[2][1], a02 = J[0][0] * R[0][2] + J[0][1] * R[1][2] + J[0][2] * R[2][2];
+    const a10 = J[1][0] * R[0][0] + J[1][1] * R[1][0] + J[1][2] * R[2][0], a11 = J[1][0] * R[0][1] + J[1][1] * R[1][1] + J[1][2] * R[2][1], a12 = J[1][0] * R[0][2] + J[1][1] * R[1][2] + J[1][2] * R[2][2];
+    const tx = c[0] + J[0][0] * pose[0] + J[0][1] * pose[1] + J[0][2] * pose[2], ty = c[1] + J[1][0] * pose[0] + J[1][1] * pose[1] + J[1][2] * pose[2];
+    for (const grp of b.groups){
+      let col, alpha;
+      if (ov){ col = css3(ov); alpha = Math.max(0.35, ov[3]); }
+      else if (b.kind === "robot"){ col = opts.armCol && b.name.startsWith("arm_") ? opts.armCol : C.ink; alpha = 0.5; }
+      else { const a = grp.rgba[3] === undefined ? 1 : grp.rgba[3]; col = css3([0, 1, 2].map(i => 0.5 * grp.rgba[i] + 0.5 * ink[i])); alpha = a < 1 ? Math.max(0.3, a) : 0.85; }
+      g.strokeStyle = col; g.globalAlpha = alpha; g.lineWidth = grp.mesh ? 0.6 : 1; g.beginPath();
+      const q = grp.pts;
+      for (let i = 0; i + 5 < q.length; i += 6){
+        g.moveTo(tx + a00 * q[i] + a01 * q[i + 1] + a02 * q[i + 2], ty + a10 * q[i] + a11 * q[i + 1] + a12 * q[i + 2]);
+        g.lineTo(tx + a00 * q[i + 3] + a01 * q[i + 4] + a02 * q[i + 5], ty + a10 * q[i + 3] + a11 * q[i + 4] + a12 * q[i + 5]); }
+      g.stroke();
+    }
+  }
+  g.globalAlpha = 1;
+}
+
 // ---- geometry ------------------------------------------------------------------------------------
 const qToR = ([x, y, z, w]) => [[1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)], [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)], [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]];
 function rToQ(m){ const tr = m[0][0] + m[1][1] + m[2][2]; let q;
@@ -315,13 +439,26 @@ function anchorAt(t){ const A = (S.rec && S.rec.anchors) || []; let best = null;
 function drawRobot(g, W, H, t, view, follow, compact){
   g.clearRect(0, 0, W, H); g.fillStyle = C.panel; g.fillRect(0, 0, W, H);
   const bp = basePose(t), desc = S.model && S.model.description, rb = (desc && desc.robot) || {frame_size: 0.4318, modules: S.modules};
-  const focus = bp && follow ? [bp[0], bp[1], 0.35] : (view.focus || [0, 0, 0.35]);
-  if (bp && follow) view.focus = focus;
-  const P = view.proj(W, H, focus), D = pen(g, P);
+  // the recorded sim scene is in the sim world, the robot's streams (wbc / estimator) in the estimator's, which is
+  // reset to the sim pose at every world reset but drifts while driving (up to ~10 cm through the revolving door).
+  // With a scene, the view is the sim world: the robot's own drawings are mapped onto the scene's base_link by the
+  // planar offset between the two base poses at t (exact at the base; EE references keep their place on the robot)
+  const sc = sceneState(t);
+  let M = null;
+  if (sc && sc.base && bp){ const [sx, sy, sth] = sc.base, d = sth - bp[2], cd = Math.cos(d), sd = Math.sin(d);
+    M = q => [sx + cd * (q[0] - bp[0]) - sd * (q[1] - bp[1]), sy + sd * (q[0] - bp[0]) + cd * (q[1] - bp[1]), q[2] || 0]; }
+  const bw = sc && sc.base ? sc.base : bp;
+  const focus = bw && follow ? [bw[0], bw[1], 0.35] : (view.focus || [0, 0, 0.35]);
+  if (bw && follow) view.focus = focus;
+  const P0 = view.proj(W, H, focus), P = M ? (q => P0(M(q))) : P0, D = pen(g, P), D0 = pen(g, P0);
   g.lineJoin = "round"; g.font = "11px " + C.font;
   const s = view.scale(), R0 = Math.max(W, H) / s * 0.9, step = s > 140 ? 0.5 : s > 30 ? 1 : 5;
-  grid(D, Math.round(focus[0]), Math.round(focus[1]), 0, R0, step);
-  for (let k = 0; k < 3; k++){ const d = [0, 0, 0]; d[k] = 0.2; D.line([0, 0, 0], d, AX[k], 1.2); }
+  grid(D0, Math.round(focus[0]), Math.round(focus[1]), 0, R0, step);
+  for (let k = 0; k < 3; k++){ const d = [0, 0, 0]; d[k] = 0.2; D0.line([0, 0, 0], d, AX[k], 1.2); }
+  // the robot from the scene when it has the robot's bodies (the sim's own geometry: exact); else from the description
+  const W8a = have("wbc") ? rows("wbc") : null, armedA = W8a ? W8a.at("armed", t, true) > 0.5 : false;
+  const sceneRobot = !!(sc && sc.G && sc.G.hasRobot);
+  if (sc && sc.G) drawScene(g, P0, sc.f, sc.G, {robot: true, armCol: armedA ? C.live : null});
   // the base path: the whole recording faint, the last 5 s solid
   if (trail) D.path(trail.map(p => p ? [p[1], p[2], 0] : null), C.rule, 1.5);
   if (bp){ const w = have("wbc") ? rows("wbc") : rows("estimator"), fx = have("wbc") ? "base_x" : "x", fy = have("wbc") ? "base_y" : "y";
@@ -336,12 +473,13 @@ function drawRobot(g, W, H, t, view, follow, compact){
   if (an && an.robot_frame){ const [ax, ay, ath] = an.robot_frame, c = Math.cos(ath), sn = Math.sin(ath);
     D.line([ax, ay, 0.01], [ax + 0.3 * c, ay + 0.3 * sn, 0.01], C.muted, 1.2, [3, 3]); D.line([ax, ay, 0.01], [ax - 0.3 * sn, ay + 0.3 * c, 0.01], C.muted, 1.2, [3, 3]);
     if (an.ee_anchor){ const p = an.ee_anchor.slice(0, 3); triad(D, p, qToR(an.ee_anchor.slice(3)), 0.05, 1, C.muted, [2, 2]); D.text(p, "anchor", C.muted, 6, 12); } }
-  if (!bp){ g.fillStyle = C.muted; g.fillText("no base pose (wbc / estimator) at this time", 10, H - 10); return; }
+  if (!bp){ g.fillStyle = C.muted; g.fillText(sceneRobot ? "sim scene · no wbc / estimator pose at this time" : "no base pose (wbc / estimator) at this time", 10, H - 10); return; }
   const [px, py, th] = bp, ct = Math.cos(th), st = Math.sin(th), Bw = q => [px + ct * q[0] - st * q[1], py + st * q[0] + ct * q[1], q[2] || 0];
   const armed = W8 ? W8.at("armed", t, true) > 0.5 : false, wstate = W8 ? W8.at("state", t, true) : NaN;
   const ink = C.ink, h = rb.frame_size / 2;
   const box = (c, sz, col, w, dash) => { const Q = []; for (const i of [-1, 1]) for (const j of [-1, 1]) for (const k of [-1, 1]) Q.push(Bw([c[0] + i * sz[0] / 2, c[1] + j * sz[1] / 2, c[2] + k * sz[2] / 2]));
     [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]].forEach(([a, b]) => D.line(Q[a], Q[b], col, w, dash)); };
+  if (!sceneRobot){
   const [fz0, fz1] = rb.frame_z || [0.02, 0.12]; box([0, 0, (fz0 + fz1) / 2], [rb.frame_size, rb.frame_size, fz1 - fz0], ink, 1.4);
   const tr = rb.top_rail_z; if (tr){ box([0, 0, (tr[0] + tr[1]) / 2], [rb.frame_size, rb.frame_size, tr[1] - tr[0]], ink, 1.4);
     for (const i of [-1, 1]) for (const j of [-1, 1]) D.line(Bw([i * h, j * h, fz1]), Bw([i * h, j * h, tr[0]]), ink, 1, [2, 3]); }
@@ -350,13 +488,14 @@ function drawRobot(g, W, H, t, view, follow, compact){
   for (const m of rb.modules || S.modules){ const a0 = sw ? sw.at(`${m.name}_steer_angle`, t) : NaN, a = fin(a0) ? a0 : 0, Rw = 0.0381, ca = Math.cos(a), sa = Math.sin(a), ring = [];
     for (let k = 0; k <= 16; k++){ const u = k / 16 * 2 * Math.PI; ring.push(Bw([m.x + ca * Rw * Math.cos(u), m.y + sa * Rw * Math.cos(u), Rw + Rw * Math.sin(u)])); }
     D.path(ring, fin(a0) ? ink : C.muted, 1.3); }
+  }
   // the arm: measured joints solid; the WBC's commanded joints as a faint ghost
   const Ta = desc && desc.frames_in_base && desc.frames_in_base.arm;
   if (Ta && RU.viz && RU.viz.armSegments){
     if (W8 && view.ghost !== false){ const qc = [1, 2, 3, 4, 5, 6].map(i => W8.at(`${ee}_q_cmd${i}`, t)); const fc = armFK(qc);
       if (fc) for (const [a, b] of RU.viz.armSegments(Ta, fc, NaN)) D.line(Bw(a), Bw(b), C.muted, 0.7); }
     const A = have("arm") ? rows("arm") : null, q = A ? [1, 2, 3, 4, 5, 6].map(i => A.at(`j${i}_q`, t)) : null, fr = q ? armFK(q) : null;
-    for (const [a, b] of RU.viz.armSegments(Ta, fr, A ? A.at("g_gap", t) : NaN)) D.line(Bw(a), Bw(b), fr ? (armed ? C.live : ink) : C.muted, 1.25);
+    if (!sceneRobot) for (const [a, b] of RU.viz.armSegments(Ta, fr, A ? A.at("g_gap", t) : NaN)) D.line(Bw(a), Bw(b), fr ? (armed ? C.live : ink) : C.muted, 1.25);
   }
   // EE references (world): target, command, measured, with their recent paths
   const roles = [["tgt", C.signal, "target"], ["cmd", C.p[1], "command"], ["meas", ink, "measured"]];
@@ -370,7 +509,8 @@ function drawRobot(g, W, H, t, view, follow, compact){
   if (W8){ const lim = W8.at("limited_by", t, true), e1 = W8.at(`${ee}_err_pos`, t), e2 = W8.at(`${ee}_err_meas_pos`, t);
     lines.push((armed ? "ARMED" : "disarmed") + " · " + (WBC_STATES[wstate] || "-") + (fin(lim) && lim > 0 ? " · limited: " + (LIMITS[lim] || lim) : ""));
     lines.push(`cmd-tgt ${fin(e1) ? (e1 * 1000).toFixed(0) + " mm" : "-"} · meas-tgt ${fin(e2) ? (e2 * 1000).toFixed(0) + " mm" : "-"}`); }
-  if (!compact) lines.push("base from " + bp[3]);
+  if (sceneOn() && !(sc && sc.G)) lines.push(sc && sc.failed ? "sim scene: " + sc.failed : "sim scene loading");
+  if (!compact) lines.push("base from " + bp[3] + (M ? ` · drawn in the sim scene (${(Math.hypot(sc.base[0] - bp[0], sc.base[1] - bp[1]) * 100).toFixed(1)} cm off)` : ""));
   for (const s of lines.reverse()){ g.fillStyle = s.startsWith("ARMED") ? C.live : C.muted; g.fillText(s, 10, y); y -= 14; }
   let lx = W - 10; g.textAlign = "right";
   for (const [, col, name] of roles.slice().reverse()){ g.fillStyle = col; g.fillText("— " + name, lx, H - 10); lx -= g.measureText("— " + name).width + 10; }
@@ -554,6 +694,7 @@ function buildViews(){
     l.querySelector("input").onchange = e => { vis[k] = e.target.checked; applyVis(); }; el.appendChild(l); };
   opt("robot", "robot 3D"); opt("operator", "operator 3D");
   for (const n of camNames()) opt("cam:" + n, n);
+  if (hasScene()) opt("scene", "sim scene");
   opt("plots", "plots"); opt("ghost", "commanded arm (ghost)");
 }
 function applyVis(){ $("#robot").classList.toggle("hidden", vis.robot === false); $("#operator").classList.toggle("hidden", vis.operator === false || !have("oplog.headset"));
@@ -586,6 +727,8 @@ function prefetch(){
   for (const fr of Object.values(F)){ fr.list(Math.floor(t / CH)); fr.list(Math.floor(t / CH) + 1); fr.list(Math.floor(t / CH) - 1);
     const n = S.playing ? Math.min(30, Math.ceil(12 * Math.max(1, S.rate))) : 3; for (const i of fr.next(t, n)) fr.bitmap(i);
     if (!S.playing){ const i = fr.index(t); if (i >= 0) fr.bitmap(i); } }
+  if (sceneOn()){ const a = Math.floor((t - 1) / CH), b = Math.floor((t + (S.playing ? Math.max(2, 3 * S.rate) : 2)) / CH);
+    for (let k = a; k <= b; k++) sceneChunk(k); const f = sceneFrame(t); if (f) sceneGeom(f.sid); }
 }
 requestAnimationFrame(tick);
 new ResizeObserver(() => S.dirty = true).observe(document.body);
@@ -609,7 +752,7 @@ async function loadLibrary(){
 async function openRec(key, ep){
   S.playing = false; $("#play").textContent = "play";
   if (key !== S.key){
-    for (const k in R) delete R[k]; for (const k in F){ for (const b of F[k].img.values()) if (b && b.close) b.close(); delete F[k]; }
+    for (const k in R) delete R[k]; sceneReset(); for (const k in F){ for (const b of F[k].img.values()) if (b && b.close) b.close(); delete F[k]; }
     S.key = key; S.rec = null;
     const [rec, model] = await Promise.all([api("api/recording?" + qs({key})).then(r => r.json()), api("api/model?" + qs({key})).then(r => r.json())]);
     S.rec = rec; S.model = model;
@@ -718,6 +861,7 @@ async function ensureAt(t){
   const ps = [];
   for (const r of Object.values(R)) if (r.fields.length) ps.push(r.ensure(t - plotWin / 2 - 2.1, t + plotWin / 2 + 0.1));
   for (const n of camNames()) if (vis["cam:" + n] !== false) ps.push(F[n].ensure(t));
+  if (vis.robot !== false) ps.push(sceneEnsure(t));
   await Promise.all(ps);
   for (const fr of Object.values(F)){ const i = fr.index(t); if (i >= 0 && !fr.img.has(i)) await fr.bitmap(i); }
 }

@@ -10,6 +10,10 @@ Every data route takes ``key`` (a library item: ``.`` for the opened path itself
 - ``GET /api/envelope?key&stream&field&t0&t1&buckets``: per bucket ``min`` / ``max`` (an overview).
 - ``GET /api/frames?key&stream&t0&t1``: ``{i: [record index], t: [Pi time]}`` of the frames in the window.
 - ``GET /api/frame?key&stream&i``: that frame's JPEG bytes (immutable: cached by the browser).
+- ``GET /api/scene3d/index?key&scene_id``: a recorded rigid scene's index, each body with ``draw`` (the geoms the
+  headset draws); ``GET /api/scene3d/blob?key&scene_id``: its mesh blob (both immutable: cached by the browser);
+  ``GET /api/scene3d/frames?key&t0&t1[&hz]``: binary: the pose frames in the window (at most ``hz`` per second),
+  dated by ``t_rx`` (scene.py ``pack_frames``). ``/api/recording`` lists the scenes (``scene3d``).
 - ``GET /api/export/info``; ``POST /api/export/estimate``; ``POST /api/export`` (a job the page feeds) then
   ``POST /api/export/{id}/frame`` (a JPEG; ``repeat``) and ``POST /api/export/{id}/finish``; ``GET
   /api/export/{id}``; ``GET /api/export/{id}/file``; ``POST /api/export/camera`` (one camera, server-side).
@@ -32,6 +36,7 @@ from .model import arm_chain, load_description, recorded_model
 from .page import PAGE_HTML
 
 MAX_ROWS = 400_000
+IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}     # scene ids are content hashes
 
 
 def _nan_list(a) -> list:
@@ -125,6 +130,32 @@ def build_app(lib: Library, exporter: Exporter, description: Optional[str] = Non
             raise HTTPException(404, "no such frame")
         return Response(s.payload(i), media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    # -- the recorded rigid scene ----------------------------------------------------------------------
+
+    def track(key: str):
+        sc = rec(key).scene
+        if sc is None:
+            raise HTTPException(404, f"no rigid scene recorded in {key!r}")
+        return sc
+
+    @app.get("/api/scene3d/index")
+    def scene_index(key: str, scene_id: str):
+        idx = track(key).index(scene_id)
+        if idx is None:
+            raise HTTPException(404, f"scene {scene_id!r} not saved in {key!r}")
+        return JSONResponse(_clean(idx), headers=IMMUTABLE)
+
+    @app.get("/api/scene3d/blob")
+    def scene_blob(key: str, scene_id: str):
+        b = track(key).blob(scene_id)
+        if b is None:
+            raise HTTPException(404, f"scene {scene_id!r} not saved in {key!r}")
+        return Response(b, media_type="application/octet-stream", headers=IMMUTABLE)
+
+    @app.get("/api/scene3d/frames")
+    def scene_frames(key: str, t0: float, t1: float, hz: float = 0.0):
+        return Response(track(key).frames(t0, t1, hz), media_type="application/octet-stream")
 
     # -- export ----------------------------------------------------------------------------------
 
