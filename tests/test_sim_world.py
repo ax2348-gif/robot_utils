@@ -229,6 +229,30 @@ def test_timing_is_the_robots_unless_lenient_and_auto_is_macos_only():
         w.close()
 
 
+@needs_gl
+def test_cameras_keep_streaming_after_a_reset(w):
+    """A reset puts sim time back to 0; the frame schedule must restart with it (it waited for the time the world had
+    run before the reset, so the camera streams stopped that long after every A press: 2026-11-24)."""
+    from robot_utils.nodes.sim.render import Cameras
+    cams = Cameras(w, w.cfg["cameras"])
+    try:
+        cams.start("camera", ["color"])
+
+        def rendered_while(seconds):
+            n0 = cams.cams["camera"].rendered["color"]
+            for _ in range(int(seconds * 1000) // 20):
+                w.step(20)
+                time.sleep(0.002)                              # let the render thread run
+                cams.start("camera", ["color"])                # keep the stream active
+            time.sleep(0.2)
+            return cams.cams["camera"].rendered["color"] - n0
+        assert rendered_while(3.0) > 3                         # rendering as sim time runs (it skips when behind)
+        w.reset()                                              # back to t = 0 (the schedule was ~3 s ahead of it)
+        assert rendered_while(2.0) > 3, "camera frames stopped after the reset"
+    finally:
+        cams.close()
+
+
 def test_time_step_run_pause_rtf(w):
     t0 = w.t
     w.step(100)
