@@ -394,7 +394,7 @@ class ArmNode(JointStream, ArmRequests):
                 for m in e.missing:
                     self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
             age = math.inf if self._fresh_t is None else now - self._fresh_t
-            limit = STALE_ON if self.motors_on else STALE_OFF
+            limit = self.settings.stale_on if self.motors_on else STALE_OFF
             if self.motors_on and STALE_WARN <= age <= limit and not self._stale_warned:
                 self._stale_warn(now, age, e.missing)
             if self.reading is None or age > limit:
@@ -451,7 +451,7 @@ class ArmNode(JointStream, ArmRequests):
         self._stale_warn_t, self._stale_gaps = now, 0
         self.events.add(f"no complete reading for {age * 1e3:.0f} ms (no reply from "
                         f"{', '.join(dict.fromkeys(missing))}); with the motors on the arm faults at "
-                        f"{STALE_ON * 1e3:.0f} ms" + (f" ({more} more since the last report)" if more else ""),
+                        f"{self.settings.stale_on * 1e3:.0f} ms" + (f" ({more} more since the last report)" if more else ""),
                         "warn")
 
     def _note_latency(self, now: float) -> None:
@@ -483,7 +483,7 @@ class ArmNode(JointStream, ArmRequests):
             self.events.add(f"reply latency p99 {st['p99_ms']:.1f} ms (max {st['max_ms']:.1f} ms) over the last "
                             f"{st['n']} complete reads: {st['margin_ms']:.1f} ms margin to the {DT * 1e3:.0f} ms tick; "
                             "later replies are waited for one more tick (missed after two), and with the motors on "
-                            f"{STALE_ON * 1e3:.0f} ms without a complete reading faults", "warn")
+                            f"{self.settings.stale_on * 1e3:.0f} ms without a complete reading faults", "warn")
 
     def _note_fallbacks(self) -> None:
         """Control thread: the first time on a connection that a motor's feedback had to be refreshed

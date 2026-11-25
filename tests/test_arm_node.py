@@ -1180,3 +1180,25 @@ def test_feedback_refresh_fallback_warns_once_and_counts_survive_a_reconnect(rig
     after = n.feedback_refresh()
     assert after["fallbacks_by_motor"]["joint2"] == fr["fallbacks_by_motor"]["joint2"]
     assert after["refreshes"] >= fr["refreshes"]
+
+
+def test_timing_is_the_robots_unless_lenient_on_a_simulated_arm():
+    """--timing (docs/arm.md): strict keeps the robot's stall limits; auto is lenient only for a simulated arm on
+    macOS; lenient on hardware is refused."""
+    from robot_utils.nodes.arm.node import STALE_ON
+    s = C.apply_timing(C.NodeSettings(), "auto", sim=True, platform="linux")
+    assert (s.stale_on, s.ctl_heartbeat, s.timing) == (STALE_ON, 0.25, "strict")
+    s = C.apply_timing(C.NodeSettings(), "auto", sim=False, platform="darwin")
+    assert s.timing == "strict" and s.stale_on == STALE_ON
+    s = C.apply_timing(C.NodeSettings(), "auto", sim=True, platform="darwin")
+    assert (s.stale_on, s.ctl_heartbeat, s.timing) == (0.5, 2.0, "lenient (sim on macOS)")
+    with pytest.raises(ValueError):
+        C.apply_timing(C.NodeSettings(), "lenient", sim=False, platform="darwin")
+
+
+def test_lenient_stale_limit_forgives_a_reading_gap_that_strict_faults(rig):
+    n = ready(rig).node
+    n.settings.stale_on = 0.5
+    rig.sim.drop_reads = 10                                   # ~100 ms without a complete reading
+    rig.step(12)
+    assert n.state != "fault"

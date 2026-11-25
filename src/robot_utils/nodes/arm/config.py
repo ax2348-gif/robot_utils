@@ -165,6 +165,29 @@ class NodeSettings:
     stream_stale_ms: float = 30.0
     stream_max_lead: float = math.radians(20.0)
     gripper: GripperContact = field(default_factory=GripperContact)
+    # stall limits (docs/arm.md "Timing"): with the motors on, a reading this old faults (node.STALE_ON); the control
+    # process silent this long faults the node (proc_node). The robot's values; --timing lenient (the sim world on
+    # macOS, where scheduling stalls of 0.1-0.5 s happen under load) raises them, never on hardware.
+    stale_on: float = 0.05
+    ctl_heartbeat: float = 0.25
+    timing: str = "strict"
+
+
+LENIENT_TIMING = {"stale_on": 0.5, "ctl_heartbeat": 2.0}
+
+
+def apply_timing(settings: "NodeSettings", mode: str, sim: bool, platform: str) -> "NodeSettings":
+    """``--timing``: strict keeps the robot's stall limits; lenient raises them (a simulated arm only: ValueError on
+    hardware); auto = lenient for a simulated arm on macOS. Changes ``settings`` in place and returns it."""
+    if mode not in ("auto", "strict", "lenient"):
+        raise ValueError(f"timing is auto, strict or lenient, not {mode!r}")
+    lenient = mode == "lenient" or (mode == "auto" and sim and platform == "darwin")
+    if lenient and not sim:
+        raise ValueError("lenient timing is for a simulated arm only: the robot keeps its stall limits")
+    if lenient:
+        settings.stale_on, settings.ctl_heartbeat = LENIENT_TIMING["stale_on"], LENIENT_TIMING["ctl_heartbeat"]
+    settings.timing = ("lenient (sim on macOS)" if mode == "auto" else "lenient") if lenient else "strict"
+    return settings
 
 
 def config_path() -> Path:
