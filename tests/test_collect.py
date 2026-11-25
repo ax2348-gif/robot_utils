@@ -119,6 +119,31 @@ def test_index_orders_and_skips(tmp_path):
 
 # -- recording -----------------------------------------------------------------------------------
 
+def test_batching_only_the_row_streams(tmp_path):
+    s = Session("http://bot", tmp_path, "t", ["camera/color", "arm/stream", "wbc/stream", "quest_teleop/oplog/stream",
+                                              "camera/stream?streams=depth&mode=raw"], batch_ms=50)
+    params = {sp.name: sp.params for sp in s.specs}
+    assert params["arm"] == {"batch_ms": "50"} and params["wbc"] == {"batch_ms": "50"}
+    assert "batch_ms" not in params["camera.color"] and params["quest_teleop.oplog"] == {}
+    assert "batch_ms" not in params["camera.stream.streams.depth.mode.raw"]
+    s = Session("http://bot", tmp_path, "t", ["arm/stream"], session_name="b")       # the default: every row alone
+    assert s.specs[0].params == {}
+
+
+def test_description_saved_and_required(robot, tmp_path):
+    run = Running(robot, tmp_path)
+    d = run.stop()
+    assert json.loads((d / "description.json").read_text())["cameras"]["camera"]["serial"] == "FAKE"
+    assert json.loads((d / "model.json").read_text())["model_version"] == "fake0001"
+    assert (d / "model.urdf").read_text().startswith("<robot")
+    meta = json.loads((d / "session.json").read_text())
+    assert meta["description"]["model_version"] == "fake0001"
+    robot.refuse.add("description")                      # no description node: no recording
+    s = Session(robot.url, tmp_path, "t", ["arm/stream"], session_name="nodesc")
+    with pytest.raises(RuntimeError, match="without the robot description"):
+        asyncio.run(s.run(install_signals=False))
+
+
 def test_records_streams_and_indexes_episodes(robot, tmp_path):
     run = Running(robot, tmp_path, start_teleop=True)
     assert ("task", {"text": "pick the cup"}) in robot.calls and ("start", None) in robot.calls

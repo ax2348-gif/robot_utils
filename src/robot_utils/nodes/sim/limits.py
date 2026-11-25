@@ -16,7 +16,9 @@ line itself: in between it is a little stronger than the motor.
 
 Arm (``arm/config.py``, as the node loads it: ``load_settings()``, i.e. ``~/.config/robot_utils/arm.yaml``'s
 ``joint_vel_max`` when set): the joint speed caps per joint (``hard.joint_vel``); the gripper's squeeze force cap
-``HARD_MAX_FORCE``.
+``HARD_MAX_FORCE``; the motors' torque limits (the dynamic arm's clamp): min(datasheet peak, the MIT frame's TMAX) of
+each joint's Damiao model as the gain profile's hardware file names it (``config.motor_torque_limits``: 4340P 27 N m
+on joints 1-3, 4310 7 N m on joints 4-6 and the gripper).
 """
 from __future__ import annotations
 
@@ -25,7 +27,8 @@ import numpy as np
 # keys a sim config may no longer set (they come from here)
 DERIVED_KEYS = {("base", "steer_rate_max"), ("base", "wheel_speed_max"), ("base", "wheel_accel_max"),
                 ("base", "steer", "torque_max"), ("base", "wheel", "torque_max"),
-                ("components", "arm", "joint_speed_max"), ("components", "arm", "finger_force_max")}
+                ("components", "arm", "joint_speed_max"), ("components", "arm", "finger_force_max"),
+                ("components", "arm", "torque_max"), ("components", "arm", "gripper_torque_max")}
 
 
 def swerve_limits() -> dict:
@@ -46,8 +49,11 @@ def swerve_limits() -> dict:
 def arm_limits(settings=None) -> dict:
     from ..arm import config as C
     s = settings or C.load_settings()
+    tau, g_tau = C.motor_torque_limits()
     return {"joint_speed_max": np.asarray(s.hard.joint_vel, float).copy(),     # rad/s per joint
-            "finger_force_max": float(C.HARD_MAX_FORCE)}                       # N (the jaws' squeeze)
+            "finger_force_max": float(C.HARD_MAX_FORCE),                       # N (the jaws' squeeze)
+            "joint_torque_max": tau,                                           # N m per joint, output side
+            "gripper_torque_max": float(g_tau)}                                # N m, the gripper motor
 
 
 def robot_limits() -> dict:

@@ -1,0 +1,11 @@
+# The sim with the rings sorting scene and no table (docs/sim.md, "The rings scene"):
+# ROBOT_SIM_CONFIG=deploy/sim/sim_rings.yaml. Speeds, the object count and the seed: scene.rings_setup.
+scene:
+  tabletop: false
+  rings: true
+  view_anchor: [0.6, 0.0, 0.0]   # placed 1.6 m ahead: the robot ~1.0 m in front of the operator, the rings beyond it (both ahead)
+# 80 objects: MuJoCo's no-slip post-solve doubles the step (1.65 -> 0.74 ms per 1 ms step, measured 2026-11-24), so it
+# is off for this scene; grasps still hold (dynamic arm, lift + shake: slip 1.2-1.3 mm vs 0.5 with it, 5 mm before
+# the jaw fix; tests/test_sim_grasp_hold.py)
+contact:
+  noslip_iterations: 0

@@ -626,7 +626,8 @@ class JointChannelSession(BaseModel):
     stale: bool = Field(description="No fresh goal within stale_ms: ramping to / holding a hold.")
     counts: JointChannelCounts
     dropped: dict[str, int] = Field(description="Datagrams dropped, by reason (old, addr, not_enabled, paused, "
-                                                "nonfinite, limits, gap, no_reading, engage, lead, mode).")
+                                                "nonfinite, limits, gap, no_reading, engage, lead, mode, server: the "
+                                                "server process was lost).")
 
 
 class JointChannelGoal(BaseModel):
@@ -646,6 +647,41 @@ class JointChannelOut(BaseModel):
     bad_datagrams: dict[str, int] = Field(description="Datagrams without a session or malformed, by reason (session, "
                                                       "size, magic, version, json, unbound, control).")
     nonfinite_goals: int = Field(description="Non-finite goals the command step held instead (a backstop; any source).")
+
+
+class TickTime(BaseModel):
+    """The last 500 control ticks (the bus read to the row): wall time, the control thread's CPU time (Python running,
+    i.e. holding the GIL, or native code) and the rest (off the CPU: waiting for the GIL, for the bus, or
+    preempted). In one process with other Python threads, off-CPU time beyond the bus's is GIL waiting."""
+    n: int = Field(description="Ticks these numbers cover.")
+    wall_p50_ms: float = Field(description="Wall time per tick, median (ms).")
+    wall_p99_ms: float = Field(description="Wall time per tick, 99th percentile (ms).")
+    wall_max_ms: float = Field(description="Wall time per tick, longest (ms).")
+    cpu_p50_ms: float = Field(description="The control thread's CPU time per tick, median (ms).")
+    cpu_p99_ms: float = Field(description="The control thread's CPU time per tick, 99th percentile (ms).")
+    off_cpu_p50_ms: float = Field(description="Wall minus CPU time per tick, median (ms).")
+    off_cpu_p99_ms: float = Field(description="Wall minus CPU time per tick, 99th percentile (ms).")
+    off_cpu_max_ms: float = Field(description="Wall minus CPU time per tick, longest (ms).")
+
+
+class ProcessOut(BaseModel):
+    """Where the control loop runs (docs/arm.md "Processes")."""
+    mode: Literal["process", "thread"] = Field(description="`process`: the control loop and the bus in their own "
+                                                          "process (the default); `thread`: a thread of the server "
+                                                          "process (`--control thread`, the old structure).")
+    pid: Optional[int] = Field(None, description="The control process's pid (process mode).")
+    alive: Optional[bool] = Field(None, description="The control process is running (process mode).")
+    fault: Optional[str] = Field(None, description="Why the control process was lost (latched: restart the node); "
+                                                   "null if it was not.")
+    heartbeat_age: Optional[float] = Field(None, description="s since the control process's last heartbeat.")
+    snapshot_age: Optional[float] = Field(None, description="s since the control process published the state this "
+                                                            "document is built from (at most ~20 ms while it runs).")
+    busy: Optional[str] = Field(None, description="A blocking step the control process announced (connecting, "
+                                                  "enabling: the gripper check), its heartbeat excused meanwhile.")
+    rows_dropped: Optional[int] = Field(None, description="Stream rows the server process missed (ring overflow).")
+    commands_dropped: Optional[int] = Field(None, description="Messages to the control process that could not be sent.")
+    service_max_ms: Optional[float] = Field(None, description="The server's longest per-tick service (ms).")
+    tick_time: Optional[TickTime] = Field(None, description="How long the control ticks take; null until 50 ticks.")
 
 
 class ArmStateOut(BaseModel):
@@ -703,4 +739,6 @@ class ArmStateOut(BaseModel):
     joint_channel: JointChannelOut
     latest: Optional[TickRow] = Field(description="The latest control tick; null before the first.")
     server_mono: float = Field(description="Server monotonic s when this was built.")
+    process: Optional[ProcessOut] = Field(None, description="Where the control loop runs (docs/arm.md "
+                                                            "\"Processes\").")
 

@@ -26,6 +26,12 @@ def model():
     return WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),))
 
 
+# The base caps these controller tests were measured at (the WBC's first-test defaults; the defaults since
+# 2026-11-24 are 0.8 m/s, 0.9 rad/s, 2.0 m/s², wheels 2.0 m/s). At the new defaults the reach-boundary braking
+# transient is ~41 mm (not 6.6 mm) and the ramp is twice as steep: the measured numbers below are for these caps.
+FIRST_CAPS = dict(max_speed=0.6, max_omega=0.8, max_accel=1.0, wheel_speed=1.0)
+
+
 class Sim:
     """Perfect tracking: the base moves by the commanded twist, the arm by the commanded step."""
 
@@ -210,7 +216,7 @@ def test_commanded_velocity_moves_the_base_while_the_arm_holds_the_ee(model):
     rate and tracks it while the arm keeps a world-fixed EE in place; past its ttl the reference is zero and the
     base brakes and is held at rest. (0.2 m/s: from rest a commanded velocity must be worth the start charge.)"""
     v = 0.2
-    s = Sim(model, mode="commanded", velocity=VelocityHint(vx=v, vy=0.0, omega=0.0, ttl=0.3))
+    s = Sim(model, Config(**FIRST_CAPS), mode="commanded", velocity=VelocityHint(vx=v, vy=0.0, omega=0.0, ttl=0.3))
     T0 = s.tcp()
     s.buf.set_reactive(0.0, T0.translation, T0.rotation)
     errs = []
@@ -308,7 +314,7 @@ def test_base_hint_yields_at_the_reach_boundary(model):
     """A base pose reference (with its heading, as the Quest client sends) far behind a world-anchored EE target:
     the base stops where the shoulder is reach_fraction of the nominal reach from the target (limited_by reach,
     a hard row) while the EE stays on target."""
-    s = Sim(model)
+    s = Sim(model, Config(**FIRST_CAPS))
     T0 = s.tcp()
     s.buf.set_reactive(0.0, T0.translation, T0.rotation)
     s.hints = parse_hints({"base": {"mode": "hint", "target": {"pose": {"x": -1.5, "y": 0.0},

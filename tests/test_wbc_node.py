@@ -239,7 +239,7 @@ def test_runtime_config_bounds_and_structural_keys(rig):
             assert r.status_code == 422 and "hard limits" in r.json()["detail"]
             r = c.post("/config", json={"max_omega": 2.0})
             assert r.status_code == 422 and "hard limits" in r.json()["detail"]
-            assert node.cfg.max_speed == 0.6 and base.limits == []          # refused: nothing changed
+            assert node.cfg.max_speed == 0.8 and base.limits == []          # refused: nothing changed
             r = c.post("/config", json={"max_speed": 0.9})
             assert r.status_code == 200 and node.cfg.max_speed == 0.9 and base.limits == [(0.9, node.cfg.max_omega)]
             for k, v in (("rate_hz", 50.0), ("reach", 0.6), ("joint_vel", [1, 1, 1, 1, 1, 1]),

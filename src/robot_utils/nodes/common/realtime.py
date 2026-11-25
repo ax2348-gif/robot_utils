@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 # Below the kernel's threaded interrupt handlers (50), so USB and CAN interrupts still run first.
 PRIO_BUS = 40        # loops that own a motor bus (arm, swerve): a late tick trips a motor watchdog
+PRIO_BUS_IO = 39     # a bus driver's own native reader thread (motorbridge's polling worker): just below its loop
 PRIO_ESTIMATE = 30   # the estimator: the controllers above it wait on its poses
 PRIO_CONTROL = 20    # loops that command another node over HTTP (pose_servo)
 
@@ -38,6 +39,11 @@ class RealtimeOut(BaseModel):
     requested: int = Field(description="The priority the loop asked for (0: none, real time is switched off).")
     error: Optional[str] = Field(description="Why the request was not granted; null if it was, or before the loop "
                                              "has started.")
+    bus_threads: Optional[list[dict]] = Field(None, description="The bus driver's own native threads started when the "
+                                                                "bus connected (the arm: motorbridge's polling worker), "
+                                                                "each `{tid, name, policy, priority, error}`: raised to "
+                                                                "real time just below the loop; null before a connect "
+                                                                "or where not applicable (macOS, a simulated bus).")
 
 
 def not_started(requested: int) -> dict:
@@ -122,6 +128,84 @@ def _macos_latency(name: str) -> str:
             return ", ".join(notes)
     notes.append("App Nap and timer coalescing off")
     return ", ".join(notes)
+
+
+def task_ids() -> Optional[set]:
+    """This process's thread ids (Linux ``/proc/self/task``), or None where there is no such listing (macOS)."""
+    try:
+        return {int(t) for t in os.listdir("/proc/self/task")}
+    except (OSError, ValueError):
+        return None
+
+
+def _policy_name(tid: int) -> str:
+    try:
+        pol = os.sched_getscheduler(tid) & ~getattr(os, "SCHED_RESET_ON_FORK", 0)
+    except OSError as e:
+        return f"unknown ({e.strerror})"
+    return {getattr(os, "SCHED_FIFO", -1): "SCHED_FIFO", getattr(os, "SCHED_RR", -1): "SCHED_RR",
+            getattr(os, "SCHED_OTHER", -2): "SCHED_OTHER"}.get(pol, str(pol))
+
+
+def _thread_name(tid: int) -> str:
+    try:
+        with open(f"/proc/self/task/{tid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def raise_native_threads(before: Optional[set], priority: int = PRIO_BUS_IO, what: str = "bus reader") -> dict:
+    """Give SCHED_FIFO ``priority`` to the native thread a driver started since ``before`` (``task_ids()`` taken
+    just before the bus was opened): the threads now in this process that were not there then and are not Python
+    threads (``threading``'s native ids). Exactly one is expected; none or several: nothing is changed (several could
+    be anything another thread of this process started meanwhile). Never raises.
+
+    Returns ``{"threads": [{tid, name, policy, priority, error}], "error": why nothing was set or None,
+    "level": "info" | "warn"}``."""
+    import threading
+    out = {"threads": [], "error": None, "level": "warn"}
+    try:
+        if os.environ.get("ROBOT_UTILS_RT", "1").strip().lower() in ("0", "off", "false", "no"):
+            out["error"] = "real time switched off (ROBOT_UTILS_RT=0)"
+            return out
+        now = task_ids()
+        if before is None or now is None or not hasattr(os, "SCHED_FIFO"):
+            out["error"] = "not available on this OS"
+            return out
+        py = {t.native_id for t in threading.enumerate()}
+        new = sorted(now - before - py)
+        out["threads"] = [{"tid": t, "name": _thread_name(t), "policy": _policy_name(t), "priority": 0,
+                           "error": None} for t in new]
+        if len(new) != 1:
+            out["error"] = (f"no new native {what} thread found" if not new else
+                            f"{len(new)} new native threads ({', '.join(map(str, new))}): not knowing which is the "
+                            f"{what}, none changed")
+            return out
+        th = out["threads"][0]
+        try:
+            os.sched_setscheduler(new[0], os.SCHED_FIFO | getattr(os, "SCHED_RESET_ON_FORK", 0),
+                                  os.sched_param(priority))
+            th["priority"] = priority
+            out["level"] = "info"
+        except PermissionError:
+            th["error"] = out["error"] = (f"not permitted: this user's real-time priority limit (RLIMIT_RTPRIO) is "
+                                          f"below {priority}; see docs/realtime.md")
+        except (OSError, ValueError) as e:
+            th["error"] = out["error"] = f"{type(e).__name__}: {e}"
+        th["policy"] = _policy_name(new[0])
+    except Exception as e:  # noqa: BLE001 - never into connect
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def describe_threads(rec: dict, what: str = "bus reader") -> str:
+    """One line for a node's event log about ``raise_native_threads``' result."""
+    ths = ", ".join(f"tid {t['tid']} ({t['name']}) {t['policy']}" + (f" {t['priority']}" if t["priority"] else "")
+                    for t in rec["threads"]) or "none"
+    if rec["error"] is None:
+        return f"{what} thread is real time: {ths}"
+    return f"{what} thread NOT made real time ({rec['error']}); new threads: {ths}"
 
 
 def describe(rt: dict) -> str:

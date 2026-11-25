@@ -60,6 +60,18 @@ canvas.ru-plot{width:100%;height:70px}
     <div class="ru-card" data-panel="teleop" data-role="control"><b>Teleop</b>
       <div class="ctl"><button class="ru live" id="start">Start</button><button class="ru" id="stop">Stop</button>
         <span class="ru-muted" id="sending"></span></div>
+      <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
+        <span class="ru-muted" id="modenote">applies from the next grip</span></div>
+      <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
+      <div class="ctl" id="simaids" hidden><button class="ru" id="ghost">Goal ghost: on</button>
+        <button class="ru" id="autopause">Auto pause: off</button>
+        <button class="ru" id="hview" title="Cycle how the headset draws the sim (the sim node's /scene3d/view)">Headset view</button>
+        <span class="ru-muted" id="aidsnote"></span></div>
+      <div class="ctl">top speed <input type="number" id="vmax" step="0.1" min="0.1" max="2" style="width:64px"> m/s
+        <input type="number" id="wmax" step="0.1" min="0.1" max="4" style="width:64px"> rad/s
+        <button class="ru" id="setspeed">Set</button></div>
+      <div class="ru-muted" id="capsnote"></div>
+      <div class="ru-muted" id="reg"></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
       <div class="ru-muted" id="reason"></div>
@@ -99,6 +111,24 @@ $("#start").onclick = () => call("start");
 $("#stop").onclick = () => call("stop");
 $("#qup").onclick = () => call("quest/up");
 $("#qdown").onclick = () => call("quest/down");
+$("#mode3").onclick = () => call("mode/third");
+let headlessOn = true;
+$("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
+$("#mode1").onclick = () => call("mode/first");
+let ghostOn = true, pauseOn = false;
+$("#ghost").onclick = () => call("sim/ghost/" + (ghostOn ? "off" : "on"));
+$("#autopause").onclick = () => call("sim/auto_pause/" + (pauseOn ? "off" : "on"));
+let simNode = null;
+$("#hview").onclick = async () => {
+  if (!simNode) return;
+  try { err(""); const r = await fetch("/nodes/" + simNode + "/scene3d/view/next", {method: "POST"});
+        const v = await r.json(); $("#hview").textContent = "Headset view: " + v.style.replace("_", " "); }
+  catch(e){ err("headset view: " + e.message); }
+};
+$("#setspeed").onclick = async () => {
+  try { err(""); await RU.api("top_speed", {method: "POST", body: {max_speed: +$("#vmax").value, max_omega: +$("#wmax").value}}); }
+  catch(e){ err(e.message); }
+};
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const f = (v, n) => v === null || v === undefined || !isFinite(v) ? "–" : Number(v).toFixed(n);
 const STEPS = [["released", "released", "good"], ["engaged", "engaged", "good"], ["needs_release", "needs release", "bad"],
@@ -121,6 +151,28 @@ RU.sse("events", s => {
   $("#status").textContent = s.state.replace("_", " ");
   $("#status").className = "ru-pill " + ({engaged: "ru-ok", released: "ru-ok", stale: "ru-warn", needs_release: "ru-warn", refused: "ru-warn"}[s.state] || "");
   $("#start").disabled = T.phase !== "stopped"; $("#stop").disabled = T.phase !== "running";
+  $("#reg").textContent = s.config.mode !== "third" ? "first person: every grip aligns your forward to the robot's" : (T.registered ? "registered (" + T.registration + "): face where the robot faces and click the right stick to re-register" : "not registered: the first enable (Y) or a right-stick click registers (face where the robot faces)" + (T.registration ? " · " + T.registration : ""));
+  headlessOn = !!s.config.headless;
+  for (const [id, v] of [["#vmax", s.config.max_speed], ["#wmax", s.config.max_omega]])
+    if (document.activeElement !== $(id)) $(id).value = v;
+  const WC = T.wbc_caps;
+  $("#capsnote").textContent = "the sticks' full deflection; Start sets the WBC's max_speed / max_omega to it and Stop restores them"
+    + (WC && Object.keys(WC.asserted).length ? " · now asserted (WBC had " + Object.entries(WC.previous).map(([k, v]) => k + " " + v).join(", ") + ")" : "");
+  $("#headless").textContent = "Headless left stick: " + (headlessOn ? "on" : "off");
+  $("#headless").classList.toggle("live", headlessOn);
+  $("#headless").disabled = s.config.mode !== "third";
+  const A = s.sim_aids;
+  $("#simaids").hidden = !A;
+  simNode = s.config.sim && !s.config.sim.includes("/") ? s.config.sim : null;
+  $("#hview").hidden = !simNode;
+  if (A){
+    ghostOn = A.ghost; pauseOn = A.auto_pause;
+    $("#ghost").textContent = "Goal ghost: " + (ghostOn ? "on" : "off"); $("#ghost").classList.toggle("live", ghostOn);
+    $("#autopause").textContent = "Auto pause: " + (pauseOn ? "on" : "off"); $("#autopause").classList.toggle("live", pauseOn);
+    $("#aidsnote").textContent = (pauseOn ? (A.paused ? "sim paused (idle)" : "sim time stops when neither clutched nor driving") : "")
+      + (A.error ? " · " + A.error : "");
+  }
+  $("#mode3").classList.toggle("live", s.config.mode === "third"); $("#mode1").classList.toggle("live", s.config.mode === "first");
   $("#sending").textContent = running ? (T.sending ? `sending · ${T.sent ? T.sent.target : 0} targets` : "silent (holding)") : (T.stop_reason ? "stopped: " + T.stop_reason : "");
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");
   const why = running ? (T.reason || "") : (s.error || "");
@@ -167,7 +219,7 @@ RU.sse("events", s => {
   ] : [["error", esc(W.error)]];
   if (s.estop.latched) wkv.push(["e-stop", "latched: clear it on the WBC, arm and swerve pages"]);
   $("#wbc").innerHTML = wkv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
-  // episode: the open one, the task, the last outcome and event (recording is the client-side script's job)
+  // episode: the open one, the task, the last outcome and event (the sim also records every teleop run itself: recording.py)
   const E = s.episodes || {}, ev = s.last_event, L = s.eventlog || {};
   $("#epline").className = "lim" + (E.state === "recording" ? " on" : "");
   $("#epline").textContent = E.state === "recording" ? `episode ${E.id} · ${f(E.elapsed, 0)} s` : E.state === "resetting" ? `resetting the sim for ${E.pending}` : "no episode";
@@ -182,6 +234,15 @@ RU.sse("events", s => {
     ["event log", `${L.dir ? "on disk" : "memory only"} · seq ${L.seq}` + (L.dropped || L.write_errors ? ` · ${L.dropped} lost, ${L.write_errors} write errors` : "")],
   ];
   if (E.refused && E.state !== "recording") ekv.push(["A refused", esc(E.refused)]);
+  const R = s.recording || {};
+  if (R.enabled) {   // the sim records every teleop run (recording.py)
+    const st = R.streams || {}, down = Object.entries(st).filter(([, v]) => !v.connected).map(([k]) => k);
+    const sc = (R.scenes || []).reduce((n, x) => n + (x.saved || []).length, 0);
+    const rec = R.active ? `recording · ${f((R.bytes || 0) / 1e6, 0)} MB · ${Object.keys(st).length} streams${down.length ? " (" + down.length + " down)" : ""} · ${sc} scenes`
+      : R.dir ? (R.exit_code === 0 ? "finished" : R.exit_code === null ? "starting" : "stopped") : "starts with teleop";
+    ekv.push(["recording", esc(rec) + (R.dir ? `<div class="ru-muted" style="font-size:12px">${esc(R.dir)}</div>` : "")]);
+    if (R.error) ekv.push(["recorder", esc(R.error)]);
+  }
   $("#episode").innerHTML = ekv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
   $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${esc(e.msg)}</div>`).join("");
 });

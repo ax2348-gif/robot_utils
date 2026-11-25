@@ -44,7 +44,9 @@ stale`. Neither a shorter switch interval nor higher thresholds fixed it: the GI
 - **IPC** (`ipc.py`): one shared-memory file (mmap, a private 0700 directory on tmpfs: `$XDG_RUNTIME_DIR` on the
   robot) with heartbeats, seqlocked latest-value slots (the twist, the server's lease / sender status, the snapshot;
   CRC-checked) and single-producer rings (stream rows, estimator rows, swerve rows; drop-oldest, counted); commands on
-  two Unix datagram sockets (pickled; non-blocking on the control side). The control loop waits for its tick on the
+  two Unix datagram sockets (pickled; non-blocking on the control side). After every tick the control process sends
+  a `tick` message: the server's one IPC thread then posts the twist and publishes the row (event-driven, no
+  polling: an earlier 500 Hz polling pump made the server process's other threads late). The control loop waits for its tick on the
   command socket, so a command is applied at once between ticks: the e-stop first (it disarms and holds the arm on
   receipt). Requests that need an answer (enable, disable, session, hints, config, disarm, e-stop) wait for the
   control process's.
@@ -60,12 +62,14 @@ stale`. Neither a shorter switch interval nor higher thresholds fixed it: the GI
   routes, the stream fields, the datagram formats, the latch, the stop paths.
 - Measured (`tests/test_wbc_proc.py`, MacBook, no SCHED_FIFO; the server hammered by 6 `/state` pollers, 3 SSE
   and 3 `/stream` clients and three simulated 100 Hz readers while tracking a moving target): tick period p99
-  13.3 ms, max 13.7 ms, 0 overruns with the process; 17.4 ms p99, 20.1 ms max, 40 overruns as a thread.
+  11.9–13.3 ms, max 12.0–13.7 ms, 0 overruns with the process; 13.1–17.4 ms p99, 13.3–20.1 ms max, 1–40 overruns
+  as a thread (two runs). On the Mac neither has SCHED_FIFO; the robot's inversion (a FIFO thread waiting for a
+  descheduled normal one) cannot happen across processes.
 
 ### Defaults (for the first tests, the owner's)
 
-Base: `max_speed` 0.6 m/s (body), `max_omega` 0.8 rad/s, `max_accel` 1.0 m/s², `max_alpha` 1.5 rad/s², every
-wheel `wheel_speed` 1.0 m/s. Arm: `joint_vel` / `joint_acc` default to **the arm's own** (null in the config): the
+Base: `max_speed` 0.8 m/s (body), `max_omega` 0.9 rad/s, `max_accel` 2.0 m/s², `max_alpha` 1.5 rad/s², every
+wheel `wheel_speed` 2.0 m/s (the owner's tuned values, 2026-11-24; first tests: 0.6, 0.8, 1.0, 1.0). Arm: `joint_vel` / `joint_acc` default to **the arm's own** (null in the config): the
 arm's joint-channel welcome `limits` (2, 2, 2, 6, 6, 6 rad/s; 10, 10, 10, 30, 30, 30 rad/s²; until a welcome, the
 arm config's soft defaults, the same numbers); a tuple in the config narrows them, never widens. Ceilings: the base
 speed and yaw rate are checked at `POST /enable` against the swerve's own `GET /limits` "hard" (beyond them: 422,

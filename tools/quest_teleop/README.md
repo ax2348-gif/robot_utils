@@ -17,8 +17,10 @@ tools/quest_teleop/quest_down          # stop the headset's telemetry
 
 `teleop.py` options: `--hand left|right` (the hand that drives the arm, default right), `--ee` (default `arm`),
 `--no-head-walk` (engaged: the base hint follows only the stick offset), `--stale-ms` (default 200),
-`--max-latency-ms` (default 150), `--min-rate` (default 30 Hz), `--no-gripper`, `--udp-host`. Ctrl-C stops
-sending, disables and releases the lease. The status line shows ARMED / disarmed, the engagement state, whether
+`--max-latency-ms` (default 150), `--min-rate` (default 30 Hz), `--no-gripper`, `--udp-host`, `--max-speed` /
+`--max-omega` (the top speed: the sticks' full deflection and the hint clamp, asserted as the WBC's caps for the
+lease and restored at the end; docs/quest_teleop_node.md). Ctrl-C stops sending, disables, restores the WBC caps
+and releases the lease. The status line shows ARMED / disarmed, the engagement state, whether
 datagrams are going out, the headset latency and rate, the age of the newest WBC row, the stick offset
 `(x, y, yaw)` and the base hint sent `(x, y, heading)`, and the last reason (a disarm, or an engagement ended or
 refused).
@@ -93,8 +95,11 @@ All of this only while armed (Y, above).
 | A (right), the teleop node | start an episode (armed only; in the sim stack: the sim reset first, leaving it disarmed) | the same |
 | B tap (right, < 2 s), the teleop node | stop the episode (kept); held 2 s: the headset stops telemetry, the episode is aborted | the same |
 
-Stick scaling is the stream's own (`control_intent.base_velocity`: 18 % dead zone, 0.45 m/s and 0.8 rad/s full
-scale). Stick clicks are not mapped (left click was the Quest app's automove; the WBC replaces it).
+Stick scaling: the stream's `control_intent.base_velocity` (native: 18 % dead zone, 0.45 m/s and 0.8 rad/s full
+scale, per axis) is rescaled here to `Config.stick_max_speed` / `stick_max_omega` (0.8 m/s, 0.9 rad/s), the left
+stick's translation clamped to a circle. The native constants are duplicated in `body_frozen.py`
+(`NATIVE_STICK_*`) until a joint refactor with quest_env moves the scaling to one place. The WBC still clamps to
+its own `max_speed` / `max_omega`. Stick clicks are not mapped (left click was the Quest app's automove; the WBC replaces it).
 
 ## The body-frozen scheme (quest_env DEMO.md, "Experimental walking scheme")
 
@@ -111,7 +116,43 @@ On each engagement of the arm's hand, seen from its start:
 - **Target** (world) `= F · (e0 + dp, dR · E0)`: at engagement exactly the current command. Platform motion does not
   move it; operator travel does; equal operator and platform travel leaves it fixed relative to the platform.
   `F`'s origin cancels (`target.p = ee.p + R_F dp`), so the platform frame and DEMO's shoulder frame give the same
-  target.
+  target. That is the formula with head walking off (`--no-head-walk`).
+- **Two links with head walking on** (the default). The headset is worn on the neck, so it is a torso proxy. The
+  robot chain mirrors the operator's: world → base reference (link 1: the base at engagement + the head's motion +
+  the stick offset, i.e. the base hint) → EE (link 2: `F⁻¹ · command` at engagement + the hand's delta **in the
+  current head frame**: horizontal position + gravity-aligned yaw). Target = link 1 ∘ link 2.
+  - **The invariant:** while the hand keeps its pose relative to the head, the EE target keeps its pose relative to
+    the base reference, for any walking or turning.
+  - **Only what the base can follow is absorbed.** The head frame keeps the head's height at engagement, so
+    crouching (or rising) moves the hand, and so the arm, down (or up): a way to lower the arm.
+  - The frozen-frame formula broke it on turns. The hand sweeps an arc about the head while the base turns about its
+    own origin, so the EE drifted sideways by about `|Δyaw| · |ee_in_base − hand_in_head|` in the plane: about 0.15 m
+    for a 30° turn with a 0.28 m lever.
+  - Clutch invariance is unchanged: both links' deltas start at zero on engagement.
+  - A head lost mid-engagement freezes both links: the hand is read in the last tracked head frame. When the head
+    returns, both re-anchor where they are, so the robot does not move.
+- **Sticks: third vs first person** (`--mode`, the node page's toggle; read at each grip). The grip registers the
+  headset to the robot (you face where the robot faces). With `A` = that registration, `O(t)` your body pose (neck:
+  x, y, yaw), `δ` the hand delta in your body frame and `E0` the EE in the base at grip:
+  - **third person** (default; shared room): base `= T(s) · A · O(t) · R(σ)`, EE `= T(s) · A · O(t) · [δ ⊙ R(σ)E0]`.
+    The stick translation `s` moves the robot in the world, and the stick yaw `σ` turns only the robot (and swings
+    the arm with it). Walking and reaching stay room-aligned.
+  - **first person** (egocentric): one anchor `A(t)`; a stick increment `Δ` (robot frame) updates it as
+    `A ← (Base·Δ·Base⁻¹)·A`, i.e. `Base → Base·Δ`, a turn about the robot. Your forward stays the robot's forward
+    for walking and reaching.
+  - Without a stick yaw the two modes command exactly the same; they differ only after one.
+  - **Registration (third person)** is persistent: made at the **first enable** (the Y press that arms, after Start:
+    face where the robot faces), or by a **right stick click** (released: at once; engaged: in place, nothing moves).
+    Later clutches keep it: the clutch puts the robot's offset from its registered pose into the stick slots
+    (`s`, `σ`), so it moves nothing and the room directions stay. It is dropped on an estimator reset, a new XR session or an operator
+    frame realign (not on gaps or reconnects), and the next enable or click registers again. A system recenter
+    of the headset is not visible in the stream: click to re-register. A clutch without
+    any registration (nothing armed: tools, tests) registers. First person ignores it: every clutch zeroes.
+  - **Headless left stick** (third person, **on by default**; `--no-headless` or the page's toggle turns it off,
+    applies at once): with a
+    registration, the left stick moves the robot along **your facing** (`A`'s yaw + your yaw), not the robot's
+    forward. Engaged it integrates into `s` as before; released it is the same world direction expressed in the base
+    frame. The right stick's yaw is unchanged.
 
 Released or not yet engaged, the arm rides with the platform. The WBC takes world targets only, so the client
 computes the riding target: at release it stores the **commanded EE at release** relative to the base (`arm_cmd_*`
@@ -126,7 +167,7 @@ by `v / k` (measured in the QP at 0.5 m/s: the EE 142 mm behind, the base 250 mm
 hint carries `vx, vy` (pose) and `omega` (heading) = the hint target's velocity (the head's motion mapped as the
 hint's position is, plus the stick offset's rate, exact). Both are least-squares slopes over the frames of the last
 `ff_window` = 60 ms on `sample_time_ns`: exact for a steady motion, about 30 ms (half the window) behind a change of
-speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the WBC's caps (0.6 m/s, 0.8 rad/s: it refuses more). Zero
+speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the stick maxima (`hint_max_speed` / `hint_max_omega`, 0.8 m/s, 0.9 rad/s; the WBC clamps further to its own caps). Zero
 while the head is lost (its history restarts). **Every engagement starts them at zero**: only this engagement's
 frames count, and they ramp in as the window fills, so re-engaging never moves the robot. With it: the EE about 1 mm
 behind, the base about 18 mm (the same QP test). `Config(feedforward=False)` turns it off.

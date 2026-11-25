@@ -26,11 +26,11 @@ class Config:
     """Caps, gains and timeouts (``--config`` YAML keys; the defaults below)."""
     rate_hz: float = 100.0
     # base caps (the swerve's soft limits are set to max_speed / max_omega at enable)
-    max_speed: float = 0.6          # m/s, |(vx, vy)| body (inscribed octagon); <= the swerve's hard limit (at enable)
-    max_omega: float = 0.8          # rad/s; <= the swerve's hard limit (at enable)
-    max_accel: float = 1.0          # m/s², |twist rate| linear (octagon)
+    max_speed: float = 0.8          # m/s, |(vx, vy)| body (inscribed octagon); <= the swerve's hard limit (at enable)
+    max_omega: float = 0.9          # rad/s; <= the swerve's hard limit (at enable)
+    max_accel: float = 2.0          # m/s², |twist rate| linear (octagon)
     max_alpha: float = 1.5          # rad/s²
-    wheel_speed: float = 1.0        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
+    wheel_speed: float = 2.0        # m/s, every wheel (inscribed octagon, 8 rows per wheel)
     # arm caps (within the arm node's soft limits)
     # None = the arm's own (its joint-channel welcome `limits`; without one, the arm config's soft defaults
     # 2,2,2,6,6,6 rad/s and 10,10,10,30,30,30 rad/s²); a tuple narrows them further (never widens)

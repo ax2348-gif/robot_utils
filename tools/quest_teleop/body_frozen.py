@@ -17,7 +17,25 @@ Per engagement of the arm's hand:
 - **Target** = that frozen robot frame applied to ``(anchor.p + dp, dR anchor.R)``, in the world frame. At
   engagement it is exactly the current command. Platform motion does not move it; operator travel does. The frame's
   origin cancels (``target.p = ee.p + R_F dp``), so the platform frame and a shoulder frame with the same yaw give
-  the same target.
+  the same target. That is the formula with head walking off.
+
+**Two links (head walking on).** The operator chain is world → head (worn on the neck: a torso proxy; position and
+gravity-aligned yaw) → hand, and the robot chain mirrors it: world → base reference → EE.
+
+- **Link 1**, base reference = the base at engagement + the head's motion since engagement (+ the stick offset):
+  the base hint below.
+- **Link 2**, the EE in the base reference = the EE at engagement (``B0⁻¹ ∘ command``) + the hand's delta **in the
+  current head frame** since engagement (``ee_rel``). The head frame takes from the head only what the base can
+  follow: horizontal position and gravity-aligned yaw. Its height stays at the head's height at engagement, so a
+  crouch lowers the hand and the arm with it.
+- **Target** = link 1 ∘ link 2.
+
+The invariant: while the hand keeps its pose relative to the head, the EE target keeps its pose relative to the base
+reference, for any walking or turning. Vertical motion is not absorbed: the base cannot follow it. The frozen-frame formula breaks it on turns: the hand sweeps an arc about the
+head, the base turns about its own origin, and the EE drifts sideways by about ``|dyaw| * |ee_in_base - hand_in_head|``
+in the plane. Clutch invariance is unchanged: both links' deltas start at zero, so engaging gives exactly the
+command. A head lost mid-engagement freezes both links (link 2 reads the hand in the last tracked head frame). When
+the head comes back, both re-anchor where they are, as at an engagement, so the robot does not move.
 
 Engagement rules: an engagement starts only after this consumer has seen the hand released (valid, not engaged)
 since the last discontinuity (start, reconnect, session or revision change, gap, invalid frame, estimator reset,
@@ -33,7 +51,8 @@ as base-frame components), which cancels the ~20 ms lag. Not the last target: th
 short of it.
 
 Base (the sticks are the intent's ``base_velocity``: left stick forward/left m/s, right stick X yaw rad/s, 18 %
-dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively):
+dead zone and full scale 0.45 m/s / 0.8 rad/s applied natively; ``stick_velocity`` rescales that full scale to
+``Config.stick_max_speed`` / ``stick_max_omega``, the left stick's translation clamped to a circle):
 
 - **Released** (the arm's hand not engaged): no hint; only the sticks move the base: mode ``commanded`` with
   ``velocity`` in the base frame and a short ttl; sticks idle: ``locked`` (the base decelerates to a stop and holds).
@@ -70,7 +89,36 @@ from typing import Optional, Sequence
 import numpy as np
 
 from . import frames as F
-from .arming import sticks_neutral
+from .arming import button, sticks_neutral
+
+UP_LOCAL = F.C.T @ np.array([0.0, 0.0, 1.0])     # the up axis in OpenXR LOCAL (+Y)
+
+# The native stick scaling (quest_env native/teleop_core.h, Teleop::update: ``.45 * stick(..)`` / ``.8 * stick(..)``,
+# 18 % dead zone, not rescaled). MAGIC NUMBERS duplicated from the headset: they must match it until the scaling moves
+# to one place (a joint refactor with quest_env: send the raw normalised sticks and scale here only).
+NATIVE_STICK_SPEED = 0.45    # m/s, the native base_velocity forward / left at full deflection
+NATIVE_STICK_OMEGA = 0.8     # rad/s, the native base_velocity yaw at full deflection
+# Bounds on the configurable top speed: the swerve's hard limits (docs/swerve_node.md; the WBC caps lie within them)
+TOP_SPEED_LIMIT = 2.0        # m/s
+TOP_OMEGA_LIMIT = 4.0        # rad/s
+
+
+def _pl_compose(a, b) -> np.ndarray:
+    """Planar poses (x, y, yaw): ``a ∘ b``."""
+    c, s_ = math.cos(a[2]), math.sin(a[2])
+    return np.array([a[0] + c * b[0] - s_ * b[1], a[1] + s_ * b[0] + c * b[1], F.wrap(a[2] + b[2])])
+
+
+def _pl_inverse(a) -> np.ndarray:
+    c, s_ = math.cos(a[2]), math.sin(a[2])
+    return np.array([-(c * a[0] + s_ * a[1]), s_ * a[0] - c * a[1], F.wrap(-a[2])])
+
+
+def operator_planar(head_p_local, yaw: float) -> np.ndarray:
+    """The operator's planar pose in the headset's room (operator FLU axes of LOCAL): position, gravity-aligned
+    yaw."""
+    p = F.C @ np.asarray(head_p_local, float)
+    return np.array([p[0], p[1], float(yaw)])
 
 
 
@@ -183,14 +231,20 @@ def rotvec(r) -> np.ndarray:
 class Engagement:
     id: int
     operator: F.OperatorFrame
-    hand_anchor: tuple            # controller pose in the operator frame at engagement
-    robot: F.PlanarFrame          # frozen platform frame
-    ee_anchor: tuple              # measured EE in the frozen platform frame
+    hand_anchor: tuple            # link 2 anchor: the controller pose in the head frame (operator frame at engagement)
+    robot: F.PlanarFrame          # link 1 anchor: the platform frame at engagement (moved by a head re-anchor)
+    ee_anchor: tuple              # link 2 anchor: the commanded EE in the link-1 anchor frame
     est_reset: float
     head_yaw0: float
     head_p0: np.ndarray           # LOCAL
-    target: Optional[tuple] = None   # newest world target (body-frozen, moved with the stick offset)
-    target_raw: Optional[tuple] = None   # the body-frozen target alone (operator hand and travel)
+    target: Optional[tuple] = None   # newest world target: base reference (with the stick offset) ∘ ee_rel
+    target_raw: Optional[tuple] = None   # the same without the stick offset
+    ee_rel: Optional[tuple] = None   # link 2: the EE target in the base reference frame
+    head_last: Optional[tuple] = None   # the newest tracked head (LOCAL position, yaw): link 2's frame
+    rebase_hand: bool = False        # the head was re-anchored: re-anchor link 2 on the next hand pose
+    mode: str = "third"              # "third" | "first": where the stick terms enter (Config.mode at capture)
+    correction: np.ndarray = field(default_factory=lambda: np.zeros(3))   # first person: anchor correction C
+    hand_delta: Optional[tuple] = None   # link 2's hand delta (dp, dR), body frame
     head_d: np.ndarray = field(default_factory=lambda: np.zeros(3))    # last head displacement (engagement frame)
     head_dyaw: float = 0.0                                             # last head yaw change
     head_yaw_unwrapped: float = 0.0                                    # continuous (the velocity fit)
@@ -202,7 +256,9 @@ class Engagement:
 
 
 def body_frozen_target(eng: Engagement, hand_p_local, hand_r_local):
-    """World target for the current controller pose (DEMO.md body-frozen formula)."""
+    """World target for the current controller pose by the DEMO.md body-frozen formula: the hand's delta in the
+    operator frame frozen at engagement, applied in the frozen platform frame. ``TeleopCore`` uses it only through
+    the same formula with link 1 frozen (``head_walk`` off); with head walking it composes the two links."""
     current = eng.operator.pose(hand_p_local, hand_r_local)
     dp, dr = F.delta(eng.hand_anchor, current)
     return eng.robot.to_world(*F.apply_delta(eng.ee_anchor, dp, dr))
@@ -230,14 +286,37 @@ class Config:
     velocity_ttl: float = 0.2         # released: commanded stick velocity lapses after this
     max_dt: float = 0.05              # offset integration: longest step between two frames (s)
     gripper: bool = True
+    headless: bool = True             # third person, registered: the left stick moves the robot along the
+                                      # operator's facing (mapped by the registration), not the robot's forward
+    mode: str = "third"               # third: the sticks move the robot, directions stay room-aligned (the
+                                      # grip registers the headset to the robot); first: the sticks shift the
+                                      # anchor (your forward is the robot's forward). Read at each engagement.
     ride_lead: float = 0.01           # s: released, the riding target is placed on the base pose predicted this far
                                       # past the stream row's arrival (plus its age), so it does not lag the base
     feedforward: bool = True          # engaged: the EE twist and the hint velocity (see the module docstring)
     ff_window: float = 0.06           # s, the velocity fit's window (adds about half of it as lag)
     ff_max_speed: float = 1.0         # m/s, EE feedforward clamp
     ff_max_omega: float = 3.0         # rad/s, EE feedforward clamp
-    hint_max_speed: float = 0.6       # m/s, the hint velocity clamp (the WBC refuses more than its max_speed)
-    hint_max_omega: float = 0.8       # rad/s (the WBC's max_omega)
+    # the top speed (``set_top_speed``: both pairs together; the WBC clamps further to its own caps)
+    stick_max_speed: float = 0.8      # m/s, the left stick at full deflection (any direction: clamped to a circle)
+    stick_max_omega: float = 0.9      # rad/s, the right stick at full deflection
+    hint_max_speed: float = 0.8       # m/s, the hint velocity clamp (head walking + sticks)
+    hint_max_omega: float = 0.9       # rad/s
+
+
+def set_top_speed(cfg: Config, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> Config:
+    """The teleop's top speed, in place: the sticks' full deflection and the hint velocity clamp together
+    (``max_speed`` m/s, ``max_omega`` rad/s; None keeps that one). Bounded by the swerve's hard limits
+    (``TOP_*_LIMIT``); ValueError otherwise, nothing changed. Applies from the next frame (the head's velocity fit
+    takes its clamp at the next engagement)."""
+    for v, lim, what in ((max_speed, TOP_SPEED_LIMIT, "max_speed (m/s)"), (max_omega, TOP_OMEGA_LIMIT, "max_omega (rad/s)")):
+        if v is not None and not (_finite(v) and 0 < v <= lim):
+            raise ValueError(f"{what} must be in (0, {lim}]")
+    if max_speed is not None:
+        cfg.stick_max_speed = cfg.hint_max_speed = float(max_speed)
+    if max_omega is not None:
+        cfg.stick_max_omega = cfg.hint_max_omega = float(max_omega)
+    return cfg
 
 
 def head_pose(frame: dict):
@@ -260,6 +339,8 @@ class Status:
     reason: str = ""
     engagements: int = 0
     refused: dict = field(default_factory=dict)
+    registered: bool = False      # third person: the headset's room is registered to the robot's world
+    registration: str = ""        # how / why (first enable, click, clutch; or why it was dropped)
 
 
 class TeleopCore:
@@ -280,6 +361,9 @@ class TeleopCore:
         self.hold_base: Optional[tuple] = None    # released: the command at release relative to the base
         self.last_robot: Optional[RobotState] = None
         self.offset = np.zeros(3)                 # stick offset (x, y, yaw), world; zero at every engagement
+        self.reg: Optional[np.ndarray] = None    # third person: A = robot ∘ operator⁻¹ (planar), the registration
+        self.reg_reset: Optional[float] = None   # the estimator epoch it was made in
+        self._click = True                       # the right stick click, last frame (True: wait for a release)
         self.hint: Optional[dict] = None          # the newest base hint target sent (status)
         self._last_ns: Optional[int] = None
         self._tracked = False
@@ -298,6 +382,69 @@ class TeleopCore:
         self.hold_base = None                     # the riding target is captured from the current command
         self.sticks_live = False
         self.gripper_live = True
+        if self.reg is None and frame is not None:
+            self._register(frame, "first enable")  # the default zero: the operator faces where the robot faces
+
+    # -- the registration (third person) ---------------------------------------------------------
+
+    def _register(self, frame: dict, why: str) -> bool:
+        """Register the headset's room to the robot's world from this frame: the operator faces where the robot
+        faces (``A = robot ∘ operator⁻¹``). Released only (engaged: ``_register_in_place``)."""
+        head, robot = head_pose(frame), self.last_robot
+        yaw = F.head_yaw(head[1]) if head is not None else None
+        if yaw is None or robot is None:
+            return False
+        o = operator_planar(head[0], yaw)
+        self.reg = _pl_compose(np.array([robot.base_x, robot.base_y, robot.base_yaw]), _pl_inverse(o))
+        self.reg_reset = robot.est_reset
+        self.status.registered, self.status.registration = True, why
+        return True
+
+    def _unregister(self, why: str) -> None:
+        if self.reg is not None:
+            self.reg, self.reg_reset = None, None
+            self.status.registered, self.status.registration = False, f"dropped: {why}"
+
+    def _register_in_place(self, frame: dict) -> bool:
+        """Engaged, third person: register to how the operator faces now without moving the robot. The current
+        base reference becomes the registered pose of the operator's current pose (``A = Ref ∘ O⁻¹``, sigma = s = 0)
+        and both links re-anchor where they are."""
+        eng = self.eng
+        head, hp = head_pose(frame), hand_pose(frame, self.cfg.hand)
+        yaw = F.head_yaw(head[1]) if head is not None else None
+        if yaw is None or hp is None or eng.target is None:
+            return False
+        ref = np.array(self._hint_pose())
+        self.reg = _pl_compose(ref, _pl_inverse(operator_planar(head[0], yaw)))
+        self.reg_reset = eng.est_reset
+        eng.robot = F.PlanarFrame(ref[0], ref[1], ref[2], float(eng.robot.p[2]))
+        eng.head_p0 = np.asarray(head[0], float).copy()
+        eng.head_yaw0 = float(yaw)
+        eng.head_d, eng.head_dyaw = np.zeros(3), 0.0
+        eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
+        eng.operator = F.OperatorFrame(eng.head_p0, eng.head_yaw0)
+        self.offset = np.zeros(3)
+        eng.ee_anchor = eng.robot.to_local(*eng.target)
+        eng.ee_rel = eng.ee_anchor
+        eng.hand_anchor = eng.operator.pose(*hp)
+        eng.hand_delta = F.delta(eng.hand_anchor, eng.hand_anchor)
+        eng.rebase_hand = False
+        eng.head_fit.reset()
+        self.status.registered, self.status.registration = True, "right stick click (engaged)"
+        return True
+
+    def _clicks(self, frame: dict) -> None:
+        """The right stick click (a press seen released first) registers, third person: released at once,
+        engaged in place."""
+        down = button(frame, "right", "stick")
+        pressed, self._click = down and not self._click, down
+        if not pressed or self.cfg.mode == "first":
+            return
+        if self.eng is not None:
+            if self.eng.mode == "third":
+                self._register_in_place(frame)
+        else:
+            self._register(frame, "right stick click")
 
     def on_disarm(self, reason: str = "disarmed") -> None:
         """Disarmed: nothing carries over to the next arm (engagement, riding pose, sticks); no gripper command."""
@@ -313,7 +460,8 @@ class TeleopCore:
 
     def stick_v(self, intent: dict) -> list:
         """The sticks' base velocity, zero until they were seen neutral after arming."""
-        return stick_velocity(intent) if self.sticks_live else [0.0, 0.0, 0.0]
+        return (stick_velocity(intent, self.cfg.stick_max_speed, self.cfg.stick_max_omega) if self.sticks_live
+                else [0.0, 0.0, 0.0])
 
     # -- engagement ------------------------------------------------------------------------------
 
@@ -343,6 +491,7 @@ class TeleopCore:
         if self.valid and self.frame is not None:
             self._gates(frame)
             self._sticks(frame, robot)
+            self._clicks(frame)
         if self._tracked and self.eng is not None:
             # after the sticks: the EE target and the base hint use the same (this frame's) offset
             self._track_offset(frame)
@@ -357,12 +506,31 @@ class TeleopCore:
             return                       # the capture frame: the offset stays zero (engaging never moves the robot)
         v = self.stick_v(frame["control_intent"])
         yaw = robot.base_yaw if robot is not None else self.eng.robot.yaw
-        self.offset[:2] += F.rot_z(yaw)[:2, :2] @ np.array(v[:2]) * dt
-        self.offset[2] += v[2] * dt
+        # stick forward = the robot's forward (headless: the operator's facing, through the registration)
+        d_xy = F.rot_z(self._stick_yaw(frame, yaw))[:2, :2] @ np.array(v[:2]) * dt
+        d_yaw = v[2] * dt
+        if self.eng.mode == "first":
+            # an increment in the robot's own frame, Base -> Base·Δ, folded into the anchor correction
+            # C <- (Base Δ Base⁻¹) C: a turn about the base reference's position, then the translation
+            x, y, _ = self._hint_pose()
+            c = self.eng.correction
+            pivot = np.array([x, y])
+            rz = F.rot_z(d_yaw)[:2, :2]
+            c[:2] = rz @ (c[:2] - pivot) + pivot + d_xy
+            c[2] += d_yaw
+        else:
+            # third person: the translation in the world (left, T(s)), the yaw on the robot only (right, R(sigma))
+            self.offset[:2] += d_xy
+            self.offset[2] += d_yaw
 
     def _engagement(self, frame: dict, verdict, robot: Optional[RobotState], now: float) -> None:
         if verdict.discontinuity:
             self.drop(verdict.reason)
+            # only events that change the headset's frame drop the registration (a new XR session, an operator
+            # frame realign); gaps and reconnects do not: re-arming after one must not re-register silently
+            if {"session", "revision"} & set((verdict.reason or "").split(",")):
+                self._unregister(verdict.reason)
+            self._click = True
         self.valid = verdict.valid
         if not verdict.valid:
             self.frame = None
@@ -373,6 +541,8 @@ class TeleopCore:
             self.drop("hand invalid")
             self.valid = False
             return
+        if self.reg is not None and robot is not None and robot.est_reset != self.reg_reset:
+            self._unregister("estimator reset")
         if self.eng is not None and robot is not None and robot.est_reset != self.eng.est_reset:
             self.drop("estimator reset")
             return
@@ -391,9 +561,9 @@ class TeleopCore:
             if hp is None:
                 self.drop("hand pose missing")
                 return
-            self.eng.target_raw = body_frozen_target(self.eng, *hp)
             self.eng.captured_now = False
-            self._track(frame)
+            self._track(frame)                   # link 1 (and a head re-anchor) before link 2 reads the head
+            self.eng.ee_rel = self._link2(*hp)
             self.status.state = "engaged"
             return
         if self.needs_release:
@@ -419,9 +589,23 @@ class TeleopCore:
             return
         eng.target_raw = (robot.ee_p.copy(), robot.ee_r.copy())
         eng.target = eng.target_raw
+        eng.ee_rel = eng.ee_anchor
+        eng.mode = "first" if self.cfg.mode == "first" else "third"
+        eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
         eng.hand_fit = VelocityFit(self.cfg.ff_window, (self.cfg.ff_max_speed, self.cfg.ff_max_omega))
         eng.head_fit = VelocityFit(self.cfg.ff_window, (self.cfg.hint_max_speed, self.cfg.hint_max_omega))
         self.offset = np.zeros(3)
+        if eng.mode == "third":
+            if self.reg is None:
+                self._register(frame, "first clutch (no registration yet)")
+            if self.reg is not None:
+                # keep the registration: link 1's anchor is the registered pose of the operator now (A ∘ O_k);
+                # the robot's actual pose differs by a translation s (world) and a heading offset sigma, which go
+                # into the stick slots, so this clutch moves nothing and the directions stay registered
+                ref = _pl_compose(self.reg, operator_planar(eng.head_p0, eng.head_yaw0))
+                eng.robot = F.PlanarFrame(ref[0], ref[1], ref[2], float(eng.robot.p[2]))
+                self.offset = np.array([robot.base_x - ref[0], robot.base_y - ref[1],
+                                        F.wrap(robot.base_yaw - ref[2])])
         eng.captured_now = True
         self.eng = eng
         self._track(frame)
@@ -437,19 +621,101 @@ class TeleopCore:
             head = head_pose(frame)
             yaw = F.head_yaw(head[1]) if head is not None else None
             if yaw is not None:
+                if not eng.head_tracked:            # reacquired: re-anchor so neither link jumps
+                    self._reanchor_head(head[0], yaw)
                 eng.head_d = F.rot_z(-eng.head_yaw0) @ F.C @ (head[0] - eng.head_p0)
                 dyaw = F.wrap(yaw - eng.head_yaw0)
                 eng.head_yaw_unwrapped += F.wrap(dyaw - eng.head_dyaw)
                 eng.head_dyaw = dyaw
+                eng.head_last = (np.asarray(head[0], float).copy(), yaw)
             elif eng.head_tracked:                  # head lost: keep its last contribution, no velocity
                 eng.head_fit.reset()
             eng.head_tracked = yaw is not None
         self._tracked = True
 
-    def _track_offset(self, frame: dict) -> None:
-        """The target with this frame's stick offset (the base hint's too) and the feedforward fits' samples."""
+    def _reanchor_head(self, head_p_local, yaw: float) -> None:
+        """The head came back after a loss, possibly elsewhere. Both links restart from where they are, as at an
+        engagement: link 1's anchor becomes the current base reference (without the stick offset) and the head's
+        new pose; link 2 re-anchors on the next hand pose (``rebase_hand``) at the current ``ee_rel``. The robot
+        does not move; only motion from here on counts."""
         eng = self.eng
-        eng.target = self._with_offset(eng.target_raw)
+        x, y, byaw = self._head_pose()
+        eng.robot = F.PlanarFrame(x, y, byaw, float(eng.robot.p[2]))
+        eng.head_p0 = np.asarray(head_p_local, float).copy()
+        eng.head_yaw0 = float(yaw)
+        eng.head_d = np.zeros(3)
+        eng.head_dyaw = 0.0
+        eng.head_last = (eng.head_p0.copy(), eng.head_yaw0)
+        eng.rebase_hand = True
+        eng.head_fit.reset()
+
+    def _link2(self, hand_p_local, hand_r_local) -> tuple:
+        """Link 2: the EE target in the base reference frame, from the hand's motion relative to the head.
+
+        With head walking the hand is read in the current head frame (newest tracked head: position, gravity-aligned
+        yaw), so a rigid operator motion (head and hand together) leaves it unchanged; link 1 carries the motion to
+        the base. Without head walking link 1 is frozen and so is the frame (the operator frame at engagement): the
+        DEMO.md body-frozen formula."""
+        eng = self.eng
+        if self.cfg.head_walk and eng.head_last is not None:
+            # only what the base can follow moves the frame (x, y, yaw): the height stays at the head's height at
+            # engagement (or re-anchor), so a crouch or a rise moves the hand, and so the arm, up and down
+            p, yaw = eng.head_last
+            p = np.asarray(p, float) + UP_LOCAL * float(UP_LOCAL @ (eng.head_p0 - np.asarray(p, float)))
+            frame = F.OperatorFrame(p, yaw)
+        else:
+            frame = eng.operator
+        hand = frame.pose(hand_p_local, hand_r_local)
+        sigma = self._sigma()
+        if eng.rebase_hand:
+            # the new anchor is the current link-2 pose with the third-person stick yaw taken back out (it is
+            # applied to the anchor, inside the hand delta: R(sigma) anchor ⊕ 0 = the current pose)
+            eng.hand_anchor = hand
+            eng.ee_anchor = _rot_pose(eng.ee_rel, -sigma)
+            eng.rebase_hand = False
+        eng.hand_delta = F.delta(eng.hand_anchor, hand)
+        return F.apply_delta(_rot_pose(eng.ee_anchor, sigma), *eng.hand_delta)
+
+    def _stick_yaw(self, frame: Optional[dict], robot_yaw: float) -> float:
+        """The world direction of the left stick's forward: the robot's heading, or with ``headless`` (third
+        person, registered, head tracked) the operator's facing mapped by the registration (``A ∘ O``'s yaw)."""
+        mode = self.eng.mode if self.eng is not None else self.cfg.mode
+        if self.cfg.headless and mode == "third" and self.reg is not None and frame is not None:
+            head = head_pose(frame)
+            yaw = F.head_yaw(head[1]) if head is not None else None
+            if yaw is not None:
+                return F.wrap(float(self.reg[2]) + yaw)
+        return robot_yaw
+
+    def _sigma(self) -> float:
+        """The stick yaw applied inside the hand delta: the third-person stick yaw (it turns the robot, not the
+        direction mappings); 0 in first person, whose stick yaw lives in the anchor correction."""
+        return float(self.offset[2]) if self.eng is not None and self.eng.mode == "third" else 0.0
+
+    def _compose(self, with_sticks: bool = True) -> tuple:
+        """World target = the base reference without the stick terms (``A ∘ O(t)``: base at engagement + the
+        head's motion) ∘ ``ee_rel``, then the stick terms on the left: third person ``T(s)``, first person the
+        anchor correction ``C``. (The third-person stick yaw is already inside ``ee_rel``.)"""
+        eng = self.eng
+        if eng.hand_delta is not None:
+            # link 2 with this frame's stick yaw (the sticks are integrated after the hand is read)
+            eng.ee_rel = F.apply_delta(_rot_pose(eng.ee_anchor, self._sigma()), *eng.hand_delta)
+        x, y, yaw = self._head_pose()
+        p, r = F.PlanarFrame(x, y, yaw, float(eng.robot.p[2])).to_world(*eng.ee_rel)
+        if not with_sticks:
+            return p, r
+        if eng.mode == "third":
+            return p + np.array([self.offset[0], self.offset[1], 0.0]), r
+        c = eng.correction
+        rz = F.rot_z(c[2])
+        return rz @ p + np.array([c[0], c[1], 0.0]), rz @ r
+
+    def _track_offset(self, frame: dict) -> None:
+        """The target with this frame's stick terms (the base hint's too) and the feedforward fits' samples."""
+        eng = self.eng
+        if not eng.captured_now:                   # the capture frame keeps the exact command (no jump)
+            eng.target_raw = self._compose(with_sticks=False)
+            eng.target = self._compose()
         ns = frame.get("sample_time_ns")
         if not isinstance(ns, int):
             return
@@ -460,27 +726,36 @@ class TeleopCore:
         if eng.target_r0 is None:
             eng.target_r0 = r.copy()
         if self.cfg.head_walk and eng.head_tracked:
-            xy = eng.robot.r[:2, :2] @ eng.head_d[:2]
-            eng.head_fit.push(t, [xy[0], xy[1], eng.head_yaw_unwrapped])
+            # in the operator frame of the engagement; mapped to the world at use (``_map_rot``): in first person
+            # the mapping turns with the stick yaw
+            eng.head_fit.push(t, [eng.head_d[0], eng.head_d[1], eng.head_yaw_unwrapped])
 
-    def _hint_pose(self, offset) -> tuple:
-        """The base hint (x, y, yaw) world: the base at engagement + the head's motion + ``offset``."""
+    def _head_pose(self) -> tuple:
+        """The base reference without the stick terms, ``A ∘ O(t)``: the base at engagement (link-1 anchor) + the
+        head's motion, (x, y, yaw) world."""
         eng = self.eng
-        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2] + offset[:2]
-        return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw + offset[2])
+        xy = eng.robot.p[:2] + eng.robot.r[:2, :2] @ eng.head_d[:2]
+        return float(xy[0]), float(xy[1]), F.wrap(eng.robot.yaw + eng.head_dyaw)
 
-    def _with_offset(self, target):
-        """The body-frozen target moved with the stick offset: the same planar rigid motion that takes the base
-        hint without the offset to the hint with it, so the EE and base references agree (the arm does not fight
-        the sticks)."""
-        if target is None or not np.any(self.offset):
-            return target
-        x0, y0, _ = self._hint_pose(np.zeros(3))
-        Rz = F.rot_z(float(self.offset[2]))
-        c0 = np.array([x0, y0, 0.0])
-        c1 = c0 + np.array([self.offset[0], self.offset[1], 0.0])
-        p, r = target
-        return c1 + Rz @ (np.asarray(p, float) - c0), Rz @ np.asarray(r, float)
+    def _map_rot(self) -> np.ndarray:
+        """The rotation (2x2) taking operator-frame motion to world motion: the engagement's, and in first person
+        also the anchor correction's yaw."""
+        eng = self.eng
+        r = eng.robot.r[:2, :2]
+        return F.rot_z(eng.correction[2])[:2, :2] @ r if eng.mode == "first" else r
+
+    def _hint_pose(self, offset=None) -> tuple:
+        """The base hint (x, y, yaw) world: ``A ∘ O(t)`` with the stick terms. Third person ``T(s) · A·O(t) ·
+        R(sigma)`` (``offset``: the stick translation s, world, and yaw sigma; default the current ones); first
+        person ``C · A·O(t)`` with the anchor correction ``C``."""
+        eng = self.eng
+        x, y, yaw = self._head_pose()
+        if eng.mode == "first":
+            c = eng.correction
+            xy = F.rot_z(c[2])[:2, :2] @ [x, y] + c[:2]
+            return float(xy[0]), float(xy[1]), F.wrap(yaw + c[2])
+        o = self.offset if offset is None else offset
+        return float(x + o[0]), float(y + o[1]), F.wrap(yaw + o[2])
 
     def feedforward(self) -> tuple:
         """(EE twist [vx, vy, vz, wx, wy, wz] world, hint velocity (vx, vy, omega) world) of the engagement: the
@@ -490,8 +765,10 @@ class TeleopCore:
             return np.zeros(6), np.zeros(3)
         tw = eng.hand_fit.velocity(6)
         hv = eng.head_fit.velocity(3) if self.cfg.head_walk and eng.head_tracked else np.zeros(3)
+        hv[:2] = self._map_rot() @ hv[:2]
         sv = self.stick_v(self.frame["control_intent"]) if self.frame is not None else [0.0, 0.0, 0.0]
         yaw = self.last_robot.base_yaw if self.last_robot is not None else eng.robot.yaw
+        yaw = self._stick_yaw(self.frame, yaw)
         hv = hv + np.concatenate([F.rot_z(yaw)[:2, :2] @ np.array(sv[:2]), [sv[2]]])
         n = float(np.hypot(hv[0], hv[1]))
         if n > self.cfg.hint_max_speed:
@@ -555,6 +832,11 @@ class TeleopCore:
         if self.eng is None:
             self.hint = None
             v = self.stick_v(intent)
+            if self.cfg.headless and self.last_robot is not None:
+                # headless: the stick's direction in the world, expressed in the base frame for the command
+                ryaw = self.last_robot.base_yaw
+                vxy = F.rot_z(ryaw - self._stick_yaw(self.frame, ryaw))[:2, :2].T @ np.array(v[:2])
+                v = [float(vxy[0]), float(vxy[1]), v[2]]
             if any(abs(x) > 1e-9 for x in v):
                 return {"mode": "commanded", "velocity": {"vx": v[0], "vy": v[1], "omega": v[2], "frame": "base",
                                                           "ttl": cfg.velocity_ttl}}
@@ -571,10 +853,25 @@ class TeleopCore:
         return {"mode": "hint", "target": target}
 
 
-def stick_velocity(intent: dict) -> list:
-    """The intent's ``base_velocity`` (forward, left m/s; yaw rad/s), non-finite parts as 0."""
+def _rot_pose(pose, angle: float) -> tuple:
+    """A pose turned about Z through the origin of its frame."""
+    if not angle:
+        return pose
+    rz = F.rot_z(angle)
+    return rz @ np.asarray(pose[0], float), rz @ np.asarray(pose[1], float)
+
+
+def stick_velocity(intent: dict, max_speed: float = NATIVE_STICK_SPEED, max_omega: float = NATIVE_STICK_OMEGA) -> list:
+    """The intent's ``base_velocity`` (forward, left m/s; yaw rad/s), non-finite parts as 0, rescaled from the native
+    full scale (``NATIVE_STICK_*``) to ``max_speed`` / ``max_omega``; the translation's norm is clamped to
+    ``max_speed`` (the native per-axis scaling makes a square: a full diagonal would be sqrt 2 faster)."""
     v = intent.get("base_velocity") or [0, 0, 0]
-    return [float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3]]
+    vx, vy, w = (float(x) if _finite(x) else 0.0 for x in (list(v) + [0, 0, 0])[:3])
+    vx, vy, w = vx * max_speed / NATIVE_STICK_SPEED, vy * max_speed / NATIVE_STICK_SPEED, w * max_omega / NATIVE_STICK_OMEGA
+    n = math.hypot(vx, vy)
+    if n > max_speed:
+        vx, vy = vx * max_speed / n, vy * max_speed / n
+    return [vx, vy, max(-max_omega, min(max_omega, w))]
 
 
 def _finite(x) -> bool:

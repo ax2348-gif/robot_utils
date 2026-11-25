@@ -30,7 +30,8 @@ def world(tmp_path):
     node.close()
 
 
-def test_whole_body_reach_in_the_sim_world(world):
+@pytest.mark.parametrize("arm_control", ["thread", "process"])
+def test_whole_body_reach_in_the_sim_world(world, arm_control):
     from robot_utils.nodes.estimator.node import EstimatorNode
     from robot_utils.nodes.estimator.server import create_app as estimator_app
     from robot_utils.nodes.sim.backends.swerve import start_world_sim, stop_world_sim
@@ -52,8 +53,12 @@ def test_whole_body_reach_in_the_sim_world(world):
     from robot_utils.nodes.sim.backends.arm import WorldArmBus
     d = tempfile.mkdtemp(prefix="wbcs")                     # short: macOS limits socket paths to ~104 bytes
     limits = joint_limits(load_cfg(C.PROFILES["soft"]))
-    arm = ArmNode(lambda: WorldArmBus(SIM, limits=limits), locks=LockStore(os.path.join(d, "locks")),
-                  joint_socket=os.path.join(d, "arm.joint.sock"))
+    import functools
+    from robot_utils.nodes.arm.proc_node import ProcNode as ArmProcNode
+    # the arm node's control loop and bus in its own process (as on the robot) or a thread of its server process
+    arm = (ArmProcNode if arm_control == "process" else ArmNode)(
+        functools.partial(WorldArmBus, SIM, limits=limits), locks=LockStore(os.path.join(d, "locks")),
+        joint_socket=os.path.join(d, "arm.joint.sock"))
     arm_url, arm_srv, arm_t = serve(arm_app(arm))
     urdf, _ = fetch_urdf("local")
     node = ProcNode(WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),)), arm=arm_url, swerve=sw_url,

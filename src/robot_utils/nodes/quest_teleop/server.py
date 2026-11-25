@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,12 @@ TAGS = [
 
 class TaskIn(BaseModel):
     text: str = Field("", description="The task of the next episodes (in each episode_start's detail).")
+
+
+class TopSpeedIn(BaseModel):
+    max_speed: Optional[float] = Field(None, description="m/s: the left stick's full deflection, the hint clamp and "
+                                                         "(while running) the WBC's max_speed; omitted: unchanged")
+    max_omega: Optional[float] = Field(None, description="rad/s: likewise for yaw (the WBC's max_omega)")
 
 
 class EStopIn(BaseModel):
@@ -54,7 +60,8 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             "on the headset over ssh, only when asked. Episodes: A (right controller) starts one, a B tap stops "
             "it (the sim stack: A resets the sim first); the node emits events (`GET /eventlog`, its only files) "
             "and the operator stream (`GET /oplog/stream`: headset frames, datagrams sent, events); recording is "
-            "the client-side script's job."),
+            "the client-side script's job (`python -m robot_utils.collect run`), which a sim stack's node runs "
+            "itself from Start to Stop (`/state` `recording`)."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 
@@ -117,6 +124,47 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
                                                    "(409 with the WBC's reason if it refuses)")
     async def start_teleop():
         return await asyncio.to_thread(node.start_teleop)
+
+    @app.post("/mode/{mode}", tags=["control"], summary="Third or first person (`third` | `first`): where the sticks "
+                                                         "enter the frame chain; applies from the next grip")
+    async def set_mode(mode: str):
+        try:
+            return node.set_mode(mode)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/sim/auto_pause/{state}", tags=["control"],
+              summary="Sim only: pause sim time while neither clutched nor driving (`on` | `off`)")
+    async def sim_auto_pause(state: str):
+        if node.aids is None:
+            raise HTTPException(409, "not a sim stack (--sim none)")
+        if state not in ("on", "off"):
+            raise HTTPException(422, "on or off")
+        return await asyncio.to_thread(node.aids.set_auto_pause, state == "on")
+
+    @app.post("/sim/ghost/{state}", tags=["control"],
+              summary="Sim only: the end effector's goal drawn as a gripper ghost, coloured by the error (`on` | `off`)")
+    async def sim_ghost(state: str):
+        if node.aids is None:
+            raise HTTPException(409, "not a sim stack (--sim none)")
+        if state not in ("on", "off"):
+            raise HTTPException(422, "on or off")
+        return await asyncio.to_thread(node.aids.set_ghost, state == "on")
+
+    @app.post("/headless/{state}", tags=["control"], summary="Headless left stick (`on` | `off`, third person, "
+                                                              "registered): the stick moves along the operator's facing")
+    async def set_headless(state: str):
+        if state not in ("on", "off"):
+            raise HTTPException(400, "state must be 'on' or 'off'")
+        return node.set_headless(state == "on")
+
+    @app.post("/top_speed", tags=["control"], summary="The top speed: the sticks' full deflection, the hint clamp and, "
+                                                       "while running, the WBC caps this lease asserts (restored at stop)")
+    async def set_top_speed(body: TopSpeedIn):
+        try:
+            return await asyncio.to_thread(node.set_top_speed, body.max_speed, body.max_omega)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.post("/stop", tags=["control"], summary="Stop teleop: stop sending, disable the WBC, release its lease")
     async def stop_teleop():

@@ -11,6 +11,10 @@ docs/plans/data_collection_v1.md on the paths the script uses (``/nodes/<node>/.
 - ``/nodes/quest_teleop``: ``POST /task``, ``/start``, ``/stop``; ``GET /state`` (``episode``: the open one or
   null); ``GET /eventlog?since_seq=N&limit=M`` (JSON lines, at most M, default 1000), ``GET /eventlog/files``.
 
+- ``/nodes/sim/scene3d`` (+ ``/blob``, ``/view``, ``/stream?format=bin``): a small rigid scene (``FakeScene``:
+  a robot body, a static table, optionally a cube) and its RSF1 pose frames at ``scene_hz``; ``new_scene()``
+  adds the cube (a new scene_id), ``sim_reset()`` bumps reset_seq.
+
 Test controls: ``emit`` / ``start_episode`` / ``stop_episode`` / ``abort_episode`` (events go to the log and,
 unless their seq is in ``skip_on_stream``, to every open operator stream), ``drop(key)`` (every open
 connection of that stream ends after half a record), ``refuse`` (keys whose new connections get 503),
@@ -25,16 +29,43 @@ import threading
 import time
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from robot_utils.nodes.common.protocol import pack_record, rows_record, schema_record
+from robot_utils.scene3d.format import Frame, SceneBuilder, encode_frame
 
 ROW_NODES = ("arm", "swerve", "wbc", "estimator")
 CAM_NODES = ("camera", "wrist_camera")
 
 
+class FakeScene:
+    """A rigid scene: a robot body (box) moving along x, a static table, and with ``cube`` a cube (an object)."""
+
+    def __init__(self, cube=False):
+        b = SceneBuilder("fake")
+        tri = b.add_mesh("wedge", [[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0], [0, 0, 0.2]],
+                         [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+        b.add_body("base", "robot", [0, 0, 0.1, 0, 0, 0, 1], True,
+                   geoms=[{"type": "box", "half_extents": [0.3, 0.25, 0.1], "rgba": [0.6, 0.6, 0.7, 1],
+                           "role": "both"},
+                          {"type": "mesh", "mesh": tri, "pos": [0, 0, 0.1], "role": "visual"}])
+        b.add_body("table", "object", [1.0, 0, 0.35, 0, 0, 0, 1], False,
+                   geoms=[{"type": "box", "half_extents": [0.4, 0.6, 0.35], "rgba": [0.5, 0.4, 0.3, 1]}])
+        if cube:
+            b.add_body("cube", "object", [1.0, 0, 0.75, 0, 0, 0, 1], True,
+                       geoms=[{"type": "box", "half_extents": [0.025] * 3, "rgba": [0.9, 0.1, 0.1, 1]}])
+        self.index, self.blob = b.build()
+        self.id = self.index["scene_id"]
+
+    def frame(self, seq, t, reset_seq) -> bytes:
+        n = len(self.index["dynamic"])
+        poses = [[0.1 * (seq % 50) / 50, 0, 0.1, 0, 0, 0, 1]] + [[1.0, 0, 0.75, 0, 0, 0, 1]] * (n - 1)
+        return encode_frame(Frame(seq, t, reset_seq, self.id, poses))
+
+
 class FakeRobot:
-    def __init__(self, rows_hz=100.0, cam_fps=20.0, headset_hz=50.0, frame_bytes=2000, prior_events=3):
+    def __init__(self, rows_hz=100.0, cam_fps=20.0, headset_hz=50.0, frame_bytes=2000, prior_events=3,
+                 scene_hz=50.0):
         self.rows_hz = rows_hz
         self.cam_fps = cam_fps
         self.headset_hz = headset_hz
@@ -55,6 +86,10 @@ class FakeRobot:
         self.connections: dict[str, int] = {}
         self.eventlog_calls: list[tuple[int, int]] = []
         self.pruned_below = 0
+        self.scene_hz = scene_hz
+        self.scene = FakeScene()
+        self.reset_seq = 0
+        self.scene_requests: list[str] = []
         for _ in range(prior_events):
             self.emit("button", button="Y", pressed=True)
         self.app = self._build()
@@ -89,6 +124,27 @@ class FakeRobot:
         ev = self.emit("episode_abort", self.open_episode, reason=reason)
         self.open_episode = None
         return ev
+
+    def new_scene(self) -> str:
+        self.scene = FakeScene(cube=True)
+        return self.scene.id
+
+    def sim_reset(self) -> int:
+        self.reset_seq += 1
+        return self.reset_seq
+
+    def _scene_frames(self):
+        async def body():
+            seq = 0
+            period = 1.0 / self.scene_hz
+            t0 = time.monotonic()
+            while True:
+                seq += 1
+                f = self.scene.frame(seq, time.monotonic() - t0, self.reset_seq)
+                yield f[:20]                                 # frames arrive split across chunks too
+                yield f[20:]
+                await asyncio.sleep(period)
+        return body
 
     def drop(self, key):
         """End every open connection of stream ``key`` (``arm``, ``camera``, ``oplog``...) mid-record."""
@@ -181,6 +237,20 @@ class FakeRobot:
         def oplog():
             return self._stream("oplog", self._oplog())
 
+        @app.get("/nodes/description/description")
+        def description():
+            if "description" in self.refuse:
+                return JSONResponse({"detail": "down"}, status_code=503)
+            return {"frames": {"base": {}}, "cameras": {"camera": {"serial": "FAKE"}}, "conventions": {}}
+
+        @app.get("/nodes/description/model")
+        def model():
+            return {"model_version": "fake0001", "options": {"mounts": "calibrated"}, "joints": []}
+
+        @app.get("/nodes/description/model/urdf")
+        def urdf():
+            return Response('<robot name="fake"/>', media_type="application/xml")
+
         @app.post("/nodes/quest_teleop/task")
         async def task(request: Request):
             body = await request.json()
@@ -226,6 +296,27 @@ class FakeRobot:
                 return []
             return [{"name": "events-20261121.jsonl", "bytes": sum(len(json.dumps(e)) + 1 for e in evs),
                      "first_seq": evs[0]["seq"], "last_seq": evs[-1]["seq"]}]
+
+        @app.get("/nodes/sim/scene3d")
+        def scene3d(cell: float = 0.002, crease_deg: float = 30.0):
+            self.scene_requests.append("index")
+            return Response(json.dumps(self.scene.index), media_type="application/json")
+
+        @app.get("/nodes/sim/scene3d/blob")
+        def scene3d_blob(scene_id: str = None):
+            self.scene_requests.append("blob")
+            if scene_id is not None and scene_id != self.scene.id:
+                raise HTTPException(409, "scene moved on")
+            return Response(self.scene.blob, media_type="application/octet-stream")
+
+        @app.get("/nodes/sim/scene3d/view")
+        def scene3d_view():
+            return {"style": "flat", "role": "auto"}
+
+        @app.get("/nodes/sim/scene3d/stream")
+        def scene3d_stream(format: str = "jsonl", hz: float = 30.0):
+            assert format == "bin"
+            return self._stream("scene3d", self._scene_frames())
 
         @app.get("/nodes/{node}/stream")
         def stream(node: str, streams: str = "color", mode: str = "jpeg"):

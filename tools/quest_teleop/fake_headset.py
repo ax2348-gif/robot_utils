@@ -2,7 +2,7 @@
 """A fake Quest headset: serves ``teleop.quest_state.v1`` JSON lines on TCP (default port 9391) with scripted head
 and hand motion, for tests and for a dry run of the client without the headset.
 
-    python tools/quest_teleop/fake_headset.py [--port 9391] [--rate 72] [--scenario demo] [--loop]
+    python tools/quest_teleop/fake_headset.py [--port 9391] [--rate 72] [--scenario demo] [--loop] [--ar URL]
 
 The frames have the native app's shape (quest_env native/telemetry.cpp): ``session_id``, ``frame_seq``,
 ``input_focused``, ``action_sync_result``, ``head`` (tracking flags and a 16-number row-major LOCAL pose),
@@ -13,7 +13,14 @@ after start, focus loss, gaps and session changes, the 18 % stick dead zone, bod
 Scenarios are lists of keyframes ``(t, state)``: poses are given in operator FLU (metres, radians) and converted
 to OpenXR LOCAL with ``C``; values between keyframes are interpolated linearly (yaw too), booleans and
 the session step. ``demo`` engages the right hand, moves it, walks forward, turns the head, uses the stick,
-releases, loses focus and changes session.
+releases, loses focus and changes session. ``record`` arms (Y), reaches, looks around, starts an episode (A: the
+sim resets), arms again, reaches and stops it (B tap): a sim teleop recording to replay.
+
+``--ar URL`` (the sim stack's frontend) emulates the headset's robot AR view for the log: ``ArView`` places the sim
+world as the native view does (robot_utils ``replay.ar.Placement``, a port of quest_env's: the first tracked head,
+each change of the sim's ``reset_seq``, polled from ``URL/nodes/sim/scene3d/frame``) with a floor 1.6 m below the
+first head, and every frame carries the ``robot_ar`` block a real headset logs (placement and eyes; quest_env
+ROBOT_AR.md "Logged placement"). The eyes are a nominal Quest 3 pair (``replay.ar.default_views``).
 """
 from __future__ import annotations
 
@@ -137,8 +144,9 @@ class NativeIntent:
         if disc:
             self.op_from_quest, self.revision = F.C.copy(), 0
         self.initialized, self.session = True, session
-        aligned = (align and focused and not gap and left.grip <= 0.4 and right.grip <= 0.4 and head is not None
-                   and self.realign(head))
+        # A realigns in the standard scheme only (native teleop::Intent: body-frozen takes its frame at each grip)
+        aligned = (align and not self.body_frozen and focused and not gap and left.grip <= 0.4 and right.grip <= 0.4
+                   and head is not None and self.realign(head))
         ok = focused and not gap and not aligned
         self.hands[0].update(left, ok, self.op_from_quest, self.body_frozen, head)
         self.hands[1].update(right, ok, self.op_from_quest, self.body_frozen, head)
@@ -217,7 +225,9 @@ def head_r_op(yaw: float, pitch: float = 0.0):
 class Headset:
     """Builds native-shaped frames from a HeadsetState."""
 
-    def __init__(self, body_frozen: bool = True, session_base: int = 1_700_000_000_000_000_000):
+    def __init__(self, body_frozen: bool = True, session_base: int = 1_700_000_000_000_000_000,
+                 ar: Optional["ArView"] = None):
+        self.ar = ar
         self.intent = NativeIntent(body_frozen)
         self.session_base = session_base
         self.seq = 0
@@ -247,6 +257,8 @@ class Headset:
                      "pose": F.matrix16_from_pose(hp, hr) if s.head_tracked else None},
             "hands": {}, "control_intent": self.intent.json(), "demo": {"enabled": False, "base_frame": "live"},
         }
+        if self.ar is not None:
+            frame["robot_ar"] = self.ar.block(sid, head, s.align and s.focused)
         for name, hs, hi in (("left", s.left, hands_in[0]), ("right", s.right, hands_in[1])):
             frame["hands"][name] = {
                 "pose_source": "tracked_remote", "active": hs.tracked, "position_valid": hs.tracked,
@@ -257,6 +269,51 @@ class Headset:
                             "thumb_rest": False, "stick": hs.click}}
         self.seq += 1
         return frame
+
+
+class ArView:
+    """The headset's AR placement, emulated (see the module doc). ``reset_seq()`` returns the sim's newest
+    ``reset_seq`` or None; ``floor_z``: the floor in LOCAL-FLU (the first head is LOCAL's origin)."""
+
+    def __init__(self, reset_seq: Callable[[], Optional[int]] = lambda: None, floor_z: float = -1.6,
+                 floor_space: str = "LOCAL_FLOOR"):
+        from robot_utils.replay import ar as AR      # noqa: PLC0415 (only with --ar: needs robot_utils on the path)
+        self.AR = AR
+        self.placement = AR.Placement()
+        self.reset_seq, self.floor_z, self.floor_space = reset_seq, floor_z, floor_space
+        self.views = [{"eye": k, "fov": list(v.fov), "pose": AR.matrix16(v.p, v.r)}
+                      for k, v in AR.default_views().items()]
+        self._a_prev = False
+
+    def block(self, session, head_local, a_down: bool) -> dict:
+        a_press, self._a_prev = a_down and not self._a_prev, a_down
+        head_flu = self.AR.flu(*head_local) if head_local is not None else None
+        self.placement.update(str(session), head_flu, self.reset_seq(), a_press, self.floor_z)
+        return self.placement.block(self.floor_space, self.views)
+
+
+class SimResetSeq:
+    """The sim's reset_seq, polled in the background from ``<url>/nodes/sim/scene3d/frame`` (the real headset reads
+    it from the state stream)."""
+
+    def __init__(self, url: str, period: float = 0.2):
+        self.url = url.rstrip("/") + "/nodes/sim/scene3d/frame"
+        self.value: Optional[int] = None
+        self.period = period
+        threading.Thread(target=self._run, name="fake-headset-reset-seq", daemon=True).start()
+
+    def _run(self):
+        import urllib.request     # noqa: PLC0415
+        while True:
+            try:
+                with urllib.request.urlopen(self.url, timeout=2) as r:
+                    self.value = int(json.loads(r.read()).get("reset_seq"))
+            except Exception:     # noqa: BLE001 (the sim not up yet: keep polling)
+                pass
+            time.sleep(self.period)
+
+    def __call__(self) -> Optional[int]:
+        return self.value
 
 
 # -- scenarios -------------------------------------------------------------------------------------
@@ -367,8 +424,35 @@ def episodes_scenario() -> list:
     return keys
 
 
-SCENARIOS: dict[str, Callable[[], list]] = {"demo": demo_scenario, "idle": lambda: [(0.0, HeadsetState())],
-                                            "episodes": episodes_scenario}
+def record_scenario() -> list:
+    """A sim teleop session to record and replay: arm (Y), reach with the right hand while looking around, release;
+    A (an episode: the sim resets, the AR view re-anchors, teleop is left disarmed), arm again, reach, B tap (the
+    episode kept), idle."""
+    s = HeadsetState()
+    y = replace(s, left=replace(s.left, secondary=True))
+    grip = replace(s, right=replace(s.right, grip=1.0))
+    reach = replace(grip, right=replace(grip.right, pos=(0.55, -0.15, -0.15), trigger=0.9), head_yaw=0.35,
+                    head_pitch=0.25)
+    look = replace(reach, head_yaw=-0.3, head_pos=(0.2, 0.1, 0.0), right=replace(reach.right, pos=(0.7, -0.05, -0.2)))
+    release = replace(look, right=replace(look.right, grip=0.0, trigger=0.0))
+    back = replace(release, head_yaw=0.0, head_pitch=0.1, head_pos=(0.0, 0.0, 0.0),
+                   right=replace(release.right, pos=(0.35, -0.2, -0.35)))
+    a = replace(back, align=True)
+    y2 = replace(back, left=replace(back.left, secondary=True))
+    grip2 = replace(back, right=replace(back.right, grip=1.0))
+    reach2 = replace(grip2, right=replace(grip2.right, pos=(0.5, -0.3, -0.1), rpy=(0.0, 0.3, -0.4), trigger=1.0),
+                     head_yaw=-0.25, head_pitch=0.3)
+    release2 = replace(reach2, right=replace(reach2.right, grip=0.0))
+    b = replace(release2, right=replace(release2.right, secondary=True))
+    return [(0.0, s), (1.5, s), (1.51, y), (2.0, y), (2.01, s), (2.5, s), (2.51, grip), (3.0, grip), (5.0, reach),
+            (7.0, look), (7.5, look), (7.51, release), (8.5, back), (9.0, back), (9.01, a), (9.3, a), (9.31, back),
+            (11.5, back), (11.51, y2), (12.0, y2), (12.01, back), (12.5, back), (12.51, grip2), (13.0, grip2),
+            (15.0, reach2), (15.5, reach2), (15.51, release2), (16.0, release2), (16.01, b), (16.3, b),
+            (16.31, release2), (18.0, release2)]
+
+
+SCENARIOS: dict[str, Callable[[], list]] = {"demo": demo_scenario, "record": record_scenario,
+                                            "idle": lambda: [(0.0, HeadsetState())], "episodes": episodes_scenario}
 
 
 # -- the server ------------------------------------------------------------------------------------
@@ -465,11 +549,19 @@ def main():
     ap.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo")
     ap.add_argument("--loop", action="store_true", help="repeat the scenario")
     ap.add_argument("--standard", action="store_true", help="intent in the standard scheme, not body-frozen")
+    ap.add_argument("--ar", metavar="URL", help="emulate the robot AR view against this sim stack's frontend (the "
+                                                "robot_ar block of each record)")
+    ap.add_argument("--wait-client", action="store_true",
+                    help="start the scenario only once a client is connected")
     args = ap.parse_args()
     server = FakeHeadsetServer(args.host, args.port)
     print(f"fake headset on {args.host}:{server.port}, scenario {args.scenario} at {args.rate} Hz", flush=True)
+    ar = ArView(SimResetSeq(args.ar)) if args.ar else None
     try:
-        play(server, SCENARIOS[args.scenario](), args.rate, loop=args.loop, headset=Headset(not args.standard))
+        while args.wait_client and server.n_clients == 0:
+            time.sleep(0.05)
+        play(server, SCENARIOS[args.scenario](), args.rate, loop=args.loop,
+             headset=Headset(not args.standard, ar=ar))
     except KeyboardInterrupt:
         pass
     finally:

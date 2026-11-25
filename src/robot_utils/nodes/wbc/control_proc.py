@@ -222,6 +222,7 @@ class ControlCore(WbcNode):
             self._ticks += 1
             if self._ticks % SNAPSHOT_EVERY == 0:
                 self.write_snapshot()
+            self.port.send(("t",))                      # the server posts the twist and publishes the row now
         self.shutdown()
 
     def write_snapshot(self) -> None:

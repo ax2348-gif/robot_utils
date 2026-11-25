@@ -13,6 +13,7 @@ Threads:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import threading
@@ -27,10 +28,13 @@ from ..common.hub import RowHub
 from ..common.lease import RequestError
 from ..common.server import EventLog
 from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, EpisodeButtons, LocalWbcClient,
-                     QuestReader, TeleopClient, WbcStream, close_wbc, open_wbc, quest_ctl, x_pressed)
+                     QuestReader, TeleopClient, WbcStream, assert_caps, close_wbc, open_wbc, quest_ctl,
+                     set_top_speed, top_speed_caps, x_pressed)
 from .episodes import RESET_TIMEOUT, Episodes
+from .sim_aids import AidsConfig, SimAids
 from .eventlog import CAP_BYTES, TeleopEventLog
 from .oplog import OpLog
+from .recording import RecordConfig, SimRecorder
 
 log = logging.getLogger("quest_teleop")
 
@@ -206,9 +210,13 @@ class QuestTeleopNode:
                  runner_factory: Optional[Callable] = None, probe: Optional[Callable] = None,
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
-                 log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT):
+                 log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
+                 aids: Optional[AidsConfig] = None, autostart: bool = False, estimator: Optional[str] = "estimator",
+                 record: Optional[RecordConfig] = None,
+                 recorder_factory: Callable = SimRecorder):
         """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
-        keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it."""
+        keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it;
+        ``record``: with ``sim``, record every teleop run (recording.py; None: off)."""
         self.name = name
         self.wbc_target = wbc
         self.arm_target, self.swerve_target = arm, swerve     # the e-stop goes to these directly too
@@ -235,8 +243,11 @@ class QuestTeleopNode:
         self.eventlog = TeleopEventLog(data_dir, log_cap_bytes, clock=clock)
         self.eventlog.listeners.append(self.oplog.event)
         self.eventlog.listeners.append(lambda line: self.hub.state_changed())
-        self.episodes = Episodes(self, sim, reset_timeout)
+        self.episodes = Episodes(self, sim, reset_timeout, estimator=estimator)
+        self.autostart = bool(autostart and sim)     # the sim: start teleop by itself once the WBC answers
         self.sim = sim
+        self.aids = SimAids(self, sim, aids) if sim else None   # the goal ghost, auto pause (sim_aids.py)
+        self.recorder = recorder_factory(self, sim, record) if sim and record is not None else None
         self.buttons: Optional[EpisodeButtons] = None
         self.wbc_enabled: Optional[bool] = None   # as this node knows it (its own requests, the 1 Hz poll)
         self._known_lock = threading.Lock()
@@ -274,11 +285,34 @@ class QuestTeleopNode:
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
+        if self.aids is not None:
+            self.aids.start()
+        if self.autostart:
+            t = threading.Thread(target=self._autostart, name="quest-autostart", daemon=True)
+            t.start()
+            self._threads.append(t)
         self.events.add(f"headset stream {self.quest_host}:{self.quest_port}, ssh host {self.ssh_host!r}, "
                         f"WBC {self.wbc_target}")
 
+    def _autostart(self) -> None:
+        """--autostart (sim only): Start as soon as the WBC accepts it, retrying every 2 s; once, at node start (a
+        later Stop is the operator's)."""
+        while not self._stop.wait(2.0):
+            if self.phase != "stopped":
+                return
+            try:
+                self.start_teleop()
+                self.events.add("teleop started automatically (--autostart)")
+                return
+            except Exception as e:  # noqa: BLE001 (the WBC or the sim not up yet: try again)
+                log.info("autostart: %s", getattr(e, "detail", None) or e)
+
     def close(self) -> None:
         self.stop_teleop("node shutting down")
+        if self.recorder is not None:
+            self.recorder.close()           # its files closed before the node goes
+        if self.aids is not None:
+            self.aids.close()
         self._stop.set()
         for t in self._threads:
             t.join(2)
@@ -393,6 +427,18 @@ class QuestTeleopNode:
                 raise RequestError(409, f"teleop is {self.phase}")
             self.phase, self.error, self.stop_reason = "starting", None, None
         self.hub.state_changed()
+        if self.sim:                       # the sim: every run starts from the start scene's state (and is recorded so)
+            try:
+                from .episodes import reset_world
+                with NodeClient.for_instance(self.sim, timeout=3.0) as sim:
+                    out = reset_world(sim, self.episodes.estimator)
+                self.events.add(f"sim reset for the start (reset_seq {out.get('reset_seq')})")
+            except Exception as e:  # noqa: BLE001 (no reset, no start: the run would not start where it should)
+                msg = getattr(e, "detail", None) or str(e)
+                with self.lock:
+                    self.phase, self.error = "stopped", f"start refused: sim reset failed: {msg}"
+                self.events.add(f"start refused: sim reset failed: {msg}", "warn")
+                raise RequestError(409, f"the sim reset failed: {msg}") from None
         wbc = self.wbc_client_factory(self.wbc_target, client_name=CLIENT_NAME)
         try:
             info = open_wbc(wbc, self.cfg)
@@ -414,11 +460,52 @@ class QuestTeleopNode:
             self.wbc, self.client = wbc, client
             self.phase, self.started_at = "running", self.clock()
             self.last_msg = None
+        if self.recorder is not None:      # the sim records every run: from the events after this seq on
+            self.recorder.start(self.eventlog.seq, self.episodes.task)
         self.emit("teleop_start", {"session": info.get("session"), "transport": getattr(wbc, "transport", None)})
         self.set_enabled(True, "teleop start")
         self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; nothing moves until "
                         f"Y (left) arms, X disables; the {self.cfg.hand} grip clutches the arm")
         return self.teleop_info()
+
+    def set_mode(self, mode: str) -> dict:
+        """Third or first person: where the sticks enter the frame chain (tools/quest_teleop/README.md). Read at
+        each engagement, so it applies from the next grip; an engagement in progress keeps its mode."""
+        if mode not in ("third", "first"):
+            raise ValueError(f"mode must be 'third' or 'first', not {mode!r}")
+        old, self.cfg.mode = self.cfg.mode, mode
+        if mode != old:
+            self.events.add(f"mode: {mode} person (from the next grip)")
+        self.hub.state_changed()
+        return {"mode": self.cfg.mode}
+
+    def set_headless(self, on: bool) -> dict:
+        """Third person, registered: the left stick moves the robot along the operator's facing (applies at once)."""
+        old, self.cfg.headless = self.cfg.headless, bool(on)
+        if self.cfg.headless != old:
+            self.events.add(f"headless left stick {'on' if on else 'off'}")
+        self.hub.state_changed()
+        return {"headless": self.cfg.headless}
+
+    def set_top_speed(self, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> dict:
+        """The top speed (m/s, rad/s; None keeps one): the sticks' full deflection, the hint clamp and, while teleop
+        runs, the WBC caps this lease asserts (restored at stop). Running, the WBC takes them only while the base is
+        still (disarmed, or the sticks at rest): otherwise 409 and nothing changes. ValueError beyond the bounds."""
+        trial = set_top_speed(dataclasses.replace(self.cfg), max_speed, max_omega)   # validates; nothing changed yet
+        with self.lock:
+            wbc = self.wbc if self.phase == "running" else None
+        if wbc is not None:
+            try:
+                assert_caps(wbc, top_speed_caps(trial))
+            except Exception as e:  # noqa: BLE001
+                msg = getattr(e, "detail", None) or str(e)
+                raise RequestError(409, f"the WBC refused the caps (disarm first: they change only while the base "
+                                        f"is still): {msg}") from None
+        set_top_speed(self.cfg, max_speed, max_omega)
+        self.events.add(f"top speed {self.cfg.stick_max_speed:g} m/s, {self.cfg.stick_max_omega:g} rad/s"
+                        + (" (WBC caps too)" if wbc is not None else " (the WBC caps at the next Start)"))
+        self.hub.state_changed()
+        return {"max_speed": self.cfg.stick_max_speed, "max_omega": self.cfg.stick_max_omega}
 
     def stop_teleop(self, reason: str = "requested") -> dict:
         with self.lock:
@@ -442,6 +529,8 @@ class QuestTeleopNode:
                 self.error = "stop: " + "; ".join(p.strip() for p in problems)
         self.set_enabled(False, "teleop stop")
         self.emit("teleop_stop", {"reason": reason})
+        if self.recorder is not None:
+            self.recorder.stop()            # it settles and closes on its own; never waited for here
         self.events.add(f"teleop stopped ({reason})" + (f": {'; '.join(problems)}" if problems else ""),
                         "warn" if reason != "requested" else "info")
         return {"stopped": True, "reason": reason, "engagements": client.core.status.engagements}
@@ -769,8 +858,11 @@ class QuestTeleopNode:
                 "sending": bool(c and c.sending), "reason": core.status.reason if core else None,
                 "refused": dict(core.status.refused) if core else {},
                 "engagements": core.status.engagements if core else 0,
+                "registered": bool(core and core.status.registered),
+                "registration": core.status.registration if core else "",
                 "sent": dict(w.sent) if w else None, "renew_errors": w.renew_errors if w else None,
                 "transport": w.transport if w else None, "session": w.session if w else None,
+                "wbc_caps": dict(w.caps) if w else None,
                 "last_sent_age": None if self.last_sent_at is None or c is None
                 else round(self.clock() - self.last_sent_at, 3),
                 "stop_reason": self.stop_reason, "started_at": self.started_at if c else None}
@@ -798,10 +890,13 @@ class QuestTeleopNode:
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
                        "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
-                       "head_walk": cfg.head_walk, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
+                       "head_walk": cfg.head_walk, "mode": cfg.mode, "headless": cfg.headless,
+                       "max_speed": cfg.stick_max_speed, "max_omega": cfg.stick_max_omega, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,
+            "sim_aids": None if self.aids is None else self.aids.info(),
+            "recording": {"enabled": False} if self.recorder is None else self.recorder.info(),
             "episode": self.episodes.open_episode(),
             "episodes": self.episodes.info(),
             "task": self.episodes.task,

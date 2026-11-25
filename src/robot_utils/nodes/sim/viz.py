@@ -126,6 +126,16 @@ def _xyzw(q) -> list:
     return [round(float(q[1]), 6), round(float(q[2]), 6), round(float(q[3]), 6), round(float(q[0]), 6)]
 
 
+def _part(o: dict, rgba) -> dict:
+    """A primitive as robot_state.v1 writes it (box full extents, cylinder radius + length), at its pose in the
+    object's / link's frame when it has one."""
+    g = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
+                                else {"radius": o["radius"], "length": o["length"]}), "rgba": rgba}
+    if "pos" in o:
+        g["origin"] = {"xyz": o["pos"], "rpy": o["rpy"]}
+    return g
+
+
 def robot_state(world) -> dict:
     """The robot's full state in the description's terms: base_link's world pose and every movable joint by its
     model (URDF) name, plus the scene's objects. A client draws the robot from GET /model/tree with these."""
@@ -139,11 +149,16 @@ def robot_state(world) -> dict:
         objects = {}
         for name, o in world.objects.items():
             b = world.obj_idx[name][0]
-            geom = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
-                                           else {"radius": o["radius"], "length": o["length"]}),
-                    "rgba": o.get("rgba")}
-            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]), "geom": geom,
-                             "fixed": bool(o.get("fixed"))}
+            if o["shape"] == "articulated":           # one entry per link (its parts in its frame): name/link
+                for ln in o["links"]:
+                    lb = b if "parent" not in ln else m.body(f"obj_{name}/{ln['name']}").id
+                    objects[f"{name}/{ln['name']}"] = {
+                        "pose": [round(float(v), 6) for v in d.xpos[lb]] + _xyzw(d.xquat[lb]),
+                        "geom": [_part(g, g.get("rgba", o.get("rgba"))) for g in ln["geoms"]],
+                        "fixed": bool(o.get("fixed")) and "joint" not in ln and "parent" not in ln}
+                continue
+            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]),
+                             "geom": _part(o, o.get("rgba")), "fixed": bool(o.get("fixed"))}
         return {"t": round(float(d.time), 4), "model_version": world.model_info.get("model_version"),
                 "base": [round(float(v), 6) for v in q[:3]] + _xyzw(q[3:7]), "joints": joints, "objects": objects,
                 "sim": {"running": world.running, "rtf": world.rtf}}
@@ -241,3 +256,73 @@ class Markers:
             if gone:
                 self.version += 1
             return [mk for mk, _ in self.items.values()]
+
+
+# -- ghosts --------------------------------------------------------------------------------------------------
+
+class Ghosts:
+    """Copies of a body (and by default its subtree) drawn at another pose, in a colour the poster picks, e.g. the
+    gripper at the end effector's goal, coloured by the tracking error. Declared by the first post (the rigid scene
+    then has the ghost's bodies: a scene change), shown while posted within ``ttl`` (wall clock), hidden after
+    (alpha 0), removed by DELETE. Pose: ``pose`` (the body's goal in the world) or ``relative`` (the goal in the
+    body's own frame now: drift-free when the poster's world differs from the sim's)."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.items: dict[str, dict] = {}
+
+    @staticmethod
+    def check(g: dict, bodies) -> dict:
+        name = str(g.get("name") or "")
+        if not NAME.match(name):
+            raise ValueError(f"bad ghost name {name!r}")
+        body = str(g.get("body") or "")
+        if body not in bodies:
+            raise ValueError(f"ghost {name}: no body {body!r}")
+        have = [k for k in ("pose", "relative") if g.get(k) is not None]
+        if len(have) != 1:
+            raise ValueError(f"ghost {name}: give exactly one of pose, relative")
+        p = [float(x) for x in g[have[0]]]
+        if len(p) != 7 or not all(math.isfinite(x) for x in p) or np.linalg.norm(p[3:]) < 1e-6:
+            raise ValueError(f"ghost {name}: {have[0]} is [x, y, z, qx, qy, qz, qw]")
+        rgba = [float(x) for x in (g.get("rgba") or [0.3, 0.9, 0.5, 0.4])]
+        if len(rgba) != 4 or not all(0 <= x <= 1 for x in rgba):
+            raise ValueError(f"ghost {name}: rgba is 4 numbers 0..1")
+        ttl = g.get("ttl")
+        return {"name": name, "body": body, "subtree": bool(g.get("subtree", True)), "mode": have[0], "value": p,
+                "rgba": rgba, "ttl": None if ttl is None else float(ttl), "source": g.get("source")}
+
+    def put(self, ghosts: list, bodies, source: Optional[str] = None) -> list:
+        out = [self.check({**g, "source": g.get("source", source)}, bodies) for g in ghosts]
+        now = self.clock()
+        with self.lock:
+            for g in out:
+                g["t"] = now
+                self.items[g["name"]] = g
+        return [g["name"] for g in out]
+
+    def remove(self, name: Optional[str] = None, source: Optional[str] = None) -> int:
+        with self.lock:
+            drop = [n for n, g in self.items.items() if (name is None or n == name) and
+                    (source is None or g.get("source") == source)]
+            for n in drop:
+                del self.items[n]
+            return len(drop)
+
+    def declared(self) -> tuple:
+        """What the scene needs: (name, body, subtree) per ghost, live or not."""
+        with self.lock:
+            return tuple(sorted((g["name"], g["body"], g["subtree"]) for g in self.items.values()))
+
+    def live(self) -> dict:
+        now = self.clock()
+        with self.lock:
+            return {n: dict(g) for n, g in self.items.items() if g["ttl"] is None or now - g["t"] <= g["ttl"]}
+
+    def list(self) -> list:
+        now = self.clock()
+        with self.lock:
+            return [{"name": g["name"], "body": g["body"], "subtree": g["subtree"], g["mode"]: g["value"],
+                     "rgba": g["rgba"], "ttl": g["ttl"], "source": g["source"], "age": round(now - g["t"], 3),
+                     "live": g["ttl"] is None or now - g["t"] <= g["ttl"]} for g in self.items.values()]
