@@ -173,6 +173,7 @@ class ArmNode(JointStream, ArmRequests):
         self.servo = False                 # arm closed loop
         self.g_servo = False               # gripper closed loop
         self.g_motor_on = False            # gripper motor enabled (off = damping)
+        self._seen_on = np.zeros(N + 1, bool)   # per motor: reported enabled (status 1) since it was switched on
         self._g_cut = False                # gripper motor off requested (disable)
         self.soft = C.DEFAULT_SOFT.copy()
         self._lock = threading.RLock()
@@ -416,6 +417,10 @@ class ArmNode(JointStream, ArmRequests):
         if faults and self.motors_on:
             self._fault("motor fault: " + "; ".join(faults))
             return
+        off = [] if stale else self._dropped_off(r)
+        if off:
+            self._fault(f"motor disabled unexpectedly: {', '.join(off)} reports disabled while the motors are on")
+            return
         ch = self.chocks()
         if ch and self.enabled:
             self._disable(f"CHOCKED ({describe_locks(ch)}): disabled (arm floating)")
@@ -526,6 +531,19 @@ class ArmNode(JointStream, ArmRequests):
         p50, p99 = np.percentile(a, [50, 99])
         return {"n": int(len(a)), "p50_ms": round(float(p50), 2), "p99_ms": round(float(p99), 2),
                 "max_ms": round(float(a.max()), 2), "margin_ms": round(DT * 1e3 - float(p99), 2)}
+
+    def _dropped_off(self, r) -> list[str]:
+        """Motors that should be on but report disabled (status 0): a brown-out, an external disable, a simulated
+        world that lost them. Only after the motor has reported enabled since it was switched on: the bus is
+        pipelined, so the first readings after an enable can still carry the replies from before it."""
+        expect = np.zeros(N + 1, bool)
+        if self.motors_on:
+            expect[:N] = True
+            expect[N] = self.g_motor_on
+        st = np.asarray(r.status)
+        self._seen_on &= expect
+        self._seen_on |= expect & (st == 1)
+        return [n for n, e, seen, c in zip(self.bus.names, expect, self._seen_on, st) if e and seen and c == 0]
 
     def _motors_off(self, why: str) -> None:
         """Control thread: motors disabled (damping)."""

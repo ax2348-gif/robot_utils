@@ -14,6 +14,9 @@ lights and scene objects. Every physics step it first runs the per-component con
   arm node's hard joint speed caps (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
   (``qfrc_bias`` as a joint torque, so the chassis carries the arm's weight) keeps the joints on it.
   The gripper's reference follows its goal at ``gripper_speed``; the fingers are force-capped.
+- **arm** (dynamic fidelity, opt-in): each motor applies its MIT frame as joint torque (kp, kd, tau_ff as the node
+  sends them, clamped at the robot config's torque limits; no gravity feedforward of the sim's own), the gripper
+  motor likewise on the finger; off / disabled / watchdog: zero torque (``_arm_dynamic``).
 
 Time: ``step(n)`` advances by hand (paused); ``run(rtf)`` locks the sim clock to the wall clock in a
 thread. The world never touches a node: backends reach it through ``protocol`` sockets (node.py).
@@ -130,6 +133,7 @@ class Arm:
         self.g_ref = 0.0
         self.last_frame = -math.inf       # sim time of the last MIT frame
         self.frames = 0
+        self.pending = collections.deque()    # dynamic: (due sim time, cmd, gcmd) frames in transport
 
 
 class World:
@@ -141,6 +145,11 @@ class World:
             raise SimError(f"the sim config sets {', '.join(bad)}: limits come from the robot config "
                            "(swerve/constants.py, arm/config.py; docs/sim.md)")
         self.limits = robot_limits()
+        self.fidelity = str(self.cfg["components"]["arm"].get("fidelity", "kinematic"))
+        if self.fidelity not in ("kinematic", "dynamic"):
+            raise SimError(f"arm fidelity {self.fidelity!r}: kinematic or dynamic")
+        self.dynamic = self.fidelity == "dynamic"
+        self._settling = False            # reset's settle: a dynamic arm is held at the start pose (a teleport)
         self.model_info = model_info or {}
         self.lock = threading.RLock()
         self.objects: dict = {}           # name -> spec dict (shape, size, mass, pose at add / reset)
@@ -236,10 +245,10 @@ class World:
                 self._servo(spec, f"wheel_{mm.group(1)}", f"base_{mm.group(1)}_wheel_joint", 0.0, float(w["kv"]),
                             L["wheel_torque_max"], velocity=True)
         ac = self.cfg["components"]["arm"]
-        if ac.get("fidelity", "kinematic") != "kinematic":
-            raise SimError(f"arm fidelity {ac.get('fidelity')!r} is not built yet (kinematic only)")
         names = {j.name for j in spec.joints}
-        if set(ARM_JOINTS) <= names:
+        if self.dynamic and set(ARM_JOINTS) <= names:
+            self._dynamic_arm_spec(spec, names)
+        elif set(ARM_JOINTS) <= names:
             for jn in ARM_JOINTS:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
             if "arm_finger_left" in names:
@@ -297,6 +306,44 @@ class World:
         if fc.get("mimic_solref"):
             for e in spec.equalities:
                 e.solref = [float(v) for v in fc["mimic_solref"]]
+
+    def _dynamic_arm_spec(self, spec: mujoco.MjSpec, names: set) -> None:
+        """fidelity dynamic: one torque motor per arm joint and the gripper's (on the left finger, the right one
+        follows through the mimic), each an affine actuator whose gains the MIT frame sets every step
+        (``_arm_dynamic``), force-limited at the motor's torque limit (robot config); the joints get the motors'
+        armature and friction (``components.arm.dynamic``: estimates). The gripper motor's angle q and the finger's
+        travel x relate as x = -q r (r = 8 mm, the pinion), so its armature / friction / limit are divided by r^2 / r.
+        The URDF's joint effort limits (MuJoCo's actuatorfrcrange) are lifted: the motor's limit is the actuator's (the
+        arm's equal the URDF's 27 / 7 N m; the finger's URDF 8 N is no motor limit: the 4310 pushes ~875 N there)."""
+        dc = self.cfg["components"]["arm"]["dynamic"]
+        L = self.limits
+        joints = {j.name: j for j in spec.joints}
+        for i, jn in enumerate(ARM_JOINTS):
+            j = joints[jn]
+            j.armature, j.damping = float(dc["armature"][i]), [float(dc["viscous"][i]), 0.0, 0.0]
+            j.frictionloss = float(dc["coulomb"][i])
+            j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
+            self._motor(spec, jn, jn, float(L["joint_torque_max"][i]))
+        if "arm_finger_left" in names:
+            r, gc = GAP_PER_RAD / 2, dc["gripper"]
+            j = joints["arm_finger_left"]
+            j.armature, j.damping = float(gc["armature"]) / r ** 2, [float(gc["viscous"]) / r ** 2, 0.0, 0.0]
+            j.frictionloss = float(gc["coulomb"]) / r
+            j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
+            self._motor(spec, "arm_finger", "arm_finger_left", float(L["gripper_torque_max"]) / r)
+
+    @staticmethod
+    def _motor(spec, name: str, joint: str, force: float):
+        """force = ctrl + biasprm[1] q + biasprm[2] qd, clamped at +-force (the MIT law, gains set per step)."""
+        a = spec.add_actuator(name=name, target=joint, trntype=mujoco.mjtTrn.mjTRN_JOINT)
+        a.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+        a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+        a.gainprm[0] = 1.0
+        a.biasprm[:3] = [0.0, 0.0, 0.0]
+        a.forcerange = [-force, force]
+        a.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        a.ctrllimited = mujoco.mjtLimited.mjLIMITED_FALSE
+        return a
 
     @staticmethod
     def _servo(spec, name: str, joint: str, kp: float, kv: float, force: Optional[float], velocity: bool = False):
@@ -606,7 +653,8 @@ class World:
     # -- state reset -----------------------------------------------------------------------------------
 
     def reset(self, start_scene: bool = False, count: bool = True) -> int:
-        """Time 0, the robot at its start pose, objects where they were added, every command dropped.
+        """Time 0, the robot at its start pose, objects where they were added, every command dropped;
+        the arm's motors keep their enable state (and fault), as real motors would.
         ``start_scene``: the scene the world started with (the default tabletop + config objects) instead.
         Every reset increments ``reset_seq`` (in /state and every robot_state.v1 record: the headset re-anchors its
         AR scene on a change; ``count=False`` only for the world's own initial reset); returns it."""
@@ -620,7 +668,10 @@ class World:
             d.qpos[self.base_q + 3:self.base_q + 7] = yaw_quat(float(st.get("yaw", 0.0)))
             for i, mod in enumerate(self.modules):
                 mod.__init__(mod.name)
+            prev = self.arm if self.has_arm else None
             if self.has_arm:
+                # the arm's motors don't power off on a reset (real ones wouldn't): a fresh Arm settles the
+                # pose (motors off, so no watchdog), then the enable state and fault carry over below
                 self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
                 d.qpos[self.arm_q] = self.arm.q_ref
             for name, o in self.objects.items():
@@ -634,7 +685,15 @@ class World:
                 d.qpos[qa + 3:qa + 7] = rpy_quat(o["rpy"])
             self.wrenches = []
             mujoco.mj_forward(m, d)
-            self._settle()
+            self._settling = True
+            try:
+                self._settle()
+            finally:
+                self._settling = False
+            if prev is not None:
+                a = self.arm
+                a.enabled, a.g_enabled, a.fault, a.frames = prev.enabled, prev.g_enabled, prev.fault, prev.frames
+                a.last_frame = 0.0       # the clock restarted at 0: the watchdog counts from the reset
             if count:
                 self.reset_seq += 1
             return self.reset_seq
@@ -688,6 +747,9 @@ class World:
         d, a, ac = self.d, self.arm, self.cfg["components"]["arm"]
         if a.enabled and d.time - a.last_frame > float(ac["watchdog"]):
             a.enabled, a.g_enabled, a.fault = False, False, 0xD
+        if self.dynamic:
+            self._arm_dynamic()
+            return
         if a.enabled and a.cmd is not None:
             q, _, kp, _, _ = a.cmd
             target = np.where(kp > 0, q, a.q_ref)     # kp = 0 (floating): hold where it is
@@ -701,6 +763,44 @@ class World:
             gs = float(ac["gripper_speed"]) * dt
             a.g_ref = min(0.0, max(GRIPPER_OPEN_RAD, a.g_ref + max(-gs, min(gs, goal - a.g_ref))))
         d.ctrl[self.finger_a] = min(FINGER_TRAVEL, max(0.0, -a.g_ref * GAP_PER_RAD / 2))
+
+    def _arm_dynamic(self) -> None:
+        """fidelity dynamic: each motor applies its latest MIT frame (after ``command_delay``) as joint torque,
+        tau = kp (q - q_m) + kd (qd - qd_m) + tau_ff, clamped at its torque limit (the actuator's forcerange). The
+        law is the affine actuator force ctrl + biasprm[1] q + biasprm[2] qd, so the integrator treats kd implicitly
+        (the wrist's kd 2 on its ~1e-3 kg m^2 would be unstable explicitly at 1 kHz). Off, disabled, watchdog: zero
+        torque. A joint sent kp = 0 floats (kd and tau_ff only)."""
+        m, d, a = self.m, self.d, self.arm
+        while a.pending and a.pending[0][0] <= d.time + 1e-9:
+            _, cmd, gcmd = a.pending.popleft()
+            a.cmd = cmd
+            if gcmd is not None:
+                a.gcmd = gcmd
+        q_m = d.qpos[self.arm_q]
+        if self._settling:                # a reset puts the arm at its start pose: held there, as a teleport
+            sc = self.cfg["components"]["arm"]["servo"]
+            q, qd, tau = a.q_ref, np.zeros(6), d.qfrc_bias[self.arm_v].copy()
+            kp, kd = np.full(6, float(sc["kp"])), np.full(6, float(sc["kv"]))
+        elif a.enabled and a.cmd is not None:
+            q, qd, kp, kd, tau = a.cmd
+            a.q_ref = np.where(kp != 0, q, q_m)
+        else:
+            q = qd = kp = kd = tau = np.zeros(6)
+            a.q_ref = q_m.copy()
+        m.actuator_biasprm[self.arm_a, 1] = -kp
+        m.actuator_biasprm[self.arm_a, 2] = -kd
+        d.ctrl[self.arm_a] = np.where(kp != 0, kp * q, 0.0) + kd * qd + tau
+        # the gripper motor on the left finger: q = -x / r, so tau = C - kp q - kd qd is the finger force -tau / r
+        r = GAP_PER_RAD / 2
+        if a.enabled and a.g_enabled and a.gcmd is not None and not self._settling:
+            g_q, g_qd, g_kp, g_kd, g_tau = a.gcmd
+            a.g_ref = g_q if g_kp != 0 else -float(d.qpos[self.finger_q]) / r
+        else:
+            g_q = g_qd = g_kp = g_kd = g_tau = 0.0
+        c = (g_kp * g_q if g_kp != 0 else 0.0) + g_kd * g_qd + g_tau
+        m.actuator_biasprm[self.finger_a, 1] = -g_kp / r ** 2
+        m.actuator_biasprm[self.finger_a, 2] = -g_kd / r ** 2
+        d.ctrl[self.finger_a] = -c / r
 
     # -- time ------------------------------------------------------------------------------------------
 
@@ -822,7 +922,7 @@ class World:
         with self.lock:
             arm = self.arm
             if op == "hello":
-                return {"joints": ARM_JOINTS, "fidelity": "kinematic",
+                return {"joints": ARM_JOINTS, "fidelity": self.fidelity,
                         "reply_latency": float(self.cfg["components"]["arm"]["reply_latency"])}
             if op == "enable":
                 arm.enabled = arm.g_enabled = True
@@ -830,9 +930,11 @@ class World:
                 arm.q_ref = self.d.qpos[self.arm_q].copy()
                 arm.last_frame = float(self.d.time)
                 arm.cmd = arm.gcmd = None
+                arm.pending.clear()
             elif op == "disable":
                 arm.enabled = arm.g_enabled = False
                 arm.cmd = arm.gcmd = None
+                arm.pending.clear()
             elif op == "gripper_motor":
                 arm.g_enabled = bool(a["on"]) and arm.enabled
                 if not arm.g_enabled:
@@ -841,11 +943,20 @@ class World:
                 arm.g_ref = 0.0
                 self.d.qpos[self.finger_q] = 0.0
                 self.d.ctrl[self.finger_a] = 0.0
+                if self.dynamic:
+                    self.d.qvel[self.finger_v] = 0.0
             elif op == "send":
                 if arm.enabled:
-                    arm.cmd = tuple(np.asarray(a[k], float) for k in ("q", "qd", "kp", "kd", "tau"))
-                    if a.get("gripper"):
-                        arm.gcmd = tuple(float(a[k]) for k in ("g_q", "g_qd", "g_kp", "g_kd", "g_tau"))
+                    cmd = tuple(np.asarray(a[k], float) for k in ("q", "qd", "kp", "kd", "tau"))
+                    gcmd = tuple(float(a[k]) for k in ("g_q", "g_qd", "g_kp", "g_kd", "g_tau")) \
+                        if a.get("gripper") else None
+                    if self.dynamic:                   # the motors apply it after the transport delay
+                        delay = float(self.cfg["components"]["arm"]["dynamic"].get("command_delay", 0.0))
+                        arm.pending.append((float(self.d.time) + delay, cmd, gcmd))
+                    else:
+                        arm.cmd = cmd
+                        if gcmd is not None:
+                            arm.gcmd = gcmd
                     arm.last_frame = float(self.d.time)
                     arm.frames += 1
                 return {"t": float(self.d.time)}
@@ -858,10 +969,14 @@ class World:
         tau = d.actuator_force[self.arm_a] + d.qfrc_applied[self.arm_v]
         f = float(d.qpos[self.finger_q])
         status = [arm.fault or (1 if arm.enabled else 0)] * 6 + [1 if arm.g_enabled else 0]
+        if self.dynamic:     # the gripper motor's torque, MIT sign (closing > 0): the finger force is -tau / r
+            g_tau = -float(d.actuator_force[self.finger_a]) * GAP_PER_RAD / 2
+        else:
+            g_tau = float(d.actuator_force[self.finger_a]) * GAP_PER_RAD / 2
         return {"t": float(d.time), "q": d.qpos[self.arm_q].tolist(), "qd": d.qvel[self.arm_v].tolist(),
                 "tau": tau.tolist(), "status": status, "g_q": -2 * f / GAP_PER_RAD,
                 "g_qd": -2 * float(d.qvel[self.finger_v]) / GAP_PER_RAD,
-                "g_tau": float(d.actuator_force[self.finger_a]) * GAP_PER_RAD / 2, "q_ref": arm.q_ref.tolist(),
+                "g_tau": g_tau, "q_ref": arm.q_ref.tolist(),
                 "g_ref": arm.g_ref}
 
     def arm_lost(self) -> None:

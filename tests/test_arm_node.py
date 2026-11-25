@@ -481,6 +481,17 @@ def test_motor_fault_code_faults(rig):
     assert n.state == "fault" and "communication lost" in n.error
 
 
+def test_a_motor_dropping_to_disabled_while_on_faults(rig):
+    """A motor that reported enabled and then reports disabled (status 0) while the motors are on (a brown-out, an
+    external disable, a sim world that lost them) faults instead of servoing into nothing."""
+    n = engaged(rig).node
+    rig.step(3)
+    assert n.state != "fault"
+    rig.sim.enabled = False
+    rig.step(1)
+    assert n.state == "fault" and "disabled unexpectedly" in n.error and "joint1" in n.error
+
+
 def test_profile_and_tcp_only_while_not_servoing(rig):
     n = engaged(rig).node
     with pytest.raises(RequestError):
