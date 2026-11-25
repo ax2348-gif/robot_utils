@@ -46,6 +46,8 @@ GAP_PER_RAD = 0.016                  # m of jaw gap per rad of the gripper motor
 GRIPPER_OPEN_RAD = -3.1              # fully open (arm/config.py); 0 = closed
 FINGER_TRAVEL = 0.0285               # m, each finger (the arm URDF's finger_left limit)
 ARM_JOINTS = [f"arm_joint{i}" for i in range(1, 7)]
+# dynamic arm: the bodies whose mass / centre of mass are fitted to the calibrated gravity (World._fit_arm_gravity)
+GRAVITY_FIT_BODIES = ["arm_link2", "arm_link3", "arm_link4", "arm_link5", "arm_link6", "arm_end_link"]
 MODULE_JOINT = re.compile(r"^base_(\w+)_steer$")
 ROBOT_CONTYPE, ROBOT_CONAFFINITY = 2, 1      # the robot never collides with itself
 WORLD_CONTYPE, WORLD_CONAFFINITY = 1, 3      # floor and objects collide with the robot and each other
@@ -188,6 +190,9 @@ class World:
         self.m = self.spec.compile()
         self.d = mujoco.MjData(self.m)
         self._index()
+        self.gravity_fit: Optional[dict] = None
+        if self.dynamic and self.has_arm and self.cfg["components"]["arm"]["dynamic"].get("gravity_fit", True):
+            self._fit_arm_gravity()
         self.modules = [Module(n) for n in self.module_names]
         self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
         self.swerve_last = -math.inf
@@ -276,6 +281,10 @@ class World:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
             if "arm_finger_left" in names:
                 self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, self.limits["finger_force_max"])
+                # the URDF's finger effort (8 N, MuJoCo's actuatorfrcrange) is no gripper limit: it capped the servo
+                # far below finger_force_max (4 N per jaw: held objects dropped)
+                next(j for j in spec.joints if j.name == "arm_finger_left").actfrclimited = \
+                    mujoco.mjtLimited.mjLIMITED_FALSE
         # cameras: MuJoCo looks along -z with y up; the optical frame looks along +z with y down
         w_max, h_max = 640, 480
         for cam, cc in (self.cfg.get("cameras") or {}).items():
@@ -320,6 +329,10 @@ class World:
                 g = body.add_geom(name=f"arm_{link}_{name}_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
                                   pos=c, size=[v / 2 for v in size], group=3)
                 g.contype, g.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
+                # priority: the jaws' contact parameters govern their contacts. Without it MuJoCo mixes solref /
+                # solimp with the object's (solmix: the average, ~0.012 s here), and a held object sank ~1.3 mm into
+                # each jaw and crept out of the grip as the wrist moved (docs/sim.md "Grasping")
+                g.priority = int(fc.get("priority", 1))
                 g.condim = int(fc.get("condim", 3))
                 g.friction = [float(v) for v in fc.get("friction", [1.0, 0.005, 0.0001])]
                 if fc.get("solref"):
@@ -354,6 +367,88 @@ class World:
             j.frictionloss = float(gc["coulomb"]) / r
             j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
             self._motor(spec, "arm_finger", "arm_finger_left", float(L["gripper_torque_max"]) / r)
+
+    def _gravity_rows(self, d, q, ids) -> tuple:
+        """At arm joints ``q`` (base level, fingers closed): the arm joints' gravity torque of the model now (6,) and
+        its linear map from each body in ``ids``'s [mass, mass x COM (body frame)] (6, 4 len(ids))."""
+        m = self.m
+        d.qpos[:] = m.qpos0
+        d.qpos[self.base_q:self.base_q + 3] = 0.0
+        d.qpos[self.arm_q] = q
+        d.qvel[:] = 0.0
+        mujoco.mj_forward(m, d)
+        g = m.opt.gravity
+        A = np.zeros((6, 4 * len(ids)))
+        jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
+        for k, b in enumerate(ids):
+            mujoco.mj_jacBody(m, d, jp, jr, b)
+            R = d.xmat[b].reshape(3, 3)
+            A[:, 4 * k] = -jp[:, self.arm_v].T @ g                 # holding torque of a unit mass at the origin
+            for j in range(3):                                    # ... and of a unit first moment along body axis j
+                A[:, 4 * k + 1 + j] = -jr[:, self.arm_v].T @ np.cross(R[:, j], g)
+        return d.qfrc_bias[self.arm_v].copy(), A
+
+    def _fit_arm_gravity(self) -> None:
+        """fidelity dynamic: make the arm's gravity the calibrated real arm's, so the node's feedforward
+        g_pinocchio(q) x tau_scale (its gain profile) holds it as on the robot. The masses and centres of mass of
+        ``GRAVITY_FIT_BODIES`` are fitted (least squares over random poses in the joint ranges, held near the URDF's
+        by a small ridge) to that torque. tau_scale scales joints 4 and 5 but not 3 and 6, which no mass
+        distribution reproduces exactly, so the residual is shared out by each joint's dry friction (rows weighted
+        1 / coulomb): what stiction must hold. Validated on a second set of poses; ``gravity_fit`` has the residuals.
+        Inertia tensors stay (gravity does not see them)."""
+        from ..arm import config as C
+        from ..arm.kin import ArmKinematics
+        dc = self.cfg["components"]["arm"]["dynamic"]
+        m = self.m
+        d = mujoco.MjData(m)
+        ids = [m.body(n).id for n in GRAVITY_FIT_BODIES]
+        kin = ArmKinematics({})
+        scale = C.load_profile(C.DEFAULT_PROFILE).tau_scale
+        jid = [m.joint(n).id for n in ARM_JOINTS]
+        lo, hi = m.jnt_range[jid, 0], m.jnt_range[jid, 1]
+        phi0 = np.concatenate([[m.body_mass[b], *(m.body_mass[b] * m.body_ipos[b])] for b in ids])
+        rw = 1.0 / np.maximum(np.asarray(dc["coulomb"], float), 1e-3)
+
+        def grid(seed, n):
+            rng = np.random.default_rng(seed)
+            A, b = [], []
+            for _ in range(n):
+                q = rng.uniform(lo, hi)
+                tau, Ak = self._gravity_rows(d, q, ids)
+                A.append(Ak)
+                b.append(kin.gravity(q) * scale - (tau - Ak @ phi0))      # what the fitted bodies must supply
+            return np.vstack(A), np.concatenate(b)
+        n = int(dc.get("gravity_fit_poses", 400))
+        A, b = grid(0, n)
+        W = np.tile(rw, n)
+        reg = np.concatenate([[1.0 / m.body_mass[bb]] + [1.0 / (m.body_mass[bb] * 0.05)] * 3 for bb in ids])
+        lam = float(dc.get("gravity_fit_ridge", 1e-4)) * n
+        Aw = A * W[:, None]
+        with np.errstate(all="ignore"):                       # macOS Accelerate's matmul raises spurious FP flags
+            phi = np.linalg.solve(Aw.T @ Aw + lam * np.diag(reg ** 2), Aw.T @ (b * W) + lam * reg ** 2 * phi0)
+        masses = phi[0::4]
+        if not np.all(np.isfinite(phi)) or np.any(masses <= 0.2 * phi0[0::4]):
+            raise SimError(f"arm gravity fit: implausible masses {np.round(masses, 3).tolist()}")
+        Av, bv = grid(1, n)                                   # validation poses
+        with np.errstate(all="ignore"):
+            r0 = (Av @ phi0 - bv).reshape(n, 6)
+            r1 = (Av @ phi - bv).reshape(n, 6)
+        for k, name in enumerate(GRAVITY_FIT_BODIES):
+            sb = self.spec.body(name)
+            sb.mass = float(masses[k])
+            sb.ipos = (phi[4 * k + 1:4 * k + 4] / masses[k]).tolist()
+        self.m, self.d = self.spec.recompile(self.m, self.d)
+        self._index()
+        rnd = lambda v: np.round(v, 4).tolist()               # noqa: E731
+        self.gravity_fit = {"target": "g_pinocchio(q) x tau_scale", "tau_scale": rnd(scale), "poses": n,
+                            "rms_before": rnd(np.sqrt((r0 ** 2).mean(0))), "max_before": rnd(np.abs(r0).max(0)),
+                            "rms": rnd(np.sqrt((r1 ** 2).mean(0))), "max": rnd(np.abs(r1).max(0)),
+                            "bodies": {nm: {"mass": [round(float(phi0[4 * k]), 4), round(float(masses[k]), 4)],
+                                            "com": [rnd(phi0[4 * k + 1:4 * k + 4] / phi0[4 * k]),
+                                                    rnd(phi[4 * k + 1:4 * k + 4] / masses[k])]}
+                                       for k, nm in enumerate(GRAVITY_FIT_BODIES)}}
+        log.info("arm gravity fit to the node's model x tau_scale: residual max %s N m (was %s)",
+                 self.gravity_fit["max"], self.gravity_fit["max_before"])
 
     @staticmethod
     def _motor(spec, name: str, joint: str, force: float):
@@ -1090,4 +1185,6 @@ class World:
                               "q": [round(float(x), 6) for x in self.d.qpos[self.arm_q]],
                               "q_ref": [round(float(x), 6) for x in a.q_ref],
                               "gap_mm": round(2 * float(self.d.qpos[self.finger_q]) * 1000, 3), "frames": a.frames}
+                if self.gravity_fit is not None:
+                    out["arm"]["gravity_fit"] = self.gravity_fit
             return out
