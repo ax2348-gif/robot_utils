@@ -1,0 +1,17 @@
+# The rings agent's stack (tools/agent_rings/README.md): the sim stack's registry (robot_utils/nodes/sim/
+# stack_nodes.yaml) without the whole-body controller (its UDP target port would bypass the agent's proxy, and it
+# shares leases with pose_servo) and without the headset teleop. Run socket-only (--port 0) under its own runtime dir.
+nodes:
+  - {name: description, kind: description, start: {module: robot_utils.nodes.description,
+                                                   args: [--data-dir, ~/.local/share/robot_utils/sim/description]}}
+  - {name: sim, kind: sim, start: {module: robot_utils.nodes.sim}}
+  - {name: arm, kind: arm, start: {module: robot_utils.nodes.arm, args: [--sim, world, --timing, lenient]}}
+  - {name: swerve, kind: swerve, start: {module: robot_utils.nodes.swerve, args: [--sim, world]}}
+  - {name: camera, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [--sim, world]}}
+  - {name: wrist_camera, kind: camera, start: {module: robot_utils.nodes.orbbec, args: [--sim, world, --no-imu]}}
+  - {name: power, kind: power, start: {module: robot_utils.nodes.power, args: [--fake]}}
+  - {name: estimator, kind: estimator, start: {module: robot_utils.nodes.estimator}}
+  - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
+  - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d, args: [--allow-nominal]}}
+  - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface,
+                                                           args: [--no-require-imu]}}

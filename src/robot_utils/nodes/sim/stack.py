@@ -18,9 +18,11 @@ in sim mode next to the real ones.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -37,13 +39,47 @@ def registry_path() -> str:
     return str(resources.files(__package__).joinpath("stack_nodes.yaml"))
 
 
-class Frontend:
-    """The landing page's API on its TCP port."""
+class _UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self.path = path
 
-    def __init__(self, port: int):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
+
+
+class Frontend:
+    """The landing page's API: on its TCP port, or on its unix socket only (``uds``: --port 0, no TCP at all, e.g.
+    for an agent that may reach the robot only through a filtering proxy: tools/agent_rings)."""
+
+    def __init__(self, port: int, uds: Optional[str] = None):
         self.base = f"http://127.0.0.1:{port}"
+        self.uds = uds
+
+    def _uds_call(self, method: str, path: str, timeout: float):
+        c = _UnixConnection(self.uds, timeout)
+        try:
+            c.request(method, path, body=b"" if method == "POST" else None)
+            r = c.getresponse()
+            data = r.read()
+            try:
+                body = json.loads(data or b"null")
+            except ValueError:
+                body = None
+            if r.status >= 400:
+                return r.status, {"detail": (body or {}).get("detail") if isinstance(body, dict) else str(data[:200])}
+            return r.status, body
+        finally:
+            c.close()
 
     def call(self, method: str, path: str, timeout: float = 30.0):
+        if self.uds:
+            try:
+                return self._uds_call(method, path, timeout)
+            except OSError as e:
+                raise urllib.error.URLError(e) from e
         req = urllib.request.Request(self.base + path, method=method, data=b"" if method == "POST" else None)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -140,7 +176,8 @@ def report_cameras(fe: Frontend) -> None:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m robot_utils.nodes.sim.stack", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--port", type=int, default=8080, help="the landing page's TCP port (default 8080)")
+    p.add_argument("--port", type=int, default=8080, help="the landing page's TCP port (default 8080); 0 = no TCP at all, "
+                                                         "its unix socket <runtime>/robot/frontend.sock only")
     p.add_argument("--host", default="127.0.0.1",
                    help="address for --port (default 127.0.0.1: this machine only; 0.0.0.0 for the LAN / a headset)")
     p.add_argument("--nodes", default=DEFAULT_NODES, help=f"instances to start, in order (default {DEFAULT_NODES}); "
@@ -165,13 +202,14 @@ def main(argv=None) -> int:
     if len(str(sock_dir / "sim" / "sim" / "camera-wrist_camera.sock")) > 103:
         p.error(f"socket directory {sock_dir} is too long for unix sockets; use a shorter --runtime-dir")
 
-    fe = Frontend(a.port)
+    fe = Frontend(a.port, uds=str(sock_dir / "frontend.sock") if a.port == 0 else None)
     if fe.up():
         p.error(f"something already answers on port {a.port} (another stack?); stop it or use --port")
     cfg = a.config or registry_path()
     snapshot_robot(cfg, a.robot_host, not a.no_pull)
-    cmd = [sys.executable, "-m", "robot_utils.frontend", "--config", cfg, "--port", str(a.port), "--host", a.host,
-           "--no-observe"]
+    cmd = [sys.executable, "-m", "robot_utils.frontend", "--config", cfg, "--no-observe"]
+    if a.port:                                     # --port 0: the unix socket only (no TCP listener)
+        cmd += ["--port", str(a.port), "--host", a.host]
     log(f"landing page: {' '.join(cmd[1:])}")
     front = subprocess.Popen(cmd, env=env, start_new_session=True)
 
@@ -203,7 +241,8 @@ def main(argv=None) -> int:
                 stopping["flag"] = True
         if not stopping["flag"]:
             shown = "localhost" if a.host in ("127.0.0.1", "0.0.0.0", "::") else a.host
-            url = (os.environ.get("ROBOT_STACK_URL") or f"http://{shown}:{a.port}/").rstrip("/")   # behind a proxy
+            url = (os.environ.get("ROBOT_STACK_URL") or (f"http://{shown}:{a.port}/" if a.port
+                                                          else f"unix:{fe.uds}")).rstrip("/")   # behind a proxy
             log(f"up: {', '.join(started)}")
             log(f"landing page  {url}/")
             log(f"sim world     {url}/nodes/sim/")
