@@ -180,6 +180,63 @@ gain}` (a MuJoCo velocity actuator: rad/s or m/s, N m or N, default gain 1000) a
 equality holding it at that link's joint position). Both are validated like the other link fields, accepted by
 `POST /scene/objects`, kept by save / load, and a reset restarts the drives at their velocity with the joints at 0.
 
+**Start speeds and ratchets** (any articulated object): a link's `joint` may also carry `qvel0` (rad/s or m/s: the
+joint's speed when the object is added or loaded and after every reset, which otherwise zeroes all velocities; set
+after the reset's 0.3 s settle, so at time 0 the joint is at 0 moving at `qvel0`) and `ratchet: {direction: 1 | -1,
+max_torque, gain}` (a one-way clutch: it moves freely along `direction` and is held against the other way with up to
+`max_torque`; a MuJoCo velocity actuator at 0 whose force range is one-sided, default gain 1e5 N m s/rad, so 100 N m
+against it creeps 1 mrad/s; it adds no drag going the free way, measured). Not a drive and a ratchet on one joint.
+Both are validated like the other link fields (`qvel0` finite, a number not a bool), accepted by `POST /scene/objects`
+and kept by save / load. A `qvel0` on a `mimic` leader does not start its followers: give them the same `qvel0`.
+
+### The revolving door scene
+
+`scene: {tabletop: false, revolving_door: true}` (or `ROBOT_SIM_CONFIG=deploy/sim/sim_revolving_door_dynamic.yaml`,
+with the dynamic arm and `view_anchor` [0.6, 0, 0]: the robot ~1 m in front of the operator, the door beyond it): a
+passive revolving door straight ahead of the robot, spinning when the scene starts and after every reset, slowing to
+a stop on its bearing's friction (`scene.py` `revolving_door`).
+
+- **The layout**: a glass drum, inner radius **1.50 m** (3.06 m outside, 2.2 m tall), set in a **facade** (the
+  dividing wall: 10 cm thick, 2.2 m tall, running 2.5 m out from the drum on each side) across the robot's way, so
+  the robot's side (near, −x) and the far side (+x) meet only through the drum. Its centre is on the robot's x axis
+  at x **2.35 m**: the drum **0.60 m** ahead of the base's front at the start pose, the robot facing its centre.
+- **The rotor**: **8 radial wings** (45° compartments) on a ⌀ 12 cm post, 2.1 m tall, 1 cm off the floor and 2 cm
+  short of the drum. Each wing is 6 mm tempered glass in a light aluminium frame, **53 kg** (15 kg/m² × 1.42 × 2.1 m
+  plus 1.2 kg/m of frame), the rotor **433 kg, 324 kg m²** about its axis: a big glass door's numbers. It is passive:
+  no motor, only a ratchet (below).
+- **The path through ("nearly a full rotation")**: the two doorways (0.70 m chords) sit **side by side where the
+  facade meets the drum** (the drum's +y side), separated only by a 0.40 m closed stretch of drum wall: the
+  **entrance** on the near side (97.7°–124.6° about the centre, front-left of the robot), the **exit** on the far side
+  (55.4°–82.3°). A **ratchet** lets the rotor turn only counterclockwise (seen from above), so a compartment taken in
+  at the entrance swings away from the exit, past −x, −y and +x, and lines up with the exit only after most of a
+  turn. Proven kinematically (`tests/door_sweep.py`): a disc of the base's inscribed radius (0.216 m: every robot
+  pose covers it, so where it cannot go the robot cannot), on a 2.5 cm grid, can get from the near side to the far
+  side only after the rotor turns **280–320°** (whatever the rotor's angle when it goes in; 1° steps). Two things
+  make that work: the compartments are robot-sized (45°: the robot cannot move far round inside one, so it rides
+  with its wings), and the ratchet. Without it the same disc gets out with as little as **4°** of backward turn:
+  the robot could push the wings back the short way. A physics check agrees: a 0.43 m, 20 kg box shoved at the exit
+  from just inside the entrance for 3 s stays in the drum, the rotor does not turn back.
+- **The fit** (the robot's footprint from the model at its start pose, the arm at `start_q`: 0.576 × 0.454 m, x
+  −0.216…+0.360, y −0.238…+0.216 about the base's centre; the base alone is the 0.432 m `FRAME` square): in a
+  compartment, front outward and centred, the robot clears the wings and the drum by **8.3 cm** all round; a doorway
+  is **12.3 cm** wider than it on each side. It cannot turn in place inside a compartment with the arm out (its swing
+  radius 0.39 m vs the compartment's inscribed circle ~0.40 m); the swerve base does not need to: it crabs in and
+  out. The base alone (swing radius 0.305 m) can. The robot can push the wings with the base or the arm; with
+  18.6 kg on the floor and 1.2 N m of bearing friction, 50 N at 1 m starts the rotor at ~0.15 rad/s².
+- **The spin**: `qvel0` **0.35 rad/s** counterclockwise (3.3 rpm, an automatic revolving door's pace: the wing tips
+  at 0.52 m/s), slowing on **1.2 N m** of dry friction (`frictionloss`) and **1.2 N m s/rad** of damping:
+  dω/dt = −(1.2 + 1.2 ω) / 324, so ω(t) = (0.35 + 1) e^(−t/270) − 1 until it stops at
+  t = 270 ln 1.35 ≈ **81 s**. Measured (stepped): 0.350 rad/s at 0 s, 0.301 at 10 s, 0.254 at 20 s, 0.208 at 30 s,
+  0.164 at 40 s, 0.122 at 50 s, **0.081 at 60 s**, 0.042 at 70 s, 0.004 at 80 s, **stopped at 81 s** (and stays
+  stopped) after ~2.1 turns (771°). A reset (`POST /scene/reset`) puts the rotor back at 0 spinning at 0.35 rad/s
+  again; so does a reload of the start scene.
+- **The rigid-scene export** (docs/scene3d.md): the rotor is one dynamic body (`revolving_door/rotor`, hinge joint),
+  its wings see-through (alpha 0.45; the drum 0.25, the facade 0.35); the drum and facade are static.
+- **Cost**: the door alone ~0.04 ms per physics step (stepped, the robot idle). Live (the preset, `--nodes
+  description,sim`, a loaded MacBook, 2026-11-24): `rtf_measured` 1.0, `step_rate` 999–1001 /s, `behind` 0 over the
+  first minute; one re-anchor (`behind` 1) at a `POST /scene/reset`, none after; the rotor's angle tracked the stepped
+  decay (8.76 rad at 32 s) and a reset set it back to 0 at 0.35 rad/s.
+
 ## Grasping
 
 - **Jaw collision**: in every model variant the finger links collide as the **jaw boxes** (`arm/geometry.py`
@@ -486,8 +543,8 @@ with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 `physics` (timestep, integrator, gravity), `model.variant`, `floor`, `base` (servo gains, armature, wheel contact,
 start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose; `dynamic`: armature,
 viscous, coulomb, gripper, command_delay), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
-`delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene.objects`,
-`time` (`run`, `rtf`).
+`delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene`
+(`tabletop`, `cabinet`, `rings`, `revolving_door`, `view_anchor`, `objects`), `time` (`run`, `rtf`).
 
 ## Performance (MacBook, 2026-11-21, measured)
 

@@ -63,6 +63,13 @@ class DriveIn(_In):
                                                           "(default 1000).")
 
 
+class RatchetIn(_In):
+    direction: Literal[1, -1] = Field(description="The way it turns (slides) freely, along its axis: 1 or -1.")
+    max_torque: float = Field(gt=0, description="N m (hinge) or N (slide): the most it holds against the other way.")
+    gain: Optional[float] = Field(None, gt=0, description="N m s/rad or N s/m of hold per unit of reverse speed "
+                                                          "(default 1e5: 100 N m against it creeps 1 mrad/s).")
+
+
 class JointIn(_In):
     type: Literal["slide", "hinge"] = Field(description="slide (m along axis) or hinge (rad about axis).")
     axis: list[float] = Field([1.0, 0.0, 0.0], min_length=3, max_length=3, description="In the link frame.")
@@ -72,6 +79,11 @@ class JointIn(_In):
     frictionloss: float = Field(0.0, ge=0, description="N or N m: dry friction holding it in place.")
     drive: Optional[DriveIn] = Field(None, description="A motor holding the joint at a velocity (e.g. a turntable); "
                                                        "absent: passive.")
+    ratchet: Optional[RatchetIn] = Field(None, description="A one-way clutch (e.g. a revolving door's anti-reverse); "
+                                                           "not with a drive.")
+    qvel0: Optional[float] = Field(None, allow_inf_nan=False,
+                                   description="rad/s or m/s: its speed when the object is loaded and after every "
+                                               "reset (e.g. a door given a spin); absent: at rest.")
     mimic: Optional[str] = Field(None, description="An earlier link (same joint type) whose joint position this one "
                                                    "is held at: parts that move as one without sharing a body.")
 

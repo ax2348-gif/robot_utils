@@ -310,3 +310,107 @@ def rings_scene(outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04, p
     """The rings (``rings()``) with ``per_ring`` red and blue objects scattered on each (``ring_objects()``)."""
     return [rings(outer_rim_speed=outer_rim_speed, inner_rim_speed=inner_rim_speed),
             *ring_objects(per_ring=per_ring, seed=seed)]
+
+
+# -- a revolving door: a passive one-way rotor in a drum, entrance and exit side by side -------------------------
+
+DOOR_WINGS = 8              # wings (compartments of 45 deg: each holds the robot snugly, so it rides with its wings)
+DOOR_R = 1.50               # m, the drum's inner radius (the wings sweep to DOOR_R - WING_GAP): 3.06 m outside
+DOOR_WALL_T = 0.03          # m, the drum's wall (glass in a frame)
+DOOR_WALL_H = 2.20          # m, the drum's and the facade's height
+DOOR_DOORWAY = 0.70         # m, each doorway's chord at the drum's inner radius
+DOOR_JUNCTION = 0.40        # m, the closed drum wall between the doorways (chord), where the facade meets the drum
+FACADE_T = 0.10             # m, the facade (the dividing wall) thickness
+FACADE_L = 2.50             # m, how far the facade runs out from the drum on each side
+WING_T = 0.04               # m, a wing's thickness (glass in an aluminium frame)
+WING_H = 2.10               # m, a wing's height
+WING_GAP = 0.02             # m, between a wing's edge and the drum (and 10 mm above the floor)
+HUB_R = 0.06                # m, the central post
+GLASS_KG_M2 = 15.0          # kg/m^2: 6 mm tempered glass (2500 kg/m^3)
+FRAME_KG_M = 1.2            # kg/m: a light aluminium frame round each wing
+DOOR_SPIN = 0.35            # rad/s, the start spin (3.3 rpm: an automatic revolving door's pace), counterclockwise
+DOOR_FRICTION = 1.20        # N m, the bearing's dry friction (frictionloss)
+DOOR_DAMPING = 1.20         # N m s/rad, its viscous friction
+DOOR_RATCHET = 400.0        # N m, the anti-reverse ratchet's hold (more than the robot can push with)
+DOOR_GAP = 0.60             # m, from the base's front at the start pose to the drum's outer wall
+
+
+def door_geometry(r: float = DOOR_R, wings: int = DOOR_WINGS, doorway: float = DOOR_DOORWAY,
+                  junction: float = DOOR_JUNCTION) -> dict:
+    """The door's angles (rad, in its own frame: the facade along its y axis, the near side -x, the far side +x):
+    the junction (the closed wall where the facade meets the drum, centred on +y), the entrance (near side) and the
+    exit (far side) doorways either side of it, the closed drum walls, and where the wings are at q = 0 (one
+    compartment centred on the entrance)."""
+    c = 2 * math.asin(junction / (2 * r))
+    w = 2 * math.asin(doorway / (2 * r))
+    a_j = math.pi / 2
+    entrance = (a_j + c / 2, a_j + c / 2 + w)
+    exit_ = (a_j - c / 2 - w, a_j - c / 2)
+    phi = 2 * math.pi / wings
+    a_e = (entrance[0] + entrance[1]) / 2
+    return {"r": r, "wings": wings, "phi": phi, "junction": (a_j - c / 2, a_j + c / 2), "entrance": entrance,
+            "exit": exit_, "wing_angles": [a_e + phi / 2 + k * phi for k in range(wings)],
+            "closed": [(a_j - c / 2, a_j + c / 2), (entrance[1], exit_[0] + 2 * math.pi)]}
+
+
+def _arc(r: float, t: float, a0: float, a1: float, h: float, rgba, sag: float = 0.004) -> list[dict]:
+    """A wall r..r+t thick between angles a0 and a1 (about the link's z axis), h tall from the floor: boxes whose inner
+    faces are chords no more than ``sag`` inside the circle, each ending on its end's radial line."""
+    m = max(1, math.ceil((a1 - a0) / (2 * math.acos(1 - sag / r))))
+    d = (a1 - a0) / m
+    rc = r * math.cos(d / 2) + t / 2                      # the inner face on the chord between the ends
+    return [{"shape": "box", "size": [t, 2 * (rc + t / 2) * math.tan(d / 2), h],
+             "pos": [rc * math.cos(a), rc * math.sin(a), h / 2], "rpy": [0, 0, a], "mass": 1.0, "rgba": rgba}
+            for a in (a0 + (k + 0.5) * d for k in range(m))]
+
+
+def wing_mass(r: float = DOOR_R) -> float:
+    """kg: a wing's glass and frame (it runs from the post to WING_GAP short of the drum, WING_H tall)."""
+    ln = r - WING_GAP - HUB_R
+    return GLASS_KG_M2 * ln * WING_H + FRAME_KG_M * 2 * (ln + WING_H)
+
+
+def revolving_door(name: str = "revolving_door", xyz=None, yaw: float = 0.0, r: float = DOOR_R,
+                   wings: int = DOOR_WINGS, doorway: float = DOOR_DOORWAY, junction: float = DOOR_JUNCTION,
+                   spin: float = DOOR_SPIN, friction: float = DOOR_FRICTION, damping: float = DOOR_DAMPING,
+                   ratchet: float | None = DOOR_RATCHET) -> dict:
+    """A revolving door (POST /scene/objects fields, shape articulated, fixed): a glass drum (inner radius ``r``) set
+    in a facade (the dividing wall) along the door's y axis, and a passive rotor of ``wings`` radial wings turning
+    about the centre, started at ``spin`` rad/s counterclockwise (``qvel0``: at load and on every reset) and slowing
+    on its bearing's dry ``friction`` and ``damping``. The two doorways sit side by side where the facade meets the
+    drum (+y): the entrance on the near side (-x), the exit on the far side (+x), the closed ``junction`` wall between
+    them. A ratchet stops the rotor turning clockwise, so a compartment taken in at the entrance goes the long way
+    round (past -x, -y, +x) to the exit: most of a turn (docs/sim.md, "The revolving door scene"). Default placement:
+    the robot at its start pose faces the door's centre, the drum ``DOOR_GAP`` ahead of its front. Its origin is the
+    drum's centre on the floor."""
+    from ..swerve.constants import FRAME
+    g = door_geometry(r, wings, doorway, junction)
+    if xyz is None:
+        xyz = [FRAME / 2 + DOOR_GAP + DOOR_WALL_T + r, 0.0, 0.0]
+    glass, facade_c = [0.62, 0.78, 0.86, 0.25], [0.80, 0.80, 0.78, 0.35]
+    wing_c, metal = [0.55, 0.72, 0.82, 0.45], [0.60, 0.60, 0.62, 1.0]
+    drum = []
+    for a0, a1 in g["closed"]:
+        drum += _arc(r, DOOR_WALL_T, a0, a1, DOOR_WALL_H, glass)
+    y0 = r + DOOR_WALL_T - 0.01                               # the facade starts inside the drum's wall
+    for s in (1, -1):
+        drum.append({"shape": "box", "size": [FACADE_T, FACADE_L, DOOR_WALL_H],
+                     "pos": [0.0, s * (y0 + FACADE_L / 2), DOOR_WALL_H / 2], "mass": 1.0, "rgba": facade_c})
+    ln = r - WING_GAP - HUB_R
+    m_w = wing_mass(r)
+    rotor = [{"shape": "cylinder", "radius": HUB_R, "length": WING_H, "pos": [0, 0, 0.01 + WING_H / 2],
+              "mass": 8.0, "rgba": metal}]
+    rotor += [{"shape": "box", "size": [ln, WING_T, WING_H],
+               "pos": [(HUB_R + ln / 2) * math.cos(a), (HUB_R + ln / 2) * math.sin(a), 0.01 + WING_H / 2],
+               "rpy": [0, 0, a], "mass": m_w, "rgba": wing_c} for a in g["wing_angles"]]
+    joint = {"type": "hinge", "axis": [0, 0, 1], "damping": damping, "frictionloss": friction, "qvel0": spin}
+    if ratchet:
+        joint["ratchet"] = {"direction": 1, "max_torque": ratchet}
+    return {"name": name, "shape": "articulated", "fixed": True, "xyz": list(xyz), "rpy": [0.0, 0.0, yaw],
+            "rgba": glass, "links": [{"name": "drum", "geoms": drum},
+                                     {"name": "rotor", "parent": "drum", "joint": joint, "geoms": rotor}]}
+
+
+def revolving_door_scene() -> list[dict]:
+    """The revolving door ahead of the robot (``revolving_door()``)."""
+    return [revolving_door()]

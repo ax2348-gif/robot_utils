@@ -114,6 +114,7 @@ scene:
   tabletop: true
   cabinet: false                 # an articulated cabinet beside the table (two drawers, a door; scene.py)
   rings: false                   # two counter-rotating rings ahead of the robot, red and blue objects on them (scene.py)
+  revolving_door: false          # a one-way revolving door ahead of the robot, spinning down from its start (scene.py)
   view_anchor: null              # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
   rings_setup:
     outer_rim_speed: 0.12        # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 3x the first 0.04)

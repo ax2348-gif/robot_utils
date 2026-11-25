@@ -57,6 +57,7 @@ SHAPES = ("box", "cylinder", "articulated")
 JOINT_TYPES = {"slide": mujoco.mjtJoint.mjJNT_SLIDE, "hinge": mujoco.mjtJoint.mjJNT_HINGE}
 SWERVE_HEARTBEAT = 0.1                         # s without setpoints: the SPARKs disable (their CAN heartbeat)
 DRIVE_GAIN = 1000.0                  # N m s/rad (N s/m): an object joint drive's default velocity gain
+RATCHET_GAIN = 1e5                   # N m s/rad (N s/m): a ratchet's default: 100 N m against it creeps 1 mrad/s
 IMU_BUFFER = 2000                    # samples kept per IMU (2 s at 1 kHz)
 
 
@@ -514,6 +515,7 @@ class World:
         self.obj_idx = {}
         self.obj_joints = {}                # articulated object -> {link: (qpos adr, dof adr)}
         self.obj_drives = []                # (actuator id, velocity) of every driven object joint
+        self.obj_qvel0 = {}                 # object -> [(dof adr, start speed)] of its joints with a qvel0
         for name, o in self.objects.items():
             if o["shape"] == "articulated":
                 self.obj_joints[name] = {ln["name"]: (int(m.joint(f"obj_{name}/{ln['name']}").qposadr[0]),
@@ -521,6 +523,10 @@ class World:
                                          for ln in o["links"] if ln.get("joint")}
                 self.obj_drives += [(m.actuator(f"obj_{name}/{ln['name']}").id, ln["joint"]["drive"]["velocity"])
                                     for ln in o["links"] if (ln.get("joint") or {}).get("drive")]
+                spins = [(self.obj_joints[name][ln["name"]][1], ln["joint"]["qvel0"])
+                         for ln in o["links"] if (ln.get("joint") or {}).get("qvel0") is not None]
+                if spins:
+                    self.obj_qvel0[name] = spins
             if o.get("fixed"):
                 self.obj_idx[name] = (m.body(f"obj_{name}").id, None, None)
             else:
@@ -540,6 +546,9 @@ class World:
         if sc.get("rings"):
             from .scene import rings_scene
             out += rings_scene(**(sc.get("rings_setup") or {}))
+        if sc.get("revolving_door"):
+            from .scene import revolving_door_scene
+            out += revolving_door_scene()
         return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
@@ -625,6 +634,15 @@ class World:
                     raise SimError(f"{obj}/{nm}: damping and frictionloss are >= 0")
                 if j_in.get("drive") is not None:
                     j["drive"] = self._check_drive(f"{obj}/{nm}", j_in["drive"])
+                if j_in.get("ratchet") is not None:
+                    if "drive" in j:
+                        raise SimError(f"{obj}/{nm}: a joint has a drive or a ratchet, not both")
+                    j["ratchet"] = self._check_ratchet(f"{obj}/{nm}", j_in["ratchet"])
+                if j_in.get("qvel0") is not None:          # its speed at load and after every reset
+                    v = j_in["qvel0"]
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                        raise SimError(f"{obj}/{nm}: qvel0 is a finite number (rad/s or m/s)")
+                    j["qvel0"] = float(v)
                 if j_in.get("mimic") is not None:          # held at the position of an earlier link's joint
                     lead = next((x for x in out if x["name"] == j_in["mimic"]), None)
                     if lead is None or (lead.get("joint") or {}).get("type") != j["type"]:
@@ -664,6 +682,24 @@ class World:
         if not math.isfinite(out["velocity"]) or not out["max_torque"] > 0 or not out["gain"] > 0 \
                 or not math.isfinite(out["max_torque"] + out["gain"]):
             raise SimError(f"{where}: drive velocity is finite, max_torque and gain are > 0")
+        return out
+
+    @staticmethod
+    def _check_ratchet(where: str, rt) -> dict:
+        """A joint's ratchet (a one-way clutch): the joint moves freely in ``direction`` (1 or -1 along its axis) and
+        is held against the other way with up to ``max_torque`` (N m or N): a velocity servo at 0 whose force acts
+        one way only, ``gain`` N m s/rad (N s/m) per unit of reverse speed."""
+        if not isinstance(rt, dict):
+            raise SimError(f"{where}: ratchet is {{direction, max_torque, gain}}")
+        try:
+            out = {"direction": rt["direction"], "max_torque": float(rt["max_torque"]),
+                   "gain": float(rt.get("gain", RATCHET_GAIN))}
+        except (KeyError, TypeError, ValueError):
+            raise SimError(f"{where}: ratchet needs a direction (1 or -1) and a numeric max_torque") from None
+        if out["direction"] not in (1, -1) or isinstance(out["direction"], bool) or not out["max_torque"] > 0 \
+                or not out["gain"] > 0 or not math.isfinite(out["max_torque"] + out["gain"]):
+            raise SimError(f"{where}: ratchet direction is 1 or -1, max_torque and gain are finite and > 0")
+        out["direction"] = int(out["direction"])
         return out
 
     def _add_part(self, body, g: dict, rgba) -> None:
@@ -708,6 +744,11 @@ class World:
                 if "drive" in j:                    # a velocity servo; its ctrl (the velocity) is set by _drive
                     self._servo(self.spec, mj.name, mj.name, 0.0, j["drive"]["gain"], j["drive"]["max_torque"],
                                 velocity=True)
+                if "ratchet" in j:                  # a velocity servo at 0 that only pushes in its direction
+                    rt = j["ratchet"]
+                    a = self._servo(self.spec, f"{mj.name}/ratchet", mj.name, 0.0, rt["gain"], rt["max_torque"],
+                                    velocity=True)
+                    a.forcerange = [0.0, rt["max_torque"]] if rt["direction"] > 0 else [-rt["max_torque"], 0.0]
                 if "mimic" in j:                    # q = q of the leader (a joint equality)
                     e = self.spec.add_equality(type=mujoco.mjtEq.mjEQ_JOINT, name=mj.name, name1=mj.name,
                                                name2=f"obj_{o['name']}/{j['mimic']}")
@@ -729,6 +770,14 @@ class World:
         for a, v in self.obj_drives:
             self.d.ctrl[a] = v
 
+    def _spin(self, names=None) -> None:
+        """Start the object joints that have a ``qvel0`` at that speed (every object's, or those of ``names``): at
+        load and after every reset (mj_resetData zeroes every velocity)."""
+        for name, spins in self.obj_qvel0.items():
+            if names is None or name in names:
+                for adr, v in spins:
+                    self.d.qvel[adr] = v
+
     def _recompile(self) -> None:
         self.m, self.d = self.spec.recompile(self.m, self.d)
         self._index()
@@ -747,6 +796,7 @@ class World:
                 del self.objects[o["name"]]
                 raise
             self._place(o["name"], o["xyz"], rpy_quat(o["rpy"]))
+            self._spin([o["name"]])
             return self.object_state(o["name"])
 
     def remove_object(self, name: str) -> None:
@@ -816,6 +866,7 @@ class World:
             self._recompile()
             for o in new:
                 self._place(o["name"], o["xyz"], rpy_quat(o["rpy"]))
+            self._spin()
             return self.scene()
 
     # -- state reset -----------------------------------------------------------------------------------
@@ -859,6 +910,7 @@ class World:
                 self._settle()
             finally:
                 self._settling = False
+            self._spin()                     # after the settle: at time 0 those joints are at 0 and at their qvel0
             if prev is not None:
                 a = self.arm
                 a.enabled, a.g_enabled, a.fault, a.frames = prev.enabled, prev.g_enabled, prev.fault, prev.frames
