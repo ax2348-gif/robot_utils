@@ -345,7 +345,7 @@ def test_http_task_list_switch_and_saved_scenes(api):
     c, node = api
     t = c.get("/scene/tasks").json()
     names = [x["name"] for x in t["tasks"]]
-    assert {"tabletop", "cabinet", "rings", "revolving_door", "empty"} <= set(names)
+    assert {"tabletop", "cabinet", "rings", "revolving_door", "cart_door", "empty"} <= set(names)
     t0 = c.get("/state").json()["t"]
     r = c.post("/scene/task", json={"name": "revolving_door"}).json()
     assert r["task"] == "revolving_door" and r["view"]["anchor"] == [0.6, 0.0, 0.0]

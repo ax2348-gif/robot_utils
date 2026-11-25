@@ -420,6 +420,11 @@ def revolving_door_scene() -> list[dict]:
 
 # -- tasks: the scenes an operator picks from (the sim page's task list, POST /scene/task) -----------------------
 
+def _cart_door(sc: dict) -> list:
+    from .scenes.cart_door import cart_door_scene
+    return cart_door_scene(**(sc.get("cart_door_setup") or {}))
+
+
 def tasks(setup: dict | None = None) -> dict:
     """Every task: name -> {title, objects() -> list, view_anchor ([x, y, yaw_deg] or None: the origin)}.
     ``setup``: the config's ``scene`` block (``rings_setup`` etc.), so a task matches what the flags would build."""
@@ -432,5 +437,7 @@ def tasks(setup: dict | None = None) -> dict:
         "rings": {"title": "Counter-rotating rings (sorting)",
                   "objects": lambda: rings_scene(**(sc.get("rings_setup") or {})), "view_anchor": near},
         "revolving_door": {"title": "Revolving door", "objects": revolving_door_scene, "view_anchor": near},
+        "cart_door": {"title": "Pull a cart through a pull door",
+                      "objects": lambda: _cart_door(sc), "view_anchor": near},
         "empty": {"title": "Empty floor", "objects": list, "view_anchor": None},
     }
