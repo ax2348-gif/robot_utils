@@ -1,0 +1,8 @@
+# The rings sorting scene with the dynamic arm (sim_rings.yaml + sim_dynamic_arm.yaml; docs/sim.md):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_rings_dynamic.yaml python -m robot_utils.nodes.sim.stack
+scene:
+  tabletop: false
+  rings: true
+components:
+  arm:
+    fidelity: dynamic

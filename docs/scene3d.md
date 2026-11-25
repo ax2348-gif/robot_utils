@@ -109,7 +109,8 @@ qr --ar=URL --ar-model=URL/nodes/sim/scene3d/compat/model --ar-state='URL/nodes/
 primitives (box / cylinder at a pose in the link frame) joined to its parent by a `slide` or `hinge` joint (axis,
 range, damping, frictionloss) or welded. The object is fixed (furniture) or free as any other. `/scene` reports
 each jointed link's position (`joints`); robot_state.v1 lists one object per link (`cabinet/drawer_high`); a reset
-puts every joint back to 0; saved scenes keep the links (joint positions restart at 0).
+puts every joint back to 0; saved scenes keep the links (joint positions restart at 0). A joint may carry a `drive`
+(a velocity servo, e.g. a turntable) or `mimic` another link's joint (docs/sim.md, "The rings scene").
 
 `scene.cabinet: true` (sim config) adds `scene.py`'s cabinet beside the table (front in line with the table's
 edge at y -1.25: drive right to it): two drawers sliding out 28 cm and a door hinged on its +y edge opening to
