@@ -1,0 +1,3 @@
+# The sim with the articulated cabinet beside the table (docs/scene3d.md): ROBOT_SIM_CONFIG=deploy/sim/sim_cabinet.yaml
+scene:
+  cabinet: true

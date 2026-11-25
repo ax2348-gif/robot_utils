@@ -18,6 +18,8 @@ from, and ``arm/config.py``):
 """
 from __future__ import annotations
 
+import math
+
 TOP_ABOVE_MOUNT = 0.08      # m, table top above the arm's mount (the base's top surface)
 EDGE_GAP = 0.04             # m, between the base's front and the table's edge
 TABLE_DEPTH = 0.60          # m (x)
@@ -64,3 +66,352 @@ def tabletop() -> list[dict]:
          "rgba": [0.55, 0.35, 0.70, 1]},
     ]
     return objs
+
+
+# -- a cabinet: articulated furniture for drawer / door tasks ----------------------------------------------------
+
+CAB_DEPTH, CAB_WIDTH, CAB_HEIGHT = 0.40, 0.50, 0.62     # m, outer x, y, z
+CAB_WALL = 0.018                                         # m, panel thickness
+CAB_PLINTH = 0.06                                        # m, kick plinth under the lowest compartment
+CAB_GAP = 0.004                                          # m, between a front and its opening, each side
+HANDLE_STANDOFF = 0.035                                  # m, from the front's face to the bar's centre
+DRAWER_TRAVEL = 0.28                                     # m
+CABINET_Y = -1.25                                        # m, beside the table (it ends at y -0.8)
+
+
+def _handle(x_face: float, z: float, horizontal: bool, y: float = 0.0, length: float = 0.12) -> list[dict]:
+    """A bar handle on a front whose face is at ``x_face`` (the front faces -x): the bar and its two posts. The bar
+    (12 mm square) leaves 35 mm to the front, inside the gripper's 49.6 mm opening around it."""
+    bar, post = 0.012, 0.010
+    xb = x_face - HANDLE_STANDOFF
+    size = [bar, length, bar] if horizontal else [bar, bar, length]
+    parts = [{"shape": "box", "size": size, "pos": [xb, y, z], "mass": 0.05, "rgba": [0.75, 0.75, 0.78, 1]}]
+    for s in (-1, 1):
+        off = s * (length / 2 - post)
+        parts.append({"shape": "box", "size": [HANDLE_STANDOFF, post, post],
+                      "pos": [x_face - HANDLE_STANDOFF / 2, y + (off if horizontal else 0), z + (0 if horizontal else off)],
+                      "mass": 0.02, "rgba": [0.75, 0.75, 0.78, 1]})
+    return parts
+
+
+def cabinet(name: str = "cabinet", x_front: float | None = None, y: float = CABINET_Y, yaw: float = 0.0) -> dict:
+    """A fixed cabinet (POST /scene/objects fields, shape articulated) whose front faces -x: a door compartment at the
+    bottom (hinged on its +y edge, opening outward up to ~110 deg) and two drawers above it (sliding out along -x up
+    to ``DRAWER_TRAVEL``), each with a bar handle the gripper closes around. ``x_front``: where its front is
+    (default: in line with the table's front edge, so the robot faces it from its start x after driving to ``y``).
+    Its origin is the centre of its footprint on the floor."""
+    from ..swerve.constants import FRAME
+    x_front = FRAME / 2 + EDGE_GAP if x_front is None else x_front
+    D, W, H, t = CAB_DEPTH, CAB_WIDTH, CAB_HEIGHT, CAB_WALL
+    body_c, front_c = [0.86, 0.84, 0.80, 1.0], [0.55, 0.62, 0.70, 1.0]
+    fx = -D / 2                                            # the front plane (carcass edge), local x
+    # compartments, bottom up: (z0, z1) of each opening
+    z_door = (CAB_PLINTH + t, 0.34)
+    z_d1, z_d2 = (0.34 + t, 0.48), (0.48 + t, H - t)
+    panels = [
+        {"shape": "box", "size": [D, W, t], "pos": [0, 0, H - t / 2]},                       # top
+        {"shape": "box", "size": [D, W, t], "pos": [0, 0, CAB_PLINTH + t / 2]},              # bottom
+        {"shape": "box", "size": [D - t, W - 2 * t, CAB_PLINTH], "pos": [t / 2, 0, CAB_PLINTH / 2]},  # plinth
+        {"shape": "box", "size": [D, t, H], "pos": [0, W / 2 - t / 2, H / 2]},               # sides
+        {"shape": "box", "size": [D, t, H], "pos": [0, -W / 2 + t / 2, H / 2]},
+        {"shape": "box", "size": [t, W - 2 * t, H - 2 * t], "pos": [D / 2 - t / 2, 0, H / 2]},  # back
+        {"shape": "box", "size": [D - t, W - 2 * t, t], "pos": [t / 2, 0, 0.34 + t / 2]},     # dividers
+        {"shape": "box", "size": [D - t, W - 2 * t, t], "pos": [t / 2, 0, 0.48 + t / 2]},
+    ]
+    for p in panels:
+        p.update(mass=1.0, rgba=body_c)
+    links = [{"name": "body", "geoms": panels}]
+
+    def drawer(n: str, z0: float, z1: float) -> dict:
+        """A drawer box behind a front panel; its frame is the carcass's, so q = 0 is closed."""
+        inner_w, inner_h = W - 2 * t - 2 * CAB_GAP, z1 - z0 - 2 * CAB_GAP
+        depth = D - 2 * t - 0.02
+        x0 = fx + t                                        # behind the front panel
+        zc, side_h = (z0 + z1) / 2, inner_h - 0.02
+        geoms = [
+            {"shape": "box", "size": [t, W - 2 * t - 2 * CAB_GAP, z1 - z0 - 2 * CAB_GAP],     # front, flush
+             "pos": [fx + t / 2, 0, zc], "rgba": front_c},
+            {"shape": "box", "size": [depth, inner_w - 2 * t, 0.010], "pos": [x0 + depth / 2, 0, z0 + CAB_GAP + 0.005]},
+            {"shape": "box", "size": [depth, 0.010, side_h], "pos": [x0 + depth / 2, inner_w / 2 - t, z0 + CAB_GAP + side_h / 2]},
+            {"shape": "box", "size": [depth, 0.010, side_h], "pos": [x0 + depth / 2, -inner_w / 2 + t, z0 + CAB_GAP + side_h / 2]},
+            {"shape": "box", "size": [0.010, inner_w - 2 * t, side_h], "pos": [x0 + depth - 0.005, 0, z0 + CAB_GAP + side_h / 2]},
+            *_handle(fx, zc, horizontal=True),
+        ]
+        for g in geoms:
+            g.setdefault("mass", 0.25)
+        return {"name": n, "parent": "body",
+                "joint": {"type": "slide", "axis": [-1, 0, 0], "range": [0.0, DRAWER_TRAVEL], "damping": 3.0,
+                          "frictionloss": 0.4},
+                "geoms": geoms}
+
+    links += [drawer("drawer_low", *z_d1), drawer("drawer_high", *z_d2)]
+    # the door: hinged on the +y edge of the front, rotating about -z so it opens toward -x
+    dz0, dz1 = z_door
+    dw, dh = W - 2 * CAB_GAP, dz1 - dz0 + t - 2 * CAB_GAP
+    hinge = [fx - t / 2, W / 2 - CAB_GAP, 0.0]
+    links.append({"name": "door", "parent": "body", "pos": hinge,
+                  "joint": {"type": "hinge", "axis": [0, 0, -1], "range": [0.0, 1.9], "damping": 0.6,
+                            "frictionloss": 0.15},
+                  "geoms": [{"shape": "box", "size": [t, dw, dh], "pos": [0, -dw / 2, (dz0 + dz1) / 2],
+                             "mass": 0.8, "rgba": front_c},
+                            *_handle(-t / 2, (dz0 + dz1) / 2 + 0.05, horizontal=False, y=-dw + 0.05)]})
+    return {"name": name, "shape": "articulated", "fixed": True, "xyz": [x_front + D / 2, y, 0.0],
+            "rpy": [0.0, 0.0, yaw], "rgba": body_c, "links": links}
+
+
+def cabinet_scene() -> list[dict]:
+    """The cabinet beside the table, with a cube in its upper drawer (to take out after opening it)."""
+    cab = cabinet()
+    x_c, y = cab["xyz"][0], cab["xyz"][1]
+    return [cab, {"name": "drawer_cube", "shape": "box", "size": [0.035, 0.035, 0.035], "mass": 0.05,
+                  "xyz": [x_c - 0.02, y, 0.48 + CAB_WALL + CAB_GAP + 0.010 + 0.0175 + 0.002],
+                  "rgba": [0.90, 0.30, 0.55, 1]}]
+
+
+# -- rings: two concentric counter-rotating turntables for a dynamic sorting task ----------------------------------
+
+RING_D = 2.0                # m, the outer ring's outer diameter
+OUTER_W = 0.20              # m, the outer ring's width: the arm reaches over it onto the inner ring
+INNER_W = 0.30              # m, the inner ring's width
+RING_GAP = 0.01             # m, between the rings
+RING_T = 0.03               # m, ring thickness
+RING_SAG = 0.003            # m, the polygonal edges' largest deviation from the circle (sets the segment count)
+SUPPORT_T = 0.02            # m, the support walls' thickness
+SUPPORT_CLEAR = 0.005       # m, between a support wall's top and its ring
+RING_SECTORS = 16           # bodies per ring (one body would couple every contact on it: the solver's cost)
+SECTOR_GAP = 0.0005         # m, the slit between neighbouring sectors
+RING_MASS = 6.0             # kg, each ring
+RING_MAX_TORQUE = 20.0      # N m, each ring's drive cap (it stalls rather than shoving the robot)
+RING_GAIN = 1000.0          # N m s/rad, each ring's drive gain (10 N m of load costs 0.01 rad/s)
+RING_DAMPING = 0.5          # N m s/rad, each ring's bearing
+RED, BLUE = [0.85, 0.20, 0.15, 1.0], [0.20, 0.45, 0.85, 1.0]
+
+
+def arm_mount_y() -> float:
+    """The arm mount's y on the base (default_description.yaml's arm frame: flush with the frame's right face)."""
+    from ..swerve.constants import FRAME
+    return -(FRAME / 2 - 0.070)
+
+
+def _segments(r_in: float, r_out: float, z: float, h: float, mass: float, rgba, n: int | None = None) -> list[dict]:
+    """An annulus (r_in..r_out about the link's z axis, centred at height z, h thick) as ``n`` boxes, each tangent to
+    the outer circle; default n: enough that the outer edge is within ``RING_SAG`` of the circle. Their tops are
+    coplanar (one flat surface); the boxes overlap toward the inner edge (the notches there are < 1 mm)."""
+    if n is None:
+        n = math.ceil(math.pi / math.acos(1 - RING_SAG / r_out))
+    t = 2 * r_out * math.tan(math.pi / n)
+    rc = (r_in + r_out) / 2
+    return [{"shape": "box", "size": [r_out - r_in, t, h], "pos": [rc * math.cos(a), rc * math.sin(a), z],
+             "rpy": [0, 0, a], "mass": mass / n, "rgba": rgba}
+            for a in (2 * math.pi * k / n for k in range(n))]
+
+
+def _sector(r_in: float, r_out: float, a0: float, a1: float, z: float, h: float, mass: float, rgba) -> list[dict]:
+    """The part of an annulus between angles a0 and a1 as boxes with flat, coplanar tops: interior boxes as
+    ``_segments`` (pitch set by ``RING_SAG``), and at each end a half-pitch box whose side lies on the end's radial
+    plane, ``SECTOR_GAP`` / 2 inside it, so neighbouring sectors never overlap (a straight 0.5 mm slit between them)."""
+    m = max(2, math.ceil((a1 - a0) / (2 * math.acos(1 - RING_SAG / r_out))))
+    d = (a1 - a0) / m
+    t = 2 * r_out * math.tan(d / 2)
+    rc = (r_in + r_out) / 2
+    each = mass / (m + 1)
+    out = [{"shape": "box", "size": [r_out - r_in, t, h], "pos": [rc * math.cos(a), rc * math.sin(a), z],
+            "rpy": [0, 0, a], "mass": each, "rgba": rgba}
+           for a in (a0 + d / 2 + (k + 0.5) * d for k in range(m - 1))]
+    half = r_out * math.tan(d / 2)
+    for a, s in ((a0, 1), (a1, -1)):            # y off the end's radial line, into the sector
+        y = s * (SECTOR_GAP / 2 + half / 2)
+        out.append({"shape": "box", "size": [r_out - r_in, half, h],
+                    "pos": [rc * math.cos(a) - y * math.sin(a), rc * math.sin(a) + y * math.cos(a), z],
+                    "rpy": [0, 0, a], "mass": each, "rgba": rgba})
+    return out
+
+
+def ring_geometry() -> dict:
+    """The rings' numbers (m): surface height, centre (world, base at its start pose), and radii."""
+    from ..swerve.constants import FRAME, TOP_Z
+    r_o = RING_D / 2
+    r_oi = r_o - OUTER_W
+    r_io = r_oi - RING_GAP
+    return {"top": TOP_Z + TOP_ABOVE_MOUNT, "centre": [FRAME / 2 + EDGE_GAP + r_o, arm_mount_y()],
+            "outer": (r_oi, r_o), "inner": (r_io - INNER_W, r_io)}
+
+
+def rings(name: str = "rings", outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04) -> dict:
+    """Two concentric horizontal rings (POST /scene/objects fields, shape articulated, fixed) turning about a vertical
+    axis, each driven at a rim speed (m/s at its outer edge; + counterclockwise seen from above): the outer
+    ``OUTER_W`` wide, the inner ``INNER_W`` wide, the centre hollow (an object off the inner edge falls to the floor).
+    The surface is at the tabletop's height, the outer edge ``EDGE_GAP`` ahead of the base's front at the start pose
+    and the centre on the arm mount's y, so the arm reaches straight over the outer ring onto the inner one. Each ring
+    rides above a thin cylindrical wall set back from its edges (the outer one 3 cm inside the outer ring's inner
+    edge, clear of the base's approach; the inner one 10 cm outside the hollow). Its origin is the rings' centre on
+    the floor."""
+    g = ring_geometry()
+    top, (r_oi, r_o), (r_ii, r_io) = g["top"], g["outer"], g["inner"]
+    wall_h = top - RING_T - SUPPORT_CLEAR
+    grey, ring_c = [0.45, 0.45, 0.48, 1.0], [0.80, 0.80, 0.78, 1.0]
+    stand = (_segments(r_oi + 0.03, r_oi + 0.03 + SUPPORT_T, wall_h / 2, wall_h, 20.0, grey, n=48)
+             + _segments(r_ii + 0.10, r_ii + 0.10 + SUPPORT_T, wall_h / 2, wall_h, 15.0, grey, n=40))
+
+    def ring(n: str, r_in: float, r_out: float, rim_speed: float) -> list[dict]:
+        """RING_SECTORS links: each driven (its share of the cap), all held at the first one's angle."""
+        a = 2 * math.pi / RING_SECTORS
+        drive = {"velocity": rim_speed / r_out, "max_torque": RING_MAX_TORQUE / RING_SECTORS,
+                 "gain": RING_GAIN / RING_SECTORS}
+        return [{"name": f"{n}{k}", "parent": "stand",
+                 "joint": {"type": "hinge", "axis": [0, 0, 1], "damping": RING_DAMPING / RING_SECTORS,
+                           "drive": drive, **({"mimic": f"{n}0"} if k else {})},
+                 "geoms": _sector(r_in, r_out, k * a, (k + 1) * a, top - RING_T / 2, RING_T,
+                                  RING_MASS / RING_SECTORS, ring_c)}
+                for k in range(RING_SECTORS)]
+
+    return {"name": name, "shape": "articulated", "fixed": True, "xyz": [*g["centre"], 0.0], "rgba": grey,
+            "links": [{"name": "stand", "geoms": stand}, *ring("outer", r_oi, r_o, outer_rim_speed),
+                      *ring("inner", r_ii, r_io, inner_rim_speed)]}
+
+
+def ring_objects(per_ring: int = 8, seed: int = 0) -> list[dict]:
+    """``per_ring`` graspable objects on each ring, half red and half blue, at seeded random angles (spread so no two
+    touch), radii (clear of the edges) and headings: cubes, cylinders and blocks, each horizontal width < 0.8 x the
+    gripper's opening, masses and friction as the tabletop's."""
+    import random
+    from ..arm.config import GAP_MAX
+    w = 0.035                                        # m, the widest horizontal dimension (0.8 x GAP_MAX = 39.7 mm)
+    assert w < 0.8 * GAP_MAX
+    kinds = [({"shape": "box", "size": [w, w, w], "mass": 0.05}, w),
+             ({"shape": "cylinder", "radius": w / 2, "length": 0.06, "mass": 0.08}, 0.06),
+             ({"shape": "box", "size": [0.025, w, 0.05], "mass": 0.05}, 0.05)]
+    rnd = random.Random(seed)
+    g = ring_geometry()
+    (cx, cy), top = g["centre"], g["top"]
+    out = []
+    for tag in ("outer", "inner"):
+        r_in, r_out = g[tag]
+        margin = 0.035                               # m, from either edge to an object's centre
+        colours = [RED, BLUE] * (per_ring // 2) + [RED] * (per_ring % 2)
+        rnd.shuffle(colours)
+        sep = min(0.10 / r_in, 0.6 * 2 * math.pi / max(per_ring, 1))     # rad: >= 10 cm apart at the inner edge
+        angles: list[float] = []
+        while len(angles) < per_ring:
+            a = rnd.uniform(0, 2 * math.pi)
+            if all(abs((a - b + math.pi) % (2 * math.pi) - math.pi) > sep for b in angles):
+                angles.append(a)
+        for i, (a, rgba) in enumerate(zip(angles, colours), 1):
+            r = rnd.uniform(r_in + margin, r_out - margin)
+            kind, h = rnd.choice(kinds)
+            out.append({"name": f"{'red' if rgba is RED else 'blue'}_{tag}{i}", **kind, "rgba": list(rgba),
+                        "xyz": [cx + r * math.cos(a), cy + r * math.sin(a), top + h / 2 + 0.002],
+                        "yaw": rnd.uniform(-math.pi, math.pi)})
+    return out
+
+
+def rings_scene(outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04, per_ring: int = 8,
+                seed: int = 0) -> list[dict]:
+    """The rings (``rings()``) with ``per_ring`` red and blue objects scattered on each (``ring_objects()``)."""
+    return [rings(outer_rim_speed=outer_rim_speed, inner_rim_speed=inner_rim_speed),
+            *ring_objects(per_ring=per_ring, seed=seed)]
+
+
+# -- a revolving door: a passive one-way rotor in a drum, entrance and exit side by side -------------------------
+
+DOOR_WINGS = 5              # wings (compartments of 72 deg; owner: 8 left barely any room)
+DOOR_R = 1.50               # m, the drum's inner radius (the wings sweep to DOOR_R - WING_GAP): 3.06 m outside
+DOOR_WALL_T = 0.03          # m, the drum's wall (glass in a frame)
+DOOR_WALL_H = 2.20          # m, the drum's and the facade's height
+DOOR_DOORWAY = 0.70         # m, each doorway's chord at the drum's inner radius
+DOOR_JUNCTION = 1.05        # m, the closed drum wall between the doorways (chord), where the facade meets the drum: with
+                            # 72 deg compartments below ~0.95 m one compartment spans both doorways (a 0 deg pass)
+FACADE_T = 0.10             # m, the facade (the dividing wall) thickness
+FACADE_L = 2.50             # m, how far the facade runs out from the drum on each side
+WING_T = 0.04               # m, a wing's thickness (glass in an aluminium frame)
+WING_H = 2.10               # m, a wing's height
+WING_GAP = 0.02             # m, between a wing's edge and the drum (and 10 mm above the floor)
+HUB_R = 0.06                # m, the central post
+GLASS_KG_M2 = 15.0          # kg/m^2: 6 mm tempered glass (2500 kg/m^3)
+FRAME_KG_M = 1.2            # kg/m: a light aluminium frame round each wing
+DOOR_SPIN = 0.35            # rad/s, the start spin (3.3 rpm: an automatic revolving door's pace), counterclockwise
+DOOR_FRICTION = 0.75        # N m, the bearing's dry friction (frictionloss): 5/8 of the 8-wing door's, as its inertia
+DOOR_DAMPING = 0.75         # N m s/rad, its viscous friction (the same ~80 s spin-down)
+DOOR_RATCHET = 400.0        # N m, the anti-reverse ratchet's hold (more than the robot can push with)
+DOOR_GAP = 0.60             # m, from the base's front at the start pose to the drum's outer wall
+
+
+def door_geometry(r: float = DOOR_R, wings: int = DOOR_WINGS, doorway: float = DOOR_DOORWAY,
+                  junction: float = DOOR_JUNCTION) -> dict:
+    """The door's angles (rad, in its own frame: the facade along its y axis, the near side -x, the far side +x):
+    the junction (the closed wall where the facade meets the drum, centred on +y), the entrance (near side) and the
+    exit (far side) doorways either side of it, the closed drum walls, and where the wings are at q = 0 (one
+    compartment centred on the entrance)."""
+    c = 2 * math.asin(junction / (2 * r))
+    w = 2 * math.asin(doorway / (2 * r))
+    a_j = math.pi / 2
+    entrance = (a_j + c / 2, a_j + c / 2 + w)
+    exit_ = (a_j - c / 2 - w, a_j - c / 2)
+    phi = 2 * math.pi / wings
+    a_e = (entrance[0] + entrance[1]) / 2
+    return {"r": r, "wings": wings, "phi": phi, "junction": (a_j - c / 2, a_j + c / 2), "entrance": entrance,
+            "exit": exit_, "wing_angles": [a_e + phi / 2 + k * phi for k in range(wings)],
+            "closed": [(a_j - c / 2, a_j + c / 2), (entrance[1], exit_[0] + 2 * math.pi)]}
+
+
+def _arc(r: float, t: float, a0: float, a1: float, h: float, rgba, sag: float = 0.004) -> list[dict]:
+    """A wall r..r+t thick between angles a0 and a1 (about the link's z axis), h tall from the floor: boxes whose inner
+    faces are chords no more than ``sag`` inside the circle, each ending on its end's radial line."""
+    m = max(1, math.ceil((a1 - a0) / (2 * math.acos(1 - sag / r))))
+    d = (a1 - a0) / m
+    rc = r * math.cos(d / 2) + t / 2                      # the inner face on the chord between the ends
+    return [{"shape": "box", "size": [t, 2 * (rc + t / 2) * math.tan(d / 2), h],
+             "pos": [rc * math.cos(a), rc * math.sin(a), h / 2], "rpy": [0, 0, a], "mass": 1.0, "rgba": rgba}
+            for a in (a0 + (k + 0.5) * d for k in range(m))]
+
+
+def wing_mass(r: float = DOOR_R) -> float:
+    """kg: a wing's glass and frame (it runs from the post to WING_GAP short of the drum, WING_H tall)."""
+    ln = r - WING_GAP - HUB_R
+    return GLASS_KG_M2 * ln * WING_H + FRAME_KG_M * 2 * (ln + WING_H)
+
+
+def revolving_door(name: str = "revolving_door", xyz=None, yaw: float = 0.0, r: float = DOOR_R,
+                   wings: int = DOOR_WINGS, doorway: float = DOOR_DOORWAY, junction: float = DOOR_JUNCTION,
+                   spin: float = DOOR_SPIN, friction: float = DOOR_FRICTION, damping: float = DOOR_DAMPING,
+                   ratchet: float | None = DOOR_RATCHET) -> dict:
+    """A revolving door (POST /scene/objects fields, shape articulated, fixed): a glass drum (inner radius ``r``) set
+    in a facade (the dividing wall) along the door's y axis, and a passive rotor of ``wings`` radial wings turning
+    about the centre, started at ``spin`` rad/s counterclockwise (``qvel0``: at load and on every reset) and slowing
+    on its bearing's dry ``friction`` and ``damping``. The two doorways sit side by side where the facade meets the
+    drum (+y): the entrance on the near side (-x), the exit on the far side (+x), the closed ``junction`` wall between
+    them. A ratchet stops the rotor turning clockwise, so a compartment taken in at the entrance goes the long way
+    round (past -x, -y, +x) to the exit: most of a turn (docs/sim.md, "The revolving door scene"). Default placement:
+    the robot at its start pose faces the door's centre, the drum ``DOOR_GAP`` ahead of its front. Its origin is the
+    drum's centre on the floor."""
+    from ..swerve.constants import FRAME
+    g = door_geometry(r, wings, doorway, junction)
+    if xyz is None:
+        xyz = [FRAME / 2 + DOOR_GAP + DOOR_WALL_T + r, 0.0, 0.0]
+    glass, facade_c = [0.62, 0.78, 0.86, 0.25], [0.80, 0.80, 0.78, 0.35]
+    wing_c, metal = [0.55, 0.72, 0.82, 0.45], [0.60, 0.60, 0.62, 1.0]
+    drum = []
+    for a0, a1 in g["closed"]:
+        drum += _arc(r, DOOR_WALL_T, a0, a1, DOOR_WALL_H, glass)
+    y0 = r + DOOR_WALL_T - 0.01                               # the facade starts inside the drum's wall
+    for s in (1, -1):
+        drum.append({"shape": "box", "size": [FACADE_T, FACADE_L, DOOR_WALL_H],
+                     "pos": [0.0, s * (y0 + FACADE_L / 2), DOOR_WALL_H / 2], "mass": 1.0, "rgba": facade_c})
+    ln = r - WING_GAP - HUB_R
+    m_w = wing_mass(r)
+    rotor = [{"shape": "cylinder", "radius": HUB_R, "length": WING_H, "pos": [0, 0, 0.01 + WING_H / 2],
+              "mass": 8.0, "rgba": metal}]
+    rotor += [{"shape": "box", "size": [ln, WING_T, WING_H],
+               "pos": [(HUB_R + ln / 2) * math.cos(a), (HUB_R + ln / 2) * math.sin(a), 0.01 + WING_H / 2],
+               "rpy": [0, 0, a], "mass": m_w, "rgba": wing_c} for a in g["wing_angles"]]
+    joint = {"type": "hinge", "axis": [0, 0, 1], "damping": damping, "frictionloss": friction, "qvel0": spin}
+    if ratchet:
+        joint["ratchet"] = {"direction": 1, "max_torque": ratchet}
+    return {"name": name, "shape": "articulated", "fixed": True, "xyz": list(xyz), "rpy": [0.0, 0.0, yaw],
+            "rgba": glass, "links": [{"name": "drum", "geoms": drum},
+                                     {"name": "rotor", "parent": "drum", "joint": joint, "geoms": rotor}]}
+
+
+def revolving_door_scene() -> list[dict]:
+    """The revolving door ahead of the robot (``revolving_door()``)."""
+    return [revolving_door()]

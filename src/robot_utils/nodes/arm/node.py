@@ -173,6 +173,7 @@ class ArmNode(JointStream, ArmRequests):
         self.servo = False                 # arm closed loop
         self.g_servo = False               # gripper closed loop
         self.g_motor_on = False            # gripper motor enabled (off = damping)
+        self._seen_on = np.zeros(N + 1, bool)   # per motor: reported enabled (status 1) since it was switched on
         self._g_cut = False                # gripper motor off requested (disable)
         self.soft = C.DEFAULT_SOFT.copy()
         self._lock = threading.RLock()
@@ -394,7 +395,7 @@ class ArmNode(JointStream, ArmRequests):
                 for m in e.missing:
                     self.misses_by_motor[m] = self.misses_by_motor.get(m, 0) + 1
             age = math.inf if self._fresh_t is None else now - self._fresh_t
-            limit = STALE_ON if self.motors_on else STALE_OFF
+            limit = self.settings.stale_on if self.motors_on else STALE_OFF
             if self.motors_on and STALE_WARN <= age <= limit and not self._stale_warned:
                 self._stale_warn(now, age, e.missing)
             if self.reading is None or age > limit:
@@ -415,6 +416,10 @@ class ArmNode(JointStream, ArmRequests):
             self.latched = [] if self.motors_on else faults
         if faults and self.motors_on:
             self._fault("motor fault: " + "; ".join(faults))
+            return
+        off = [] if stale else self._dropped_off(r)
+        if off:
+            self._fault(f"motor disabled unexpectedly: {', '.join(off)} reports disabled while the motors are on")
             return
         ch = self.chocks()
         if ch and self.enabled:
@@ -451,7 +456,7 @@ class ArmNode(JointStream, ArmRequests):
         self._stale_warn_t, self._stale_gaps = now, 0
         self.events.add(f"no complete reading for {age * 1e3:.0f} ms (no reply from "
                         f"{', '.join(dict.fromkeys(missing))}); with the motors on the arm faults at "
-                        f"{STALE_ON * 1e3:.0f} ms" + (f" ({more} more since the last report)" if more else ""),
+                        f"{self.settings.stale_on * 1e3:.0f} ms" + (f" ({more} more since the last report)" if more else ""),
                         "warn")
 
     def _note_latency(self, now: float) -> None:
@@ -483,7 +488,7 @@ class ArmNode(JointStream, ArmRequests):
             self.events.add(f"reply latency p99 {st['p99_ms']:.1f} ms (max {st['max_ms']:.1f} ms) over the last "
                             f"{st['n']} complete reads: {st['margin_ms']:.1f} ms margin to the {DT * 1e3:.0f} ms tick; "
                             "later replies are waited for one more tick (missed after two), and with the motors on "
-                            f"{STALE_ON * 1e3:.0f} ms without a complete reading faults", "warn")
+                            f"{self.settings.stale_on * 1e3:.0f} ms without a complete reading faults", "warn")
 
     def _note_fallbacks(self) -> None:
         """Control thread: the first time on a connection that a motor's feedback had to be refreshed
@@ -526,6 +531,19 @@ class ArmNode(JointStream, ArmRequests):
         p50, p99 = np.percentile(a, [50, 99])
         return {"n": int(len(a)), "p50_ms": round(float(p50), 2), "p99_ms": round(float(p99), 2),
                 "max_ms": round(float(a.max()), 2), "margin_ms": round(DT * 1e3 - float(p99), 2)}
+
+    def _dropped_off(self, r) -> list[str]:
+        """Motors that should be on but report disabled (status 0): a brown-out, an external disable, a simulated
+        world that lost them. Only after the motor has reported enabled since it was switched on: the bus is
+        pipelined, so the first readings after an enable can still carry the replies from before it."""
+        expect = np.zeros(N + 1, bool)
+        if self.motors_on:
+            expect[:N] = True
+            expect[N] = self.g_motor_on
+        st = np.asarray(r.status)
+        self._seen_on &= expect
+        self._seen_on |= expect & (st == 1)
+        return [n for n, e, seen, c in zip(self.bus.names, expect, self._seen_on, st) if e and seen and c == 0]
 
     def _motors_off(self, why: str) -> None:
         """Control thread: motors disabled (damping)."""

@@ -181,6 +181,78 @@ def test_arm_kinematic_follows_q_within_speed_limit_and_watchdog(w):
     assert np.allclose(w.arm_op("read", {})["q"], q_hold, atol=2e-3)      # holds where it is
 
 
+def test_reset_keeps_the_arm_motors_on(w):
+    """A reset (an episode start) restarts the world, not the motors: an enabled arm stays enabled at the start
+    pose, takes frames right away and the watchdog counts from the reset (sim time restarts at 0)."""
+    q_start = np.array(w.cfg["components"]["arm"]["start_q"], float)
+    w.arm_op("enable", {})
+    goal = q_start + np.array([0.3, -0.2, 0.2, 0.0, 0.2, -0.3])
+
+    def send(q):
+        w.arm_op("send", {"q": list(q), "qd": [0] * 6, "kp": [30] * 6, "kd": [1] * 6, "tau": [0] * 6})
+    for _ in range(20):
+        send(goal)
+        w.step(20)
+    assert np.allclose(w.arm_op("read", {})["q"], goal, atol=2e-3)
+    w.reset()
+    r = w.arm_op("read", {})
+    assert r["status"][:7] == [1] * 7 and w.arm.cmd is None
+    assert np.allclose(r["q"], q_start, atol=2e-3) and np.allclose(r["q_ref"], q_start)
+    for _ in range(20):
+        send(goal)
+        w.step(20)
+    r = w.arm_op("read", {})
+    assert np.allclose(r["q"], goal, atol=2e-3) and r["status"][:6] == [1] * 6
+    w.step(150)                                               # the watchdog still runs after the reset
+    assert w.arm_op("read", {})["status"][:6] == [0xD] * 6
+    w.reset()                                                 # a fault latches across a reset too
+    assert w.arm.fault == 0xD and not w.arm.enabled
+
+
+def test_timing_is_the_robots_unless_lenient_and_auto_is_macos_only():
+    from robot_utils.nodes.sim.world import default_config, resolve_timing
+    cfg = default_config()
+    assert resolve_timing(cfg, "linux") == {"lenient": False, "why": "auto: not macOS", "arm_watchdog": 0.1,
+                                            "swerve_heartbeat": 0.1}
+    mac = resolve_timing(cfg, "darwin")
+    assert mac["lenient"] and mac["arm_watchdog"] == 0.5 and mac["swerve_heartbeat"] == 0.5
+    assert not resolve_timing({**cfg, "timing": {"lenient": False}}, "darwin")["lenient"]
+    w = make_world(timing={"lenient": True})
+    try:
+        w.arm_op("enable", {})
+        w.step(300)                                           # 0.3 s without frames: forgiven
+        assert w.arm_op("read", {})["status"][:6] == [1] * 6
+        w.step(250)                                           # past 0.5 s: the watchdog still trips
+        assert w.arm_op("read", {})["status"][:6] == [0xD] * 6
+        assert w.snapshot()["timing"]["lenient"] is True
+    finally:
+        w.close()
+
+
+@needs_gl
+def test_cameras_keep_streaming_after_a_reset(w):
+    """A reset puts sim time back to 0; the frame schedule must restart with it (it waited for the time the world had
+    run before the reset, so the camera streams stopped that long after every A press: 2026-11-24)."""
+    from robot_utils.nodes.sim.render import Cameras
+    cams = Cameras(w, w.cfg["cameras"])
+    try:
+        cams.start("camera", ["color"])
+
+        def rendered_while(seconds):
+            n0 = cams.cams["camera"].rendered["color"]
+            for _ in range(int(seconds * 1000) // 20):
+                w.step(20)
+                time.sleep(0.002)                              # let the render thread run
+                cams.start("camera", ["color"])                # keep the stream active
+            time.sleep(0.2)
+            return cams.cams["camera"].rendered["color"] - n0
+        assert rendered_while(3.0) > 3                         # rendering as sim time runs (it skips when behind)
+        w.reset()                                              # back to t = 0 (the schedule was ~3 s ahead of it)
+        assert rendered_while(2.0) > 3, "camera frames stopped after the reset"
+    finally:
+        cams.close()
+
+
 def test_time_step_run_pause_rtf(w):
     t0 = w.t
     w.step(100)

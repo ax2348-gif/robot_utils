@@ -60,7 +60,8 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             "on the headset over ssh, only when asked. Episodes: A (right controller) starts one, a B tap stops "
             "it (the sim stack: A resets the sim first); the node emits events (`GET /eventlog`, its only files) "
             "and the operator stream (`GET /oplog/stream`: headset frames, datagrams sent, events); recording is "
-            "the client-side script's job."),
+            "the client-side script's job (`python -m robot_utils.collect run`), which a sim stack's node runs "
+            "itself from Start to Stop (`/state` `recording`)."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 
@@ -131,6 +132,24 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             return node.set_mode(mode)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    @app.post("/sim/auto_pause/{state}", tags=["control"],
+              summary="Sim only: pause sim time while neither clutched nor driving (`on` | `off`)")
+    async def sim_auto_pause(state: str):
+        if node.aids is None:
+            raise HTTPException(409, "not a sim stack (--sim none)")
+        if state not in ("on", "off"):
+            raise HTTPException(422, "on or off")
+        return await asyncio.to_thread(node.aids.set_auto_pause, state == "on")
+
+    @app.post("/sim/ghost/{state}", tags=["control"],
+              summary="Sim only: the end effector's goal drawn as a gripper ghost, coloured by the error (`on` | `off`)")
+    async def sim_ghost(state: str):
+        if node.aids is None:
+            raise HTTPException(409, "not a sim stack (--sim none)")
+        if state not in ("on", "off"):
+            raise HTTPException(422, "on or off")
+        return await asyncio.to_thread(node.aids.set_ghost, state == "on")
 
     @app.post("/headless/{state}", tags=["control"], summary="Headless left stick (`on` | `off`, third person, "
                                                               "registered): the stick moves along the operator's facing")

@@ -1,0 +1,11 @@
+# The revolving door scene with the dynamic arm (docs/sim.md, "The revolving door scene"):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_revolving_door_dynamic.yaml python -m robot_utils.nodes.sim.stack
+# A passive one-way door 0.6 m ahead of the robot, spinning down from 0.35 rad/s (stops ~81 s after the start or a
+# reset); the entrance is front-left, the exit beside it on the far side of the facade: most of a turn inside.
+scene:
+  tabletop: false
+  revolving_door: true
+  view_anchor: [0.6, 0.0, 0.0]   # placed 1.6 m ahead: the robot ~1.0 m in front of the operator, the door beyond it (both ahead)
+components:
+  arm:
+    fidelity: dynamic

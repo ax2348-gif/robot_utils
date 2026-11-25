@@ -26,6 +26,7 @@ class FakeQuest:
         self.running, self.pull_rc, self.run_rc, self.battery = running, pull_rc, run_rc, battery
         self.xr = xr
         self.ar = None                        # the robot AR URL in ~/.config/quest-env/robot-ar (None: no file)
+        self.loaded = self.package = None     # sha256 of the running library / of the clone's package (None: unknown)
         self.commands: list[str] = []
 
     def __call__(self, cmd, timeout=60.0):
@@ -47,14 +48,19 @@ class FakeQuest:
                 if "--scheme=body-frozen" in cmd:
                     self.mode += " body-frozen"
                 self.ar = cmd.split("--ar=", 1)[1].split()[0] if "--ar=" in cmd else None
+                self.loaded = self.package
             return Result(self.run_rc, "", "" if self.run_rc == 0 else "No built telemetry package")
         if 'quest" stop' in cmd:
             self.running = False
             return Result(0, "stopped\n")
         if 'quest" status' in cmd:              # the real output shape (live check, 2026-11-21)
             return Result(0, json.dumps({"ok": True, "runtime_pid": 5939, "xr_pids": [11444] if self.running else [],
+                                         **({"selected": f"/data/native/apps/{self.loaded}/libapp.so"}
+                                            if self.loaded else {}),
                                          "last_load": {"pid": 11444, "state": "entry-returned"},
                                          "last_load_process_alive": self.running}) + "\n")
+        if "sha256sum" in cmd:
+            return Result(0, f"{self.package}  libapp.so\n") if self.package else Result(1, "", "No such file")
         if cmd.startswith("logcat"):
             return Result(0, f"11-21 18:50:44.031 11444 11475 I QuestRuntimeXR: OpenXR session state {self.xr}\n")
         if "robot-ar" in cmd:
@@ -274,3 +280,15 @@ def test_battery_comes_from_the_stream_never_from_ssh():
     ctl, _ = ctl_for(fq)
     ctl.status()
     assert not fq.ran("power_supply") and not fq.ran("dumpsys")
+
+
+def test_up_restarts_when_the_running_library_is_not_the_clones_package():
+    """A branch checked out on the headset (or files copied) leaves the old library running: up reloads it."""
+    fq = FakeQuest()
+    fq.loaded, fq.package = "a" * 64, "b" * 64
+    ctl, logs = ctl_for(fq)
+    assert ctl.up() == 0
+    assert fq.ran('quest" run') and any("not the clone's package" in s for s in logs)
+    n = len(fq.ran('quest" run'))
+    assert ctl.up() == 0 and len(fq.ran('quest" run')) == n      # now the same: not restarted again
+    assert_safe(fq)

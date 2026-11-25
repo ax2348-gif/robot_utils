@@ -208,6 +208,23 @@ class QuestCtl:
             return None
         return vals["behind"], vals["dirty"]
 
+    def package_stale(self) -> Optional[bool]:
+        """Is the running telemetry library another build than the clone's package (a branch checked out or files
+        updated without a pull)? From ``quest status`` (the runtime keeps each library under its sha256) and the
+        package's sha256; None when either is unknown."""
+        r = self.q("status", 30)
+        try:
+            sel = json.loads(r.out).get("selected") or ""
+        except (ValueError, AttributeError):
+            return None
+        parts = sel.split("/")
+        loaded = parts[-2] if len(parts) >= 2 and len(parts[-2]) == 64 else None
+        p = self.run(ROOT + 'sha256sum "$R/packages/telemetry/libapp.so"', 30)
+        pkg = p.out.split()[0] if p.rc == 0 and p.out.split() else None
+        if not loaded or not pkg or len(pkg) != 64:
+            return None
+        return loaded != pkg
+
     def mode(self) -> str:
         r = self.run(f"cat {MODE_FILE} 2>/dev/null", 15)
         return " ".join(r.out.split()) if r.rc == 0 else ""
@@ -281,11 +298,13 @@ class QuestCtl:
         want = f"{'live' if demo else 'off'}{' body-frozen' if scheme == 'body-frozen' else ''}"
         current, current_ar = self.mode(), self.ar_url()
         live = self.probe(self.stream_host, self.port, 1.0)
-        if live.live and current == want and current_ar == ar and not pulled and not restart:
+        stale = live.live and not pulled and not restart and self.package_stale()
+        if live.live and current == want and current_ar == ar and not pulled and not restart and not stale:
             self.log(f"telemetry already running ({want}{', AR ' + ar if ar else ''}); not restarting")
         else:
             why = ("--restart" if restart else "updated" if pulled else
                    "stream not answering" if not live.live else
+                   "the running library is not the clone's package" if stale else
                    f"mode {current or 'unset'!r} -> {want!r}" if current != want else
                    f"AR {current_ar or 'off'} -> {ar or 'off'}")
             args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "") + (f" --ar={ar}" if ar else "")

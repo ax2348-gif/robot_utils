@@ -503,6 +503,15 @@ and a wrong gravity feedforward show; the driver's refusal of setpoints outside 
 gripper stops at 0 mm or an "object" gap). Needed by the preview harness
 and the tests; nothing in the tests touches hardware.
 
+### Timing (`--timing`)
+
+Two stall limits fault the node: with the motors on, a reading older than `stale_on` (50 ms), and the control
+process silent for `ctl_heartbeat` (0.25 s; latched until the node restarts). These are the robot's. `--timing
+lenient` raises them to 0.5 s / 2 s, for a simulated arm only (refused on hardware); `auto` (the default) is lenient
+for a simulated arm on macOS, which has no real-time scheduling: under load its control process stalled past 0.25 s
+at start and was reported dead. The sim world's own motor watchdog is lenient there too (docs/sim.md). The node's
+events say which is in force.
+
 ## Config changes
 
 - `rebotarm_dm_safe.yaml`: gripper kp 8.0 → 0.5.

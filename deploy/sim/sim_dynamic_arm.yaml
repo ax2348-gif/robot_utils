@@ -1,0 +1,14 @@
+# Sim config: the dynamic arm (docs/sim.md, "What the world is"), merged over default_sim.yaml:
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_dynamic_arm.yaml python -m robot_utils.nodes.sim.stack
+#   python -m robot_utils.nodes.sim --config deploy/sim/sim_dynamic_arm.yaml
+# Each Damiao motor applies the arm node's MIT frames as joint torque, tau = kp (q - q_m) + kd (qd - qd_m) + tau_ff,
+# clamped at its torque limit (robot config: 27 N m joints 1-3, 7 N m joints 4-6 and the gripper); gravity comes only
+# from the node's tau_ff, so its model error shows up as droop (~2 deg on the wrist pitch at the start pose). Commanded-
+# vs-measured deflection, contact forces and the WBC's lead bound are physical. The friction, armature and transport
+# delay are ESTIMATES (components.arm.dynamic in default_sim.yaml); override them here, e.g.:
+components:
+  arm:
+    fidelity: dynamic
+    # dynamic:
+    #   coulomb: [0.3, 0.3, 0.3, 0.05, 0.05, 0.05]
+    #   command_delay: 0.002

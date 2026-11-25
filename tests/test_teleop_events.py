@@ -67,7 +67,7 @@ def test_the_line_has_the_contract_shape_and_unknown_kinds_are_refused(tmp_path)
     assert lines(tmp_path) == [ln]
     assert set(E.KINDS) == {"button", "armed", "disarmed", "enabled", "disabled", "episode_start", "episode_stop",
                             "episode_abort", "estop", "fault", "hold", "stale", "teleop_start", "teleop_stop",
-                            "sim_reset"}
+                            "sim_reset", "sim_pause", "sim_resume"}
 
 
 def test_seq_and_the_episode_counter_continue_across_a_restart(tmp_path):

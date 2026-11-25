@@ -7,6 +7,7 @@ their backends over ``protocol`` sockets: ``arm.sock``, ``swerve.sock``, ``camer
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 import time
@@ -94,6 +95,13 @@ class SimNode:
         self.servers: dict = {}
         self.t_start = time.monotonic()
         self.markers = viz.Markers()
+        self.ghosts = viz.Ghosts()
+        # how headsets draw /scene3d (GET/POST /scene3d/view); anchor: the sim-world point [x, y, yaw deg] the headset
+        # places in front of the operator (null: the world origin, the robot's start)
+        anchor = (world.cfg.get("scene") or {}).get("view_anchor")
+        self.view = {"style": "flat", "role": "auto",
+                     "anchor": None if anchor is None else [float(v) for v in anchor]}
+        self._ghost_lines = None             # (scene_id, rigid.Poses, compat.StateLines) for robot_state's ghosts
 
     # -- lifecycle ---------------------------------------------------------------------------------
 
@@ -162,7 +170,7 @@ class SimNode:
         sc = self.world.scene()
         os.makedirs(self.scene_dir, exist_ok=True)
         path = os.path.join(self.scene_dir, f"{name}.yaml")
-        objs = [{k: v for k, v in o.items() if k != "speed"} for o in sc["objects"]]
+        objs = [{k: v for k, v in o.items() if k not in ("speed", "joints")} for o in sc["objects"]]
         with open(path, "w") as f:
             yaml.safe_dump({"objects": objs}, f, sort_keys=False)
         self.events.add(f"scene saved: {path} ({len(objs)} objects)")
@@ -200,18 +208,72 @@ class SimNode:
             out["markers"] = mk
         return out
 
+    VIEW_STYLES = ("flat", "flat_edges", "hidden_line", "wire")
+    VIEW_ROLES = ("auto", "visual", "collision")
+
+    def set_view(self, style: Optional[str] = None, role: Optional[str] = None, next_style: bool = False,
+                 anchor=False) -> dict:
+        if next_style:
+            i = self.VIEW_STYLES.index(self.view["style"])
+            style = self.VIEW_STYLES[(i + 1) % len(self.VIEW_STYLES)]
+        if style is not None:
+            if style not in self.VIEW_STYLES:
+                raise ValueError(f"style: one of {', '.join(self.VIEW_STYLES)}")
+            self.view["style"] = style
+        if role is not None:
+            if role not in self.VIEW_ROLES:
+                raise ValueError(f"role: one of {', '.join(self.VIEW_ROLES)}")
+            self.view["role"] = role
+        if anchor is not False:                     # None clears it
+            if anchor is not None and (len(anchor) != 3 or not all(math.isfinite(float(v)) for v in anchor)):
+                raise ValueError("anchor is [x, y, yaw_deg]")
+            self.view["anchor"] = None if anchor is None else [float(v) for v in anchor]
+        self.events.add(f"headset view: {self.view['style']}, {self.view['role']} geometry, anchor "
+                        f"{self.view['anchor'] or 'origin'}")
+        self.hub.state_changed()
+        return dict(self.view)
+
+    def put_ghosts(self, ghosts: list, source: Optional[str] = None, replace: bool = False) -> dict:
+        with self.world.lock:
+            m = self.world.m
+            bodies = {m.body(i).name for i in range(1, m.nbody)}
+        if replace:
+            self.ghosts.remove(source=source)
+        names = self.ghosts.put(ghosts, bodies, source)
+        return {"names": names, "count": len(self.ghosts.list())}
+
+    def ghost_objects(self) -> dict:
+        """The live ghosts as robot_state.v1 objects (their bodies' primitives; meshes as boxes), so today's AR view
+        draws them: ``ghost:<name>/<body>``."""
+        decl = self.ghosts.declared()
+        if not decl:
+            return {}
+        from ...scene3d import compat
+        from . import rigid
+        index, _ = rigid.build(self.world, ghosts=decl)
+        if self._ghost_lines is None or self._ghost_lines[0] != index["scene_id"]:
+            self._ghost_lines = (index["scene_id"], rigid.Poses(index), compat.StateLines(index))
+        _, poses, lines = self._ghost_lines
+        line = lines.line(poses.frame(self.world, self.ghosts.live()))
+        return {k: {**v, "fixed": False} for k, v in line["objects"].items() if k.startswith("ghost:")}
+
     def robot_state(self) -> dict:
         """One robot_state.v1 record (docs/sim.md, "Robot state stream")."""
         s = viz.robot_state(self.world)
+        s["objects"].update(self.ghost_objects())
         sim = s.pop("sim")
         self._state_seq = getattr(self, "_state_seq", 0) + 1
-        arm = self.world.arm if self.world.has_arm else None
         return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",
                 "reset_seq": self.world.reset_seq,
                 "t_host": round(time.monotonic(), 4), "model_version": s["model_version"], "frame": "world",
-                "base": s["base"], "joints": s["joints"], "objects": s["objects"],
-                "overlays": {"markers": self.markers.list(), "sim": sim,
-                             **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}}
+                "base": s["base"], "joints": s["joints"], "objects": s["objects"], "overlays": self.overlays(sim)}
+
+    def overlays(self, sim: Optional[dict] = None) -> dict:
+        """robot_state.v1's overlays: the live markers, the sim's run state, the arm motors as the world sees them."""
+        w = self.world
+        arm = w.arm if w.has_arm else None
+        return {"markers": self.markers.list(), "sim": sim or {"running": w.running, "rtf": w.rtf},
+                **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}
 
     # -- state -------------------------------------------------------------------------------------------
 
@@ -234,4 +296,5 @@ class SimNode:
                 **snap, "cameras": cams,
                 "backends": {k: {"socket": str(s.path), "clients": s.clients, "requests": s.requests}
                              for k, s in self.servers.items()},
+                "view": dict(self.view),
                 "events": self.events.list()}

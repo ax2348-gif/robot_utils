@@ -265,8 +265,9 @@ def test_the_landing_page_lists_the_tool_and_the_registries_the_node():
     from robot_utils.nodes.sim.stack import DEFAULT_NODES, registry_path
     tool = next(t for t in list_tools() if t["name"] == "quest_teleop")
     assert tool["title"] == "Quest teleop"
-    # the robot's registry (no sim: A never resets), the sim stack's (A resets the sim first)
-    for cfg, args in ((None, ["--ar", ":80"]), (registry_path(), ["--ar", ":8080", "--sim", "sim"])):
+    # the robot's registry (no sim: A never resets), the sim stack's (Start and A reset the sim first; teleop starts
+    # by itself)
+    for cfg, args in ((None, ["--ar", ":80"]), (registry_path(), ["--ar", ":8080", "--sim", "sim", "--autostart"])):
         n = next(n for n in load_config(cfg) if n.name == "quest_teleop")
         assert n.start.module == "robot_utils.nodes.quest_teleop" and list(n.start.args) == args
     assert "quest_teleop" not in DEFAULT_NODES.split(",")          # the sim stack: a Start button
@@ -341,3 +342,23 @@ def test_top_speed_asserts_the_wbc_caps_only_while_the_base_is_still_and_stop_re
     fake.config["max_omega"] = 0.5
     assert http.post("/stop").status_code == 200
     assert fake.config == {"max_speed": 0.6, "max_omega": 0.5, "wheel_speed": 1.0}     # the original speed back
+
+
+def test_autostart_starts_teleop_once_and_only_in_the_sim(monkeypatch):
+    """--autostart: the node starts teleop by itself (retrying while the WBC is not up), once; never without --sim."""
+    from robot_utils.nodes.quest_teleop.node import QuestTeleopNode
+    calls = []
+
+    def fake_start(self):
+        calls.append(1)
+        if len(calls) < 2:
+            raise RuntimeError("the WBC is not up yet")
+        self.phase = "running"
+        return {}
+    monkeypatch.setattr(QuestTeleopNode, "start_teleop", fake_start)
+    n = QuestTeleopNode("wbc", quest_host="127.0.0.1", sim=None, autostart=True)
+    assert n.autostart is False                                    # without a sim: off
+    n2 = QuestTeleopNode("wbc", quest_host="127.0.0.1", sim="sim", autostart=True)
+    n2._stop.wait = lambda t: False                                # no 2 s waits in the test
+    n2._autostart()
+    assert len(calls) == 2 and n2.phase == "running"

@@ -114,6 +114,16 @@ the event log; the Pi records nothing else).
   the pending episode (`reset`, its id in `episode`) and leaves the WBC disabled (Y enables and arms, as after X); X,
   an e-stop, a fault, stale input, a B tap or stopping teleop during the sequence cancel it the same way (an enable
   already made is undone). On the robot (no `--sim`) A starts the episode at once, armed.
+- **Sim aids** (`--sim`; `nodes/quest_teleop/sim_aids.py`, the page's sim row, `POST /sim/ghost/{on|off}`,
+  `POST /sim/auto_pause/{on|off}`, `/state` `sim_aids`):
+  - **Goal ghost** (on; `--no-ghost`): the gripper drawn at the WBC's target, coloured by target − measured
+    (green, yellow at half, red from 5 cm or 20°), see-through. Posted to the sim relative to the measured end
+    link (tcp · meas⁻¹ · tgt · tcp⁻¹), so estimator drift cancels; hidden while there is no target.
+  - **Auto pause** (off; `--auto-pause`): sim time stops while the operator is neither clutched nor touching a
+    stick for 0.25 s, and runs again at the next grip or stick. Only while teleop runs, never during an episode's
+    sim reset (it waits on the estimator); the node only resumes what it paused. Events `sim_pause` / `sim_resume`
+    mark the frozen spans for recordings. Measured: 4 s paused leaves the WBC enabled, the estimator healthy and the
+    arm servoing.
 - **Headset (not yet changed):** in body-frozen mode the headset still realigns on A (a new operator-frame revision:
   a discontinuity, which disarms and spoils the press). The plan's *headset* change (A no longer realigns in
   body-frozen mode) is needed before A starts episodes on the real headset.
@@ -126,7 +136,7 @@ raw edges in valid frames, plus a refused A: `action`, `reason`), `armed` (`arm_
 `enabled` (`by`), `disabled` (`reason`), `episode_start` (`task`), `episode_stop`, `episode_abort` (`reason`, `why`),
 `estop` (`reason`, `source`), `fault` (`reason`), `hold` (`reason`: the WBC's hold reason when it changes),
 `stale` (`reason`: staleness / latency / rate; `why`), `teleop_start` (`session`, `transport`), `teleop_stop`
-(`reason`), `sim_reset` (`reset_seq`). Episode ids `YYYYMMDD-NNNN` (a counter per local day).
+(`reason`), `sim_reset` (`reset_seq`), `sim_pause` / `sim_resume` (auto pause: `reason`). Episode ids `YYYYMMDD-NNNN` (a counter per local day).
 
 One append-only file per local day, `<data dir>/events-YYYYMMDD.jsonl`; each line is flushed and fsynced as it is
 written. `seq` is gap-free for the node's life and continues across restarts (the newest file's last line is read
@@ -144,6 +154,14 @@ payload, in order of occurrence: `headset` (`t_rx`: arrival, this machine's mono
 to the WBC), `event` (the event line, its fields flat in the header). A `ping` first and after 1 s idle. A subscriber
 more than `max_records` behind loses the oldest records and the next record carries `dropped` (as the rows streams);
 publishing never blocks the teleop loop. Lost events are in the log: `GET /eventlog?since_seq=N`.
+
+## Recording in the sim (`--record`)
+
+In a sim stack (`--sim`), Start also starts the collect script and Stop (any stop: the button, an auto-stop, a fault,
+the node shutting down) ends it: every teleop run becomes a session under `--record DIR` (default `~/data/sim`),
+with the sim's rigid scene; `--no-record` turns it off. Details, the design and the files: docs/collect.md, "Sim
+teleop records itself". `/state` `recording`: `enabled`, `active`, `dir`, `pid`, `exit_code`, `error`, the
+streams (connected, rate, records, gaps), episodes and scenes saved; the page's Episode card shows it.
 
 ## The AR view (`--ar`)
 
@@ -178,8 +196,8 @@ pruned) and `oplog` (subscribers, records per type).
 ## Storage
 
 Only the event log (above; events, never frames) under `--data-dir`, a deliberate small exception like
-agent_interface's transcripts: no recording (the client-side script records the streams, docs/nodes.md), no state
-files; log lines go to stderr (the journal under systemd). Constructed without a `data_dir` (tests, library use) the
+agent_interface's transcripts: no recording of its own (the client-side script records the streams, docs/nodes.md;
+in a sim stack the node runs that script as a child process, `--record`), no state files; log lines go to stderr (the journal under systemd). Constructed without a `data_dir` (tests, library use) the
 event log stays in memory. Tested: start, teleop,
 stop, e-stop and both headset commands leave the node's working directory and `$HOME` empty.
 

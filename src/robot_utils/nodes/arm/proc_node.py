@@ -56,7 +56,6 @@ SERVICE_S = 0.01                # the server's service runs on every control tic
 
 
 class ProcNode(ArmRequests):
-    CTL_HEARTBEAT = 0.25        # s without the control process's heartbeat (outside a blocking step) -> fault
     KILL_AFTER_S = 1.0          # s after the fault a still-silent control process is killed
     ESTOP_ACK_S = 0.2           # s the e-stop waits for the control process (the motors off)
     CALL_S = 2.0                # s a command waits for its answer
@@ -71,6 +70,7 @@ class ProcNode(ArmRequests):
         self.profile0 = C.load_profile(profile).name
         self._profiles = {self.profile0: C.load_profile(profile)}
         self.settings = settings or C.NodeSettings()
+        self.ctl_heartbeat = self.settings.ctl_heartbeat     # s: the control process silent this long -> fault
         self.description_node = description_node
         self.clock = time.monotonic                 # one clock for both processes
         self.locks = locks or LockStore()
@@ -267,7 +267,7 @@ class ProcNode(ArmRequests):
             return
         if self.proc_fault is not None:
             hb_age = now - self.shm.beats[CTL_HB]
-            if (self.proc.is_alive() and now - self._fault_t > self.KILL_AFTER_S and hb_age > self.CTL_HEARTBEAT
+            if (self.proc.is_alive() and now - self._fault_t > self.KILL_AFTER_S and hb_age > self.ctl_heartbeat
                     and now > self.shm.beats[CTL_BUSY]):
                 log.error("the arm's control process is still silent: killing it")
                 self.proc.kill()
@@ -276,7 +276,7 @@ class ProcNode(ArmRequests):
             self._proc_failed(f"the control process exited (code {self.proc.exitcode})")
             return
         age = now - self.shm.beats[CTL_HB]
-        if age > self.CTL_HEARTBEAT and now > self.shm.beats[CTL_BUSY]:
+        if age > self.ctl_heartbeat and now > self.shm.beats[CTL_BUSY]:
             self._proc_failed(f"no control process heartbeat for {age:.2f} s")
 
     def _proc_failed(self, reason: str) -> None:

@@ -4,7 +4,8 @@
 Runs the Quest whole-body teleop client (tools/quest_teleop) as a node on this machine, against the local WBC node
 (target datagrams over its unix socket), with a page to start / stop it, watch it, and bring the headset's telemetry
 up or down over ssh (docs/quest_teleop_node.md). Same on the robot and in the sim stack. Writes only its event log
-(--data-dir; events, never frames).
+(--data-dir; events, never frames); in a sim stack (--sim) it also records every teleop run with the collect script
+(--record DIR, --no-record; docs/collect.md "Sim teleop records itself").
 """
 import argparse
 import logging
@@ -58,6 +59,25 @@ def main() -> None:
                                                  "it before an episode; 'none' (the robot) = no reset")
     p.add_argument("--reset-timeout", type=float, default=5.0,
                    help="s: a sim reset waits this long for the estimator's reset in the WBC stream")
+    p.add_argument("--autostart", action="store_true",
+                   help="sim only: start teleop by itself once the WBC answers (the sim stack passes it), as if Start "
+                        "were pressed: the sim resets, recording starts")
+    p.add_argument("--estimator", default="estimator",
+                   help="the estimator instance a sim reset resets with it (default %(default)s)")
+    p.add_argument("--auto-pause", action="store_true",
+                   help="sim only: sim time stops while the operator is neither clutched nor driving the base, and "
+                        "runs at the next grip or stick (switchable on the page)")
+    p.add_argument("--no-ghost", action="store_true",
+                   help="sim only: no gripper ghost at the end effector's goal (on by default; switchable on the page)")
+    p.add_argument("--record", default="~/data/sim", metavar="DIR",
+                   help="sim only: every teleop run is recorded (python -m robot_utils.collect run, as a child process) "
+                        "to DIR/<YYYYMMDD-HHMMSS>, from Start to Stop, with the sim's rigid scene (default %(default)s)")
+    p.add_argument("--no-record", action="store_true", help="sim only: do not record teleop runs")
+    p.add_argument("--record-streams", default=None,
+                   help="sim only: the recorder's stream specs (default: collect's defaults; the rigid scene is added)")
+    p.add_argument("--record-robot", default="local",
+                   help="sim only: where the recorder reaches the nodes: 'local' (their unix sockets, default) or the "
+                        "frontend's URL")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "quest_teleop")
     a = p.parse_args()
@@ -65,9 +85,13 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from .client import Config, set_top_speed
+    from .recording import RecordConfig
     from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
+    from .sim_aids import AidsConfig
     from .server import create_app
+    if a.autostart and a.sim in ("none", ""):
+        p.error("--autostart is for a sim stack only (--sim)")
     cfg = Config(hand=a.hand, ee=a.ee, head_walk=not a.no_head_walk, mode=a.mode, headless=not a.no_headless, gripper=not a.no_gripper)
     try:
         set_top_speed(cfg, a.max_speed, a.max_omega)
@@ -79,7 +103,11 @@ def main() -> None:
                            min_rate=a.min_rate, ar=a.ar, scheme=a.scheme, ctl_timeout=a.ctl_timeout,
                            wait=a.wait, name=a.name, data_dir=a.data_dir or DATA_DIR,
                            log_cap_bytes=int(a.log_cap_mb * 1024 * 1024), sim=off(a.sim),
-                           reset_timeout=a.reset_timeout)
+                           reset_timeout=a.reset_timeout,
+                           aids=AidsConfig(ghost=not a.no_ghost, auto_pause=a.auto_pause),
+                           autostart=a.autostart, estimator=off(a.estimator),
+                           record=None if a.no_record else RecordConfig(out=a.record, robot=a.record_robot,
+                                                                        streams=a.record_streams))
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "
                                       f"ssh {a.ssh_host}, AR {a.ar})")
 
