@@ -38,6 +38,7 @@ PAGES = {
     "wbc": lambda: node_page("wbc"),
     "quest_teleop": lambda: node_page("quest_teleop"),
     "sim": lambda: node_page("sim"),
+    "browse": lambda: import_module("robot_utils.collect.browse.page").PAGE_HTML,
 }
 
 

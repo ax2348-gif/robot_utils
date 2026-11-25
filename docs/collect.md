@@ -152,6 +152,8 @@ appearance): the rigid scenes its `scene3d` records name, copied (hard-linked) t
 | | `event` | `t` |
 | `sim.scene3d` | `scene3d` | `t_rx` (the recorder's receipt; below) |
 
+Reviewing sessions and episodes (replay, plots, 3D, video export): `python -m robot_utils.collect browse`, docs/browse.md.
+
 Training conversion (e.g. LeRobot), the arm's `t_meas` latency compensation and interpolation onto a master
 clock are offline steps on these files, not part of the cut.
 

@@ -22,6 +22,7 @@ import mujoco
 import numpy as np
 
 from robot_utils.scene3d.format import Frame, mesh_arrays
+from robot_utils.scene3d.view import select_geoms     # the headset's rule (scene3d/view.py)
 
 from . import ar
 
@@ -42,19 +43,6 @@ def _quat_of(r: np.ndarray) -> np.ndarray:
     q = np.zeros(4)
     mujoco.mju_mat2Quat(q, np.ascontiguousarray(r, float).reshape(-1))
     return q
-
-
-def _wants(geom_role: str, want: str) -> bool:
-    return geom_role == want or geom_role == "both"
-
-
-def select_geoms(body: dict, role: str) -> list[dict]:
-    """The geoms of a body the headset draws (``SceneView::rebuild``): planes never."""
-    want = role if role in ("visual", "collision") else ("visual" if body.get("kind") in ("robot", "ghost")
-                                                          else "collision")
-    geoms = body.get("geoms") or []
-    have = any(_wants(g.get("role", "both"), want) for g in geoms)
-    return [g for g in geoms if g.get("type") != "plane" and (not have or _wants(g.get("role", "both"), want))]
 
 
 def _controller_geoms(body, scale: float, rgba) -> None:

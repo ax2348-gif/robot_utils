@@ -151,5 +151,7 @@ passthrough, stereo, 1280 x 1340 per eye, 72 Hz, GPU time of our draws per frame
   (USD: bake each rigid body's mesh subtree into body-local meshes once, stream `RigidPrim.get_world_poses()`;
   about 130 dynamic bodies per SimReady kitchen).
 - **Recorded** with a sim teleop session (docs/collect.md, "The rigid scene"): the pose stream as records, each scene
-  once per `scene_id`; `python -m robot_utils.replay` re-renders the operator's view from them.
+  once per `scene_id`; `python -m robot_utils.replay` re-renders the operator's view from them, and the episode
+  browser (docs/browse.md, "The sim scene") draws them in its robot view. Both pick the geoms with the headset's
+  rule, `scene3d/view.py` (`select_geoms` / `drawn_geoms`).
 - **Side channels**: contacts (point, normal, force) and joint values for cues.
