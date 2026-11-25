@@ -219,7 +219,7 @@ RU.sse("events", s => {
   ] : [["error", esc(W.error)]];
   if (s.estop.latched) wkv.push(["e-stop", "latched: clear it on the WBC, arm and swerve pages"]);
   $("#wbc").innerHTML = wkv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
-  // episode: the open one, the task, the last outcome and event (recording is the client-side script's job)
+  // episode: the open one, the task, the last outcome and event (the sim also records every teleop run itself: recording.py)
   const E = s.episodes || {}, ev = s.last_event, L = s.eventlog || {};
   $("#epline").className = "lim" + (E.state === "recording" ? " on" : "");
   $("#epline").textContent = E.state === "recording" ? `episode ${E.id} · ${f(E.elapsed, 0)} s` : E.state === "resetting" ? `resetting the sim for ${E.pending}` : "no episode";
@@ -234,6 +234,15 @@ RU.sse("events", s => {
     ["event log", `${L.dir ? "on disk" : "memory only"} · seq ${L.seq}` + (L.dropped || L.write_errors ? ` · ${L.dropped} lost, ${L.write_errors} write errors` : "")],
   ];
   if (E.refused && E.state !== "recording") ekv.push(["A refused", esc(E.refused)]);
+  const R = s.recording || {};
+  if (R.enabled) {   // the sim records every teleop run (recording.py)
+    const st = R.streams || {}, down = Object.entries(st).filter(([, v]) => !v.connected).map(([k]) => k);
+    const sc = (R.scenes || []).reduce((n, x) => n + (x.saved || []).length, 0);
+    const rec = R.active ? `recording · ${f((R.bytes || 0) / 1e6, 0)} MB · ${Object.keys(st).length} streams${down.length ? " (" + down.length + " down)" : ""} · ${sc} scenes`
+      : R.dir ? (R.exit_code === 0 ? "finished" : R.exit_code === null ? "starting" : "stopped") : "starts with teleop";
+    ekv.push(["recording", esc(rec) + (R.dir ? `<div class="ru-muted" style="font-size:12px">${esc(R.dir)}</div>` : "")]);
+    if (R.error) ekv.push(["recorder", esc(R.error)]);
+  }
   $("#episode").innerHTML = ekv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
   $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${esc(e.msg)}</div>`).join("");
 });

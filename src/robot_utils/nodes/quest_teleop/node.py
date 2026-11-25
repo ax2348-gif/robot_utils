@@ -34,6 +34,7 @@ from .episodes import RESET_TIMEOUT, Episodes
 from .sim_aids import AidsConfig, SimAids
 from .eventlog import CAP_BYTES, TeleopEventLog
 from .oplog import OpLog
+from .recording import RecordConfig, SimRecorder
 
 log = logging.getLogger("quest_teleop")
 
@@ -210,9 +211,11 @@ class QuestTeleopNode:
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
                  log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
-                 aids: Optional[AidsConfig] = None):
+                 aids: Optional[AidsConfig] = None, record: Optional[RecordConfig] = None,
+                 recorder_factory: Callable = SimRecorder):
         """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
-        keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it."""
+        keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it;
+        ``record``: with ``sim``, record every teleop run (recording.py; None: off)."""
         self.name = name
         self.wbc_target = wbc
         self.arm_target, self.swerve_target = arm, swerve     # the e-stop goes to these directly too
@@ -242,6 +245,7 @@ class QuestTeleopNode:
         self.episodes = Episodes(self, sim, reset_timeout)
         self.sim = sim
         self.aids = SimAids(self, sim, aids) if sim else None   # the goal ghost, auto pause (sim_aids.py)
+        self.recorder = recorder_factory(self, sim, record) if sim and record is not None else None
         self.buttons: Optional[EpisodeButtons] = None
         self.wbc_enabled: Optional[bool] = None   # as this node knows it (its own requests, the 1 Hz poll)
         self._known_lock = threading.Lock()
@@ -286,6 +290,8 @@ class QuestTeleopNode:
 
     def close(self) -> None:
         self.stop_teleop("node shutting down")
+        if self.recorder is not None:
+            self.recorder.close()           # its files closed before the node goes
         if self.aids is not None:
             self.aids.close()
         self._stop.set()
@@ -423,6 +429,8 @@ class QuestTeleopNode:
             self.wbc, self.client = wbc, client
             self.phase, self.started_at = "running", self.clock()
             self.last_msg = None
+        if self.recorder is not None:      # the sim records every run: from the events after this seq on
+            self.recorder.start(self.eventlog.seq, self.episodes.task)
         self.emit("teleop_start", {"session": info.get("session"), "transport": getattr(wbc, "transport", None)})
         self.set_enabled(True, "teleop start")
         self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; nothing moves until "
@@ -490,6 +498,8 @@ class QuestTeleopNode:
                 self.error = "stop: " + "; ".join(p.strip() for p in problems)
         self.set_enabled(False, "teleop stop")
         self.emit("teleop_stop", {"reason": reason})
+        if self.recorder is not None:
+            self.recorder.stop()            # it settles and closes on its own; never waited for here
         self.events.add(f"teleop stopped ({reason})" + (f": {'; '.join(problems)}" if problems else ""),
                         "warn" if reason != "requested" else "info")
         return {"stopped": True, "reason": reason, "engagements": client.core.status.engagements}
@@ -855,6 +865,7 @@ class QuestTeleopNode:
                        "reset_timeout": self.episodes.reset_timeout},
             "latest": self.latest,
             "sim_aids": None if self.aids is None else self.aids.info(),
+            "recording": {"enabled": False} if self.recorder is None else self.recorder.info(),
             "episode": self.episodes.open_episode(),
             "episodes": self.episodes.info(),
             "task": self.episodes.task,
