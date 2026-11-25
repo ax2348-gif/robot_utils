@@ -3,7 +3,7 @@
 scene:
   tabletop: false
   rings: true
-  view_anchor: [1.0, 0.0, 0.0]   # the headset places this 1.6 m ahead: the robot ~0.6 m in front of the operator, the rings beyond it
+  view_anchor: [0.6, 0.0, 0.0]   # placed 1.6 m ahead: the robot ~1.0 m in front of the operator, the rings beyond it (both ahead)
 components:
   arm:
     fidelity: dynamic
