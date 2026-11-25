@@ -47,7 +47,8 @@ ROBOT_CONTYPE, ROBOT_CONAFFINITY = 2, 1      # the robot never collides with its
 WORLD_CONTYPE, WORLD_CONAFFINITY = 1, 3      # floor and objects collide with the robot and each other
 INTEGRATORS = {"euler": mujoco.mjtIntegrator.mjINT_EULER, "rk4": mujoco.mjtIntegrator.mjINT_RK4,
                "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT, "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST}
-SHAPES = ("box", "cylinder")
+SHAPES = ("box", "cylinder", "articulated")
+JOINT_TYPES = {"slide": mujoco.mjtJoint.mjJNT_SLIDE, "hinge": mujoco.mjtJoint.mjJNT_HINGE}
 IMU_BUFFER = 2000                    # samples kept per IMU (2 s at 1 kHz)
 
 
@@ -345,7 +346,12 @@ class World:
             except KeyError:
                 pass
         self.obj_idx = {}
+        self.obj_joints = {}                # articulated object -> {link: (qpos adr, dof adr)}
         for name, o in self.objects.items():
+            if o["shape"] == "articulated":
+                self.obj_joints[name] = {ln["name"]: (int(m.joint(f"obj_{name}/{ln['name']}").qposadr[0]),
+                                                      int(m.joint(f"obj_{name}/{ln['name']}").dofadr[0]))
+                                         for ln in o["links"] if ln.get("joint")}
             if o.get("fixed"):
                 self.obj_idx[name] = (m.body(f"obj_{name}").id, None, None)
             else:
@@ -359,6 +365,9 @@ class World:
         if sc.get("tabletop"):
             from .scene import tabletop
             out += tabletop()
+        if sc.get("cabinet"):
+            from .scene import cabinet_scene
+            out += cabinet_scene()
         return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
@@ -371,15 +380,11 @@ class World:
         shape = o.get("shape", "box")
         if shape not in SHAPES:
             raise SimError(f"shape must be one of {', '.join(SHAPES)}")
-        if shape == "box":
-            size = [float(v) for v in o.get("size", [0.1, 0.1, 0.1])]
-            if len(size) != 3 or min(size) <= 0:
-                raise SimError("a box needs size [x, y, z] > 0 (full extents, m)")
-            o["size"] = size
+        if shape == "articulated":
+            o["links"] = self._check_links(name, o.get("links"))
         else:
-            o["radius"], o["length"] = float(o.get("radius", 0.05)), float(o.get("length", 0.1))
-            if o["radius"] <= 0 or o["length"] <= 0:
-                raise SimError("a cylinder needs radius and length > 0 (m)")
+            o.pop("links", None)
+            o.update(self._check_shape(o, shape))
         o["fixed"] = bool(o.get("fixed", False))
         o["mass"] = float(o.get("mass", 0.5))
         if not o["mass"] > 0:
@@ -395,6 +400,90 @@ class World:
         o["name"], o["shape"] = name, shape
         return o
 
+    @staticmethod
+    def _check_shape(g: dict, shape: str) -> dict:
+        """A primitive's dimensions: box ``size`` (full extents), cylinder ``radius`` + ``length`` (along z)."""
+        if shape == "box":
+            size = [float(v) for v in g.get("size", [0.1, 0.1, 0.1])]
+            if len(size) != 3 or min(size) <= 0:
+                raise SimError("a box needs size [x, y, z] > 0 (full extents, m)")
+            return {"size": size}
+        if shape == "cylinder":
+            r, n = float(g.get("radius", 0.05)), float(g.get("length", 0.1))
+            if r <= 0 or n <= 0:
+                raise SimError("a cylinder needs radius and length > 0 (m)")
+            return {"radius": r, "length": n}
+        raise SimError(f"a part's shape is box or cylinder, not {shape!r}")
+
+    def _check_links(self, obj: str, links) -> list:
+        """An articulated object's links: a tree of rigid parts, each a list of primitives, joined to its parent by
+        a slide or hinge joint (or welded). The first link is the root (no parent, no joint): it is the object's
+        frame, placed by the object's xyz / rpy (and fixed or free as the object)."""
+        if not isinstance(links, list) or not links:
+            raise SimError(f"articulated object {obj!r} needs links")
+        out, names = [], set()
+        for i, ln in enumerate(links):
+            ln = dict(ln)
+            nm = str(ln.get("name") or "")
+            if not re.match(r"^[A-Za-z0-9_-]{1,40}$", nm) or nm in names:
+                raise SimError(f"{obj}: link names are unique letters, digits, _ or - (got {nm!r})")
+            parent = ln.get("parent")
+            if i == 0:
+                if parent is not None or ln.get("joint"):
+                    raise SimError(f"{obj}: the first link is the root: no parent, no joint")
+            elif parent not in names:
+                raise SimError(f"{obj}/{nm}: parent must be an earlier link (got {parent!r})")
+            j = ln.get("joint")
+            if j is not None:
+                j = dict(j)
+                if j.get("type") not in JOINT_TYPES:
+                    raise SimError(f"{obj}/{nm}: joint type is slide or hinge")
+                axis = [float(v) for v in j.get("axis", [1, 0, 0])]
+                if len(axis) != 3 or not np.linalg.norm(axis) > 0:
+                    raise SimError(f"{obj}/{nm}: joint axis is a non-zero [x, y, z]")
+                rng = j.get("range")
+                if rng is not None:
+                    rng = [float(v) for v in rng]
+                    if len(rng) != 2 or not rng[0] < rng[1]:
+                        raise SimError(f"{obj}/{nm}: joint range is [lo, hi], lo < hi (m or rad)")
+                j = {"type": j["type"], "axis": axis, **({"range": rng} if rng else {}),
+                     "pos": [float(v) for v in j.get("pos", [0, 0, 0])],
+                     "damping": float(j.get("damping", 2.0)), "frictionloss": float(j.get("frictionloss", 0.0))}
+                if j["damping"] < 0 or j["frictionloss"] < 0:
+                    raise SimError(f"{obj}/{nm}: damping and frictionloss are >= 0")
+            geoms = []
+            for g in ln.get("geoms") or []:
+                g = dict(g)
+                gs = g.get("shape", "box")
+                geoms.append({"shape": gs, **self._check_shape(g, gs),
+                              "pos": [float(v) for v in g.get("pos", [0, 0, 0])],
+                              "rpy": [float(v) for v in g.get("rpy", [0, 0, 0])],
+                              "mass": float(g.get("mass", 0.2)),
+                              **({"rgba": [float(v) for v in g["rgba"]]} if g.get("rgba") else {})})
+                if not geoms[-1]["mass"] > 0:
+                    raise SimError(f"{obj}/{nm}: a part's mass is > 0 (kg)")
+            if not geoms:
+                raise SimError(f"{obj}/{nm}: a link needs geoms")
+            out.append({"name": nm, **({"parent": parent} if parent is not None else {}),
+                        "pos": [float(v) for v in ln.get("pos", [0, 0, 0])],
+                        "rpy": [float(v) for v in ln.get("rpy", [0, 0, 0])],
+                        **({"joint": j} if j else {}), "geoms": geoms})
+            names.add(nm)
+        return out
+
+    def _add_part(self, body, g: dict, rgba) -> None:
+        """One primitive of an object on ``body``, colliding with the robot and other objects."""
+        if g["shape"] == "box":
+            mg = body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[v / 2 for v in g["size"]], mass=g["mass"],
+                               rgba=g.get("rgba", rgba))
+        else:
+            mg = body.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[g["radius"], g["length"] / 2, 0],
+                               mass=g["mass"], rgba=g.get("rgba", rgba))
+        if "pos" in g:
+            mg.pos, mg.quat = g["pos"], rpy_quat(g["rpy"])
+        mg.contype, mg.conaffinity, mg.friction = WORLD_CONTYPE, WORLD_CONAFFINITY, g["friction"]
+        mg.condim = int(((self.cfg.get("contact") or {}).get("objects") or {}).get("condim", 3))
+
     def _spec_object(self, o: dict) -> None:
         if o["name"] in self.objects:
             raise SimError(f"object {o['name']!r} exists")
@@ -402,13 +491,28 @@ class World:
         if not o.get("fixed"):                       # fixed: welded to the world (furniture)
             fj = b.add_freejoint()
             fj.name = f"obj_{o['name']}_free"
-        if o["shape"] == "box":
-            g = b.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[v / 2 for v in o["size"]], mass=o["mass"], rgba=o["rgba"])
-        else:
-            g = b.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[o["radius"], o["length"] / 2, 0],
-                           mass=o["mass"], rgba=o["rgba"])
-        g.contype, g.conaffinity, g.friction = WORLD_CONTYPE, WORLD_CONAFFINITY, o["friction"]
-        g.condim = int(((self.cfg.get("contact") or {}).get("objects") or {}).get("condim", 3))
+        if o["shape"] != "articulated":
+            self._add_part(b, {k: o[k] for k in ("shape", "size", "radius", "length", "mass", "friction") if k in o},
+                           o["rgba"])
+            self.objects[o["name"]] = o
+            return
+        bodies = {}
+        for ln in o["links"]:
+            if "parent" not in ln:                  # the root: the object's own body
+                body = b
+            else:
+                body = bodies[ln["parent"]].add_body(name=f"obj_{o['name']}/{ln['name']}", pos=ln["pos"],
+                                                     quat=rpy_quat(ln["rpy"]))
+            if ln.get("joint"):
+                j = ln["joint"]
+                mj = body.add_joint(name=f"obj_{o['name']}/{ln['name']}", type=JOINT_TYPES[j["type"]],
+                                    axis=j["axis"], pos=j["pos"], damping=j["damping"],
+                                    frictionloss=j["frictionloss"])
+                if "range" in j:
+                    mj.limited, mj.range = mujoco.mjtLimited.mjLIMITED_TRUE, j["range"]
+            for g in ln["geoms"]:
+                self._add_part(body, {**g, "friction": o["friction"]}, o["rgba"])
+            bodies[ln["name"]] = body
         self.objects[o["name"]] = o
 
     def _recompile(self) -> None:
@@ -464,7 +568,10 @@ class World:
     def object_state(self, name: str) -> dict:
         o = self.objects[name]
         b, qa, va = self.obj_idx[name]
-        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba") if k in o}
+        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba", "links")
+               if k in o}
+        if name in self.obj_joints:
+            out["joints"] = {ln: round(float(self.d.qpos[qa_]), 6) for ln, (qa_, _) in self.obj_joints[name].items()}
         if qa is None:
             out["xyz"] = [round(float(v), 6) for v in self.d.xpos[b]]
             out["rpy"] = [round(v, 6) for v in quat_rpy(self.d.xquat[b])]

@@ -13,7 +13,9 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..common.server import Event, add_base_routes, add_page_routes, node_meta, setup_app, sse
-from . import __version__, viz
+from ...scene3d import compat as s3compat
+from ...scene3d import encode_frame
+from . import __version__, rigid, viz
 from .node import SimNode
 from .world import SimError
 
@@ -43,9 +45,41 @@ class StepIn(_In):
     seconds: Optional[float] = Field(None, gt=0, le=600, description="Or sim seconds to advance.")
 
 
+class PartIn(_In):
+    shape: Literal["box", "cylinder"] = Field("box", description="box or cylinder (axis z).")
+    size: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="m, box full extents x, y, z.")
+    radius: Optional[float] = Field(None, gt=0, description="m, cylinder radius.")
+    length: Optional[float] = Field(None, gt=0, description="m, cylinder length.")
+    pos: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="m, in the link frame.")
+    rpy: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="rad, in the link frame.")
+    mass: float = Field(0.2, gt=0, description="kg.")
+    rgba: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="Colour (default: the object's).")
+
+
+class JointIn(_In):
+    type: Literal["slide", "hinge"] = Field(description="slide (m along axis) or hinge (rad about axis).")
+    axis: list[float] = Field([1.0, 0.0, 0.0], min_length=3, max_length=3, description="In the link frame.")
+    range: Optional[list[float]] = Field(None, min_length=2, max_length=2, description="[lo, hi]; absent: unlimited.")
+    pos: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="m, the hinge axis' point.")
+    damping: float = Field(2.0, ge=0, description="N s/m or N m s/rad.")
+    frictionloss: float = Field(0.0, ge=0, description="N or N m: dry friction holding it in place.")
+
+
+class LinkIn(_In):
+    name: str = Field(description="Unique in the object: letters, digits, _ or -.")
+    parent: Optional[str] = Field(None, description="An earlier link; absent for the first (root) link only.")
+    pos: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="m, in the parent's frame.")
+    rpy: list[float] = Field([0.0, 0.0, 0.0], min_length=3, max_length=3, description="rad, in the parent's frame.")
+    joint: Optional[JointIn] = Field(None, description="How it moves against its parent (absent: welded).")
+    geoms: list[PartIn] = Field(min_length=1, description="Its primitives (they collide and are drawn).")
+
+
 class ObjectIn(_In):
     name: str = Field(description="Unique name: letters, digits, _ or -.")
-    shape: Literal["box", "cylinder"] = Field("box", description="box or cylinder (axis z).")
+    shape: Literal["box", "cylinder", "articulated"] = Field(
+        "box", description="box or cylinder (axis z), or articulated (`links`: a tree of parts joined by slide / "
+                           "hinge joints, e.g. a cabinet with drawers).")
+    links: Optional[list[LinkIn]] = Field(None, description="articulated: the links, root first.")
     size: Optional[list[float]] = Field(None, min_length=3, max_length=3, description="m, box full extents x, y, z.")
     radius: Optional[float] = Field(None, gt=0, description="m, cylinder radius.")
     length: Optional[float] = Field(None, gt=0, description="m, cylinder length.")
@@ -140,13 +174,15 @@ class ModuleState(BaseModel):
 
 class ObjectState(BaseModel):
     name: str = Field(description="Object name.")
-    shape: str = Field(description="box | cylinder.")
+    shape: str = Field(description="box | cylinder | articulated.")
     size: Optional[list[float]] = Field(None, description="m, box extents.")
     radius: Optional[float] = Field(None, description="m.")
     length: Optional[float] = Field(None, description="m.")
     mass: float = Field(description="kg.")
     fixed: Optional[bool] = Field(None, description="Welded to the world (present only when true).")
     rgba: Optional[list[float]] = Field(None, description="Colour, 0..1.")
+    links: Optional[list[dict]] = Field(None, description="articulated: the links as given (defaults filled in).")
+    joints: Optional[dict[str, float]] = Field(None, description="articulated: each jointed link's position (m | rad).")
     xyz: list[float] = Field(description="m.")
     rpy: list[float] = Field(description="rad.")
     speed: float = Field(description="m/s.")
@@ -307,9 +343,84 @@ class VizFrame(BaseModel):
     markers: Optional[list[Marker]] = Field(None, description="Every live marker (in the stream: only when changed).")
 
 
+class S3Geom(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["box", "sphere", "capsule", "cylinder", "ellipsoid", "plane", "mesh"] = Field(description="Shape.")
+    pos: list[float] = Field(description="m, in the body.")
+    quat: list[float] = Field(description="x, y, z, w in the body.")
+    rgba: list[float] = Field(description="Colour 0..1.")
+    role: Literal["collision", "visual", "both"] = Field(description="collision: what the physics touches; visual: "
+                                                                     "drawn only; both.")
+    half_extents: Optional[list[float]] = Field(None, description="m, box (3) or plane (2; 0 = unbounded).")
+    radius: Optional[float] = Field(None, description="m, sphere / capsule / cylinder.")
+    half_length: Optional[float] = Field(None, description="m, capsule / cylinder straight part along z, half.")
+    radii: Optional[list[float]] = Field(None, description="m, ellipsoid.")
+    mesh: Optional[int] = Field(None, description="Index into meshes.")
+
+
+class S3Body(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: int = Field(description="Body id (index).")
+    name: str = Field(description="Name (an object's without `obj_`; an articulated part `object/link`).")
+    kind: Literal["world", "robot", "object"] = Field(description="What it belongs to.")
+    parent: int = Field(description="Parent body id (-1: none). Informational: place bodies by their own poses.")
+    dynamic: bool = Field(description="Moves (streamed); false: its `pose` is fixed.")
+    pose: list[float] = Field(description="World pose [x, y, z, qx, qy, qz, qw] when the scene was made.")
+    geoms: list[S3Geom]
+    joint: Optional[dict] = Field(None, description="{name, type: hinge | slide, range?}: its joint to its parent.")
+
+
+class S3Mesh(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(description="Mesh name (`.hull`: MuJoCo's convex hull of the mesh, what it collides as).")
+    nvert: int = Field(description="Vertices (float32 x, y, z).")
+    ntri: int = Field(description="Triangles.")
+    nedge: int = Field(description="Outline edges (vertex pairs: boundary, non-manifold, crease).")
+    vert_offset: int = Field(description="Byte offset in the blob.")
+    tri_offset: int = Field(description="Byte offset of the triangles.")
+    edge_offset: int = Field(description="Byte offset of the edges.")
+    index: Literal["u16", "u32"] = Field(description="Index type (little endian).")
+    bounds: list[list[float]] = Field(description="[[min x, y, z], [max x, y, z]] in the mesh frame.")
+    error: Optional[float] = Field(description="m, how far its vertices may be from the model's after "
+                                               "simplification (null: unknown).")
+
+
+class S3Scene(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_: str = Field(alias="schema", serialization_alias="schema", description="rigid_scene.v1.")
+    scene_id: str = Field(description="16 hex digits over the index and blob: equal scenes, equal ids (cache key).")
+    source: str = Field(description="Who made it (sim).")
+    conventions: dict = Field(description="{up: +z, units: m, quat: xyzw}.")
+    crease_deg: float = Field(description="Outline edges: faces more than this apart.")
+    bodies: list[S3Body]
+    dynamic: list[int] = Field(description="Body ids in the pose stream's order.")
+    meshes: list[S3Mesh]
+    blob_bytes: int = Field(description="Size of /scene3d/blob.")
+    generation: int = Field(description="The sim model's generation.")
+    cell: float = Field(description="m, visual mesh simplification (vertex clustering).")
+    model_version: Optional[str] = Field(description="The description's model_version.")
+
+
+class S3Frame(BaseModel):
+    seq: int = Field(description="Frame counter (per stream).")
+    t: float = Field(description="s, sim time.")
+    reset_seq: int = Field(description="The world's resets since start.")
+    scene_id: str = Field(description="The scene these poses index (fetch /scene3d again on a change).")
+    poses: list[list[float]] = Field(description="Per dynamic body, in `dynamic` order: [x, y, z, qx, qy, qz, qw].")
+
+
+class S3CompatModel(BaseModel):
+    model_version: str = Field(description="The scene_id (the headset refetches the model when it changes).")
+    root: str = Field(description="world.")
+    links: dict = Field(description="{world: {visuals: []}}: every body comes in the state lines.")
+    joints: list = Field(description="None.")
+
+
 class StateObject(BaseModel):
     pose: list[float] = Field(description="World pose [x, y, z, qx, qy, qz, qw] of its centre.")
-    geom: dict = Field(description="{type: box | cylinder, size (box full extents) | radius + length (along z), rgba}.")
+    geom: dict | list[dict] = Field(description="{type: box | cylinder, size (box full extents) | radius + length "
+                                                "(along z), rgba, origin?}; a list for an articulated object's link "
+                                                "(each part at its origin in the link frame).")
     fixed: bool = Field(description="Welded to the world (furniture).")
 
 
@@ -335,7 +446,8 @@ class RobotState(BaseModel):
     base: list[float] = Field(description="base_link's world pose [x, y, z, qx, qy, qz, qw].")
     joints: dict[str, float] = Field(description="Every movable joint by its model name: rad or m (arm joints, "
                                                  "fingers, each module's steer and wheel).")
-    objects: dict[str, StateObject] = Field(description="Scene objects (not the robot).")
+    objects: dict[str, StateObject] = Field(description="Scene objects (not the robot); an articulated object as one "
+                                                        "entry per link, `object/link`.")
     overlays: RobotStateOverlays
 
 
@@ -430,7 +542,7 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
         return node.world.scene()
 
     @app.post("/scene/objects", response_model=ObjectState, response_model_exclude_unset=True, tags=["scene"],
-              summary="Add an object (box or cylinder)")
+              summary="Add an object (box, cylinder or articulated)")
     async def add_object(body: ObjectIn):
         out = await call(node.world.add_object, body.model_dump(exclude_none=True))
         node.events.add(f"object {body.name!r} added")
@@ -536,6 +648,101 @@ def create_app(node: SimNode, start: bool = True) -> FastAPI:
                 yield f"data: {json.dumps(f, separators=(',', ':'))}\n\n"
                 await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+    # -- rigid scene (rigid_scene.v1, docs/scene3d.md) ---------------------------------------------------
+
+    def s3(cell: float, crease: float):
+        return rigid.build(node.world, cell, crease)
+
+    CELL = Query(rigid.DEFAULT_CELL, ge=0, le=0.05, description="m, visual mesh simplification (0: as compiled)")
+    CREASE = Query(30.0, ge=0, le=180, description="deg, outline edges: faces at least this far apart")
+
+    @app.get("/scene3d", response_model=S3Scene, response_model_exclude_unset=True, response_model_by_alias=True,
+             tags=["view"], summary="The world as rigid bodies (rigid_scene.v1): bodies, geoms, mesh index")
+    async def scene3d(cell: float = CELL, crease_deg: float = CREASE):
+        index, _ = await asyncio.to_thread(s3, cell, crease_deg)
+        return index
+
+    @app.get("/scene3d/blob", tags=["view"], response_class=Response,
+             summary="The meshes of /scene3d: float32 vertices, u16/u32 triangles and outline edges",
+             responses={200: {"content": {"application/octet-stream": {}}, "description": "Mesh blob."}})
+    async def scene3d_blob(request: Request, cell: float = CELL, crease_deg: float = CREASE,
+                           scene_id: Optional[str] = Query(None, description="409 if the scene has changed")):
+        index, blob = await asyncio.to_thread(s3, cell, crease_deg)
+        if scene_id is not None and scene_id != index["scene_id"]:
+            raise HTTPException(409, f"scene is {index['scene_id']}; fetch /scene3d again")
+        headers = {"Cache-Control": "no-cache", "ETag": index["scene_id"]}
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            gz = getattr(node, "_s3_gz", None)
+            if gz is None or gz[0] is not blob:
+                gz = (blob, await asyncio.to_thread(gzip.compress, blob, 6))
+                node._s3_gz = gz
+            return Response(gz[1], media_type="application/octet-stream", headers={**headers, "Content-Encoding": "gzip"})
+        return Response(blob, media_type="application/octet-stream", headers=headers)
+
+    def s3_poses(cell: float, crease: float, have):
+        """(Poses for the current scene, its index): a new Poses when the scene changed."""
+        index, _ = s3(cell, crease)
+        if have is None or have.index["scene_id"] != index["scene_id"]:
+            have = rigid.Poses(index)
+        return have
+
+    @app.get("/scene3d/frame", response_model=S3Frame, tags=["view"],
+             summary="The dynamic bodies' world poses now (JSON)")
+    async def scene3d_frame(cell: float = CELL, crease_deg: float = CREASE):
+        p = s3_poses(cell, crease_deg, None)
+        return p.frame(node.world).to_json()
+
+    @app.get("/scene3d/stream", tags=["view"], response_class=StreamingResponse,
+             summary="Pose frames at `hz`: binary RSF1 frames back to back (format=bin), or JSON lines",
+             responses={200: {"content": {"application/octet-stream": {}, "application/x-ndjson": {}},
+                              "description": "bin: a 32-byte header (RSF1, seq, t, reset_seq, n, scene id) + n x 7 "
+                                             "float32; a new scene_id means fetch /scene3d again."}})
+    async def scene3d_stream(hz: float = Query(30.0, ge=1, le=120, description="Frames per second"),
+                             format: Literal["bin", "jsonl"] = Query("bin"), cell: float = CELL,
+                             crease_deg: float = CREASE):
+        async def gen():
+            p, period = None, 1.0 / hz
+            while True:
+                t0 = time.monotonic()
+                p = await asyncio.to_thread(s3_poses, cell, crease_deg, p)
+                f = p.frame(node.world)
+                yield encode_frame(f) if format == "bin" else json.dumps(f.to_json(), separators=(",", ":")) + "\n"
+                await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
+        return StreamingResponse(gen(), media_type="application/octet-stream" if format == "bin"
+                                 else "application/x-ndjson", headers={"Cache-Control": "no-store",
+                                                                       "X-Accel-Buffering": "no"})
+
+    @app.get("/scene3d/compat/model", response_model=S3CompatModel, tags=["view"],
+             summary="For today's Quest AR view (--ar-model): a description with an empty root link")
+    async def scene3d_compat_model(cell: float = CELL, crease_deg: float = CREASE):
+        index, _ = await asyncio.to_thread(s3, cell, crease_deg)
+        return s3compat.model(index)
+
+    @app.get("/scene3d/compat/stream", tags=["view"], response_class=StreamingResponse,
+             summary="For today's Quest AR view (--ar-state): robot_state.v1-shaped lines with every body as an "
+                     "object of primitives",
+             responses={200: {"content": {"application/x-ndjson": {}}, "description": "One JSON object per line."}})
+    async def scene3d_compat_stream(hz: float = Query(30.0, ge=1, le=100, description="Lines per second"),
+                                    role: Literal["collision", "visual"] = Query(
+                                        "collision", description="Which geoms to draw (falls back per body)"),
+                                    cell: float = CELL, crease_deg: float = CREASE,
+                                    format: Literal["jsonl"] = Query("jsonl", description="jsonl (the view's)")):
+        async def gen():
+            p, lines, period = None, None, 1.0 / hz
+            while True:
+                t0 = time.monotonic()
+                p = await asyncio.to_thread(s3_poses, cell, crease_deg, p)
+                if lines is None or lines.scene_id != p.index["scene_id"]:
+                    lines = s3compat.StateLines(p.index, role)
+                    base_i = next((k for k, i in enumerate(p.index["dynamic"])
+                                   if p.index["bodies"][i]["name"] == "base_link"), None)
+                f = p.frame(node.world)
+                base = None if base_i is None else f.poses[base_i]
+                yield json.dumps(lines.line(f, base, node.overlays()), separators=(",", ":")) + "\n"
+                await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
+        return StreamingResponse(gen(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     # -- robot_state.v1 ------------------------------------------------------------------------------
 

@@ -126,6 +126,16 @@ def _xyzw(q) -> list:
     return [round(float(q[1]), 6), round(float(q[2]), 6), round(float(q[3]), 6), round(float(q[0]), 6)]
 
 
+def _part(o: dict, rgba) -> dict:
+    """A primitive as robot_state.v1 writes it (box full extents, cylinder radius + length), at its pose in the
+    object's / link's frame when it has one."""
+    g = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
+                                else {"radius": o["radius"], "length": o["length"]}), "rgba": rgba}
+    if "pos" in o:
+        g["origin"] = {"xyz": o["pos"], "rpy": o["rpy"]}
+    return g
+
+
 def robot_state(world) -> dict:
     """The robot's full state in the description's terms: base_link's world pose and every movable joint by its
     model (URDF) name, plus the scene's objects. A client draws the robot from GET /model/tree with these."""
@@ -139,11 +149,16 @@ def robot_state(world) -> dict:
         objects = {}
         for name, o in world.objects.items():
             b = world.obj_idx[name][0]
-            geom = {"type": o["shape"], **({"size": o["size"]} if o["shape"] == "box"
-                                           else {"radius": o["radius"], "length": o["length"]}),
-                    "rgba": o.get("rgba")}
-            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]), "geom": geom,
-                             "fixed": bool(o.get("fixed"))}
+            if o["shape"] == "articulated":           # one entry per link (its parts in its frame): name/link
+                for ln in o["links"]:
+                    lb = b if "parent" not in ln else m.body(f"obj_{name}/{ln['name']}").id
+                    objects[f"{name}/{ln['name']}"] = {
+                        "pose": [round(float(v), 6) for v in d.xpos[lb]] + _xyzw(d.xquat[lb]),
+                        "geom": [_part(g, g.get("rgba", o.get("rgba"))) for g in ln["geoms"]],
+                        "fixed": bool(o.get("fixed")) and "joint" not in ln and "parent" not in ln}
+                continue
+            objects[name] = {"pose": [round(float(v), 6) for v in d.xpos[b]] + _xyzw(d.xquat[b]),
+                             "geom": _part(o, o.get("rgba")), "fixed": bool(o.get("fixed"))}
         return {"t": round(float(d.time), 4), "model_version": world.model_info.get("model_version"),
                 "base": [round(float(v), 6) for v in q[:3]] + _xyzw(q[3:7]), "joints": joints, "objects": objects,
                 "sim": {"running": world.running, "rtf": world.rtf}}

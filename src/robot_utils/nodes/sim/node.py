@@ -162,7 +162,7 @@ class SimNode:
         sc = self.world.scene()
         os.makedirs(self.scene_dir, exist_ok=True)
         path = os.path.join(self.scene_dir, f"{name}.yaml")
-        objs = [{k: v for k, v in o.items() if k != "speed"} for o in sc["objects"]]
+        objs = [{k: v for k, v in o.items() if k not in ("speed", "joints")} for o in sc["objects"]]
         with open(path, "w") as f:
             yaml.safe_dump({"objects": objs}, f, sort_keys=False)
         self.events.add(f"scene saved: {path} ({len(objs)} objects)")
@@ -205,13 +205,17 @@ class SimNode:
         s = viz.robot_state(self.world)
         sim = s.pop("sim")
         self._state_seq = getattr(self, "_state_seq", 0) + 1
-        arm = self.world.arm if self.world.has_arm else None
         return {"schema": viz.STATE_SCHEMA, "source": "sim", "seq": self._state_seq, "t": s["t"], "clock": "sim",
                 "reset_seq": self.world.reset_seq,
                 "t_host": round(time.monotonic(), 4), "model_version": s["model_version"], "frame": "world",
-                "base": s["base"], "joints": s["joints"], "objects": s["objects"],
-                "overlays": {"markers": self.markers.list(), "sim": sim,
-                             **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}}
+                "base": s["base"], "joints": s["joints"], "objects": s["objects"], "overlays": self.overlays(sim)}
+
+    def overlays(self, sim: Optional[dict] = None) -> dict:
+        """robot_state.v1's overlays: the live markers, the sim's run state, the arm motors as the world sees them."""
+        w = self.world
+        arm = w.arm if w.has_arm else None
+        return {"markers": self.markers.list(), "sim": sim or {"running": w.running, "rtf": w.rtf},
+                **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}
 
     # -- state -------------------------------------------------------------------------------------------
 

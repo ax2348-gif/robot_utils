@@ -84,6 +84,7 @@ render:
 # (or rpy); fixed: true welds it to the world (furniture).
 scene:
   tabletop: true
+  cabinet: false                 # an articulated cabinet beside the table (two drawers, a door; scene.py)
   objects: []
 
 time:

@@ -75,6 +75,11 @@ at the origin facing +x. Derived from the model, not guessed:
 They are in `/scene` (fixed ones with `fixed: true`), the page's 3D view, both camera renders, and `robot_state.v1`
 `objects` (`fixed` too). `scene: {tabletop: false}` in a sim config starts empty (the tests' default world does).
 
+**Articulated objects and the cabinet**: an object can be `shape: articulated`, a tree of primitive links joined by
+slide / hinge joints; `scene: {cabinet: true}` (or `ROBOT_SIM_CONFIG=deploy/sim/sim_cabinet.yaml`) adds a cabinet
+with two drawers and a door beside the table, a cube in its upper drawer. docs/scene3d.md, which also covers
+`/scene3d`: the world as rigid bodies (geometry once, poses streamed) for the headset.
+
 ## Grasping
 
 - **Jaw collision**: in every model variant the finger links collide as the **jaw boxes** (`arm/geometry.py`
