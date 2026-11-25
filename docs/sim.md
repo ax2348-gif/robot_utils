@@ -235,6 +235,77 @@ a stop on its bearing's friction (`scene.py` `revolving_door`).
   first minute; one re-anchor (`behind` 1) at a `POST /scene/reset`, none after; the rotor's angle tracked the stepped
   decay (8.76 rad at 32 s) and a reset set it back to 0 at 0.35 rad/s.
 
+**Joint springs and contact dimensions** (any object): a link's `joint` may carry `stiffness` (N m/rad or N/m, ≥ 0)
+and `springref` (rad or m, where the spring is relaxed, default 0; it needs a stiffness): MuJoCo's joint spring,
+−stiffness (q − springref). Put `springref` past the joint's range for a preload (a door closer holding a door
+shut). An object may carry `condim` (1, 3, 4 or 6; default `contact.objects.condim`, 4): its contacts' dimensions
+(MuJoCo applies the larger of the pair's, and the floor's is 3). All are validated (finite numbers, not bools),
+accepted by `POST /scene/objects`, kept by save / load and in `/scene`.
+
+### The cart and door scene
+
+`scene: {tabletop: false, cart_door: true}` (or `ROBOT_SIM_CONFIG=deploy/sim/sim_cart_door_dynamic.yaml`, with the
+dynamic arm and `view_anchor` [0.6, 0, 0]: the robot ~1 m in front of the operator, the door and room beyond it):
+pull a castered cart into a closed room through a door that opens toward the robot (`scenes/cart_door.py`; its own
+module, as the scenes to come; `scene.cart_door_setup`: `closer`, `cart_mass`).
+
+- **The layout**: a **closed room** (inside 3.0 m deep × 4.0 m wide, 0.10 m walls 2.2 m tall, see-through as the
+  revolving door's facade, alpha 0.35): the door is the only way in, so driving round is not an option. Its near
+  wall faces the robot **1.10 m** ahead of the base's front (x 1.316 m), the doorway centred on the robot's x axis.
+  The robot starts at the origin **facing the door**; the **cart beside it on its right** (the arm's side), centred
+  at (0, −0.80), its handle end toward the door, 35 cm clear of the robot and well clear of the door's swing (the
+  swing misses the robot by 8 cm).
+- **The door**: a 0.90 × 2.00 m leaf, 40 mm thick, **12 kg** (hollow core), in a 0.906 m opening (3 mm gaps, 10 mm
+  under it), flush with the wall's near face. **Hinged on the left (+y) jamb**, it swings **toward the robot**
+  (about −z, 0 = shut) up to **110°** (a closer arm's overhead stop). It **cannot open into the room**: the joint's
+  lower limit is the stop (a 15 mm stop strip on the right jamb shows it; MuJoCo excludes parent-child contacts, so
+  the strip itself is drawn, not collided); 100 N into the room at the bar moves it 0.6 mrad. From inside the room
+  it opens by a push. Hinges: 0.2 N m dry friction, 0.2 N m s/rad.
+- **The pull bar**: a vertical 25 mm tube, 0.40 m long, centred **0.60 m** up (z 0.40–0.80), on 65 mm posts (52 mm
+  behind the bar for the fingers), its axis 7 cm in from the free edge (0.83 m from the hinge axis). It is lowered
+  into the arm's band: a forward grasp reaches x 0.8 m from the base's centre at z ≤ 0.55, 0.78 at 0.65, 0.73 at
+  0.70 (IK on the model; a person's handle at ~1.0 m is above the arm). 25 mm in the 49.6 mm `GAP_MAX`.
+- **The closer** (on by default, `closer` = its moment holding the door shut, **3.0 N m**; 0 = none, the door stays
+  where it is left): a spring (`stiffness` 2.0 N m/rad, `springref` −1.5 rad, i.e. relaxed 1.5 rad past shut, so a
+  near-constant moment) — **3.0 N m shut, 4.1 at 30°, 5.1 at 60°, 6.1 at 90°, 6.8 at 110°** — and a closing-speed
+  valve: a `ratchet` (direction: opening) with gain 12 N m s/rad, capped at 30 N m, that resists closing only, as a
+  hydraulic closer's check valve does (opening stays light). **Pull at the bar** (along its path, quasi-static,
+  with the hinges): **3.8 N shut → 7.6 N at 90° → 8.5 N at 110°**; measured, a 0.5 N/s ramp starts it at 4.4 N, and
+  pulling it open to 90° at ~0.4 rad/s takes a median 6.2 N. **What the arm can pull** there (gripping the bar
+  head-on, the base 0.6 m back facing the leaf, the grasp it keeps while backing round the arc): **81 N** along the
+  bar's path at every angle (the motor limits, 27 N m joints 1–3 and 7 N m joints 4–6, less gravity and the joints'
+  dry friction); the jaws hold **150 N** (2 pads × friction 1.5 × the 50 N squeeze) before the bar slips: a
+  margin of **≥ 9.5×** over the whole swing. Released at 90° it shuts on its own in **4.9 s**, at most 0.44 rad/s
+  (0.24 rad/s, 0.22 m/s at the edge, when it reaches the stop): it does not slam.
+- **The fit** (the robot's footprint at its start pose, the arm at `start_q`: 0.576 × 0.454 m): open 90°, the clear
+  width from the stop strip to the open leaf is **0.848 m**: **19.7 cm** each side of the robot and **21.4 cm** each
+  side of the cart (0.42 m). The room is 3.0 m deep: the robot and the cart fit in line with > 1.8 m to spare.
+- **The cart**: a 0.60 × 0.42 m deck (30 mm), its top 0.17 m up, **12 kg** in all (`cart_mass`), on **four 100 mm
+  swivel casters** (swivel axes 6 cm in from the ends and sides). Each caster is a **swivel hinge** (vertical; 0.01 N m
+  dry friction, the ball race) carrying a fork and a **wheel hinge** on an axle **35 mm behind** the swivel axis, so
+  the wheel swings round to trail whichever way the cart moves (q = 0: trailing −x, rolling handle-first). The
+  wheel's **rolling resistance** is 0.02 N m dry friction on its axle (0.4 N at the rim, ~1.4 % of the weight in
+  all). The wheel touches the floor only on a 4 mm crowned tread (MuJoCo touches a flat cylinder at both rim edges:
+  across a 30 mm hub that friction couple kept the casters from swivelling at 6 N sideways); the cart's `condim` is
+  3 (no torsional friction on top: the objects' condim 4 adds 0.15 N m of scrub per wheel, and no swivel at 15 N).
+  The **U-handle**: two 25 mm posts 0.38 m apart at the deck's front end and a top bar at **0.55 m** (in the arm's
+  forward band; reachable head-on with the jaws closing vertically, the base 0.55 m back).
+- **Forces** (stepped, at the handle bar): 1 N does not move it, 2 N creeps it (6 cm in 2 s), **3 N rolls it**
+  (0.2 m in 2 s); rolling steadily at ~0.3 m/s takes **~2.1 N**. Pushed sideways the casters swing round to trail
+  within ~2 s; a 12 N sideways push sets them all trailing.
+- **The task, physically**: the cart towed handle-first by a force at its handle (a 0.4 m/s speed servo, centring)
+  from 1 m out through the doorway open at 90°, no closer: through in **4.2 s** at a median **2.2 N**, straight and
+  level. With the closer, let go at 90° as the cart comes: it swings onto the cart's side and scrapes along; the
+  cart still gets in (4.4 s, median 3.6 N). A way through with the closer: pull the door open (backing round the arc),
+  drive in, turn, push it open from inside and hold it with the base, take the cart's handle and back in.
+- **Reset** puts the door shut, the cart at its start with every caster at 0 and the robot at its start; `{start:
+  true}` reloads the scene.
+- **The rigid-scene export**: the room's walls static (`cart_room`), the door (`cart_room/door`, hinge) and the cart
+  (`cart`, its `swivel_*` and `wheel_*`) dynamic bodies.
+- **Cost**: ~0.18 ms per physics step stepped (the robot idle). Live (the preset, `--nodes description,sim`, a loaded
+  MacBook, 2026-11-24): `rtf_measured` 1.0, `step_rate` 999–1001 /s, `behind` 0 over the first 80 s; one re-anchor
+  (`behind` 1) at a `POST /scene/reset`, none after.
+
 ## Grasping
 
 - **Jaw collision**: in every model variant the finger links collide as the **jaw boxes** (`arm/geometry.py`
@@ -542,7 +613,8 @@ with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 start pose), `components.arm` (fidelity, servo, gripper speed, reply latency, watchdog, start pose; `dynamic`: armature,
 viscous, coulomb, gripper, command_delay), `cameras.<name>` (`serial`, per stream `link`, `width`, `height`, `fps`, `fovy_deg`,
 `delay`; `depth_range`, `jpeg_quality`, `imu: {link, delay}`), `render` (`shadows`, `reflections`), `scene`
-(`tabletop`, `cabinet`, `rings`, `revolving_door`, `view_anchor`, `objects`), `time` (`run`, `rtf`).
+(`tabletop`, `cabinet`, `rings`, `revolving_door`, `cart_door`, `cart_door_setup`, `view_anchor`, `objects`), `time`
+(`run`, `rtf`).
 
 ## Performance (MacBook, 2026-11-21, measured)
 

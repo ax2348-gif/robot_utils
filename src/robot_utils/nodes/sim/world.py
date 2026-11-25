@@ -549,6 +549,9 @@ class World:
         if sc.get("revolving_door"):
             from .scene import revolving_door_scene
             out += revolving_door_scene()
+        if sc.get("cart_door"):
+            from .scenes.cart_door import cart_door_scene
+            out += cart_door_scene(**(sc.get("cart_door_setup") or {}))
         return out + list(sc.get("objects") or [])
 
     # -- objects -------------------------------------------------------------------------------------
@@ -578,6 +581,12 @@ class World:
         o["rgba"] = [float(v) for v in o.get("rgba", [0.85, 0.55, 0.2, 1.0])]
         oc = (self.cfg.get("contact") or {}).get("objects") or {}
         o["friction"] = [float(v) for v in o.get("friction", oc.get("friction", [0.8, 0.005, 0.0001]))]
+        if o.get("condim") is not None:              # its contacts' dimensions (default: contact.objects.condim)
+            if isinstance(o["condim"], bool) or o["condim"] not in (1, 3, 4, 6):
+                raise SimError("condim is 1, 3, 4 or 6")
+            o["condim"] = int(o["condim"])
+        else:
+            o.pop("condim", None)
         o["name"], o["shape"] = name, shape
         return o
 
@@ -643,7 +652,17 @@ class World:
                     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
                         raise SimError(f"{obj}/{nm}: qvel0 is a finite number (rad/s or m/s)")
                     j["qvel0"] = float(v)
-                if j_in.get("mimic") is not None:          # held at the position of an earlier link's joint
+                for k in ("stiffness", "springref"):         # a spring toward springref (e.g. a door closer)
+                    v = j_in.get(k)
+                    if v is None:
+                        continue
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                            or (k == "stiffness" and v < 0):
+                        raise SimError(f"{obj}/{nm}: {k} is a finite number{' >= 0' if k == 'stiffness' else ''}")
+                    j[k] = float(v)
+                if "springref" in j and not j.get("stiffness"):
+                    raise SimError(f"{obj}/{nm}: springref needs a stiffness > 0")
+                if j_in.get("mimic") is not None:         # held at the position of an earlier link's joint
                     lead = next((x for x in out if x["name"] == j_in["mimic"]), None)
                     if lead is None or (lead.get("joint") or {}).get("type") != j["type"]:
                         raise SimError(f"{obj}/{nm}: mimic names an earlier link with a {j['type']} joint")
@@ -713,7 +732,7 @@ class World:
         if "pos" in g:
             mg.pos, mg.quat = g["pos"], rpy_quat(g["rpy"])
         mg.contype, mg.conaffinity, mg.friction = WORLD_CONTYPE, WORLD_CONAFFINITY, g["friction"]
-        mg.condim = int(((self.cfg.get("contact") or {}).get("objects") or {}).get("condim", 3))
+        mg.condim = int(g.get("condim") or ((self.cfg.get("contact") or {}).get("objects") or {}).get("condim", 3))
 
     def _spec_object(self, o: dict) -> None:
         if o["name"] in self.objects:
@@ -723,7 +742,8 @@ class World:
             fj = b.add_freejoint()
             fj.name = f"obj_{o['name']}_free"
         if o["shape"] != "articulated":
-            self._add_part(b, {k: o[k] for k in ("shape", "size", "radius", "length", "mass", "friction") if k in o},
+            self._add_part(b, {k: o[k] for k in ("shape", "size", "radius", "length", "mass", "friction", "condim")
+                                if k in o},
                            o["rgba"])
             self.objects[o["name"]] = o
             return
@@ -741,6 +761,8 @@ class World:
                                     frictionloss=j["frictionloss"])
                 if "range" in j:
                     mj.limited, mj.range = mujoco.mjtLimited.mjLIMITED_TRUE, j["range"]
+                if j.get("stiffness"):              # a spring: -stiffness (q - springref)
+                    mj.stiffness, mj.springref = [j["stiffness"], 0.0, 0.0], j.get("springref", 0.0)
                 if "drive" in j:                    # a velocity servo; its ctrl (the velocity) is set by _drive
                     self._servo(self.spec, mj.name, mj.name, 0.0, j["drive"]["gain"], j["drive"]["max_torque"],
                                 velocity=True)
@@ -754,7 +776,7 @@ class World:
                                                name2=f"obj_{o['name']}/{j['mimic']}")
                     e.data[:5] = [0.0, 1.0, 0.0, 0.0, 0.0]
             for g in ln["geoms"]:
-                self._add_part(body, {**g, "friction": o["friction"]}, o["rgba"])
+                self._add_part(body, {**g, "friction": o["friction"], "condim": o.get("condim")}, o["rgba"])
             bodies[ln["name"]] = body
         self.objects[o["name"]] = o
 
@@ -833,7 +855,8 @@ class World:
     def object_state(self, name: str) -> dict:
         o = self.objects[name]
         b, qa, va = self.obj_idx[name]
-        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba", "links")
+        out = {k: o[k] for k in ("name", "shape", "size", "radius", "length", "mass", "fixed", "rgba", "condim",
+                                   "links")
                if k in o}
         if name in self.obj_joints:
             out["joints"] = {ln: round(float(self.d.qpos[qa_]), 6) for ln, (qa_, _) in self.obj_joints[name].items()}

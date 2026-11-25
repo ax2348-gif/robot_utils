@@ -6,7 +6,7 @@ import math
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from sim_helpers import make_world
+from sim_helpers import make_world, robot_footprint
 
 from robot_utils.nodes.sim import scene as S
 
@@ -22,22 +22,6 @@ def world():
 
 def rotor(world):
     return world.obj_joints["revolving_door"]["rotor"]          # (qpos adr, dof adr)
-
-
-def robot_footprint(world) -> tuple:
-    """(x0, x1, y0, y1): the robot's extent seen from above at its start pose (base at the origin facing +x, the arm
-    at its start pose), from every robot geom's box."""
-    m, d = world.m, world.d
-    pts = []
-    for g in range(m.ngeom):
-        name = m.body(m.geom_bodyid[g]).name
-        if name == "world" or name.startswith("obj_"):
-            continue
-        c, half = m.geom_aabb[g][:3], m.geom_aabb[g][3:]
-        corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]) * half + c
-        pts.append(corners @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g])
-    p = np.concatenate(pts)
-    return float(p[:, 0].min()), float(p[:, 0].max()), float(p[:, 1].min()), float(p[:, 1].max())
 
 
 def test_preset_puts_the_door_ahead_of_the_robot_facing_it():
