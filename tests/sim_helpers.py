@@ -16,6 +16,9 @@ def make_world(variant: str = "full", **over):
     from robot_utils.nodes.sim.world import World, load_config, unzip_bundle
     urdf, assets, info = unzip_bundle(bundle(variant))
     over.setdefault("scene", {"tabletop": False})                 # an empty world unless a test asks
+    # stepped worlds: the robot's watchdogs on every host (deterministic); real-time ones: the host's default, as
+    # the stack runs (lenient on macOS, where scheduling stalls trip the 0.1 s watchdog)
+    over.setdefault("timing", {"lenient": "auto" if (over.get("time") or {}).get("run") else False})
     cfg = load_config(overrides={"time": {"run": False}, **over})
     return World(urdf, assets, cfg, {"source": "test", "model_version": info.get("model_version")})
 

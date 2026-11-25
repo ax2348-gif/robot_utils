@@ -31,6 +31,7 @@ import math
 import re
 import threading
 import time
+import sys
 import zipfile
 from importlib import resources
 from typing import Optional
@@ -52,11 +53,32 @@ INTEGRATORS = {"euler": mujoco.mjtIntegrator.mjINT_EULER, "rk4": mujoco.mjtInteg
                "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT, "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST}
 SHAPES = ("box", "cylinder", "articulated")
 JOINT_TYPES = {"slide": mujoco.mjtJoint.mjJNT_SLIDE, "hinge": mujoco.mjtJoint.mjJNT_HINGE}
+SWERVE_HEARTBEAT = 0.1                         # s without setpoints: the SPARKs disable (their CAN heartbeat)
 IMU_BUFFER = 2000                    # samples kept per IMU (2 s at 1 kHz)
 
 
 class SimError(ValueError):
     """A bad request to the world (HTTP 400 / an ``ok: false`` reply)."""
+
+
+def resolve_timing(cfg: dict, platform: Optional[str] = None) -> dict:
+    """The watchdogs the world enforces: the robot's own (the Damiao motors' CAN timeout, the SPARKs' heartbeat), or
+    with ``timing.lenient`` longer ones. ``auto`` is lenient on macOS: no real-time scheduling there, and under load
+    the arm node's control ticks arrive 90-140 ms apart (measured 2026-11-24), past the motors' 0.1 s, so every joint
+    faulted "communication lost". Lenient only forgives stalls; nothing else about the motors changes."""
+    t = cfg.get("timing") or {}
+    mode = t.get("lenient", "auto")
+    plat = sys.platform if platform is None else platform
+    if mode == "auto":
+        lenient, why = plat == "darwin", "auto: macOS" if plat == "darwin" else "auto: not macOS"
+    else:
+        lenient, why = bool(mode), "config"
+    arm = float(cfg["components"]["arm"]["watchdog"])
+    out = {"lenient": lenient, "why": why, "arm_watchdog": arm, "swerve_heartbeat": SWERVE_HEARTBEAT}
+    if lenient:
+        out["arm_watchdog"] = max(arm, float(t.get("arm_watchdog", 0.5)))
+        out["swerve_heartbeat"] = max(SWERVE_HEARTBEAT, float(t.get("swerve_heartbeat", 0.5)))
+    return out
 
 
 def _merge(a: dict, b: dict) -> dict:
@@ -139,6 +161,7 @@ class Arm:
 class World:
     def __init__(self, urdf: str, assets: dict, config: Optional[dict] = None, model_info: Optional[dict] = None):
         self.cfg = config or default_config()
+        self.timing = resolve_timing(self.cfg)
         from .limits import refuse_overrides, robot_limits
         bad = refuse_overrides(self.cfg)
         if bad:
@@ -713,7 +736,7 @@ class World:
         m, d = self.m, self.d
         dt = m.opt.timestep
         bc = self.cfg["base"]
-        if d.time - self.swerve_last > 0.1:          # no setpoints: the SPARKs' heartbeat is gone
+        if d.time - self.swerve_last > self.timing["swerve_heartbeat"]:   # no setpoints: the SPARKs' heartbeat is gone
             for mod in self.modules:
                 mod.steer_on = mod.drive_on = False
         L = self.limits
@@ -745,7 +768,7 @@ class World:
 
     def _arm_control(self, dt: float) -> None:
         d, a, ac = self.d, self.arm, self.cfg["components"]["arm"]
-        if a.enabled and d.time - a.last_frame > float(ac["watchdog"]):
+        if a.enabled and d.time - a.last_frame > self.timing["arm_watchdog"]:
             a.enabled, a.g_enabled, a.fault = False, False, 0xD
         if self.dynamic:
             self._arm_dynamic()
@@ -1060,7 +1083,7 @@ class World:
                                 "steer_goal": round(mod.steer_goal, 6), "speed_goal": round(mod.drive_goal, 6),
                                 **{k: round(v, 6) for k, v in self.module_states()["modules"][mod.name].items()}}
                                for mod in self.modules],
-                   "objects": [self.object_state(n) for n in self.objects]}
+                   "objects": [self.object_state(n) for n in self.objects], "timing": dict(self.timing)}
             if self.has_arm:
                 a = self.arm
                 out["arm"] = {"enabled": a.enabled, "gripper_enabled": a.g_enabled, "fault": a.fault,

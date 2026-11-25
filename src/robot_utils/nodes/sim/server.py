@@ -246,6 +246,8 @@ class SimState(BaseModel):
     cameras: dict[str, CameraState] = Field(description="Rendered cameras by name.")
     backends: dict[str, BackendState] = Field(description="Backend sockets: arm, swerve, camera-<name>.")
     view: Optional[dict] = Field(None, description="How headsets draw /scene3d: {style, role} (GET /scene3d/view).")
+    timing: Optional[dict] = Field(None, description="The watchdogs enforced: {lenient, why, arm_watchdog, "
+                                                  "swerve_heartbeat} (s); lenient on macOS by default.")
     events: list[Event] = Field(description="Latest events, oldest first.")
 
 

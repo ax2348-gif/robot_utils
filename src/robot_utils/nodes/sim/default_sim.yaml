@@ -103,6 +103,15 @@ scene:
   cabinet: false                 # an articulated cabinet beside the table (two drawers, a door; scene.py)
   objects: []
 
+# Watchdogs: the robot's own (the arm's components.arm.watchdog, the SPARKs' 0.1 s heartbeat), or longer ones when
+# lenient. auto = lenient on macOS: no real-time scheduling, and under load the arm node's ticks arrive 90-140 ms
+# apart (measured 2026-11-24), past the motors' 0.1 s: every joint faulted. Forgives stalls only. false on a Linux
+# sim host to keep the robot's timing.
+timing:
+  lenient: auto                  # auto | true | false
+  arm_watchdog: 0.5              # s, when lenient
+  swerve_heartbeat: 0.5          # s, when lenient
+
 time:
   run: true                      # start running in real time (false: paused, advanced by POST /step)
   rtf: 1.0                       # real-time factor
