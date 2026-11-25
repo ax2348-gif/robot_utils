@@ -3,6 +3,10 @@
 #
 #   tools/agent_rings/run.sh                 # a new run under ~/agent_runs/rings-<YYYYmmdd-HHMMSS>
 #   tools/agent_rings/run.sh --no-agent      # everything but the agent (to check the harness)
+#   tools/agent_rings/run.sh --inherit ~/agent_runs/rings-<old>/workspace
+#                                            # a fresh agent given an earlier agent's code (its *.py / *.sh, in
+#                                            # workspace/inherited/, plus its venv's package list), nothing else:
+#                                            # no notes, logs, images, measured data or transcript
 #
 # tmux session rings-<ts>, windows: stack (the agent's sim stack, socket-only), proxy (the agent's only door,
 # unix socket $SOCK_DIR/robot.sock), score (privileged scorer), record (state + rigid scene for replay), agent (interactive Claude Code
@@ -21,7 +25,15 @@ WBC_SOCK="$SOCK_DIR/wbc.target.sock"       # dgram_relay.py: the WBC's target da
 SIM_CONFIG="${AGENT_SIM_CONFIG:-$REPO/deploy/sim/sim_rings_dynamic.yaml}"
 NODES=description,sim,arm,swerve,camera,wrist_camera,power,estimator,pose_servo,wbc,3d_perception,agent_interface
 AGENT=1
-[[ "${1:-}" == "--no-agent" ]] && AGENT=0
+INHERIT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-agent) AGENT=0 ;;
+    --inherit) INHERIT="$(cd "${2:?--inherit needs a workspace}" && pwd)"; shift ;;
+    *) echo "unknown option $1"; exit 2 ;;
+  esac
+  shift
+done
 
 TS="$(date +%Y%m%d-%H%M%S)"
 NAME="rings-$TS"
@@ -45,6 +57,15 @@ for d in agent_interface arm swerve_node pose_servo_node estimator_node orbbec_n
   cp "$REPO/docs/$d.md" "$WS/docs/"
 done
 printf '# Notes\n\n' > "$WS/NOTES.md"
+if [[ -n "$INHERIT" ]]; then      # code only: the earlier agent's notes, logs, images and data stay behind
+  mkdir -p "$WS/inherited"
+  (cd "$INHERIT" && find . \( -name .venv -o -name __pycache__ -o -name docs -o -name inherited -o -name .claude \) -prune \
+     -o -type f \( -name '*.py' -o -name '*.sh' \) -print) | while read -r f; do
+    mkdir -p "$WS/inherited/$(dirname "$f")"; cp "$INHERIT/$f" "$WS/inherited/$f"
+  done
+  [[ -x "$INHERIT/.venv/bin/pip" ]] && "$INHERIT/.venv/bin/pip" freeze 2>/dev/null > "$WS/inherited/requirements.txt"
+  cat "$HERE/workspace/INHERITED.md" >> "$WS/CLAUDE.md"
+fi
 "$BASE_PY" -m venv "$WS/.venv"
 # pip's own CA bundle (the sandbox blocks the macOS keychain lookup) and a cache in the workspace
 printf '[global]\nuse-deprecated = legacy-certs\ncache-dir = %s\n' "$WS/.cache/pip" > "$WS/.venv/pip.conf"
@@ -64,7 +85,7 @@ DENY_ARGS=(); for d in "${DENY_PATHS[@]}"; do DENY_ARGS+=(--deny "$d"); done
 SID="$(uuidgen | tr A-Z a-z)"
 cat > "$H/run.json" <<EOF
 {"name": "$NAME", "workspace": "$WS", "session_id": "$SID", "socket": "$SOCK", "runtime_dir": "$RT",
- "sim_config": "$SIM_CONFIG", "repo": "$REPO", "commit": "$(git -C "$REPO" rev-parse HEAD)",
+ "sim_config": "$SIM_CONFIG", "repo": "$REPO", "commit": "$(git -C "$REPO" rev-parse HEAD)", "inherited_from": "$INHERIT",
  "transcript": "$HOME/.claude/projects/$(echo "$WS" | sed 's#[^A-Za-z0-9]#-#g')/$SID.jsonl", "started": "$TS"}
 EOF
 

@@ -8,6 +8,13 @@ audited afterwards from the transcript and the request log. The setup also enfor
     tools/agent_rings/run.sh              # launch a run in tmux (prints the session name)
     tools/agent_rings/run.sh --no-agent   # everything but the agent
     tools/agent_rings/stop.sh rings-<ts>  # stop it (the run directory stays)
+    tools/agent_rings/run.sh --inherit ~/agent_runs/rings-<old>/workspace
+                                          # a fresh agent with an earlier agent's code only
+
+**Inheriting:** `--inherit` gives the new agent an earlier run's code and nothing else: its `*.py` / `*.sh` files go to
+`workspace/inherited/` and its venv's `pip freeze` to `inherited/requirements.txt`, and the brief gets a short section
+([workspace/INHERITED.md](workspace/INHERITED.md)). Its notes, logs, images, measured data and transcript stay behind.
+Its code comments do carry what it learned, so the new run isn't context-free in a strict sense.
 
 ## What runs (tmux session `rings-<ts>`)
 
