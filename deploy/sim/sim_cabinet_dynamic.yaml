@@ -1,0 +1,7 @@
+# The cabinet scene with the dynamic arm (sim_cabinet.yaml + sim_dynamic_arm.yaml; docs/scene3d.md, docs/sim.md):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_cabinet_dynamic.yaml python -m robot_utils.nodes.sim.stack
+scene:
+  cabinet: true
+components:
+  arm:
+    fidelity: dynamic
