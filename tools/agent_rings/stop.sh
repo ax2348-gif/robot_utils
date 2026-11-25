@@ -12,4 +12,7 @@ sleep 5
 w stack && tmux send-keys -t "$S:stack" C-c
 for i in $(seq 1 30); do tmux capture-pane -p -t "$S:stack" 2>/dev/null | grep -q "stack\] stopped" && break; sleep 1; done
 tmux kill-session -t "$S"
+RT="$(sed -n 's/.*"runtime_dir": "\([^"]*\)".*/\1/p' "$HOME/agent_runs/$S/harness/run.json")"
+pid="$(lsof -t "${RT:-/tmp/ar}/robot/frontend.sock" 2>/dev/null | head -1)"        # a landing page left behind
+if [[ -n "$pid" ]]; then echo "stopping the landing page left behind (pid $pid)"; kill "$pid"; fi
 echo "stopped $S; run directory ~/agent_runs/$S"

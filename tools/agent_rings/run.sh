@@ -69,7 +69,7 @@ EOF
 ENVS="cd '$REPO' && export PYTHONPATH='$REPO/src' ROBOT_SIM_CONFIG='$SIM_CONFIG' XDG_RUNTIME_DIR='$RT'"
 tmux new-session -d -s "$NAME" -n stack -c "$REPO"
 tmux send-keys -t "$NAME:stack" "$ENVS && '$PY' -m robot_utils.nodes.sim.stack --port 0 --runtime-dir '$RT' \
---config '$HERE/stack_nodes.yaml' --nodes $NODES --no-pull 2>&1 | tee -a '$H/stack.log'" Enter
+--config '$HERE/stack_nodes.yaml' --nodes $NODES --no-pull 2>&1 | tee -i -a '$H/stack.log'" Enter
 
 echo -n "waiting for the stack"
 for i in $(seq 1 120); do
