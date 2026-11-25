@@ -207,6 +207,8 @@ class ArmState(BaseModel):
     q_ref: list[float] = Field(description="rad, the kinematic reference the servo holds.")
     gap_mm: float = Field(description="mm, jaw gap.")
     frames: int = Field(description="MIT frame batches received.")
+    gravity_fit: Optional[dict] = Field(None, description="Dynamic arm: the link masses fitted to the node's calibrated "
+                                                       "gravity model (g x tau_scale), with the residuals (N m).")
 
 
 class CameraState(BaseModel):
