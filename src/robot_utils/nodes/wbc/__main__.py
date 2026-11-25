@@ -36,6 +36,10 @@ def main() -> None:
                    help="Python's GIL switch interval (s; sys.setswitchinterval) for this process: the real-time "
                         "control thread waits at most about this long for the GIL held by a normal-priority thread "
                         "(HTTP, SSE, stream readers; with --control thread). Default 0.005 = Python's own (env WBC_SWITCH_INTERVAL); 0.0005 made the robot's tick overruns much worse on 2026-11-21 (more GIL handoffs, more priority inversion)")
+    p.add_argument("--timing", choices=("auto", "strict", "lenient"), default="auto",
+                   help="strict: the robot's stall limits; lenient: the sim's on a machine without real-time scheduling "
+                        "(arm_stale and ctl_heartbeat LENIENT_TIMING, never below what the arm node forgives); auto: "
+                        "lenient on macOS (never the robot, a Pi)")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "wbc")
     a = p.parse_args()
@@ -50,6 +54,7 @@ def main() -> None:
         import yaml
         with open(a.config) as f:
             cfg = yaml.safe_load(f) or {}
+    cfg = apply_timing(cfg, a.timing, sys.platform)
     off = lambda v: None if v in (None, "", "none") else v   # noqa: E731
     from .server import create_app
     kw = dict(model_source=a.model, arm=off(a.arm), swerve=off(a.swerve), estimator=off(a.estimator), config=cfg,
@@ -62,6 +67,23 @@ def main() -> None:
         node = WbcNode(**kw)
     serve(create_app(node), a, banner=f"wbc node {a.name!r} (arm {a.arm}, swerve {a.swerve}, estimator {a.estimator}, "
                                       f"targets udp {a.udp_host}:{a.udp_port}; control loop: {a.control})")
+
+
+# lenient stall limits (s), for a sim on a machine without real-time scheduling (macOS). The ordering rule of the sim
+# stack: the WBC forgives at least what the arm node forgives (its lenient ctl_heartbeat, 2 s: arm/config.py
+# LENIENT_TIMING) + 0.5 s, so a stall the arm node rides out never faults the WBC (measured 2026-11-24: a 678 ms
+# arm-node tick on a loaded Mac faulted the WBC's 0.2 s arm_stale with two dynamic arms).
+LENIENT_TIMING = {"arm_stale": 2.5, "ctl_heartbeat": 2.0}
+
+
+def apply_timing(cfg, mode: str, platform: str):
+    """The Config overrides with ``--timing`` applied (lenient keys never lowered below the given config's)."""
+    if mode == "strict" or (mode == "auto" and platform != "darwin"):
+        return cfg
+    out = dict(cfg or {})
+    for k, v in LENIENT_TIMING.items():
+        out[k] = max(float(out.get(k, 0.0)), v)
+    return out
 
 
 if __name__ == "__main__":

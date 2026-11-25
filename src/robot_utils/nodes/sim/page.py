@@ -86,8 +86,12 @@ table.ru-table td,table.ru-table th{font-size:12px}
     <div class="ru-row" style="margin-top:4px">x <input type="number" id="ox" value="0.6" step="0.05"> y <input type="number" id="oy" value="0" step="0.05">
       z <input type="number" id="oz" value="0.1" step="0.05">
       <button class="ru" id="add">Add</button><button class="ru" id="move" title="Teleport the named object to x, y, z">Move</button></div>
-    <div class="ru-row" style="margin-top:4px"><span class="ru-muted">scene file</span><input id="sname" value="scene1" style="width:80px">
-      <button class="ru" id="ssave">Save</button><button class="ru" id="sload">Load</button>
+    <div class="ru-row" style="margin-top:4px"><span class="ru-muted">task</span><select id="stask"></select>
+      <button class="ru" id="stask-go" title="Load the task's objects and headset view; then A (or Start) resets the robot">Switch</button></div>
+    <div class="ru-row" style="margin-top:4px"><span class="ru-muted">saved</span><select id="ssaved"></select>
+      <button class="ru" id="sload">Load</button></div>
+    <div class="ru-row" style="margin-top:4px"><span class="ru-muted">save as</span><input id="sname" value="scene1" style="width:80px">
+      <button class="ru" id="ssave">Save</button>
       <button class="ru" id="sstart" title="Reset the world to the scene it started with (the default tabletop)">Start scene</button></div>
   </div>
   <div class="ru-card priv" data-panel="physics" data-role="control"><b>Privileged physics</b><span class="tag">SIM-ONLY</span>
@@ -192,9 +196,19 @@ function objSpec() {
 }
 $("#add").onclick = () => api("POST", "scene/objects", objSpec());
 $("#move").onclick = () => api("PUT", `scene/objects/${encodeURIComponent($("#oname").value)}`, {xyz: [+$("#ox").value, +$("#oy").value, +$("#oz").value]});
-$("#ssave").onclick = () => api("POST", "scene/save", {name: $("#sname").value});
+async function loadLists(){
+  try {
+    const t = await api("GET", "scene/tasks");
+    $("#stask").innerHTML = t.tasks.map(x => `<option value="${esc(x.name)}"${x.name === t.current ? " selected" : ""}>${esc(x.title)}</option>`).join("");
+    const v = await api("GET", "scene/saved");
+    $("#ssaved").innerHTML = v.names.length ? v.names.map(n => `<option>${esc(n)}</option>`).join("") : "<option value=''>(none saved)</option>";
+  } catch(e) {}
+}
+loadLists();
+$("#ssave").onclick = () => api("POST", "scene/save", {name: $("#sname").value}).then(loadLists);
 $("#sstart").onclick = () => api("POST", "scene/reset", {start: true}).then(snap);
-$("#sload").onclick = () => api("POST", "scene/load", {name: $("#sname").value});
+$("#sload").onclick = () => { if ($("#ssaved").value) api("POST", "scene/load", {name: $("#ssaved").value}).then(snap); };
+$("#stask-go").onclick = () => api("POST", "scene/task", {name: $("#stask").value}).then(() => { snap(); loadLists(); });
 $("#objs").onclick = e => { const n = e.target.dataset.del; if (n) api("DELETE", `scene/objects/${encodeURIComponent(n)}`); };
 $("#push").onclick = () => api("POST", "physics/wrench", {body: $("#pbody").value, force: [+$("#fx").value, +$("#fy").value, +$("#fz").value], duration: +$("#fdur").value});
 $("#tele").onclick = () => api("POST", "physics/teleport", {xyz: [+$("#tx").value, +$("#ty").value, 0], yaw: +$("#tyaw").value * Math.PI / 180});
