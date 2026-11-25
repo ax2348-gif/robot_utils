@@ -147,10 +147,13 @@ No cable is needed.
 
 ## Pinned versions
 
+What changed in each release, and how to update: [collab_updates.md](collab_updates.md).
+
+
 The wizard installs fixed versions:
 - the runtime 1.6.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v2) tag `collab-v2`,
   checked by SHA-256;
-- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v2) tag `collab-v2`,
+- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v3) tag `collab-v3`,
   which then tracks branch `collab`.
 
 They are set at the top of `tools/quest_teleop/quest_setup.py`. A headset whose quest_env is already a Git clone

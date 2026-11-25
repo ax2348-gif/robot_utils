@@ -10,14 +10,18 @@ computer. This file is what you need to help someone run the **simulator with Me
   `robot_utils.frontend` module) indexes them and proxies `/nodes/<name>/`. Conventions are in `docs/nodes.md`.
 - **The simulator stack** (`python -m robot_utils.nodes.sim.stack`, `docs/sim.md`) runs the landing page on port
   8080 and these nodes against a MuJoCo world instead of hardware: description, sim, arm, swerve, camera,
-  wrist_camera, power, estimator, pose_servo, wbc. Same instance names and APIs as on the robot.
+  wrist_camera, power, estimator, pose_servo, wbc. Same instance names and APIs as on the robot. The world is a
+  task picked on the sim page (rings, revolving door, cart and door, cabinet, tabletop; `deploy/sim/*.yaml`), and the
+  headset draws it from its meshes (`docs/scene3d.md`). Sim teleop records itself (`docs/collect.md`); what changed
+  per release: `docs/collab_updates.md`.
 - **Teleop chain:**
   1. **headset:** the quest_env app sends JSON frames on TCP 9391;
   2. **`quest_teleop` node** (`src/robot_utils/nodes/quest_teleop/`; its core logic is in `tools/quest_teleop/`):
      arming, clutch, body-frozen mapping;
   3. **`wbc` node:** a QP moving the arm and base together, fed by datagrams on a unix socket;
   4. **arm and swerve nodes,** which drive the sim world.
-- **The headset side** lives in two other repositories, both on branch `collab` tag `collab-v2`:
+- **The headset side** lives in two other repositories, both on branch `collab` (quest_dev tag `collab-v2`,
+  quest_env tag `collab-v3`):
   - [quest_dev](https://github.com/ax2348-gif/quest_dev): an Android app giving the Quest an SSH server (port 8022)
     and a native XR host;
   - [quest_env](https://github.com/ax2348-gif/quest_env): the headset app, its `quest` script and native telemetry
