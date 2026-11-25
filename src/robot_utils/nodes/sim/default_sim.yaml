@@ -12,9 +12,12 @@ contact:
   cone: elliptic                 # friction cone: elliptic | pyramidal
   noslip_iterations: 5           # post-solve iterations that remove creep in held objects
   fingers:
+    priority: 1                  # the jaws' parameters below govern jaw contacts (else MuJoCo averages solref /
+                                 # solimp with the object's 0.02 s: held objects sank ~1.3 mm and crept out)
     condim: 4                    # sliding + torsional friction (an object doesn't spin out of the jaws)
-    friction: [1.5, 0.02, 0.0001]   # sliding, torsional, rolling (MuJoCo takes the larger of the two geoms')
-    solref: [0.004, 1.0]         # stiff jaw contact (time constant s, damping ratio)
+    friction: [1.5, 0.02, 0.0001]   # sliding, torsional, rolling (the jaws', by priority). ESTIMATE
+    solref: [0.002, 1.0]         # rigid jaws on rigid objects: the stiffest MuJoCo integrates stably, 2 x timestep
+                                 # (time constant s, damping ratio); measured: 0.3 mm in each jaw at a 50 N squeeze
     solimp: [0.95, 0.99, 0.001]
     mimic_solref: [0.002, 1.0]   # the right finger's coupling to the left (one pinion drives both)
   objects:

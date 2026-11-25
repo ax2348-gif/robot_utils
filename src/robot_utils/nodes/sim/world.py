@@ -252,6 +252,10 @@ class World:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
             if "arm_finger_left" in names:
                 self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, self.limits["finger_force_max"])
+                # the URDF's finger effort (8 N, MuJoCo's actuatorfrcrange) is no gripper limit: it capped the servo
+                # far below finger_force_max (4 N per jaw: held objects dropped)
+                next(j for j in spec.joints if j.name == "arm_finger_left").actfrclimited = \
+                    mujoco.mjtLimited.mjLIMITED_FALSE
         # cameras: MuJoCo looks along -z with y up; the optical frame looks along +z with y down
         w_max, h_max = 640, 480
         for cam, cc in (self.cfg.get("cameras") or {}).items():
@@ -296,6 +300,10 @@ class World:
                 g = body.add_geom(name=f"arm_{link}_{name}_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
                                   pos=c, size=[v / 2 for v in size], group=3)
                 g.contype, g.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
+                # priority: the jaws' contact parameters govern their contacts. Without it MuJoCo mixes solref /
+                # solimp with the object's (solmix: the average, ~0.012 s here), and a held object sank ~1.3 mm into
+                # each jaw and crept out of the grip as the wrist moved (docs/sim.md "Grasping")
+                g.priority = int(fc.get("priority", 1))
                 g.condim = int(fc.get("condim", 3))
                 g.friction = [float(v) for v in fc.get("friction", [1.0, 0.005, 0.0001])]
                 if fc.get("solref"):

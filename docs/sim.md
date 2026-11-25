@@ -131,9 +131,22 @@ They are in `/scene` (fixed ones with `fixed: true`), the page's 3D view, both c
   the pads, so the jaws closed through objects. Visual meshes stay. The right finger follows the left through the
   URDF's mimic (a joint equality), stiffened to `contact.fingers.mimic_solref`.
 - **Contact** (`default_sim.yaml` `contact:`, sim-only physics): elliptic friction cones, `noslip_iterations: 5`;
-  fingers `condim 4` (torsional friction), friction 1.5, stiff `solref [0.004, 1]`; objects `condim 4`, friction 0.8
-  (MuJoCo takes the larger friction of the two geoms). Without them (pyramidal, condim 3, default solref) the jaws
-  sank ~4 mm into the objects and they slipped 4–10 mm in 2 s.
+  fingers `priority 1` (their parameters govern jaw contacts), `condim 4` (torsional friction), friction 1.5,
+  `solref [0.002, 1]` (rigid jaws on rigid objects: the stiffest MuJoCo integrates stably, 2 × the timestep); objects
+  `condim 4`, friction 0.8. Without them (pyramidal, condim 3, default solref) the jaws sank ~4 mm into the objects
+  and they slipped 4–10 mm in 2 s.
+- **Holding while the arm moves** (`tests/test_sim_grasp_hold.py`: the node's own commands tick by tick, soft gains
+  and gravity feedforward, the gripper through its force-limited law at the default 50 N; top-down grasp, lift 10 cm,
+  carry 10 cm at 0.3 m/s, shake ±2 cm at 2 Hz, wrist pitch ±0.5 rad and roll ±0.8 rad at 1 Hz). Two causes of the
+  slip seen in teleop (2026-11-24), measured: (1) **the jaws' contact parameters were not in force**: without a
+  priority MuJoCo averages solref / solimp with the object's (0.02 s), so a 50 N squeeze sank 1.3 mm into each jaw,
+  and the object crept out of the grip ~0.5 mm per wrist reversal (insensitive to friction, cone, condim, noslip
+  iterations or impratio; proportional to the penetration). (2) **the kinematic finger was capped at 8 N** by the
+  URDF's finger effort limit (MuJoCo's `actuatorfrcrange`), 4 N per jaw: objects turned and dropped. Slip / turn,
+  max over the run, cube and can: dynamic 5.1 mm / 1.5° → **0.46 mm / 0.3°**; kinematic dropped (215 mm / 174°) and
+  19 mm / 64° → 4.6 mm / 12.5° and 0.7 mm / 9.7°. The kinematic gripper still squeezes with the sim servo
+  (2000 N/m × error, ~20 N per jaw on a 40 mm object) rather than the node's force limit, and a fast wrist roll turns
+  objects in its jaws by ~10°: use the dynamic arm for grasping work.
 - **A top-down grasp that works** (`tests/test_sim_grasp.py`, measured: cube / can / block lifted 97 / 97 / 96 mm of
   100, the gripper itself 99 mm, slip 0.0 mm over 2 s, in the full, boxes and simple variants): fingertips (the
   end_link origin) 6 mm above the table, or higher when the object is taller than the rail's face behind the tips
