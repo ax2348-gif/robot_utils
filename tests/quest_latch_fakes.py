@@ -78,6 +78,7 @@ class Wbc:
         self.refuse_enable = None
         self.cur = 0                 # the WBC's armed arm_seq
         self.seen = 0
+        self.caps = {"asserted": {}, "previous": {}}   # as WbcClient.caps: none asserted here
 
     def _dgram(self, m):
         self.seq += 1

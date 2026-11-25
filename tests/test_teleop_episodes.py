@@ -36,7 +36,7 @@ class Env:
         rig.stream.last_error = None
         self.node = node = QuestTeleopNode("http://127.0.0.1:9", arm=None, swerve=None, quest_host="127.0.0.1",
                                            quest_port=1, ar="off", clock=lambda: rig.t, sim=sim,
-                                           reset_timeout=reset_timeout)
+                                           reset_timeout=reset_timeout, estimator=None)   # the sim reset only
         node.stream = rig.stream
         node.reader = SimpleNamespace(connected=True)
         node.client, node.wbc, node.phase, node.started_at = rig.client, rig.wbc, "running", rig.t
@@ -403,3 +403,29 @@ def test_a_without_a_sim_never_resets(env):
     env.press(A())
     assert env.ep.state == "recording" and not env.events("sim_reset")
     assert "disable" not in env.rig.wbc.calls and env.rig.latch.armed   # the robot: the episode starts armed
+
+
+def test_reset_world_resets_the_estimator_at_the_sims_base_pose():
+    # a sim reset alone leaves the estimator where it was (the wheel jump is skipped as an odometry discontinuity),
+    # so nothing waiting for a new est_reset (the WBC, the A handshake) ever sees one: reset_world resets both
+    from robot_utils.nodes.common.client import NodeClient
+    from robot_utils.nodes.quest_teleop.episodes import reset_world
+    calls = []
+    sim_app, est_app = FastAPI(), FastAPI()
+    sim_app.post("/scene/reset")(lambda: calls.append("sim") or {"reset_seq": 7})
+    sim_app.get("/state")(lambda: {"base": {"xyz": [0.4, -0.2, 0.0], "rpy": [0.0, 0.0, 1.2]}})
+
+    @est_app.post("/reset")
+    def est_reset(body: dict):
+        calls.append(("est", body))
+        return {"reset_id": 3}
+    (surl, ssrv, sth), (eurl, esrv, eth) = serve(sim_app), serve(est_app)
+    try:
+        with NodeClient(surl) as sim:
+            assert reset_world(sim, eurl) == {"reset_seq": 7}
+            assert calls == ["sim", ("est", {"x": 0.4, "y": -0.2, "theta": 1.2})]
+            calls.clear()
+            reset_world(sim, None)                          # no estimator: the sim only
+            assert calls == ["sim"]
+    finally:
+        stop((ssrv, sth), (esrv, eth))

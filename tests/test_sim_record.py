@@ -189,6 +189,12 @@ def node_env(tmp_path, tmp_sock_dir):
     wurl, wsrv, wth = serve(fake.app)
     headset = FakeHeadsetServer()
     made = []
+    # the sim Start resets first (POST /scene/reset; the estimator off here): a stand-in that answers it
+    from fastapi import FastAPI
+    sim_app = FastAPI()
+    sim_app.post("/scene/reset")(lambda: {"reset_seq": 1})
+    sim_app.get("/state")(lambda: {"base": {"xyz": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]}})
+    surl, ssrv, sth = serve(sim_app)
 
     def factory(node, sim, cfg):
         made.append(FakeRecorder(node, sim, cfg))
@@ -196,13 +202,13 @@ def node_env(tmp_path, tmp_sock_dir):
 
     def build(**kw):
         node = QuestTeleopNode(wurl, arm=None, swerve=None, quest_host="127.0.0.1", quest_port=headset.port,
-                               ar="off", sim="http://127.0.0.1:9", reset_timeout=0.5, **kw)
+                               ar="off", sim=surl, reset_timeout=0.5, estimator=None, **kw)
         url, srv, th = serve(create_app(node))
         servers.append((srv, th))
         return node, httpx.Client(base_url=url, timeout=10)
     servers = []
-    yield SimpleNamespace(fake=fake, headset=headset, build=build, made=made, factory=factory, tmp=tmp_path)
-    stop(*servers, (wsrv, wth))
+    yield SimpleNamespace(fake=fake, headset=headset, build=build, made=made, factory=factory, tmp=tmp_path, sim=surl)
+    stop(*servers, (wsrv, wth), (ssrv, sth))
     headset.close()
     fake.close()
 
@@ -211,7 +217,7 @@ def test_sim_teleop_start_records_and_stop_ends_the_session(node_env):
     node, http = node_env.build(record=RecordConfig(out=str(node_env.tmp / "data")),
                                 recorder_factory=node_env.factory)
     rec = node_env.made[0]
-    assert rec.sim == "http://127.0.0.1:9" and rec.cfg.out.endswith("data")
+    assert rec.sim == node_env.sim and rec.cfg.out.endswith("data")
     assert http.get("/state").json()["recording"] == {"enabled": True, "active": False}
     http.post("/task", json={"text": "pick the cube"})
     assert http.post("/start").status_code == 200
