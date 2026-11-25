@@ -145,6 +145,23 @@ def test_disabled_modules_coast_and_heartbeat_loss_disables(w):
     assert 0.0 < w.base_state()["twist"][0] <= v1 + 1e-3     # coasting: no drive torque, slows by friction only
 
 
+def test_a_coasting_base_rolls_to_a_stop(w):
+    # the SPARKs idle in coast, but a real base stops: rolling resistance (tyres, gearbox, motor). Without it the sim's
+    # base kept any momentum forever (a start-up jolt rolled it away at ~2 cm/s for minutes)
+    drive(w, 0.5, 0.0, 0.0)                                # wheels pointing forward, then the drives let go
+    w.step(200)
+    assert not any(m.drive_on for m in w.modules)
+    w.apply_wrench("base", [60.0, 0, 0], [0, 0, 0], 0.1)  # a shove: ~0.1 m/s
+    w.step(100)
+    v0 = w.base_state()["twist"][0]
+    assert v0 > 0.05
+    w.step(1500)
+    x1 = w.base_state()["xyz"][0]
+    assert abs(w.base_state()["twist"][0]) < 0.002         # stopped
+    w.step(5000)
+    assert abs(w.base_state()["xyz"][0] - x1) < 0.002      # and stays: no creep
+
+
 def test_pushing_moves_the_base_and_the_wheels_stall_at_their_torque_cap(w):
     w.apply_wrench("base", [0, 300.0, 0], [0, 0, 0], 0.5)    # sideways, wheels pointing forward and powered
     drive(w, 0.5, 0.0, 0.0)
