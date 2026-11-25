@@ -116,7 +116,7 @@ scene:
   rings: false                   # two counter-rotating rings ahead of the robot, red and blue objects on them (scene.py)
   view_anchor: null              # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
   rings_setup:
-    outer_rim_speed: 0.068       # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 1.7x the first 0.04)
+    outer_rim_speed: 0.12        # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 3x the first 0.04)
     inner_rim_speed: -0.068      # m/s at the inner ring's outer edge
     per_ring: 16                 # objects on each ring (half red, half blue; owner: 2x the first 8: 5x was not real time)
     seed: 0                      # their placement
