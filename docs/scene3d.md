@@ -149,4 +149,6 @@ passthrough, stereo, 1280 x 1340 per eye, 72 Hz, GPU time of our draws per frame
 - **Other producers**: the real robot (its links from the arm node's kinematics, no physics); an Isaac Lab exporter
   (USD: bake each rigid body's mesh subtree into body-local meshes once, stream `RigidPrim.get_world_poses()`;
   about 130 dynamic bodies per SimReady kitchen).
+- **Recorded** with a sim teleop session (docs/collect.md, "The rigid scene"): the pose stream as records, each scene
+  once per `scene_id`; `python -m robot_utils.replay` re-renders the operator's view from them.
 - **Side channels**: contacts (point, normal, force) and joint values for cues.

@@ -22,6 +22,7 @@ import httpx
 
 from .episodes import EpisodeIndex
 from .records import event_line
+from .scenes import SceneSaver
 from .streams import DEFAULT_STREAMS, StreamRecorder, StreamSpec
 
 log = logging.getLogger("collect")
@@ -45,7 +46,14 @@ class Session:
                  start_teleop: bool = False, stop_teleop: bool = False, rotate_bytes: int = 512 << 20,
                  read_timeout: float = 10.0, status_every: float = 5.0, settle: float = 1.0,
                  session_name: Optional[str] = None, status_stream=None, event_page: int = 1000,
-                 teleop: str = TELEOP, batch_ms: float = 0.0):
+                 teleop: str = TELEOP, batch_ms: float = 0.0, set_task: bool = True,
+                 baseline_seq: Optional[int] = None, transport: Optional[httpx.AsyncBaseTransport] = None,
+                 status_json: bool = False):
+        """``set_task``: POST the task to the node first (``collect run``); False when the caller is the node itself
+        (the task is already its own). ``baseline_seq``: index the events after this seq (default: the Pi log's
+        newest at the start). ``transport``: the HTTP transport (the quest_teleop node's own recorder reaches the
+        nodes over their unix sockets: ``robot_utils.collect.local.NodeSocketTransport``). ``status_json``: each
+        status line is ``stats()`` as one JSON line (for a supervising process) instead of the text line."""
         self.robot = robot.rstrip("/")
         self.teleop = teleop                      # the quest_teleop node instance (its /task, /start, oplog)
         self.oplog_spec = f"{teleop}/oplog/stream"
@@ -58,6 +66,11 @@ class Session:
         names = [s.name for s in self.specs]
         if len(set(names)) != len(names):
             raise ValueError(f"two streams map to the same file name: {names}")
+        self.set_task = set_task
+        self.status_json = status_json
+        self.baseline_seq = baseline_seq
+        self.transport = transport
+        self.scenes: list[SceneSaver] = []
         self.start_teleop = start_teleop
         self.stop_teleop = stop_teleop
         self.rotate_bytes = rotate_bytes
@@ -229,13 +242,36 @@ class Session:
             drop = f" dropped {st.dropped}" if st.dropped else ""
             rates.append(f"{mark}{r.spec.name} {st.rate():.0f}/s{gaps}{drop}")
         parts.append(", ".join(rates))
+        if self.scenes:
+            parts.append(f"{sum(len(s.saved) for s in self.scenes)} scenes"
+                         + (f" ({sum(len(s.missed) for s in self.scenes)} missed)" if any(s.missed for s in self.scenes)
+                            else ""))
         parts.append(f"{sum(r.stats.bytes for r in self.recorders) / 1e6:.0f} MB")
         return " | ".join(parts)
+
+    def stats(self) -> dict:
+        """What the session has recorded so far (the quest_teleop node's /state ``recording``)."""
+        idx = self.index
+        return {"dir": str(self.dir), "streams": {r.spec.name: {"connected": r.stats.connected,
+                                                                "rate": round(r.stats.rate(), 1),
+                                                                "records": r.stats.records, "gaps": r.stats.gaps,
+                                                                "dropped": r.stats.dropped}
+                                                  for r in self.recorders},
+                "bytes": sum(r.stats.bytes for r in self.recorders),
+                "episodes": None if idx is None else {
+                    "kept": sum(e["outcome"] == "kept" for e in idx.finished),
+                    "aborted": sum(e["outcome"] != "kept" for e in idx.finished),
+                    "open": idx.open["id"] if idx.open else None},
+                "scenes": [s.info() for s in self.scenes], "status": self.status_line()}
+
+    def _print_status(self):
+        line = json.dumps({"status": self.stats()}) if self.status_json else self.status_line()
+        print(line, file=self.status_stream, flush=True)
 
     async def _status_loop(self):
         while True:
             await asyncio.sleep(self.status_every)
-            print(self.status_line(), file=self.status_stream, flush=True)
+            self._print_status()
 
     def _oplog(self) -> Optional[StreamRecorder]:
         for r in self.recorders:
@@ -271,11 +307,12 @@ class Session:
                      "streams": [s.to_json(self.robot) for s in self.specs]}
         self._write_meta()
         limits = httpx.Limits(max_connections=len(self.specs) + 8, max_keepalive_connections=8)
-        async with httpx.AsyncClient(limits=limits) as client:
+        async with httpx.AsyncClient(limits=limits, transport=self.transport) as client:
             await self._save_description(client)
             self._write_meta()
-            await self._post(client, "/task", {"text": self.task})
-            baseline = await self._baseline_seq(client)
+            if self.set_task:
+                await self._post(client, "/task", {"text": self.task})
+            baseline = self.baseline_seq if self.baseline_seq is not None else await self._baseline_seq(client)
             open_ep = await self._open_episode(client)
             if open_ep is not None and open_ep.get("start_seq") is not None:
                 # index it from its start: the events since then come from the Pi log
@@ -291,10 +328,15 @@ class Session:
                     self.index.open_from_state(open_ep)      # the log no longer has its start
             for spec in self.specs:
                 is_oplog = spec.path == self.oplog_spec
+                on_record = self._on_oplog_record if is_oplog else None
+                if spec.framing == "rsf1":           # the rigid scene: saved once per scene_id
+                    saver = SceneSaver(spec, self.robot, self.dir)
+                    saver.attach(client)
+                    self.scenes.append(saver)
+                    on_record = saver.on_record
                 self.recorders.append(StreamRecorder(
                     spec, self.robot, self.dir, rotate_bytes=self.rotate_bytes, read_timeout=self.read_timeout,
-                    on_record=self._on_oplog_record if is_oplog else None,
-                    on_connect=self._on_oplog_connect if is_oplog else None))
+                    on_record=on_record, on_connect=self._on_oplog_connect if is_oplog else None))
             tasks = [asyncio.create_task(r.run(client), name=r.spec.name) for r in self.recorders]
             helpers = [asyncio.create_task(self._reconcile_loop(client)),
                        asyncio.create_task(self._status_loop())]
@@ -340,6 +382,8 @@ class Session:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, *helpers, return_exceptions=True)
+        for s in self.scenes:
+            await s.drain()
         for r in self.recorders:
             r.close()
         oplog = self._oplog()
@@ -352,10 +396,11 @@ class Session:
                           "episodes": len(self.index.finished), "skipped_event_seqs": self.index.skipped,
                           "last_event_seq": self.index.applied_seq,
                           "files": {r.spec.name: r.files for r in self.recorders},
+                          "scenes": [s.info() for s in self.scenes],
                           "stats": {r.spec.name: {"records": r.stats.records, "rows": r.stats.rows,
                                                   "bytes": r.stats.bytes, "dropped": r.stats.dropped,
                                                   "gaps": r.stats.gaps} for r in self.recorders}})
         self._write_meta()
-        print(self.status_line(), file=self.status_stream, flush=True)
+        self._print_status()
         print(f"collect: stopped ({self.meta['stop_reason']}); {len(self.index.finished)} episodes in "
               f"{self.dir / 'episodes.jsonl'}", file=self.status_stream, flush=True)

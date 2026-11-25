@@ -8,6 +8,9 @@ Stream specs (``--streams``), relative to ``<robot>/nodes/``:
   ``every``: every frame in order from a bounded per-client queue on the node, so a short Wi-Fi or
   disk stall costs no frames; past the bound the oldest are dropped and counted in ``dropped``).
 - anything with a ``?`` is used verbatim (``camera/stream?streams=depth&mode=raw``).
+- ``<sim node>/scene3d/stream`` (``sim/scene3d/stream``): the rigid scene's pose frames (docs/scene3d.md),
+  ``format=bin``: RSF1 frames back to back, recorded as one ``scene3d`` record each (``records.Rsf1Splitter``),
+  and the scene itself (index + blob) saved once per ``scene_id`` (``scenes.SceneSaver``).
 
 File names: the spec with a trailing ``/stream`` dropped and ``/`` -> ``.`` (``arm``,
 ``camera.color``, ``quest_teleop.oplog``), then ``.NNN.bin`` per rotation and ``.gaps.jsonl``.
@@ -26,13 +29,15 @@ from typing import Callable, Optional
 
 import httpx
 
-from .records import RawSplitter, header_time, rows_times
+from .records import RawSplitter, Rsf1Splitter, header_time, rows_times
 
 log = logging.getLogger("collect")
 
 DEFAULT_STREAMS = ("camera/color", "wrist_camera/color", "arm/stream", "swerve/stream", "estimator/stream",
                    "wbc/stream", "quest_teleop/oplog/stream")
 OPLOG_SPEC = "quest_teleop/oplog/stream"
+SCENE3D_SPEC = "sim/scene3d/stream"
+SIM_STREAMS = DEFAULT_STREAMS + (SCENE3D_SPEC,)     # a sim stack: the defaults plus the rigid scene
 
 
 @dataclass
@@ -41,6 +46,7 @@ class StreamSpec:
     name: str
     path: str                     # under the robot's /nodes/
     params: dict = field(default_factory=dict)
+    framing: str = "records"      # "records" (docs/nodes.md "Streams") | "rsf1" (rigid-scene pose frames)
 
     @classmethod
     def parse(cls, spec: str) -> "StreamSpec":
@@ -51,7 +57,10 @@ class StreamSpec:
             path, _, query = spec.partition("?")
             params = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
             name = re.sub(r"[^A-Za-z0-9_.-]+", ".", spec).strip(".")
-            return cls(spec, name, path, params)
+            rsf1 = path.endswith("/scene3d/stream") and params.get("format", "bin") == "bin"
+            return cls(spec, name, path, params, "rsf1" if rsf1 else "records")
+        if spec.endswith("/scene3d/stream"):
+            return cls(spec, spec[:-len("/stream")].replace("/", "."), spec, {"format": "bin"}, "rsf1")
         if spec.endswith("/stream"):
             return cls(spec, spec[:-len("/stream")].replace("/", "."), spec)
         node, _, cam = spec.partition("/")
@@ -67,7 +76,10 @@ class StreamSpec:
         return f"{robot.rstrip('/')}/nodes/{self.path}"
 
     def to_json(self, robot: str) -> dict:
-        return {"spec": self.spec, "name": self.name, "url": self.url(robot), "params": self.params}
+        out = {"spec": self.spec, "name": self.name, "url": self.url(robot), "params": self.params}
+        if self.framing != "records":
+            out["framing"] = self.framing
+        return out
 
 
 def rotated_files(session: Path, name: str) -> list[Path]:
@@ -234,7 +246,7 @@ class StreamRecorder:
         timeout = httpx.Timeout(5.0, read=self.read_timeout)
         try:
             while True:
-                splitter = RawSplitter()
+                splitter = Rsf1Splitter() if self.spec.framing == "rsf1" else RawSplitter()
                 try:
                     async with client.stream("GET", self.url, params=self.spec.params, timeout=timeout) as r:
                         if r.status_code >= 400:

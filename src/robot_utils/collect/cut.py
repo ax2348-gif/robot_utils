@@ -5,12 +5,15 @@ For every episode of ``episodes.jsonl`` and every recorded stream: the records w
 ``<out>/<id>/<stream>.bin`` (a rows record that straddles an edge is cut to its rows inside; each
 file starts with the schema records its rows need, so it decodes on its own; pings are left out),
 and ``<out>/<id>/episode.json`` describes the episode (task, outcome, times, per-stream counts,
-dropped, the gaps that intersect the window, the time field used).
+dropped, the gaps that intersect the window, the time field used). The rigid scenes its ``scene3d`` records
+name (``scenes.py``) are copied to ``<out>/<id>/scene3d/`` with their ``scenes.jsonl`` lines, so an episode
+directory replays on its own.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -18,6 +21,7 @@ import numpy as np
 
 from .episodes import read_episodes
 from .records import header_time, iter_raw, rows_times, slice_rows_record, time_field_name
+from .scenes import SCENE_DIR, read_scenes
 from .streams import rotated_files
 
 
@@ -49,6 +53,7 @@ class _EpisodeOut:
         self.last_t: Optional[float] = None
         self.time_fields: dict[str, str] = {}     # record type -> the field that dated it
         self.types: dict[str, int] = {}
+        self.scene_ids: dict[str, None] = {}      # in order of appearance
 
     def write(self, path: Path, raw: bytes):
         if self.file is None:
@@ -94,7 +99,10 @@ def cut_session(session: str | Path, out: Optional[str | Path] = None, pre_roll:
                                   "dropped": o.dropped, "time_fields": o.time_fields,
                                   "first_t": o.first_t, "last_t": o.last_t}
             r["gaps"][name] = [g for g in gaps if gap_intersects(g, o.lo, o.hi)]
+            if o.scene_ids:
+                r.setdefault("scenes", {}).update(o.scene_ids)
     for r in results.values():
+        r["scenes"] = _copy_scenes(session, out / r["id"], list(r.get("scenes", ())))
         d = out / r["id"]
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / "episode.json.tmp"
@@ -146,6 +154,8 @@ def _cut_stream(files, outs: list[_EpisodeOut], name: str):
             continue
         for o in outs:
             if o.lo <= t <= o.hi:
+                if kind == "scene3d" and h.get("scene_id"):
+                    o.scene_ids.setdefault(h["scene_id"], None)
                 o.write(o.dir / f"{name}.bin", raw)
                 o.records += 1
                 o.dropped += int(h.get("dropped") or 0)
@@ -155,3 +165,30 @@ def _cut_stream(files, outs: list[_EpisodeOut], name: str):
                 else:
                     o.time_fields.setdefault(kind, time_field_name(h))
                 o.seen(t, t)
+
+
+def _copy_scenes(session: Path, d: Path, ids: list) -> list:
+    """The scenes ``ids`` (in order of appearance; index + blob, hard-linked when possible) and their scenes.jsonl
+    lines into ``<d>/scene3d/``; returns ``[{scene_id, saved}]``."""
+    if not ids:
+        return []
+    src = session / SCENE_DIR
+    dst = d / SCENE_DIR
+    dst.mkdir(parents=True, exist_ok=True)
+    lines = {x["scene_id"]: x for x in read_scenes(session) if "missed" not in x}
+    out = []
+    with open(dst / "scenes.jsonl", "w") as f:
+        for sid in ids:
+            ok = all((src / f"{sid}.{ext}").exists() for ext in ("json", "blob"))
+            if ok:
+                for ext in ("json", "blob"):
+                    target = dst / f"{sid}.{ext}"
+                    if target.exists():
+                        target.unlink()
+                    try:
+                        os.link(src / f"{sid}.{ext}", target)
+                    except OSError:
+                        shutil.copyfile(src / f"{sid}.{ext}", target)
+                f.write(json.dumps(lines.get(sid, {"scene_id": sid})) + "\n")
+            out.append({"scene_id": sid, "saved": ok})
+    return out

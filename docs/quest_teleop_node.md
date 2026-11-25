@@ -155,6 +155,14 @@ to the WBC), `event` (the event line, its fields flat in the header). A `ping` f
 more than `max_records` behind loses the oldest records and the next record carries `dropped` (as the rows streams);
 publishing never blocks the teleop loop. Lost events are in the log: `GET /eventlog?since_seq=N`.
 
+## Recording in the sim (`--record`)
+
+In a sim stack (`--sim`), Start also starts the collect script and Stop (any stop: the button, an auto-stop, a fault,
+the node shutting down) ends it: every teleop run becomes a session under `--record DIR` (default `~/data/sim`),
+with the sim's rigid scene; `--no-record` turns it off. Details, the design and the files: docs/collect.md, "Sim
+teleop records itself". `/state` `recording`: `enabled`, `active`, `dir`, `pid`, `exit_code`, `error`, the
+streams (connected, rate, records, gaps), episodes and scenes saved; the page's Episode card shows it.
+
 ## The AR view (`--ar`)
 
 Quest up passes `--ar=<URL>` so the headset's robot AR view opens the frontend that serves this node's robot.
@@ -188,8 +196,8 @@ pruned) and `oplog` (subscribers, records per type).
 ## Storage
 
 Only the event log (above; events, never frames) under `--data-dir`, a deliberate small exception like
-agent_interface's transcripts: no recording (the client-side script records the streams, docs/nodes.md), no state
-files; log lines go to stderr (the journal under systemd). Constructed without a `data_dir` (tests, library use) the
+agent_interface's transcripts: no recording of its own (the client-side script records the streams, docs/nodes.md;
+in a sim stack the node runs that script as a child process, `--record`), no state files; log lines go to stderr (the journal under systemd). Constructed without a `data_dir` (tests, library use) the
 event log stays in memory. Tested: start, teleop,
 stop, e-stop and both headset commands leave the node's working directory and `$HOME` empty.
 

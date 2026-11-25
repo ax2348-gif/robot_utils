@@ -60,7 +60,8 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             "on the headset over ssh, only when asked. Episodes: A (right controller) starts one, a B tap stops "
             "it (the sim stack: A resets the sim first); the node emits events (`GET /eventlog`, its only files) "
             "and the operator stream (`GET /oplog/stream`: headset frames, datagrams sent, events); recording is "
-            "the client-side script's job."),
+            "the client-side script's job (`python -m robot_utils.collect run`), which a sim stack's node runs "
+            "itself from Start to Stop (`/state` `recording`)."),
         version=__version__, lifespan=lifespan, openapi_tags=TAGS)
     setup_app(app)
 

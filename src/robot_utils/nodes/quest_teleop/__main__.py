@@ -4,7 +4,8 @@
 Runs the Quest whole-body teleop client (tools/quest_teleop) as a node on this machine, against the local WBC node
 (target datagrams over its unix socket), with a page to start / stop it, watch it, and bring the headset's telemetry
 up or down over ssh (docs/quest_teleop_node.md). Same on the robot and in the sim stack. Writes only its event log
-(--data-dir; events, never frames).
+(--data-dir; events, never frames); in a sim stack (--sim) it also records every teleop run with the collect script
+(--record DIR, --no-record; docs/collect.md "Sim teleop records itself").
 """
 import argparse
 import logging
@@ -63,6 +64,15 @@ def main() -> None:
                         "runs at the next grip or stick (switchable on the page)")
     p.add_argument("--no-ghost", action="store_true",
                    help="sim only: no gripper ghost at the end effector's goal (on by default; switchable on the page)")
+    p.add_argument("--record", default="~/data/sim", metavar="DIR",
+                   help="sim only: every teleop run is recorded (python -m robot_utils.collect run, as a child process) "
+                        "to DIR/<YYYYMMDD-HHMMSS>, from Start to Stop, with the sim's rigid scene (default %(default)s)")
+    p.add_argument("--no-record", action="store_true", help="sim only: do not record teleop runs")
+    p.add_argument("--record-streams", default=None,
+                   help="sim only: the recorder's stream specs (default: collect's defaults; the rigid scene is added)")
+    p.add_argument("--record-robot", default="local",
+                   help="sim only: where the recorder reaches the nodes: 'local' (their unix sockets, default) or the "
+                        "frontend's URL")
     p.add_argument("-v", "--verbose", action="store_true")
     add_serve_args(p, "quest_teleop")
     a = p.parse_args()
@@ -70,6 +80,7 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from .client import Config, set_top_speed
+    from .recording import RecordConfig
     from .eventlog import DATA_DIR
     from .node import QuestTeleopNode
     from .sim_aids import AidsConfig
@@ -86,7 +97,9 @@ def main() -> None:
                            wait=a.wait, name=a.name, data_dir=a.data_dir or DATA_DIR,
                            log_cap_bytes=int(a.log_cap_mb * 1024 * 1024), sim=off(a.sim),
                            reset_timeout=a.reset_timeout,
-                           aids=AidsConfig(ghost=not a.no_ghost, auto_pause=a.auto_pause))
+                           aids=AidsConfig(ghost=not a.no_ghost, auto_pause=a.auto_pause),
+                           record=None if a.no_record else RecordConfig(out=a.record, robot=a.record_robot,
+                                                                        streams=a.record_streams))
     serve(create_app(node), a, banner=f"quest teleop node {a.name!r} (WBC {a.wbc}, headset {node.quest_host}, "
                                       f"ssh {a.ssh_host}, AR {a.ar})")
 
