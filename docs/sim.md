@@ -57,7 +57,7 @@ robot_utils.nodes.sim.stack`); anything else is refused. `hello` on `arm.sock` r
 
 What becomes physical: the commanded-vs-measured deflection (`q_cmd − q`: effort / kp), contact forces at handles
 and objects (a push gives deflection ≈ contact torque / kp), the WBC's lead bound (its `lead_tau` is now a real
-torque), the droop from the node's gravity model.
+torque), the residual of the node's gravity model (none, by construction: below).
 
 - **The law.** One affine MuJoCo actuator per joint, `force = ctrl + b1 q + b2 qd` with, per step, `b1 = −kp`,
   `b2 = −kd`, `ctrl = kp q_des + kd qd_des + tau_ff`: exactly the MIT law, with kd treated implicitly by
@@ -70,6 +70,18 @@ torque), the droop from the node's gravity model.
   motors' enable state carries over as before, with no frame until the node sends one (zero torque meanwhile).
 - **URDF effort limits** (MuJoCo's per-joint `actuatorfrcrange`) are lifted in dynamic mode: the actuator carries the
   motor's limit. They equal it on the arm (27 / 7 N m); the finger's URDF effort (8 N) is no motor limit.
+- **Gravity fitted to the calibrated real arm** (`gravity_fit`, `World._fit_arm_gravity`, at start). The node's
+  feedforward is `g_pinocchio(q) × tau_scale` (0.84 on joints 4, 5: measured on the robot, where float holds). The
+  URDF's masses (plus the wrist camera and finger links the node's model lacks) gave up to 1.3 N m more: float
+  drifted ~40–90° in 10 s and the servo drooped 2° on the wrist. Now the masses and centres of mass of links 2–6 and
+  the gripper are least-squares fitted to the node's model × `tau_scale` over 200 random poses in the joint ranges
+  (a small ridge keeps them near the URDF's; masses 3.73 kg against 3.93), so stiffness stays the commanded kp.
+  `tau_scale` scales joints 4, 5 but not 3, 6, which no mass distribution reproduces exactly; the residual is
+  shared out by each joint's dry friction (rows weighted 1 / `coulomb`), i.e. what stiction must hold. Residual on
+  200 other poses, max (rms) N m: joints 2–6 0.36 (0.17), 0.34 (0.17), 0.006 (0.004), 0.001, 0.0002, against
+  1.33, 0.83, 0.68, 0.33, 0.035 before; `/state` has it (`gravity_fit`). The alternative, a motor torque gain of
+  1 / `tau_scale`, would match exactly but scale kp and kd by 1.19 on the wrist (deflection no longer the commanded
+  kp's): not taken.
 
 | parameter | value | source |
 |---|---|---|
@@ -77,15 +89,14 @@ torque), the droop from the node's gravity model.
 | kp, kd, tau_ff | whatever the node sends (soft: kp 72, 72, 96, 18, 18, 18, kd 8, 8, 8, 2, 2, 2; gripper 1.0 / 0.05) | the node (its profile, its gravity model × `tau_scale`) |
 | `armature` | 0.03, 0.03, 0.03, 0.001, 0.001, 0.001 kg m²; gripper 0.001 | ESTIMATE (rotor inertia × ratio², 4340P 40:1, 4310 10:1) |
 | `viscous` | 0.1 ×3, 0.02 ×3 N m s/rad; gripper 0.1 | ESTIMATE (gripper: about the ~0.5 s stroke seen on the robot) |
-| `coulomb` | 0.3 ×3, 0.05 ×3 N m; gripper 0.05 | ESTIMATE (MuJoCo `frictionloss`) |
+| `coulomb` | 0.4 ×3, 0.05 ×3 N m; gripper 0.05 | ESTIMATE (MuJoCo `frictionloss`; 0.4 on the 4340Ps: above the gravity fit's 0.36 N m residual, a stiction a 40:1 planetary plausibly has. Higher on the wrist (0.1) put the hand ~5 mm off a target: the deadband is coulomb / kp) |
 | `command_delay` | 2 ms | ESTIMATE |
 | watchdog, reply latency | 0.1 s, 7 ms | as kinematic |
 
-**Measured (MacBook, 2026-11-24).** Holding the start pose (0, −0.3, −0.6, 0, 0, 0) on the soft profile:
-with MuJoCo's own gravity as `tau_ff` within the friction deadband (< 0.002 rad); with the node's model
-(pinocchio × `tau_scale`, 0.84 on joints 4, 5) the wrist pitch droops 0.033–0.037 rad (~2°) and the elbow
-0.007–0.009 rad (MuJoCo's model carries more on joints 3, 4: 7.14 / 2.16 N m against the node's 6.39 / 1.53);
-without `tau_ff` 0.13 rad on the wrist (g / kp). Pushing the hand into a fixed box with joint 1: 0.126 rad of
+**Measured (MacBook, 2026-11-24).** With the node's feedforward (pinocchio × `tau_scale`), six poses
+(`tests/test_sim_dynamic_arm.py`): **float** (kp = kd = 0) drifts at most 0.24° in 10 s (joint 4; the others
+≤ 0.06°), was up to 92°; **servoing** (soft profile) the droop `q_cmd − q` is ≤ 0.06° on every joint, was 2.1° on the
+wrist and 0.5° on the elbow before the gravity fit. Without `tau_ff` the wrist sags by g / kp (~0.1 rad). Pushing the hand into a fixed box with joint 1: 0.126 rad of
 deflection, 9.0 N m motor torque, 8.8 N m carried by the contact (the rest is joint friction). In the stack (arm,
 WBC enabled and holding, gripper check passed, no fault): `/state.arm.lead` `torque` at rest −0.58 N m (joint 3),
 −0.36 N m (joint 4) of the 6 / 1.5 N m budgets, `binding` false. Physics cost: ~25 k steps/s alone.
@@ -93,10 +104,9 @@ WBC enabled and holding, gripper check passed, no fault): `/state.arm.lead` `tor
 **What the node and WBC show against a compliant arm** (not bugs of the sim):
 - an arm that was never enabled (the stack's start: uninitialized, motors off) sinks onto its joint stops before the
   first enable, as the real one would;
-- floating (kp = 0 with the node's gravity feedforward) drifts: the model error is not held by anything but friction
-  (tens of degrees within seconds on the wrist at these friction estimates);
 - the WBC seeds its commanded joints from the measured ones at enable, so every enable steps the hold down by the
-  current droop (~0.02 rad on the wrist each time).
+  current droop (~0.02 rad on the wrist each time before the gravity fit; now below 0.001 rad). The lead numbers
+  above were measured before the fit.
 
 ## The default scene
 

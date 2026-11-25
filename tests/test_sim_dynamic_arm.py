@@ -64,11 +64,16 @@ def run(w, seconds, q, tau_fn, hold_base=False, **kw):
     return w.arm_op("read", {})
 
 
-def node_gravity(w):
+def node_gravity_at(q):
+    """The arm node's gravity feedforward: its model's g(q) x the profile's tau_scale."""
     from robot_utils.nodes.arm.kin import ArmKinematics
-    if not hasattr(node_gravity, "kin"):
-        node_gravity.kin = ArmKinematics({})
-    return node_gravity.kin.gravity(w.d.qpos[w.arm_q].copy()) * P.tau_scale
+    if not hasattr(node_gravity_at, "kin"):
+        node_gravity_at.kin = ArmKinematics({})
+    return node_gravity_at.kin.gravity(np.asarray(q, float)) * P.tau_scale
+
+
+def node_gravity(w):
+    return node_gravity_at(w.d.qpos[w.arm_q].copy())
 
 
 def test_limits_and_model_are_the_robot_configs(w):
@@ -116,23 +121,58 @@ def test_tracks_a_target_with_the_node_gains_and_deflects_by_load_over_kp(w):
         assert np.allclose(r["tau"][2:4], P.kp[2:4] * 0 + np.array([kp3, P.kp[3]]) * -dq[2:4] + 0, atol=0.05)
 
 
-def test_holds_with_a_correct_tau_ff_and_droops_without(w):
+def test_gravity_is_fitted_to_the_calibrated_arm(w):
+    """The arm's masses are fitted so MuJoCo's gravity is the node's model x the profile's tau_scale (what holds the
+    real arm): on fresh poses the residual is within each joint's dry friction (stiction holds the rest)."""
+    fit = w.gravity_fit
+    assert fit is not None and fit["tau_scale"] == P.tau_scale.tolist()
+    coulomb = np.array(w.cfg["components"]["arm"]["dynamic"]["coulomb"])
+    assert np.all(np.array(fit["max"]) < coulomb)                     # validation poses, every joint
+    assert np.all(np.array(fit["max"])[3:] < 0.05) and max(fit["max_before"]) > 0.6
+    rng = np.random.default_rng(7)                                    # and here, independently, at the model now
+    ids = [w.m.joint(n).id for n in ("arm_joint1", "arm_joint2", "arm_joint3", "arm_joint4", "arm_joint5",
+                                     "arm_joint6")]
+    lo, hi = w.m.jnt_range[ids, 0], w.m.jnt_range[ids, 1]
+    import mujoco
+    d = mujoco.MjData(w.m)
+    for _ in range(20):
+        q = rng.uniform(lo, hi)
+        tau, _ = w._gravity_rows(d, q, [])
+        from robot_utils.nodes.arm.kin import ArmKinematics
+        err = tau - ArmKinematics({}).gravity(q) * P.tau_scale
+        assert np.all(np.abs(err) < coulomb), (q, err)
+
+
+def test_holds_with_the_node_feedforward_and_sags_without(w):
     w.arm_op("enable", {})
     q0 = q_start(w)
-    r = run(w, 1.5, q0, bias)                                           # MuJoCo's own gravity: holds
-    hold = np.array(r["q"]) - q0
-    assert np.max(np.abs(hold)) < 0.3 / 72 + 1e-3
     r = run(w, 1.5, q0, node_gravity)                                   # the node's model (pinocchio x tau_scale)
     node = np.array(r["q"]) - q0
+    assert np.max(np.abs(node)) < 0.002                                 # no droop (was 0.037 rad on the wrist)
     g = bias(w)
-    mismatch = g - node_gravity(w)                                      # what the node's model leaves out
-    for i in (2, 3):                                                    # the loaded joints droop by mismatch / kp
-        assert node[i] == pytest.approx(-mismatch[i] / P.kp[i], abs=abs(mismatch[i] / P.kp[i]) * 0.3 + 0.004)
-    assert abs(node[3]) > 0.01                                          # a visible wrist droop (~2 deg)
     r = run(w, 1.5, q0, lambda w: np.zeros(6))                          # no feedforward: sags by g / kp
     none = np.array(r["q"]) - q0
-    assert none[3] == pytest.approx(-g[3] / P.kp[3], rel=0.2) and abs(none[3]) > 0.1
-    assert abs(none[2]) > 3 * abs(node[2])
+    assert none[3] == pytest.approx(-g[3] / P.kp[3], rel=0.2) and abs(none[3]) > 0.08
+    assert abs(none[2]) > 0.02
+
+
+@pytest.mark.parametrize("pose", [[0, -0.3, -0.6, 0, 0, 0], [0, -0.6, -0.9, 0, 0.5, 0], [0.3, -1.0, -1.2, 0.3, 0.8, 0.2],
+                                  [0, -1.2, -0.5, -0.5, -0.6, 1.0], [-0.5, -0.8, -1.6, 0.8, 1.0, -0.5],
+                                  [0, -1.6, -1.4, 0, 1.2, 0]])
+def test_float_holds_on_the_node_feedforward(w, pose):
+    """The node's float: kp = kd = 0, tau_ff = its gravity model x tau_scale at the measured joints (a tick old).
+    As on the robot it holds: under 1 deg in 10 s at each pose."""
+    q0 = np.array(pose, float)
+    w.arm_op("enable", {})
+    w.d.qpos[w.arm_q] = q0
+    w.d.qvel[w.arm_v] = 0.0
+    prev = w.arm_op("read", {})
+    for _ in range(1000):
+        send(w, q0, node_gravity_at(prev["q"]), kp=np.zeros(6), kd=np.zeros(6))
+        prev = w.arm_op("read", {})
+        w.step(10)
+    drift = np.degrees(np.abs(np.array(w.arm_op("read", {})["q"]) - q0))
+    assert np.all(drift < 1.0), drift
 
 
 def test_torque_is_clamped_at_the_motor_limit(w):

@@ -66,7 +66,16 @@ components:
       armature: [0.03, 0.03, 0.03, 0.001, 0.001, 0.001]    # kg m^2 at the output: rotor inertia x gear ratio^2
                                                            # (4340P 40:1, 4310 10:1). ESTIMATE
       viscous: [0.1, 0.1, 0.1, 0.02, 0.02, 0.02]           # N m s/rad, gearbox viscous friction. ESTIMATE
-      coulomb: [0.3, 0.3, 0.3, 0.05, 0.05, 0.05]           # N m, gearbox dry friction (MuJoCo frictionloss). ESTIMATE
+      coulomb: [0.4, 0.4, 0.4, 0.05, 0.05, 0.05]           # N m, gearbox dry friction / stiction (MuJoCo frictionloss).
+                                                           # ESTIMATE (40:1 and 10:1 planetary gearboxes; 0.4 holds
+                                                           # the gravity fit's residual, up to 0.36 N m on joints 2, 3;
+                                                           # the position deadband is coulomb / kp)
+      # The arm's gravity is fitted to the calibrated real arm's: the node's model x its profile's tau_scale (0.84 on
+      # joints 4, 5: measured on the robot), so its float feedforward holds as on the robot (World._fit_arm_gravity;
+      # the masses / centres of mass of links 2-6 and the gripper; residual shared out by the coulomb values above)
+      gravity_fit: true
+      gravity_fit_poses: 200     # random poses in the joint ranges (and as many again to validate)
+      gravity_fit_ridge: 1.0e-4  # keeps the fitted masses near the URDF's
       gripper: {armature: 0.001, viscous: 0.1, coulomb: 0.05}   # the gripper motor, output side (rad, N m) like the
                                                            # joints; ESTIMATE (viscous: stroke ~0.5 s as on the robot)
       command_delay: 0.002       # s from the world receiving an MIT frame to the motor applying it (serial bridge +
