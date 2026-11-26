@@ -64,7 +64,10 @@ It goes through these steps, asking before anything that cannot be undone:
 4. **The Quest developer runtime:** installs the APK, checked by SHA-256. Under Tailscale's own settings in the
    headset, *Always-on VPN* keeps the headset reachable after a reboot. A runtime from another build cannot be
    updated in place; if it answers over SSH, the wizard offers to migrate it (see below), otherwise it asks
-   before uninstalling. Declining keeps the installed runtime.
+   before uninstalling. Declining keeps the installed runtime. From 1.7.0 the runtime has Meta **body tracking**
+   (`com.oculus.permission.BODY_TRACKING`, granted with the install; the wizard reports it). The teleop uses it for
+   the elbow hint; without it the teleop runs without. If the wizard reports it not granted, open the runtime from
+   Library → Unknown sources and tap *Allow body tracking*.
 5. **SSH:**
    - creates `~/.ssh/quest_ed25519` and authorises it on the headset;
    - adds `Host quest` to `~/.ssh/config`;
@@ -102,7 +105,7 @@ One command:
 1. It starts the simulator on your network (so the headset can load it) and the teleop node.
 2. It wakes the headset app over Tailscale with the robot's AR view. Press the headset's power button if it sleeps;
    the launcher retries.
-3. It starts teleop.
+3. It starts teleop (with body tracking and the elbow hint; `docs/collab_updates.md`).
 
 Then put the headset on (or wear it around your neck: it tracks your torso), stand where you want the robot to
 start, and:
@@ -110,7 +113,7 @@ start, and:
 | control | does |
 |---|---|
 | **Y** (left) | arm. Nothing moves before it. **X** disarms. |
-| **right grip**, held | the arm follows your hand; release to let go |
+| **right grip**, held | the arm follows your hand; release to let go. After a short dropout (the headset's stream late, a glitch) the robot **holds**: release and grip again to resume, no Y |
 | **right trigger** | the gripper (pull to close) |
 | **left stick / right stick** | drive the base / turn it (the left stick follows the direction you face) |
 | walking and turning, grip held | the robot walks with you |
@@ -123,6 +126,16 @@ Open <http://localhost:8080/nodes/quest_teleop/> for its state, the event log an
 
 **Every later session:** wake the headset, then run `python -m robot_utils.nodes.sim.stack --quest --no-pull`.
 No cable is needed.
+
+**The OpenArm robot** (two 7-DOF arms on the swerve base; the default is the one-arm reBot):
+
+```bash
+python -m robot_utils.nodes.sim.stack --quest --no-pull --robot openarm_bimanual
+ROBOT_SIM_CONFIG=deploy/sim/sim_openarm_dynamic.yaml python -m robot_utils.nodes.sim.stack --quest --no-pull --robot openarm_bimanual   # dynamic arms
+```
+
+Each hand's grip drives one arm (mirrored when the robot faces you), its trigger that arm's gripper. The arms
+are Enactic's OpenArm v2.0 with Anvil's joint ranges and gripper (`src/robot_utils/robots/openarm/README.md`).
 
 ## When something goes wrong
 
@@ -151,9 +164,9 @@ What changed in each release, and how to update: [collab_updates.md](collab_upda
 
 
 The wizard installs fixed versions:
-- the runtime 1.6.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v2) tag `collab-v2`,
+- the runtime 1.7.0 from [quest_dev](https://github.com/ax2348-gif/quest_dev/tree/collab-v4) tag `collab-v4`,
   checked by SHA-256;
-- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v3) tag `collab-v3`,
+- the headset app from [quest_env](https://github.com/ax2348-gif/quest_env/tree/collab-v4) tag `collab-v4`,
   which then tracks branch `collab`.
 
 They are set at the top of `tools/quest_teleop/quest_setup.py`. A headset whose quest_env is already a Git clone

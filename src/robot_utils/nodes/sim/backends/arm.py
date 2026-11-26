@@ -33,10 +33,11 @@ class WorldArmBus(ArmBus):
     sim = True
 
     def __init__(self, sim: str = "sim", limits: Optional[dict] = None, clock=time.monotonic, socket_path=None,
-                 timeout: float = 2.0):
-        """``sim``: the sim node's instance name (its ``arm.sock``), or ``socket_path`` directly;
+                 timeout: float = 2.0, arm: str = "arm"):
+        """``sim``: the sim node's instance name (its ``<arm>.sock``: ``arm`` names the arm, robots/), or
+        ``socket_path`` directly;
         ``limits``: {joint: (lo, hi)} as the driver enforces them (``joint_limits(load_cfg(profile))``)."""
-        self.client = IpcClient(socket_path or backend_socket(sim, "arm"), timeout=timeout)
+        self.client = IpcClient(socket_path or backend_socket(sim, arm), timeout=timeout)
         self.clock = clock
         self.setpoint_limits = dict(limits or {})
         self.refresh = FeedbackRefresh(self.names, skip=True)

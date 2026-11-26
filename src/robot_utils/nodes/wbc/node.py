@@ -26,6 +26,13 @@ planned motion pausing the arm, any fault, the e-stop and a control tick later t
 or ``chunk`` datagram (never ``alive``) carrying ``armed: true`` and an ``arm_seq`` greater than the highest
 ``arm_seq`` seen when it was last disarmed (the floor; kept for the node's life, ``POST /session`` returns it), while
 enabled, without a fault, e-stop or pause.
+
+**Arms**: one end effector per arm of the robot (robots/: ``ee_specs``; the default robot's one EE ``arm``), each with
+its own arm node (``arm_targets``: EE -> arm node instance; by the profile's convention the instance is named as the
+EE), its own lease, joint channel, state, gains, limits and gap. The datagram, hint and stream formats are per EE
+already. Every check, hold, resync, enable and disable covers every arm; the latch and the base are shared. The /state
+``arm`` block (and ``arm_target``, ``channel``, ``arm_state``, ... here) is the primary arm (the first); with several
+arms /state also has ``arms`` (the same block per EE).
 """
 from __future__ import annotations
 
@@ -35,7 +42,7 @@ import queue
 import secrets
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
@@ -48,8 +55,9 @@ from ..common.server import EventLog
 from ..common import realtime
 from .arm_channel import ARM_STATES, ArmChannel, ChannelError, joint_socket_path
 from .controller import LIMITED, EEState, QPController, Snapshot
-from .model import EESpec, WbcModel, arm_config_limits, fetch_urdf
+from .model import WbcModel, ee_specs, fetch_urdf
 from .receiver import Inbox, Receiver
+from .swivel_geom import HintInput
 from .spec import (MODES, Config, Hints, check_lead_torque, default_arm_gains, hints_public, make_config, merge,
                    parse_base, parse_hints)
 from .targets import R_to_quat, TargetBuffer, quat_to_R
@@ -66,7 +74,9 @@ STRUCTURAL = ("rate_hz", "lease_heartbeat", "joint_vel", "joint_acc", "reach")  
 BASE_CAPS = ("max_speed", "max_omega", "max_accel", "max_alpha", "wheel_speed")
 
 
-def stream_fields(ees) -> tuple[list, list, dict]:
+def stream_fields(ees, dofs=None) -> tuple[list, list, dict]:
+    """``dofs``: EE -> its arm's joint count (default 6): the per-joint columns q_cmd / qd / lead_tau 1..n."""
+    dofs = dofs or {}
     """The stream's columns (the contract's first, append-only after them), units and docs."""
     f = [("t_tick", "s"), ("seq", "count"), ("state", "enum"), ("base_mode", "enum"), ("solve_ms", "ms"),
          ("status", "enum"), ("base_x", "m"), ("base_y", "m"), ("base_yaw", "rad"), ("est_reset", "id"),
@@ -84,13 +94,18 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         f += [(f"{e}_tgt_{k}", "m" if k in "xyz" else "") for k in ("x", "y", "z", "qx", "qy", "qz", "qw")]
         f += [(f"{e}_err_pos", "m"), (f"{e}_err_rot", "rad"), (f"{e}_ff_scale", ""), (f"{e}_target_id", "id"),
               (f"{e}_manip", ""), (f"{e}_reach", "")]
-        f += [(f"{e}_q_cmd{i}", "rad") for i in range(1, 7)] + [(f"{e}_qd{i}", "rad/s") for i in range(1, 7)]
+        n = dofs.get(e, 6)
+        f += [(f"{e}_q_cmd{i}", "rad") for i in range(1, n + 1)] + [(f"{e}_qd{i}", "rad/s") for i in range(1, n + 1)]
     f += [("armed", "bool"), ("tick_period", "ms"), ("tick_compute", "ms"), ("overruns", "count"),
           ("late_ticks", "count")]
     for e in ees:
         f += [(f"{e}_err_meas_pos", "m"), (f"{e}_err_meas_rot", "rad"), (f"{e}_lead_pos", "m"),
               (f"{e}_lead_rot", "rad")]
-        f += [(f"{e}_lead_tau{i}", "Nm") for i in range(1, 7)]
+        f += [(f"{e}_lead_tau{i}", "Nm") for i in range(1, dofs.get(e, 6) + 1)]
+    for e in ees:
+        f += [(f"{e}_swivel", "rad"), (f"{e}_swivel_w", "")]
+    for e in ees:
+        f += [(f"{e}_limited_by", "enum")]
     doc = {
         "t_tick": "control tick time, Pi monotonic s (the clock of target t)",
         "seq": "seq of the latest accepted datagram in force (0 = none)",
@@ -134,11 +149,81 @@ def stream_fields(ees) -> tuple[list, list, dict]:
         "<ee>_lead_pos": "the servo's deflection: |COMMANDED - MEASURED| EE position (m, world axes): effort / "
                          "contact force (in free motion also the arm's lag); _lead_rot the rotation angle (rad). NaN "
                          "without a measured pose",
+        "<ee>_swivel": "a redundant arm's elbow swivel about its shoulder-wrist line at the COMMANDED joints, "
+                       "incremental (parallel-transported steps: no fixed zero, an arbitrary origin; the operator's "
+                       "swivel hint anchors to it); NaN for a 6-joint arm",
+        "<ee>_swivel_w": "the operator's swivel hint's weight in force (0..1: the ramped elbow x conf fades times the "
+                         "robot elbow's flexion fade; 0 = none, the swivel model alone); NaN for a 6-joint arm",
+        "<ee>_limited_by": "this arm's own limit binding this tick (its rows only; the LIMITED codes, as limited_by): "
+                           "0 none, 1 reach, 2 manipulability, 4 joint_limit, 7 lead",
         "<ee>_lead_tau*": "per arm joint kp (q_cmd - q_meas): the servo's push from the lead (Nm; the lead bound "
                           "keeps it within lead_torque in contact, the measured arm extrapolated over its delay). NaN "
                           "without a measured pose",
     }
     return [n for n, _ in f], [u for _, u in f], doc
+
+
+def parse_swivel_hint(h) -> tuple:
+    """A target datagram's per-EE ``swivel`` (docs/wbc.md "The operator's elbow"): ``{"seq": int (the operator's
+    engagement id), "dpsi": rad (their swivel change since it), "elbow": rad (their upper-arm-forearm angle, pi =
+    straight), "conf": 0..1}`` -> (seq, dpsi, elbow, conf); ValueError otherwise (the datagram is dropped as invalid)."""
+    if not isinstance(h, dict) or set(h) - {"seq", "dpsi", "elbow", "conf"}:
+        raise ValueError("swivel must be {seq, dpsi, elbow, conf}")
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)   # noqa: E731
+    seq = h.get("seq")
+    if not isinstance(seq, int) or isinstance(seq, bool):
+        raise ValueError("swivel seq must be an integer")
+    if not all(num(h.get(k)) for k in ("dpsi", "elbow", "conf")):
+        raise ValueError("swivel dpsi, elbow and conf must be finite numbers")
+    if not 0.0 <= h["elbow"] <= math.pi + 1e-6:
+        raise ValueError("swivel elbow must be within 0..pi rad")
+    if not 0.0 <= h["conf"] <= 1.0:
+        raise ValueError("swivel conf must be within 0..1")
+    return seq, float(h["dpsi"]), min(float(h["elbow"]), math.pi), float(h["conf"])
+
+
+def posture_of(p, spec, n: int) -> np.ndarray:
+    """A posture hint (a name or a joint vector) for an arm of ``n`` joints: "ready" is the arm's nominal posture (the
+    robot profile's, ``EESpec.posture``) when it has one, "home" zeros; else POSTURES (the reBot's 6-joint ones)."""
+    if not isinstance(p, str):
+        return np.asarray(p, float)
+    if p == "ready" and getattr(spec, "posture", None) is not None:
+        return np.asarray(spec.posture, float)
+    if p == "home":
+        return np.zeros(n)
+    q = POSTURES[p]
+    if len(q) != n:
+        raise ValueError(f"posture {p!r} has {len(q)} joints, the arm {n}")
+    return q
+
+
+def resolve_arms(ees, arm: Optional[str] = None, arms: Optional[dict] = None, arm_socket: Optional[str] = None,
+                 arm_sockets: Optional[dict] = None) -> tuple[dict, dict]:
+    """(EE -> arm node target, EE -> its joint channel socket or None for a URL). ``arms`` given: as is; else ``arm``
+    (falsy: no arm) drives the one EE of a one-EE model, and with several EEs each EE's arm node is named as the EE
+    (the robot profile's convention: arm_left, arm_right)."""
+    ees = list(ees)
+    if arms is not None:
+        targets = {e: t for e, t in arms.items() if t}
+        bad = set(targets) - set(ees)
+        if bad:
+            raise ValueError(f"arms for unknown end effectors {sorted(bad)} (have {ees})")
+    elif not arm:
+        targets = {}
+    elif len(ees) == 1:
+        targets = {ees[0]: arm}
+    else:
+        targets = {e: e for e in ees}
+    socks = {}
+    for e, t in targets.items():
+        sk = (arm_sockets or {}).get(e) or (arm_socket if len(targets) == 1 else None)
+        socks[e] = sk or (str(joint_socket_path(t)) if "://" not in t else None)
+    return targets, socks
+
+
+def arm_label(e: str, targets) -> str:
+    """How messages name an arm: ``arm`` with one (as always), else its EE name."""
+    return "arm" if len(targets) <= 1 else e
 
 
 def wrap(a: float) -> float:
@@ -155,20 +240,39 @@ class EstimatorView:
         self.last_imu: Optional[float] = None
 
 
+def robot_wbc_defaults(robot=None) -> dict:
+    """The robot profile's WBC config defaults (its ``wbc:`` block, e.g. the OpenArm's arm-proximity weight); the
+    node's ``config`` overrides them."""
+    from ...robots import load
+    try:
+        return dict(load(robot).wbc)
+    except Exception:  # noqa: BLE001 - an unknown robot fails where the model loads, with its own error
+        return {}
+
+
 class WbcNode:
     def __init__(self, model: Optional[WbcModel] = None, *, model_source: str = "description",
                  arm: Optional[str] = "arm", swerve: Optional[str] = "swerve",
                  estimator: Optional[str] = "estimator", config: Optional[dict] = None,
                  clock: Callable[[], float] = time.monotonic, udp_host: Optional[str] = "127.0.0.1",
                  udp_port: int = 9410, unix_socket: Optional[str] = None, arm_socket: Optional[str] = None,
-                 name: str = "wbc"):
-        self.cfg: Config = make_config(config)
+                 name: str = "wbc", arms: Optional[dict] = None, arm_sockets: Optional[dict] = None,
+                 robot: Optional[str] = None):
+        """``arm`` / ``arm_socket``: the one arm (one-EE model); ``arms`` / ``arm_sockets``: EE -> arm node target /
+        joint socket (``resolve_arms``); ``robot``: the robot profile the model's EEs come from (``load_model``)."""
+        self.cfg: Config = make_config({**robot_wbc_defaults(robot), **(config or {})})
         kp0, ml0, _ = default_arm_gains()
         check_lead_torque(self.cfg.lead_torque, kp0, ml0)
         self.lead_binds = 0                 # ticks the lead bound bound (any joint; since start)
+        self._posture_status: dict = {}       # EE -> the elbow's last limit-aware status (events on change)
+        self.swivel_hints: dict = {}          # EE -> (seq, dpsi, elbow, conf, t received): the operator's swivel hint
         self.clock = clock
         self.name = name
-        self.arm_target, self.swerve_target, self.estimator_target = arm, swerve, estimator
+        self.swerve_target, self.estimator_target = swerve, estimator
+        self.robot = robot
+        self._arms_in = (arm, arms, arm_socket, arm_sockets)
+        self.arm_targets: dict = {}            # EE -> arm node target (instance name or URL)
+        self.arm_sockets: dict = {}            # EE -> its joint channel socket
         self.model_source = model_source
         self.model: Optional[WbcModel] = model
         self.model_info = "given" if model is not None else None
@@ -189,7 +293,6 @@ class WbcNode:
             from ..common.serve import socket_dir
             unix_socket = str(socket_dir() / f"{name}.target.sock")
         self.receiver = Receiver(udp_host, udp_port, unix_socket, self._deliver)
-        self.arm_socket = arm_socket or (str(joint_socket_path(arm)) if arm and "://" not in arm else None)
         self.session_token: Optional[str] = None
         self.hints = Hints()
         self.override: dict = {}
@@ -203,12 +306,12 @@ class WbcNode:
         self.fault_arm_ok = self.fault_base_ok = False
         self.disabled_reason: Optional[str] = None
         self.holder: Optional[str] = None
-        self.arm_http = None
-        self.arm_lease_id: Optional[int] = None
-        self.channel: Optional[ArmChannel] = None
+        self.arm_https: dict = {}              # EE -> the arm's HTTP client (its lease) while enabled
+        self.arm_lease_ids: dict = {}
+        self.channels: dict = {}               # EE -> ArmChannel while enabled
         self.base = None
         self.enabled_at = -math.inf
-        self.arm_state = None
+        self.arm_states: dict = {}             # EE -> the arm's latest joint-channel state
         self.q_cmd: dict = {}
         self.v_cmd: dict = {}
         self.base_twist = np.zeros(3)
@@ -218,8 +321,7 @@ class WbcNode:
         self.last_rx = -math.inf
         self.resyncs = 0
         self.resync = self.cfg.resync
-        from ..arm.config import GAP_MAX
-        self.gap_max = GAP_MAX
+        self.gap_maxes: dict = {}              # EE -> the arm's gap at gripper 1 (its welcome; default GAP_MAX)
         self._paused = False
         # the armed latch (module docstring)
         self.armed = False
@@ -247,21 +349,61 @@ class WbcNode:
         if self.model is not None:
             self._setup_model()
 
+    # -- arms (the primary arm under the one-arm names) -------------------------------------------------------
+
+    @property
+    def primary(self) -> str:
+        """The primary EE: the first with an arm, else the first."""
+        return next(iter(self.arm_targets), self.ees[0] if self.ees else "arm")
+
+    @property
+    def arm_target(self) -> Optional[str]:
+        return self.arm_targets.get(self.primary)
+
+    @property
+    def arm_socket(self) -> Optional[str]:
+        return self.arm_sockets.get(self.primary)
+
+    @property
+    def arm_http(self):
+        return self.arm_https.get(self.primary)
+
+    @property
+    def channel(self) -> Optional[ArmChannel]:
+        return self.channels.get(self.primary)
+
+    @property
+    def arm_state(self):
+        return self.arm_states.get(self.primary)
+
+    @property
+    def arm_lease_id(self) -> Optional[int]:
+        return self.arm_lease_ids.get(self.primary)
+
+    @property
+    def gap_max(self) -> float:
+        from ..arm.config import GAP_MAX
+        return self.gap_maxes.get(self.primary, GAP_MAX)
+
+    def _label(self, e: str) -> str:
+        return arm_label(e, self.arm_targets)
+
     # -- model ---------------------------------------------------------------------------------------------
 
     def _setup_model(self) -> None:
         from ..swerve.constants import MODULES
         self.ctl = QPController(self.model, self.cfg, [(m.x, m.y) for m in MODULES])
         self.ees = list(self.model.ees)
-        self.fields, self.units, self.field_doc = stream_fields(self.ees)
+        self.arm_targets, self.arm_sockets = resolve_arms(self.ees, *self._arms_in)
+        self.fields, self.units, self.field_doc = stream_fields(self.ees, self.dofs())
         self.col = {n: i for i, n in enumerate(self.fields)}
         self.hub = RowHub({"tick": len(self.fields)}, recent=500)
         self.events.on_add = self.hub.state_changed
         self.buffers = {e: TargetBuffer(e, self.cfg.ff_timeout, self.cfg.blend_tau) for e in self.ees}
 
     def load_model(self) -> None:
-        urdf, how = fetch_urdf(self.model_source)
-        self.model = WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),))
+        urdf, how = fetch_urdf(self.model_source, self.robot)
+        self.model = WbcModel(urdf, ee_specs(self.robot))
         self.model_info = how
         self._setup_model()
 
@@ -279,7 +421,9 @@ class WbcNode:
         for u in self.inputs.values():
             u.start()
         self.receiver.start()
-        self.events.add(f"wbc started (model: {self.model_info}; arm {self.arm_target}, swerve {self.swerve_target}, "
+        arms = (self.arm_target if len(self.arm_targets) <= 1 else
+                ", ".join(f"{e}={t}" for e, t in self.arm_targets.items()))
+        self.events.add(f"wbc started (model: {self.model_info}; arm {arms}, swerve {self.swerve_target}, "
                         f"estimator {self.estimator_target}; targets udp {self.receiver.udp_port}, "
                         f"unix {self.receiver.unix_path})")
         if loop:
@@ -410,6 +554,7 @@ class WbcNode:
         self.session_token = token
         self.receiver.open_session(sid)
         self.inbox.drain()                           # the previous session's datagrams never apply
+        self.swivel_hints.clear()
         self._disarm_locked("new session", note=True)
         floor = self.arm_floor                       # kept for the node's life: arming needs a greater arm_seq
         self.events.add(f"session {sid} opened (arm_seq floor {floor})")
@@ -579,6 +724,7 @@ class WbcNode:
             t = now if t is None else float(t)
             if not (math.isfinite(t) and abs(t - now) <= cfg.target_t_window):
                 return "bad_t"
+            hints = {k: parse_swivel_hint(e["swivel"]) for k, e in ees.items() if e.get("swivel") is not None}
             for k, e in ees.items():
                 p = np.asarray(e["pos"], float).reshape(3)
                 R = quat_to_R(e["quat"])
@@ -589,6 +735,8 @@ class WbcNode:
                 if g is not None and not (0.0 <= float(g) <= 1.0):
                     raise ValueError("gripper must be within 0..1")
                 self.buffers[k].set_reactive(t, p, R, v, None if g is None else float(g), self.est.reset_id)
+            for k, h in hints.items():                    # absent: the last one ages (stale after the timeout)
+                self.swivel_hints[k] = (*h, now)
             return None
         if kind == "chunk":
             for k, e in ees.items():
@@ -666,9 +814,10 @@ class WbcNode:
         now = self.clock()
         dt_int, late = self._tick_timing(now)
         self._drain_inputs(now)
-        st = self.channel.poll(now) if self.channel is not None else None
-        if st is not None:
-            self.arm_state = st
+        for e, ch in self.channels.items():
+            s = ch.poll(now)
+            if s is not None:
+                self.arm_states[e] = s
         self.lease.expire_if_due()
         with self.lock:
             self._tick_times = (self._tick_times + [now])[-100:]
@@ -710,29 +859,38 @@ class WbcNode:
                 self._last["reset_id"], self._last["jumps"] = self.est.reset_id, self.est.jumps
             # a planned motion on the arm (HTTP) paused the session: disarm and hold, follow the measured joints,
             # send keep-alives; when it ends, restart from the measured joints (still disarmed)
-            st = self.arm_state
-            paused = st is not None and st.paused
+            # (one arm paused pauses the session: every arm holds, the paused ones follow their measured joints)
+            sts = dict(self.arm_states)
+            paused_by = {e: bool(s is not None and s.paused) for e, s in sts.items()}
+            paused = any(paused_by.values())
             if paused != self._paused:
                 self._paused = paused
-                self.events.add("arm session paused by a planned motion: holding" if paused else
+                who = "arm" if len(self.arm_targets) <= 1 else ", ".join(e for e, v in paused_by.items() if v) or "arm"
+                self.events.add(f"{who} session paused by a planned motion: holding" if paused else
                                 "arm session resumed: commands resynced to the measured joints", "warn")
                 if paused:
-                    self._disarm_locked("arm paused by a planned motion")
-                if not paused and st is not None and np.all(np.isfinite(st.q)):
-                    self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
-                    self.ctl.reset()
+                    self._disarm_locked(f"{who} paused by a planned motion")
+                if not paused:
+                    synced = False
+                    for e, s in sts.items():
+                        if s is not None and np.all(np.isfinite(s.q)):
+                            self.q_cmd[e], self.v_cmd[e] = s.q.copy(), np.zeros(len(s.q))
+                            synced = True
+                    if synced:
+                        self.ctl.reset()
             self._apply_messages(now)
             if self.armed and now - self.last_rx > self.cfg.hold_timeout:
                 self._disarm_locked(f"input stale ({now - self.last_rx:.2f} s without a datagram)")
             hints = self.effective_hints()
             # resync the integration to the measured joints past a threshold (well inside the arm's lead bound)
-            if st is not None and "arm" in self.q_cmd and np.all(np.isfinite(st.q)) and not paused:
-                if np.max(np.abs(st.q - self.q_cmd["arm"])) > self.resync:
-                    self.resyncs += 1
-                    self.events.add(f"arm command resynced to the measured joints (off by "
-                                    f"{np.degrees(np.max(np.abs(st.q - self.q_cmd['arm']))):.1f}°)", "warn")
-                    self.q_cmd["arm"] = st.q.copy()
-                    self.v_cmd["arm"] = np.zeros(len(st.q))
+            for e, s in sts.items():
+                if s is not None and e in self.q_cmd and np.all(np.isfinite(s.q)) and not paused:
+                    if np.max(np.abs(s.q - self.q_cmd[e])) > self.resync:
+                        self.resyncs += 1
+                        self.events.add(f"{self._label(e)} command resynced to the measured joints (off by "
+                                        f"{np.degrees(np.max(np.abs(s.q - self.q_cmd[e]))):.1f}°)", "warn")
+                        self.q_cmd[e] = s.q.copy()
+                        self.v_cmd[e] = np.zeros(len(s.q))
             stale = now - self.last_rx > self.cfg.hold_timeout and any(b.kind for b in self.buffers.values())
             no_client = not self.lease.held
             why_hold = ("arm paused by a planned motion" if paused else ("estimator: " + health) if health else
@@ -741,11 +899,12 @@ class WbcNode:
                                                               f"disarmed: {self.disarm_reason}")))
             base, est_age = self.base_pose(now)
             targets = {e: (None if why_hold or not self.armed else self.buffers[e].sample(now)) for e in self.ees}
-            meas = self._measured(now, st, paused)
+            meas = self._measured(now, paused)
             snap = Snapshot(now, base, self.base_twist.copy(),
                             {e: EEState(self.q_cmd[e].copy(), self.v_cmd[e].copy(), targets[e],
                                         hints.ee(e, self.cfg), self._posture(hints, e),
-                                        *meas.get(e, (None, None, 0.0))) for e in self.ees},
+                                        *meas.get(e, (None, None, 0.0)), swivel_hint=self._swivel_hint(e, now))
+                             for e in self.ees},
                             hints, hold=why_hold is not None, base_available=self.base is not None,
                             velocity_age=now - self.velocity_t, hint_age=now - self.hint_t, dt=dt_int)
             out = self.ctl.step(snap)
@@ -761,36 +920,66 @@ class WbcNode:
                     self.v_cmd[e] = out.qd[e].copy()
                 else:                                        # disarmed: the arm held at its commanded joints
                     self.v_cmd[e] = np.zeros_like(self.v_cmd[e])
-            if paused and np.all(np.isfinite(st.q)):         # the planned motion moves the arm, not the WBC
-                self.q_cmd["arm"], self.v_cmd["arm"] = st.q.copy(), np.zeros(len(st.q))
+            if paused:                                       # the planned motion moves the arm, not the WBC
+                for e, s in sts.items():
+                    if s is not None and paused_by[e] and np.all(np.isfinite(s.q)):
+                        self.q_cmd[e], self.v_cmd[e] = s.q.copy(), np.zeros(len(s.q))
             self.base_twist = np.asarray(out.base_twist, float)
             self._cmd_twists(base)
             if out.limited_by != "none":
                 self.limited_counts[out.limited_by] = self.limited_counts.get(out.limited_by, 0) + 1
             if out.diag.get("lead_binding"):
                 self.lead_binds += 1
+            for e, sw in (out.diag.get("swivel") or {}).items():     # the elbow's limit-aware status: an event on change
+                st_ = sw.get("status")
+                prev = self._posture_status.get(e)
+                if st_ in ("ok", "limited", "re-posing", "unreachable") and st_ != prev:
+                    self._posture_status[e] = st_
+                    if prev is not None or st_ != "ok":
+                        msg = {"ok": "elbow back at its human-like angle",
+                               "limited": "elbow held inside its room: the human-like angle is beyond the joint limits",
+                               "re-posing": "elbow re-posing into its room within the joint limits (the hand stays)",
+                               "unreachable": "this hand pose is unreachable from this arm configuration within the "
+                                              "joint limits (another IK branch would need the hand to move)"}[st_]
+                        self.events.add(f"{e}: {msg}", "warn" if st_ == "unreachable" else "info")
             self.state = ("idle" if not self.armed else "holding" if why_hold else
                           "tracking" if any(t is not None for t in targets.values()) else "idle")
             self._hold_reason = why_hold
-            gr = targets.get("arm")
-            gap = math.nan
-            if gr is not None and gr.gripper is not None:
-                gap = gr.gripper * self.gap_max
-            self._send(now, gap, keepalive=paused)
+            gaps = {}
+            for e in self.channels:
+                gr = targets.get(e)
+                gaps[e] = gr.gripper * self.gap_maxes.get(e, self.gap_max) if (
+                    gr is not None and gr.gripper is not None) else math.nan
+            self._send(now, gaps, keepalive=paused_by)
             self._publish(now, out, hold=why_hold is not None, targets=targets, base=base, est_age=est_age)
 
-    def _measured(self, now: float, st, paused: bool) -> dict:
-        """ee -> (q_meas, qd_meas, age) for the lead bound: the arm's latest state (age since it arrived, on this
+    def _swivel_hint(self, e: str, now: float) -> Optional[HintInput]:
+        """The operator's swivel hint for the controller (the latest, with its age) or None (none since the session
+        opened; the controller fades a stale one out)."""
+        h = self.swivel_hints.get(e)
+        return None if h is None else HintInput(*h[:4], max(0.0, now - h[4]))
+
+    def _measured(self, now: float, paused: bool) -> dict:
+        """ee -> (q_meas, qd_meas, age) for the lead bound: each arm's latest state (age since it arrived, on this
         clock); none while paused (the commands follow the measured joints then) or without a finite reading."""
-        if st is None or paused or not np.all(np.isfinite(st.q)):
+        if paused:
             return {}
-        qd = st.qd if np.all(np.isfinite(st.qd)) else np.zeros(len(st.q))
-        age = now - st.t_rx if math.isfinite(st.t_rx) else 0.0
-        return {"arm": (st.q.copy(), np.asarray(qd, float).copy(), min(max(age, 0.0), 0.1))}
+        out = {}
+        for e, st in self.arm_states.items():
+            if st is None or not np.all(np.isfinite(st.q)):
+                continue
+            qd = st.qd if np.all(np.isfinite(st.qd)) else np.zeros(len(st.q))
+            age = now - st.t_rx if math.isfinite(st.t_rx) else 0.0
+            out[e] = (st.q.copy(), np.asarray(qd, float).copy(), min(max(age, 0.0), 0.1))
+        return out
+
+    def dofs(self) -> dict:
+        """EE -> its arm's joint count (the model's)."""
+        return {e: len(self.model.arm_q[e]) for e in self.ees} if self.model is not None else {}
 
     def _posture(self, hints: Hints, ee: str) -> np.ndarray:
         p = hints.ee(ee, self.cfg).posture
-        q = POSTURES[p] if isinstance(p, str) else np.asarray(p, float)
+        q = posture_of(p, self.model.ees[ee], len(self.model.arm_q[ee]))
         lo, hi = self.model.arm_limits(ee)
         return np.clip(q, lo, hi)
 
@@ -807,11 +996,15 @@ class WbcNode:
         for e in self.ees:
             self.cmd_twist[e] = m.jacobian(q, e) @ v
 
-    def _send(self, now: float, gap: float, keepalive: bool = False) -> None:
-        st = self.arm_state
-        if self.channel is not None and "arm" in self.q_cmd:
-            self.channel.send(self.q_cmd["arm"], self.v_cmd["arm"], gap,
-                              t_basis=st.t_tick if st is not None else math.nan, keepalive=keepalive)
+    def _send(self, now: float, gaps, keepalive=False) -> None:
+        """Each arm its command (``gaps`` / ``keepalive``: per EE, or one value for every arm), the base its twist."""
+        for e, ch in self.channels.items():
+            if e not in self.q_cmd:
+                continue
+            st = self.arm_states.get(e)
+            gap = gaps.get(e, math.nan) if isinstance(gaps, dict) else gaps
+            ka = bool(keepalive.get(e, False)) if isinstance(keepalive, dict) else bool(keepalive)
+            ch.send(self.q_cmd[e], self.v_cmd[e], gap, t_basis=st.t_tick if st is not None else math.nan, keepalive=ka)
         if self.base is not None:
             self.base.send(self.base_twist)
 
@@ -824,10 +1017,11 @@ class WbcNode:
         self.base_twist = np.zeros(3)
         for e in self.v_cmd:
             self.v_cmd[e] = np.zeros_like(self.v_cmd[e])
-        if arm and self.channel is not None and "arm" in self.q_cmd:
-            st = self.arm_state
-            self.channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])),
-                              keepalive=st is not None and st.paused)
+        if arm:
+            for e, ch in self.channels.items():
+                if e in self.q_cmd:
+                    st = self.arm_states.get(e)
+                    ch.send(self.q_cmd[e], np.zeros(len(self.q_cmd[e])), keepalive=st is not None and st.paused)
         if base and self.base is not None:
             self.base.send((0.0, 0.0, 0.0))
 
@@ -836,22 +1030,24 @@ class WbcNode:
         the other half (fault)."""
         if self.fault is not None:
             return
-        st = self.arm_state
-        if self.channel is not None:
-            if self.channel.closed_reason:                    # the arm's bye: lease end, e-stop, disable, replaced
-                self._fault_locked(f"arm joint channel closed by the arm: {self.channel.closed_reason}", False, True)
+        for e, ch in self.channels.items():
+            st, lab = self.arm_states.get(e), self._label(e)
+            if ch.closed_reason:                              # the arm's bye: lease end, e-stop, disable, replaced
+                self._fault_locked(f"{lab} joint channel closed by the arm: {ch.closed_reason}", False, True)
                 return
             if now - self.enabled_at > ARM_GRACE_S:
                 if st is None or now - st.t_rx > self.cfg.arm_stale:
-                    self._fault_locked("arm state stale (no joint-channel state)", False, True)
+                    self._fault_locked(f"{lab} state stale (no joint-channel state)", False, True)
                     return
                 if st.state_name in ("off", "fault"):
                     if st.state_name == "off":                   # the arm's e-stop puts it off: e-stop the base too
-                        self._forward_estop("arm went off (e-stop?)", base=True, arm=False)
-                    self._fault_locked(f"arm is {st.state_name}", False, True)
+                        # (and the other arms)
+                        self._forward_estop(f"{lab} went off (e-stop?)", base=True, arm=len(self.channels) > 1,
+                                            skip=e)
+                    self._fault_locked(f"{lab} is {st.state_name}", False, True)
                     return
                 if st.state_name not in ("floating", "servoing"):
-                    self._fault_locked(f"arm is {st.state_name}", False, True)
+                    self._fault_locked(f"{lab} is {st.state_name}", False, True)
                     return
         sw = self.sw
         if self.base is not None:
@@ -882,8 +1078,8 @@ class WbcNode:
             self.base.close(disable=True)
             self.base = None
 
-    def _forward_estop(self, reason: str, *, base: bool, arm: bool) -> None:
-        forward_estop(self.arm_http, self.swerve_target, reason, self.events, base=base, arm=arm)
+    def _forward_estop(self, reason: str, *, base: bool, arm: bool, skip: Optional[str] = None) -> None:
+        forward_estop(self.arm_https, self.swerve_target, reason, self.events, base=base, arm=arm, skip=skip)
 
     # -- publish -------------------------------------------------------------------------------------------
 
@@ -892,7 +1088,6 @@ class WbcNode:
         if base is None:
             base, est_age = self.base_pose(now)
         h = self.effective_hints()
-        st = self.arm_state
         row = [now, float(self.seq_in_force), float(STATES.index(self.state)), float(MODES.index(h.mode)),
                out.solve_ms if out else nan, float(SOLVE.index(out.status)) if out else 0.0,
                base[0], base[1], base[2], nan if self.est.reset_id is None else float(self.est.reset_id),
@@ -900,6 +1095,7 @@ class WbcNode:
         m = self.model
         tail = []
         for e in self.ees:
+            st = self.arm_states.get(e)
             if e in self.q_cmd:
                 T = m.fk(m.config(base, self.q_cmd), e)
                 row += [*T.translation, *R_to_quat(T.rotation)]
@@ -919,7 +1115,8 @@ class WbcNode:
         if targets:
             ages = [t.age for t in targets.values() if t is not None]
             tg_age = min(ages) if ages else nan
-        row += [nan if st is None else now - st.t_tick, est_age, tg_age]
+        ages = [now - s.t_tick for s in self.arm_states.values() if s is not None]
+        row += [max(ages) if ages else nan, est_age, tg_age]          # arm_age: the oldest arm state
         lim = out.limited_by if out else "none"
         row += [float(lim != "none"), float(LIMITED.index(lim)), now - self.last_rx if self.last_rx > -math.inf else nan,
                 float(hold), float(out.deadband) if out else 0.0, float(out.diag.get("solves", 0)) if out else 0.0,
@@ -931,12 +1128,20 @@ class WbcNode:
             row += [d.get("err_pos", {}).get(e, nan), d.get("err_rot", {}).get(e, nan),
                     t.ff_scale if t is not None else nan, float(t.id) if t is not None else nan,
                     d.get("manip", {}).get(e, nan), d.get("reach", {}).get(e, nan)]
-            row += list(self.q_cmd.get(e, [nan] * 6)) + list(self.v_cmd.get(e, [nan] * 6))
+            nj = len(m.arm_q[e])
+            row += list(self.q_cmd.get(e, [nan] * nj)) + list(self.v_cmd.get(e, [nan] * nj))
         tk = self.tick
         row += [float(self.armed), tk["period_ms"], (time.perf_counter() - self._t0) * 1e3, float(tk["overruns"]),
                 float(tk["late"])]
         for e in self.ees:
-            row += self._meas_columns(e, base, st, targets.get(e) if targets else None)
+            row += self._meas_columns(e, base, self.arm_states.get(e), targets.get(e) if targets else None)
+        d = out.diag if out else {}
+        for e in self.ees:
+            hs = ((d.get("swivel") or {}).get(e) or {}).get("hint") or {}
+            sc = (d.get("swivel_cont") or {}).get(e)
+            row += [nan if sc is None else sc, nan if sc is None else hs.get("weight", 0.0)]
+        le = d.get("limited_ees") or {}
+        row += [float(LIMITED.index(le[e])) if e in le else 0.0 for e in self.ees]
         self._last["out"] = out
         self.hub.publish_rows(np.array([row], dtype=np.float64), "tick")
 
@@ -945,7 +1150,7 @@ class WbcNode:
         measured (EE, world), kp (q_cmd - q_meas) per joint. NaN without a measured pose."""
         nan = math.nan
         if st is None or e not in self.q_cmd or not np.all(np.isfinite(st.q)):
-            return [nan] * 10
+            return [nan] * (4 + len(self.model.arm_q[e]))
         m = self.model
         qm = dict(self.q_cmd)
         qm[e] = st.q
@@ -956,7 +1161,7 @@ class WbcNode:
         out += [float(np.linalg.norm(Tc.translation - Tm.translation)),
                 float(np.linalg.norm(pin.log3(Tc.rotation @ Tm.rotation.T)))]
         kp = self.ctl.kp.get(e) if self.ctl is not None else None
-        out += list(kp * (self.q_cmd[e] - st.q)) if kp is not None else [nan] * 6
+        out += list(kp * (self.q_cmd[e] - st.q)) if kp is not None else [nan] * len(self.q_cmd[e])
         return out
 
     # -- requests ------------------------------------------------------------------------------------------
@@ -987,16 +1192,20 @@ class WbcNode:
         """Take the arm and swerve leases together (rolling back on any failure), enable both, open the arm's
         joint channel and seed the commanded joints from its state. Blocking."""
         holder = self._enable_begin(token)
-        peers = channel = st = q0 = None
+        peers = None
+        channels: dict = {}
+        sts: dict = {}
         try:
             peers = self._open_peers(holder)
-            if peers.arm_http is not None:
-                channel = ArmChannel(self.arm_socket)
+            for e, http in peers.arm_http.items():         # each arm's joint channel, a first state, its limits
+                lab = self._label(e)
+                channel = ArmChannel(self.arm_sockets.get(e))
                 try:
-                    channel.open(peers.arm_http.token)
-                except ChannelError as e:
-                    channel = None
-                    raise RequestError(503, f"arm joint channel: {e}")
+                    channel.open(http.token)
+                except ChannelError as ex:
+                    raise RequestError(503, f"{lab} joint channel: {ex}")
+                channels[e] = channel
+                st = None
                 t_end = time.monotonic() + 1.0
                 while time.monotonic() < t_end:
                     st = channel.poll(self.clock())
@@ -1004,11 +1213,11 @@ class WbcNode:
                         break
                     time.sleep(0.005)
                 if st is None or not np.all(np.isfinite(st.q)):
-                    raise RequestError(503, "no state from the arm joint channel within 1 s")
-                q0 = st.q.copy()
-                self._apply_arm_limits(channel.limits)
+                    raise RequestError(503, f"no state from the {lab} joint channel within 1 s")
+                sts[e] = st
+                self._apply_arm_limits(channel.limits, e)
         except BaseException:
-            if channel is not None:
+            for channel in channels.values():
                 channel.close()
             if peers is not None:
                 release_peers(peers.arm_http, peers.base, background=False)
@@ -1016,8 +1225,7 @@ class WbcNode:
                 self.state = "disabled"
             raise
         with self.lock:
-            self._enable_finish_locked(peers.arm_http is not None, peers.arm_lease, channel, peers.base, st, q0,
-                                       holder, arm_http=peers.arm_http)
+            self._enable_finish_locked(peers.arm_http, peers.arm_lease, channels, peers.base, sts, holder)
         return self.status()
 
     def _enable_begin(self, token: Optional[str]) -> str:
@@ -1035,23 +1243,24 @@ class WbcNode:
 
     def _open_peers(self, holder: str) -> "Peers":
         """The arm's and the swerve's leases, limits, enables, the arm's TCP and gains (applied here)."""
-        peers = open_peers(self.arm_target, self.swerve_target, self.cfg, f"wbc ({holder})",
-                           len(self.model.arm_q["arm"]), self.events, self.ctl.kp_source)
-        if peers.tcp is not None:
-            self.model.set_tcp("arm", peers.tcp)
-        if peers.kp is not None:
-            self.ctl.kp["arm"], self.ctl.kp_source = peers.kp.copy(), peers.kp_source
+        peers = open_peers(self.arm_targets, self.swerve_target, self.cfg, f"wbc ({holder})",
+                           {e: len(self.model.arm_q[e]) for e in self.arm_targets}, self.events, self.ctl.kp_source)
+        for e, tcp in peers.tcp.items():
+            self.model.set_tcp(e, tcp)
+        for e, kp in peers.kp.items():
+            self.ctl.kp[e], self.ctl.kp_source = kp.copy(), peers.kp_source[e]
         return peers
 
-    def _enable_finish_locked(self, has_arm: bool, arm_lease, channel, base, st, q0, holder: str,
-                              arm_http=None) -> None:
-        """Under ``self.lock``: the peers are up; seed the commands, disarmed, state idle."""
-        self.arm_http, self.channel, self.base = arm_http, channel, base
-        self.arm_lease_id = arm_lease if has_arm else None
-        self.arm_state = st if has_arm else None
-        n = len(self.model.arm_q["arm"])
-        self.q_cmd = {e: (q0.copy() if q0 is not None else self._posture(self.hints, e)) for e in self.ees}
-        self.v_cmd = {e: np.zeros(n) for e in self.ees}
+    def _enable_finish_locked(self, arm_https: dict, arm_leases: dict, channels: dict, base, states: dict,
+                              holder: str) -> None:
+        """Under ``self.lock``: the peers are up (per EE: the arm's HTTP, lease id, joint channel, first state); seed
+        the commands (each arm at its measured joints, an EE without an arm at its posture), disarmed, state idle."""
+        self.arm_https, self.channels, self.base = dict(arm_https or {}), dict(channels or {}), base
+        self.arm_lease_ids = {e: l for e, l in (arm_leases or {}).items() if e in self.channels}
+        self.arm_states = {e: s for e, s in (states or {}).items() if e in self.channels}
+        self.q_cmd = {e: (self.arm_states[e].q.copy() if self.arm_states.get(e) is not None
+                          else self._posture(self.hints, e)) for e in self.ees}
+        self.v_cmd = {e: np.zeros(len(self.model.arm_q[e])) for e in self.ees}
         self.base_twist = np.zeros(3)
         self.cmd_twist = {e: np.zeros(6) for e in self.ees}
         # disarmed at enable: datagrams queued before it never arm (their arm_seq counts as seen)
@@ -1066,23 +1275,26 @@ class WbcNode:
         self.enabled_at = self.clock()
         self.holder = holder
         self.state = "idle"
-        self.events.add(f"enabled by {holder} (arm lease {self.arm_lease_id}, swerve lease "
-                        f"{base.lease_id if base else None})")
+        leases = (f"arm lease {self.arm_lease_id}" if len(self.arm_targets) <= 1 else
+                  "arm leases " + ", ".join(f"{e} {self.arm_lease_ids.get(e)}" for e in self.arm_targets))
+        self.events.add(f"enabled by {holder} ({leases}, swerve lease {base.lease_id if base else None})")
 
-    def _apply_arm_limits(self, lim: dict) -> None:
-        """The arm's own limits from its welcome: joint range, joint speed and acceleration, lead bound, gap."""
-        n = len(self.model.arm_q["arm"])
+    def _apply_arm_limits(self, lim: dict, e: Optional[str] = None) -> None:
+        """An arm's own limits from its welcome (``e``: its EE; default the primary): joint range, joint speed and
+        acceleration, lead bound, gap."""
+        e = e or self.primary
+        n = len(self.model.arm_q[e])
         try:
             if lim.get("lo") is not None and lim.get("hi") is not None:
-                self.model.narrow_arm_limits("arm", lim["lo"][:n], lim["hi"][:n])
+                self.model.narrow_arm_limits(e, lim["lo"][:n], lim["hi"][:n])
             from ..arm.config import DEFAULT_SOFT
-            self.ctl.caps["arm"] = self.ctl.arm_caps(n, lim.get("joint_vel") or DEFAULT_SOFT.joint_vel,
-                                                     lim.get("joint_acc") or DEFAULT_SOFT.joint_acc)
+            self.ctl.caps[e] = self.ctl.arm_caps(n, lim.get("joint_vel") or DEFAULT_SOFT.joint_vel,
+                                                 lim.get("joint_acc") or DEFAULT_SOFT.joint_acc)
             if lim.get("max_lead"):
-                self.resync = min(self.cfg.resync, 0.7 * float(lim["max_lead"]))
-                self.ctl.max_lead["arm"] = float(lim["max_lead"])
+                self.resync = min(self.resync, self.cfg.resync, 0.7 * float(lim["max_lead"]))
+                self.ctl.max_lead[e] = float(lim["max_lead"])
             if lim.get("gap_max"):
-                self.gap_max = float(lim["gap_max"])
+                self.gap_maxes[e] = float(lim["gap_max"])
         except (TypeError, ValueError, IndexError) as e:
             self.events.add(f"arm limits in the welcome not usable ({e}); keeping the WBC's", "warn")
 
@@ -1093,27 +1305,29 @@ class WbcNode:
             r = self._disable_locked(reason)
         if r is None:
             return {"enabled": False, "was_enabled": False}
-        was, channel, base, arm_http = r
+        was, channels, base, arm_https = r
         if base is not None:
             base.close(disable=True)
-        if channel is not None:
+        for channel in channels.values():
             channel.close()
-        release_peers(arm_http, None, background=True)
+        release_peers(arm_https, None, background=True)
         return {"enabled": False, "was_enabled": was}
 
     def _disable_locked(self, reason: str):
         """Under ``self.lock``: the base muted, a last hold to the arm, the state disabled. Returns (was enabled,
-        the channel, the base, the arm's HTTP) for the caller to close outside the lock, or None (nothing to do)."""
+        the channels, the base, the arms' HTTP; per EE) for the caller to close outside the lock, or None (nothing to
+        do)."""
         was = self.enabled
         if not was and self.state != "fault":
             return None
-        channel, base, arm_http = self.channel, self.base, self.arm_http
+        channels, base, arm_https = dict(self.channels), self.base, dict(self.arm_https)
         if base is not None:
             base.mute()               # disable coasts: no further twist (no zero twist), then the swerve disables
-        # a last hold command, then close: the arm holds its command (stale = hold) until its lease ends
-        if channel is not None and "arm" in self.q_cmd:
-            channel.send(self.q_cmd["arm"], np.zeros(len(self.q_cmd["arm"])))
-        self.channel = self.base = self.arm_http = None
+        # a last hold command, then close: each arm holds its command (stale = hold) until its lease ends
+        for e, channel in channels.items():
+            if e in self.q_cmd:
+                channel.send(self.q_cmd[e], np.zeros(len(self.q_cmd[e])))
+        self.channels, self.base, self.arm_https = {}, None, {}
         self._disarm_locked(f"disabled: {reason}")
         self.enabled, self.fault, self.state = False, None, "disabled"
         self.disabled_reason = reason
@@ -1121,9 +1335,9 @@ class WbcNode:
         # the arm floats while disabled: no commanded / measured EE pose from the old command (the rows carry NaN)
         # that a client could capture as a riding pose; enable seeds them again from the measured joints
         self.q_cmd, self.v_cmd, self.cmd_twist = {}, {}, {}
-        self.arm_state = None
+        self.arm_states = {}
         self.events.add(f"disabled: {reason}")
-        return was, channel, base, arm_http
+        return was, channels, base, arm_https
 
     ESTOP_JOIN_S = 2.5          # the fan-out waits this long for the arm's and the swerve's answers
 
@@ -1134,7 +1348,7 @@ class WbcNode:
         info = self.estop.trigger(reason, source)
         with self.lock:
             self._estop_stop_locked(reason)
-        fw = estop_fanout(self.arm_http, self.arm_target, self.swerve_target, reason, source, self.events,
+        fw = estop_fanout(self.arm_https, self.arm_targets, self.swerve_target, reason, source, self.events,
                           self.ESTOP_JOIN_S)
         out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": fw}
         self.disable(f"e-stop ({reason or 'no reason'})")
@@ -1155,7 +1369,7 @@ class WbcNode:
 
     def set_hints(self, token: Optional[str], doc: dict) -> dict:
         self.lease.check(token)
-        h = parse_hints(doc, self.cfg, self.ees, POSTURES)
+        h = parse_hints(doc, self.cfg, self.ees, POSTURES, self.dofs())
         with self.lock:
             self._set_hints_locked(h)
         return self.get_hints()
@@ -1191,6 +1405,7 @@ class WbcNode:
         """What the /state document takes from the HTTP side (the server process in the process mode)."""
         last = self.hub.recent(1, "tick") if self.hub else []
         return {"estop": self.estop.info, "lease": self.lease.info, "arm_target": self.arm_target,
+                "arm_targets": dict(self.arm_targets),
                 "swerve_target": self.swerve_target, "model": model_doc(self.model, self.model_info, self.model_error),
                 "base": None if base is None else {"lease_id": base.lease_id, "sent": base.sent, "errors": base.errors},
                 "inputs": {k: u.status() for k, u in self.inputs.items()},
@@ -1202,11 +1417,11 @@ class WbcNode:
         """Under ``self.lock``: the control state as plain data (scalars, lists, dicts, the Config and Hints
         dataclasses): /state's input, and what the control process publishes to the server process."""
         out = self._last.get("out")
-        ld = (out.diag.get("lead") or {}).get("arm") if out is not None else None
-        st, ch, rx = self.arm_state, self.channel, self.receiver
+        rx = self.receiver
         ts = self._tick_times
         ctl = self.ctl
-        kp = None if ctl is None or ctl.kp.get("arm") is None else [float(x) for x in ctl.kp["arm"]]
+        arms = {e: self._arm_snapshot(e, out) for e in (self.ees or [self.primary])}
+        a = arms.get(self.primary) or self._arm_snapshot(self.primary, out)
         return dict(
             t=now, state=self.state, enabled=self.enabled, armed=self.armed, disarm_reason=self.disarm_reason,
             latch={"arm_seq": self.arm_seq, "arm_seq_seen": self.arm_seq_seen, "arm_floor": self.arm_floor,
@@ -1214,21 +1429,15 @@ class WbcNode:
             tick=dict(self.tick), holder=self.holder, fault=self.fault,
             hold_reason=getattr(self, "_hold_reason", None), disabled_reason=self.disabled_reason,
             limited_by=out.limited_by if out is not None else "none",
-            lead_dev=None if ld is None else [float(x) for x in ld["dev"]],
+            lead_dev=a["lead_dev"], arms=arms if len(arms) > 1 else None,
             lead_binding=bool(out is not None and out.diag.get("lead_binding")),
             limited_counts=dict(self.limited_counts),
-            arm=None if st is None else {"state": st.state_name, "paused": bool(st.paused), "t_rx": float(st.t_rx)},
-            channel=None if ch is None else {"session": ch.session, "stale_ms": ch.stale_ms, **ch.counts,
-                                             "last_error": ch.last_error},
-            limits=None if ch is None else dict(ch.limits),
-            arm_lease_id=self.arm_lease_id, sw=None if self.sw is None else dict(self.sw),
+            arm=a["arm"], channel=a["channel"], limits=a["limits"], arm_lease_id=a["arm_lease_id"], sw=None if self.sw is None else dict(self.sw),
             hints=self.hints, in_force=self.effective_hints(), cfg=self.cfg, resyncs=self.resyncs,
             solve_fail=self.solve_fail,
             loop_hz=(len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 10 and ts[-1] > ts[0] else None,
-            lead_binds=self.lead_binds, kp=kp,
-            max_lead=None if ctl is None else ctl.max_lead.get("arm"),
-            kp_source=None if ctl is None else ctl.kp_source,
-            lead=None if ctl is None or "arm" not in ctl.kp else [float(x) for x in ctl.lead("arm")],
+            lead_binds=self.lead_binds, kp=a["kp"], max_lead=a["max_lead"],
+            kp_source=None if ctl is None else ctl.kp_source, lead=a["lead"],
             reset_id=self.est.reset_id, jumps=self.est.jumps,
             est_age=None if self.est.row is None else round(now - self.est.row["t"], 4),
             est_health=self.estimator_health(now) or "ok",
@@ -1238,6 +1447,41 @@ class WbcNode:
                      "input_age": None if self.last_rx == -math.inf else round(now - self.last_rx, 4)},
             realtime=dict(self.realtime), base_twist=[float(v) for v in self.base_twist],
         )
+
+    def _arm_snapshot(self, e: str, out) -> dict:
+        """One EE's arm as plain data (the /state ``arm`` block's input)."""
+        ld = (out.diag.get("lead") or {}).get(e) if out is not None else None
+        st, ch, ctl = self.arm_states.get(e), self.channels.get(e), self.ctl
+        return dict(
+            target=self.arm_targets.get(e),
+            arm=None if st is None else {"state": st.state_name, "paused": bool(st.paused), "t_rx": float(st.t_rx)},
+            channel=None if ch is None else {"session": ch.session, "stale_ms": ch.stale_ms, **ch.counts,
+                                             "last_error": ch.last_error},
+            limits=None if ch is None else dict(ch.limits), arm_lease_id=self.arm_lease_ids.get(e),
+            lead_dev=None if ld is None else [float(x) for x in ld["dev"]],
+            kp=None if ctl is None or ctl.kp.get(e) is None else [float(x) for x in ctl.kp[e]],
+            max_lead=None if ctl is None else ctl.max_lead.get(e),
+            lead=None if ctl is None or e not in ctl.kp else [float(x) for x in ctl.lead(e)],
+            posture=self._posture_doc(e, out))
+
+    @staticmethod
+    def _posture_doc(e: str, out) -> Optional[dict]:
+        """A redundant arm's elbow (docs/wbc.md "Null-space posture"): its swivel, the target, the limit-aware status
+        (ok | limited: the human-like angle is outside the elbow's room within the joint limits, re-posing: the elbow
+        is moving back into it, unreachable: no arm angle of this branch fits the target within the limits) and the
+        room (rad); None for a 6-joint arm."""
+        sw = ((out.diag.get("swivel") or {}).get(e) if out is not None else None)
+        if not sw:
+            return None
+        r = lambda v: None if v is None else round(float(v), 4)    # noqa: E731
+        h = sw.get("hint")
+        return {"psi": r(sw.get("psi")), "psi_target": r(sw.get("psi_star")), "status": sw.get("status"),
+                "room": None if sw.get("room") is None else [r(v) for v in sw["room"]],
+                "swivel": r(sw.get("psi_cont")),
+                "hint": None if not h else {"seq": h["seq"], "live": h["live"], "anchors": h["anchors"],
+                                            **{k: r(h.get(k)) for k in ("weight", "anchor", "anchor_dpsi", "dpsi",
+                                                                        "raw", "target", "age", "f_elbow", "f_conf",
+                                                                        "blend", "f_robot")}}}
 
     # -- runtime config ------------------------------------------------------------------------------
 
@@ -1260,8 +1504,8 @@ class WbcNode:
         with self.lock:
             hard = getattr(self.base, "hard", None) or {} if self.base is not None else {}
             new = validate_config(self.cfg, changes, self.enabled, self.base_twist,
-                                  None if self.ctl is None else self.ctl.kp.get("arm"),
-                                  None if self.ctl is None else self.ctl.max_lead.get("arm"), hard)
+                                  None if self.ctl is None else self.ctl.kp.get(self.primary),
+                                  None if self.ctl is None else self.ctl.max_lead.get(self.primary), hard)
             old = self.cfg
             push = self.enabled and self.base is not None and (new.max_speed, new.max_omega) != (old.max_speed,
                                                                                                 old.max_omega)
@@ -1341,10 +1585,8 @@ def state_document(sn: dict, now: float, srv: dict) -> dict:
     """The /state document from a control snapshot (``WbcNode._snapshot_locked``) and the HTTP side's parts
     (``WbcNode._server_parts``)."""
     info, e = srv["lease"], srv["estop"]
-    st, channel, base, sw = sn["arm"], sn["channel"], srv["base"], sn["sw"]
-    r6 = lambda v: None if v is None else [round(float(x), 6) for x in v]   # noqa: E731
-    dev = sn["lead_dev"]
-    return {
+    base, sw = srv["base"], sn["sw"]
+    doc = {
         "state": sn["state"],
         "enabled": sn["enabled"],
         "armed": sn["armed"],
@@ -1365,22 +1607,7 @@ def state_document(sn: dict, now: float, srv: dict) -> dict:
                   "expires_in": None if info is None else round(info.expires - now, 3)},
         "session": sn["session"],
         "model": srv["model"],
-        "arm": {"target": srv["arm_target"], "lease_id": sn["arm_lease_id"] if sn["enabled"] else None,
-                "channel": channel,
-                "state": None if st is None else st["state"],
-                "paused": bool(st is not None and st["paused"]),
-                "limits": sn["limits"],
-                "age": None if st is None else round(now - st["t_rx"], 4),
-                "resyncs": sn["resyncs"],
-                # the lead bound: per joint the bound (rad) = lead_torque / kp (at most max_lead), the command's
-                # deviation beyond the measured window this tick (rad) and its torque, how often it bound
-                "lead": {"lead_torque": list(sn["cfg"].lead_torque), "kp": r6(sn["kp"]),
-                         "kp_source": sn["kp_source"], "max_lead": sn["max_lead"], "lead_delay": sn["cfg"].lead_delay,
-                         "bound": r6(sn["lead"]), "dev": r6(dev),
-                         "torque": (r6(np.asarray(sn["kp"]) * np.asarray(dev))
-                                    if dev is not None and sn["kp"] is not None else None),
-                         "binding": sn["lead_binding"],
-                         "binds": sn["lead_binds"]}},
+        "arm": arm_block(sn, now, srv["arm_target"]),
         "swerve": {"target": srv["swerve_target"],
                    "lease_id": base["lease_id"] if base else None,
                    "sent": base["sent"] if base else None,
@@ -1397,31 +1624,75 @@ def state_document(sn: dict, now: float, srv: dict) -> dict:
         "latest": srv["latest"],
         "events": srv["events"],
     }
+    if sn.get("arms"):                     # several arms: the same block per EE (the primary's is "arm" above)
+        targets = srv.get("arm_targets") or {}
+        doc["arms"] = {ee: arm_block({**sn, **a}, now, targets.get(ee, a.get("target"))) for ee, a in sn["arms"].items()}
+    return doc
+
+
+def arm_block(sn: dict, now: float, target) -> dict:
+    """The /state ``arm`` block of one arm (its snapshot keys merged over the control snapshot)."""
+    r6 = lambda v: None if v is None else [round(float(x), 6) for x in v]   # noqa: E731
+    st, dev = sn["arm"], sn["lead_dev"]
+    return {"target": target, "lease_id": sn["arm_lease_id"] if sn["enabled"] else None,
+            "channel": sn["channel"],
+            "state": None if st is None else st["state"],
+            "paused": bool(st is not None and st["paused"]),
+            "limits": sn["limits"],
+            "age": None if st is None else round(now - st["t_rx"], 4),
+            "resyncs": sn["resyncs"],
+            # the lead bound: per joint the bound (rad) = lead_torque / kp (at most max_lead), the command's
+            # deviation beyond the measured window this tick (rad) and its torque, how often it bound
+            "lead": {"lead_torque": list(sn["cfg"].lead_torque), "kp": r6(sn["kp"]),
+                     "kp_source": sn["kp_source"], "max_lead": sn["max_lead"], "lead_delay": sn["cfg"].lead_delay,
+                     "bound": r6(sn["lead"]), "dev": r6(dev),
+                     "torque": (r6(np.asarray(sn["kp"]) * np.asarray(dev))
+                                if dev is not None and sn["kp"] is not None else None),
+                     "binding": sn["lead_binding"],
+                     "binds": sn["lead_binds"]},
+            "posture": sn.get("posture")}
 
 
 @dataclass
 class Peers:
-    """The enable's HTTP side: the arm's control plane (its lease), the swerve base, the arm's TCP and gains."""
-    arm_http: object = None
-    arm_lease: Optional[int] = None
+    """The enable's HTTP side, per EE: each arm's control plane (its lease), its TCP and gains; the swerve base."""
+    arm_http: dict = field(default_factory=dict)
+    arm_lease: dict = field(default_factory=dict)
     base: object = None
-    tcp: Optional[list] = None
-    kp: Optional[np.ndarray] = None
-    kp_source: Optional[str] = None
+    tcp: dict = field(default_factory=dict)
+    kp: dict = field(default_factory=dict)
+    kp_source: dict = field(default_factory=dict)
 
 
-def open_peers(arm_target, swerve_target, cfg: Config, name: str, n_arm: int, events, kp_source: str) -> Peers:
-    """Take the arm and swerve leases together, set the swerve's soft limits, enable both, read the arm's TCP and
-    its gains (the lead bound's kp). Rolls everything back on a failure (RequestError with the reason)."""
+def _arm_https(x) -> list:
+    """The arms' HTTP clients from a dict, a list, one client or None."""
+    if x is None:
+        return []
+    if isinstance(x, dict):
+        return [v for v in x.values() if v is not None]
+    if isinstance(x, (list, tuple)):
+        return [v for v in x if v is not None]
+    return [x]
+
+
+def open_peers(arm_targets, swerve_target, cfg: Config, name: str, n_arm, events, kp_source: str) -> Peers:
+    """Take every arm's lease and the swerve's together, set the swerve's soft limits, enable all, read each arm's
+    TCP and gains (the lead bound's kp). ``arm_targets``: EE -> arm node target (a string: the one arm ``arm``);
+    ``n_arm``: EE -> its joint count (or one count). Rolls everything back on a failure (RequestError)."""
+    if isinstance(arm_targets, str) or arm_targets is None:
+        arm_targets = {"arm": arm_targets} if arm_targets else {}
+    n_of = (lambda e: n_arm[e]) if isinstance(n_arm, dict) else (lambda e: n_arm)   # noqa: E731
     p = Peers()
     try:
-        if arm_target:
-            p.arm_http = ArmHttpFactory(arm_target)
+        for e, target in arm_targets.items():
+            lab = arm_label(e, arm_targets)
+            http = ArmHttpFactory(target)
             try:
-                out = p.arm_http.acquire(name)
-            except Exception as e:
-                raise RequestError(getattr(e, "status", 503), f"arm lease: {getattr(e, 'detail', e)}")
-            p.arm_lease = out.get("lease_id")
+                out = http.acquire(name)
+            except Exception as ex:
+                raise RequestError(getattr(ex, "status", 503), f"{lab} lease: {getattr(ex, 'detail', ex)}")
+            p.arm_http[e] = http
+            p.arm_lease[e] = out.get("lease_id")
         if swerve_target:
             from .links import SwerveBase
             base = SwerveBase(swerve_target)
@@ -1432,22 +1703,26 @@ def open_peers(arm_target, swerve_target, cfg: Config, name: str, n_arm: int, ev
                 status = 422 if isinstance(e, LimitsError) else getattr(e, "status", 503)
                 raise RequestError(status, f"swerve: {getattr(e, 'detail', e)}")
             p.base = base
-        if p.arm_http is not None:
+        for e, http in p.arm_http.items():
+            lab, n = arm_label(e, arm_targets), n_of(e)
             try:
-                p.arm_http.enable()
-            except Exception as e:
-                raise RequestError(getattr(e, "status", 503), f"arm enable: {getattr(e, 'detail', e)}")
-            p.tcp = p.arm_http.tcp()
+                http.enable()
+            except Exception as ex:
+                raise RequestError(getattr(ex, "status", 503), f"{lab} enable: {getattr(ex, 'detail', ex)}")
+            tcp = http.tcp()
+            if tcp is not None:
+                p.tcp[e] = tcp
             # the servo's kp for the lead bound: the arm's gain profile in force (its GET /gains); without it the
             # arm's default profile file stays (an event)
             try:
-                g = p.arm_http.get("/gains")
+                g = http.get("/gains")
                 kp = np.asarray(g["kp"], float)
-                if kp.shape[0] < n_arm or not np.all(np.isfinite(kp[:n_arm])) or np.any(kp[:n_arm] <= 0):
+                if kp.shape[0] < n or not np.all(np.isfinite(kp[:n])) or np.any(kp[:n] <= 0):
                     raise ValueError(f"kp {g['kp']}")
-                p.kp, p.kp_source = kp[:n_arm].copy(), f"arm GET /gains (profile {g.get('name')})"
-            except Exception as e:  # noqa: BLE001 - optional: keep the default profile's
-                events.add(f"arm gains not readable ({type(e).__name__}: {e}); the lead bound uses {kp_source}", "warn")
+                p.kp[e], p.kp_source[e] = kp[:n].copy(), f"{lab} GET /gains (profile {g.get('name')})"
+            except Exception as ex:  # noqa: BLE001 - optional: keep the default profile's
+                events.add(f"{lab} gains not readable ({type(ex).__name__}: {ex}); the lead bound uses {kp_source}",
+                           "warn")
     except BaseException:
         release_peers(p.arm_http, p.base, background=False)
         raise
@@ -1455,19 +1730,22 @@ def open_peers(arm_target, swerve_target, cfg: Config, name: str, n_arm: int, ev
 
 
 def release_peers(arm_http, base, background: bool = True) -> None:
-    """Disable and release the swerve (its own background thread) and the arm (``background``: in a thread)."""
+    """Disable and release the swerve (its own background thread) and the arms (``arm_http``: per EE, a list or
+    one; ``background``: in a thread)."""
     if base is not None:
         base.close(disable=True)
-    if arm_http is None:
+    https = _arm_https(arm_http)
+    if not https:
         return
 
     def release():
-        for call in (arm_http.disable, arm_http.release):
-            try:
-                call()
-            except Exception:  # noqa: BLE001
-                pass
-        arm_http.close()
+        for h in https:
+            for call in (h.disable, h.release):
+                try:
+                    call()
+                except Exception:  # noqa: BLE001
+                    pass
+            h.close()
     if background:
         threading.Thread(target=release, daemon=True).start()
     else:
@@ -1475,13 +1753,16 @@ def release_peers(arm_http, base, background: bool = True) -> None:
 
 
 def estop_fanout(arm_http, arm_target, swerve_target, reason: str, source: str, events, join_s: float) -> dict:
-    """The e-stop to the arm and the swerve IN PARALLEL (a slow one never delays the other); waits at most
-    ``join_s``. Returns ``forwarded``: per peer whether it answered."""
+    """The e-stop to every arm and the swerve IN PARALLEL (a slow one never delays the others); waits at most
+    ``join_s``. Returns ``forwarded``: per peer whether it answered (``arm`` with one arm, else each arm's EE).
+    ``arm_http`` / ``arm_target``: per EE (or the one arm's)."""
     fw: dict = {}
     msg = f"wbc: {reason}" if reason else "wbc"
+    targets = arm_target if isinstance(arm_target, dict) else ({"arm": arm_target} if arm_target else {})
+    https = arm_http if isinstance(arm_http, dict) else ({next(iter(targets), "arm"): arm_http} if arm_http else {})
 
-    def to_arm():
-        h = arm_http or ArmHttpFactory(arm_target)
+    def to_arm(e, target):
+        h = https.get(e) or ArmHttpFactory(target)
         h.estop(msg, source or "wbc")
 
     def to_swerve():
@@ -1497,15 +1778,16 @@ def estop_fanout(arm_http, arm_target, swerve_target, reason: str, source: str, 
             fw[name] = False
             events.add(f"e-stop forward to the {name} failed: {e}", "error")
 
-    threads = [threading.Thread(target=run, args=(n, f), name=f"wbc-estop-{n}", daemon=True)
-               for n, f, t in (("arm", to_arm, arm_target), ("swerve", to_swerve, swerve_target)) if t]
+    peers = [(arm_label(e, targets), (lambda e=e, t=t: to_arm(e, t)), t) for e, t in targets.items()]
+    peers.append(("swerve", to_swerve, swerve_target))
+    threads = [threading.Thread(target=run, args=(n, f), name=f"wbc-estop-{n}", daemon=True) for n, f, t in peers if t]
     for t in threads:
         t.start()
     deadline = time.monotonic() + join_s
     for t in threads:
         t.join(max(0.0, deadline - time.monotonic()))
     out = {}
-    for n, t in (("arm", arm_target), ("swerve", swerve_target)):
+    for n, _, t in peers:
         if t:
             out[n] = bool(fw.get(n, False))
             if n not in fw:
@@ -1513,14 +1795,19 @@ def estop_fanout(arm_http, arm_target, swerve_target, reason: str, source: str, 
     return out
 
 
-def forward_estop(arm_http, swerve_target, reason: str, events, *, base: bool, arm: bool) -> None:
-    """A cross-bus e-stop (one bus's e-stop e-stops the other), in the background."""
+def forward_estop(arm_http, swerve_target, reason: str, events, *, base: bool, arm: bool,
+                  skip: Optional[str] = None) -> None:
+    """A cross-bus e-stop (one bus's e-stop e-stops the others), in the background. ``arm_http``: per EE (or one);
+    ``skip``: the EE whose own e-stop this is."""
+    https = ({e: h for e, h in arm_http.items() if e != skip and h is not None} if isinstance(arm_http, dict) else
+             ({"arm": arm_http} if arm_http is not None else {}))
+
     def go():
-        if arm and arm_http is not None:
+        for e, h in (https.items() if arm else ()):
             try:
-                arm_http.estop(f"wbc: {reason}")
-            except Exception as e:  # noqa: BLE001
-                events.add(f"e-stop forward to the arm failed: {e}", "error")
+                h.estop(f"wbc: {reason}")
+            except Exception as ex:  # noqa: BLE001
+                events.add(f"e-stop forward to the {arm_label(e, https)} failed: {ex}", "error")
         if base and swerve_target:
             try:
                 from ..swerve.client import SwerveClient

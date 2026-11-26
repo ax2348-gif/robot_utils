@@ -149,10 +149,13 @@ class ArmNode(JointStream, ArmRequests):
     def __init__(self, bus_factory: Callable[[], ArmBus], profile: str = C.DEFAULT_PROFILE,
                  settings: Optional[C.NodeSettings] = None, hub: Optional[RowHub] = None,
                  locks: Optional[LockStore] = None, clock: Callable[[], float] = time.monotonic,
-                 description_node: str = "description", joint_socket=None):
+                 description_node: str = "description", joint_socket=None, urdf: Optional[str] = None,
+                 arm_frame: str = "arm", robot: Optional[str] = None):
         """``joint_socket``: path of the internal joint channel's socket (stream.py), started with the node; None:
-        no joint channel."""
+        no joint channel. ``urdf``: the arm's URDF for its kinematics (None: rebot_ctl's); ``arm_frame``: its
+        description frame; ``robot``: the robot profile (robots/; the frame's fallback pose)."""
         self.bus_factory = bus_factory
+        self.urdf, self.arm_frame, self.robot = urdf, arm_frame, robot
         self.description_node = description_node     # where the arm frame's pose in the robot base frame comes from
         self.clock = clock
         self.settings = settings or C.NodeSettings()
@@ -341,7 +344,7 @@ class ArmNode(JointStream, ArmRequests):
                     pass
                 raise
             self._raise_bus_threads(before)
-            self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits)
+            self.kin = self.kin or ArmKinematics(self.bus.setpoint_limits, urdf=self.urdf)
             if self.warm_planner:
                 Planner.warm(self.kin)      # start the planner process now, not on the first plan
             self._base, self.error = "uninitialized", None

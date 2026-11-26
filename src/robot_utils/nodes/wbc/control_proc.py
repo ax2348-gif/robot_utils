@@ -6,7 +6,7 @@ its surroundings swapped for the inter-process ones (ipc.py):
 
 - the target datagrams: the ``Receiver``'s sockets, polled every tick (no thread); armed / arm_seq / the latch are
   applied here as in-process;
-- the arm: its joint channel, owned here (hello with the arm lease token the server took);
+- the arms: their joint channels, owned here (hello with each arm's lease token the server took);
 - the estimator and swerve rows: rings the server's stream readers fill;
 - the base twist: a slot the server's sender posts from; ``mute`` / a lost base are flags / messages;
 - the client lease: ``held`` from the server's slot; every accepted datagram counts (the server renews the lease);
@@ -151,9 +151,10 @@ class ControlCore(WbcNode):
     """``WbcNode``'s tick in the control process (module docstring)."""
 
     def __init__(self, model, shm: ipc.Shared, port: ipc.Port, *, arm, swerve, estimator, config, udp_host,
-                 udp_port, unix_socket, arm_socket, name):
+                 udp_port, unix_socket, arm_socket, name, arms=None, arm_sockets=None):
         super().__init__(model, arm=arm, swerve=swerve, estimator=estimator, config=config, udp_host=udp_host,
-                         udp_port=udp_port, unix_socket=unix_socket, arm_socket=arm_socket, name=name)
+                         udp_port=udp_port, unix_socket=unix_socket, arm_socket=arm_socket, name=name, arms=arms,
+                         arm_sockets=arm_sockets)
         self.shm, self.port = shm, port
         self.events = _Events(port)
         self.hub = _Hub(shm.rows)
@@ -177,8 +178,8 @@ class ControlCore(WbcNode):
             t, en, es, lid = (float(v) for v in sw[-1])
             self.sw = {"t": t, "enabled": en, "estop": es, "lease_id": lid, "rx": now}
 
-    def _forward_estop(self, reason: str, *, base: bool, arm: bool) -> None:
-        self.port.send(("fwd_estop", reason, base, arm))
+    def _forward_estop(self, reason: str, *, base: bool, arm: bool, skip=None) -> None:
+        self.port.send(("fwd_estop", reason, base, arm, skip))
 
     def _live(self) -> bool:
         return super()._live() and not self._srv_lost
@@ -250,11 +251,10 @@ class ControlCore(WbcNode):
         with self.lock:
             r = self._disable_locked("node shutting down") if self.enabled else None
         if r is not None:
-            _, channel, base, _ = r
-            if channel is not None:
+            for channel in r[1].values():
                 channel.close()
-        if self._pending and self._pending.get("channel") is not None:
-            self._pending["channel"].close()
+        for channel in ((self._pending or {}).get("channels") or {}).values():
+            channel.close()
         self.receiver.close()
 
     # -- commands ------------------------------------------------------------------------------------------
@@ -335,35 +335,43 @@ class ControlCore(WbcNode):
             r = self._disable_locked(reason)
         if r is None:
             return {"enabled": False, "was_enabled": False}
-        was, channel, base, _ = r
-        if channel is not None:
+        was, channels, base, _ = r
+        for channel in channels.values():
             channel.close()
         return {"enabled": False, "was_enabled": was}
 
     def cmd_enable(self, d: dict):
-        """The server took the leases and enabled the peers; here: the TCP and gains, the joint channel (the
-        welcome and a first state are awaited over the next ticks, ``_progress_enable``), the seed."""
+        """The server took the leases and enabled the peers; here, per arm (``d["arms"]``: EE -> its lease token,
+        lease id, TCP, gains): the TCP and gains, the joint channel (the welcome and a first state are awaited over
+        the next ticks, ``_progress_enable``), the seed."""
         with self.lock:
             if self.enabled or self.state == "enabling":
                 raise RequestError(409, f"already {self.state}; disable first")
             self.state = "enabling"
+        channels: dict = {}
         try:
-            if d.get("tcp") is not None:
-                self.model.set_tcp("arm", d["tcp"])
-            if d.get("kp") is not None:
-                self.ctl.kp["arm"], self.ctl.kp_source = np.asarray(d["kp"], float).copy(), d["kp_source"]
+            for e, a in (d.get("arms") or {}).items():
+                if a.get("tcp") is not None:
+                    self.model.set_tcp(e, a["tcp"])
+                if a.get("kp") is not None:
+                    self.ctl.kp[e], self.ctl.kp_source = np.asarray(a["kp"], float).copy(), a["kp_source"]
             base = None if d.get("base_lease_id") is None else _Base(self, d["gen"], d["base_lease_id"])
-            p = {"rid": d["rid"], "d": d, "base": base, "channel": None, "welcome": False, "st": None,
-                 "deadline": time.monotonic() + 1.0}
-            if d.get("arm_token") is not None:
-                ch = ArmChannel(self.arm_socket)
+            p = {"rid": d["rid"], "d": d, "base": base, "channels": channels, "welcome": {}, "st": {},
+                 "deadline": {}}
+            for e, a in (d.get("arms") or {}).items():
+                if a.get("token") is None:
+                    continue
+                ch = ArmChannel(self.arm_sockets.get(e))
                 try:
-                    ch.begin_open(d["arm_token"])
-                except ChannelError as e:
-                    raise RequestError(503, f"arm joint channel: {e}")
-                p["channel"] = ch
+                    ch.begin_open(a["token"])
+                except ChannelError as ex:
+                    raise RequestError(503, f"{self._label(e)} joint channel: {ex}")
+                channels[e] = ch
+                p["deadline"][e] = time.monotonic() + 1.0
             self._pending = p
         except BaseException:
+            for ch in channels.values():
+                ch.close()
             with self.lock:
                 self.state = "disabled"
             raise
@@ -372,8 +380,8 @@ class ControlCore(WbcNode):
 
     def _abort_enable(self, err: RequestError) -> None:
         p, self._pending = self._pending, None
-        if p["channel"] is not None:
-            p["channel"].close()
+        for ch in p["channels"].values():
+            ch.close()
         with self.lock:
             self.state = "disabled"
         self.write_snapshot()
@@ -383,43 +391,51 @@ class ControlCore(WbcNode):
         p = self._pending
         if p is None:
             return
-        ch = p["channel"]
         now = time.monotonic()
+        waiting = False
+        lab = "arm"
         try:
-            if ch is not None and not p["welcome"]:
-                if ch.poll_open() is None:
-                    if now > p["deadline"]:
-                        ch.close(send_bye=False)
-                        p["channel"] = None
-                        raise RequestError(503, "arm joint channel: no welcome from the arm joint channel within 1 s")
-                    return
-                p["welcome"], p["deadline"] = True, now + 1.0
-            if ch is not None:
+            for e, ch in list(p["channels"].items()):          # each arm: its welcome, then a first state
+                lab = self._label(e)
+                if not p["welcome"].get(e):
+                    if ch.poll_open() is None:
+                        if now > p["deadline"][e]:
+                            ch.close(send_bye=False)
+                            del p["channels"][e]
+                            raise RequestError(503, f"{lab} joint channel: no welcome from the {lab} joint channel "
+                                                    "within 1 s")
+                        waiting = True
+                        continue
+                    p["welcome"][e], p["deadline"][e] = True, now + 1.0
                 st = ch.poll(self.clock())
                 if st is not None and np.all(np.isfinite(st.q)):
-                    p["st"] = st
-                if p["st"] is None:
-                    if now > p["deadline"]:
-                        raise RequestError(503, "no state from the arm joint channel within 1 s")
-                    return
-                self._apply_arm_limits(ch.limits)
-        except ChannelError as e:
-            p["channel"] = None
-            self._abort_enable(RequestError(503, f"arm joint channel: {e}"))
+                    p["st"][e] = st
+                if p["st"].get(e) is None:
+                    if now > p["deadline"][e]:
+                        raise RequestError(503, f"no state from the {lab} joint channel within 1 s")
+                    waiting = True
+            if waiting:
+                return
+            for e, ch in p["channels"].items():
+                self._apply_arm_limits(ch.limits, e)
+        except ChannelError as ex:
+            p["channels"].pop(e, None)
+            self._abort_enable(RequestError(503, f"{lab} joint channel: {ex}"))
             return
-        except RequestError as e:
-            self._abort_enable(e)
+        except RequestError as ex:
+            self._abort_enable(ex)
             return
         self._pending = None
-        d, st = p["d"], p["st"]
+        d = p["d"]
         self.receiver.poll()               # datagrams sent before the enable count as seen, never arm (as in-process)
         with self.lock:
-            self._enable_finish_locked(ch is not None, d.get("arm_lease"), ch, p["base"], st,
-                                       None if st is None else st.q.copy(), d["holder"])
+            self._enable_finish_locked({}, {e: a.get("lease") for e, a in (d.get("arms") or {}).items()},
+                                       p["channels"], p["base"], p["st"], d["holder"])
         self._tick_prev = None             # the enable's ticks were not late
         self.write_snapshot()
+        limits = {e: dict(ch.limits) for e, ch in p["channels"].items()}
         self.port.send(("reply", p["rid"], True, {"status": self.status(),
-                                                  "limits": None if ch is None else dict(ch.limits)}))
+                                                  "limits": limits.get(self.primary), "arms_limits": limits}))
 
 
 def control_main(params: dict) -> None:
@@ -435,7 +451,8 @@ def control_main(params: dict) -> None:
         core = ControlCore(model, shm, port, arm=params["arm"], swerve=params["swerve"],
                            estimator=params["estimator"], config=params["config"], udp_host=params["udp_host"],
                            udp_port=params["udp_port"], unix_socket=params["unix_socket"],
-                           arm_socket=params["arm_socket"], name=params["name"])
+                           arm_socket=params["arm_socket"], name=params["name"], arms=params.get("arms"),
+                           arm_sockets=params.get("arm_sockets"))
         if core.fields != params["fields"]:
             raise RuntimeError("the control process's stream fields differ from the server's")
     except Exception as e:  # noqa: BLE001

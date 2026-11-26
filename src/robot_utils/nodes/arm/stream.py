@@ -165,6 +165,8 @@ class JointStream:
             c = F.unpack_command(data)
         except F.PacketError as e:
             return self._bad(e.reason)
+        if len(c.q) != N:                                 # another arm's packet (its joint count)
+            return self._bad("joints")
         self._stream_command(c, addr, self.clock())
         return None
 

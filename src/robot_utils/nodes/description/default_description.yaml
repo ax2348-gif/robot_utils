@@ -55,7 +55,7 @@ components:
       FR: [0.165608, -0.165608]
       RR: [-0.165608, -0.165608]
       RL: [-0.165608, 0.165608]
-    chassis_mass: 9.0                   # kg, estimate (frame, battery, electronics)
+    chassis_mass: 20.0                  # kg, the owner's figure (2026-11-25; was a 9 kg estimate): frame, battery, electronics
     module_mass: 0.9                    # kg, estimate (housing, both motors)
     wheel_mass: 0.15                    # kg, estimate
     steer_effort: 45.0                  # N m at the module: NEO 550 stall 0.97 N m x 46.42:1 (MAXSwerve steering)

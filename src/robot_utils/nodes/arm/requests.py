@@ -219,8 +219,10 @@ class ArmRequests:
 
     def arm_in_base(self) -> dict:
         """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
-        ``arm`` frame (cached 10 s); its shipped default if that node is unreachable. Says which."""
-        v, self._aib = Q.arm_in_base(self.description_node, self._aib)
+        frame of this arm (``arm_frame``; cached 10 s); the robot profile's default if that node is unreachable.
+        Says which."""
+        v, self._aib = Q.arm_in_base(self.description_node, self._aib, getattr(self, "arm_frame", "arm"),
+                                     getattr(self, "robot", None))
         return v
 
     def geometry(self, q=None, pose: Optional[pin.SE3] = None, seed: str = "measured", max_rot_deg: Optional[float] = None,

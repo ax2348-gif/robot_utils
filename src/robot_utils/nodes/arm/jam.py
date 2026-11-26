@@ -9,7 +9,9 @@ from typing import Optional
 
 import numpy as np
 
-from .config import N
+from .config import ARM_TYPE, N
+
+REBOT_BANDS = [1.0, 4.0, 4.0, 1.5, 0.8, 0.6]   # Nm per joint (draft, offline study)
 
 JAM_RESPONSES = ("hold", "report", "off")
 
@@ -20,7 +22,8 @@ class JamConfig:
     while servoing with no motion executing (a finished move counts; a move still settling too), every joint
     slower than ``static_qd`` for ``settle_s``. A joint's residual |tau - tau_g| above its band for ``hold_s``
     fires; it clears below ``release`` x band."""
-    bands: list = field(default_factory=lambda: [1.0, 4.0, 4.0, 1.5, 0.8, 0.6])   # Nm per joint (draft, offline study)
+    # Nm per joint: the reBot's, or the arm type's (robots/arm_types.py jam_bands)
+    bands: list = field(default_factory=lambda: list(REBOT_BANDS if ARM_TYPE is None else ARM_TYPE["jam_bands"]))
     hold_s: float = 1.0
     release: float = 0.7
     static_qd: float = 0.05          # rad/s: every joint slower than this counts as static

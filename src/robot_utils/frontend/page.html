@@ -743,16 +743,20 @@ start();
     }, {signal: ctl.signal});
     // the arm, from live readings: its link frames (GET links, 10 Hz) and the gripper gap and enabled
     // flag from its telemetry stream; read only (no lease)
-    const arm = byKind("arm");
-    if (arm){
-      const A = {};
+    // Every arm node: one arm draws on the description frame "arm" (as always); several (a bimanual robot), each on
+    // the description frame of its instance name (robots/: arm_left, arm_right)
+    const armNodes = nodes.filter(n => (n.cfg.kind || n.cfg.name) === "arm");
+    const armState = {};
+    for (const arm of armNodes){
+      const A = {}, name = arm.cfg.name;
       RU.rows(base(arm) + "stream?max_hz=10", d => { A.gap = d.last("g_gap"); A.enabled = d.last("enabled") > 0.5; }, {signal: ctl.signal});
       const sig = ctl.signal;
       (async () => {
         while (!sig.aborted){
           const t0 = performance.now();
           try { const r = await RU.api(base(arm) + "links");
-            if (!sig.aborted) scene.update({arm: Object.assign({}, A, {frames: r.frames, at: performance.now()})}); }
+            if (!sig.aborted){ armState[name] = Object.assign({}, A, {frames: r.frames, at: performance.now(), mirror: !!r.mirror});
+              scene.update(armNodes.length > 1 ? {arms: Object.assign({}, armState)} : {arm: armState[name]}); } }
           catch (_) { /* grey after 1 s */ }
           await new Promise(res => setTimeout(res, Math.max(20, 100 - (performance.now() - t0))));
         }

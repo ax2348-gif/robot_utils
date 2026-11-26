@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, create_model
 
 from ..common.realtime import RealtimeOut
 from ..common.server import EStopState, Event, LockOut
+from .config import N
 from .node import FIELD_DOC, FIELDS, PHASES, SOURCES, STATES, UNITS
 
 ArmState = Literal[tuple(STATES)]
@@ -108,8 +109,15 @@ class LinksOut(BaseModel):
     """GET /links."""
     frames: list[PoseOut] = Field(description="Pose of each frame named in `names`, arm frame, at the measured "
                                               "joint angles.")
-    names: list[str] = Field(description="joint1..joint6 (each joint's frame), end_link (the gripper frame: at the "
-                                         "fingertips, midway between the jaws) and tcp.")
+    names: list[str] = Field(description="joint1..jointN (each joint's frame; N = 6 for a reBot, 7 for an OpenArm), "
+                                         "end_link (the gripper frame: at the fingertips, midway between the jaws) and "
+                                         "tcp.")
+    mirror: Optional[bool] = Field(None, description="Present (true) for a mirrored arm (robots/mirror.py): its link "
+                                                     "frames are the mirror image's, so drawings mirror ARM_BOXES in y.")
+    boxes: Optional[list[list]] = Field(None, description="Present for an arm type other than the reBot (robots/"
+                                        "arm_types.py): its boxes to draw, [frame, cx, cy, cz, sx, sy, sz] (mm, "
+                                        "axis-aligned in the frame: base, link1..linkN = jointN's frame, end = end_link, "
+                                        "finger = a jaw); without it the reBot's ARM_BOXES.")
 
 
 # -- geometry ------------------------------------------------------------------------------------
@@ -265,7 +273,7 @@ def _tick_docs() -> dict:
             elif (n := resolve(p, parts[0])) is not None:
                 names.append(n)
         for n in names:
-            for i in range(1, 7):
+            for i in range(1, N + 1):
                 out.setdefault(n.replace("<i>", str(i)), doc)
     return out
 
@@ -279,7 +287,7 @@ _TICK_EXTRA = {
     "progress": "of that motion: 0..1 over its planned duration", "g_qd": "gripper motor velocity",
     "g_tau": "gripper motor torque reading", "g_tau_est": "gripper torque the MIT law applies",
     "g_force_max": "squeeze force limit in force", "g_limiting": "1 while the force limit holds the squeeze back",
-    "g_status": "gripper motor's Damiao status code", **{f"j{i}_t_mos": "motor driver (MOS) temperature" for i in range(1, 7)},
+    "g_status": "gripper motor's Damiao status code", **{f"j{i}_t_mos": "motor driver (MOS) temperature" for i in range(1, N + 1)},
 }
 _UNIT_WORDS = {"enum": "index (see doc)", "bool": "1 or 0", "count": "count", "id": "id", "": "unitless", "C": "°C"}
 

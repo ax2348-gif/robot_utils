@@ -20,6 +20,8 @@ record          time field
 ``sent``        ``t_send`` (when the datagram went to the WBC)
 ``event``       ``t`` (the event line's Pi monotonic)
 ``ping``        ``t_send`` (keep-alive; never cut into an episode)
+``hint``        ``t_rx`` (the teleop client's step clock for a headset frame: the base hint's
+                candidates; tools/quest_teleop/hint_source.py)
 ``scene3d``     ``t_rx`` (this recorder's receipt of a rigid-scene pose frame; see
                 ``Rsf1Splitter``)
 ==============  ======================================================================
@@ -40,7 +42,8 @@ _LEN = struct.Struct(">I")
 
 ROW_TIME_FIELDS = ("t_tick", "t", "t_sensor", "t_end", "t_capture")
 HEADER_TIME_FIELDS = {"headset": ("t_rx",), "sent": ("t_send",), "event": ("t",), "ping": ("t_send",),
-                      "frame": ("t_sensor", "t_capture"), "scene3d": ("t_rx",)}
+                      "frame": ("t_sensor", "t_capture"), "scene3d": ("t_rx",),
+                      "hint": ("t_rx",)}
 
 
 class RawSplitter:

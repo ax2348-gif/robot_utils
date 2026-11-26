@@ -181,6 +181,7 @@ def test_limits_hold_under_demanding_targets(model):
     # this target, behind and lower, ends with the arm at a joint limit (a local minimum of the velocity-level QP,
     # reported, never a yank); the heading hint yields to the EE task (stage 2)
     assert s.log[-1][5].limited_by == "joint_limit"
+    assert s.log[-1][5].diag["limited_ees"] == {"arm": "joint_limit"}       # per arm (the haptics' hand)
     assert s.log[-1][5].diag["err_pos"]["arm"] < 0.1
 
 
@@ -330,6 +331,9 @@ def test_base_hint_yields_at_the_reach_boundary(model):
     assert d == pytest.approx(0.88 * reach, abs=0.01), (d / reach)
     assert s.base[0] > -0.6 and np.all(s.tw == 0.0)                  # stopped at the boundary, far from -1.5
     assert sum(r[5].limited_by == "reach" for r in s.log) > 50
+    # per arm (diag limited_ees, the stream's <ee>_limited_by): the arm's own reach row, the same ticks
+    assert all(r[5].diag["limited_ees"].get("arm") == "reach" for r in s.log if r[5].limited_by == "reach")
+    assert all("arm" not in r[5].diag["limited_ees"] for r in s.log if r[5].limited_by == "none")
     # the EE stays on target: a transient while the base brakes at the boundary (measured 6.6 mm), then none
     assert max(r[5].diag["err_pos"]["arm"] for r in s.log) < 0.01
     assert np.linalg.norm(s.tcp().translation - T0.translation) < 1e-4

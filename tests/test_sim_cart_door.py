@@ -478,3 +478,11 @@ def test_http_spring_and_condim_round_trip_through_save_and_load(world, tmp_path
         assert all(world.m.geom_condim[k] == 3 for k in range(world.m.ngeom) if world.m.geom_bodyid[k] == g)
         assert c.delete("/scene/objects/flapper").status_code == 200
     world.reset(start_scene=True)
+
+
+def test_the_door_has_a_pull_bar_in_the_arms_band_and_one_at_standard_height():
+    door = next(l for l in C.cart_room()["links"] if l["name"] == "door")
+    bars = sorted(g["pos"][2] for g in door["geoms"]
+                  if g["shape"] == "cylinder" and g["radius"] == C.PULL_BAR_R and g["length"] == C.PULL_BAR_L)
+    assert bars == [C.PULL_BAR_Z, C.PULL_BAR_Z_STD] == [0.60, 1.05]
+    assert C.PULL_BAR_Z + C.PULL_BAR_L / 2 < C.PULL_BAR_Z_STD - C.PULL_BAR_L / 2      # apart, not one long bar

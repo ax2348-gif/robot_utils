@@ -86,10 +86,13 @@ function buildScene(){
   fitR(...box(I4, [0, 0, (fz0 + fz1) / 2], [rb.frame_size, rb.frame_size, fz1 - fz0], muted, 1.5));
   if (tr){ fitR(...box(I4, [0, 0, (tr[0] + tr[1]) / 2], [rb.frame_size, rb.frame_size, tr[1] - tr[0]], muted, 1.5));
     for (const i of [-1, 1]) for (const j of [-1, 1]) L([i * h, j * h, fz1], [i * h, j * h, tr[0]], muted, 1, [2, 3]); }
-  const Tarm = (DESC.frames_in_base || {}).arm;
-  if (Tarm){ const live = ARM && performance.now() - ARM.at < 1500;
-    for (const [a, b] of RU.viz.armSegments(Tarm, live ? ARM.frames : null, live ? ARM.gap : 0)) L(a, b, live ? fg : muted, 1.25);
-    fitR(tf(Tarm, [0, 0, 0])); axes(Tarm, 0.08, 2, null); lab(tf(Tarm, [0.12, 0, 0.02]), "arm", fg); }
+  for (const b of rb.bodies || []){ fitR(...box(b.T, [0, 0, 0], b.size, muted, 1.25)); lab(tf(b.T, [0, 0, b.size[2] / 2]), b.name); }
+  for (const arm of (DESC.arms && DESC.arms.length ? DESC.arms : [{name: "arm", frame: "arm"}])){
+    const Tarm = (DESC.frames_in_base || {})[arm.frame], A = ARMS[arm.name];
+    if (!Tarm) continue;
+    const live = A && performance.now() - A.at < 1500;
+    for (const [a, b] of RU.viz.armSegments(Tarm, live ? A.frames : null, live ? A.gap : 0, arm.mirror, (A && A.boxes) || null)) L(a, b, live ? fg : muted, 1.25);
+    fitR(tf(Tarm, [0, 0, 0])); axes(Tarm, 0.08, 2, null); lab(tf(Tarm, [0.12, 0, 0.02]), arm.name, fg); }
   for (const m of rb.modules){ box(rpyT([m.x, m.y, 0.0381], [0, 0, 0]), [0, 0, 0], [0.0762, 0.03, 0.0762], fg, 1); lab([m.x, m.y, 0.09], m.name); }
   L([h, 0, fz1], [h + 0.06, 0, fz1], AX[0], 2);             // front marker
   axes(I4, 0.2, 2.5, ["x", "y", "z"]); lab([0, 0, -0.03], "base");

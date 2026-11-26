@@ -1,0 +1,5 @@
+# The reBot mobile robot as it is: swerve base, one reBot arm (DM motors) on the front-right corner, the head camera
+# and a wrist camera. The default robot (robots/__init__.py). Its arms: the description's one `arm` component.
+doc: reBot single arm (swerve base, one reBot arm front-right, head + wrist camera)
+description:
+  file: robot_utils:nodes/description/default_description.yaml

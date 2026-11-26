@@ -33,10 +33,9 @@ KEEP = 5
 
 
 def _merge(a: dict, b: dict) -> dict:
-    out = copy.deepcopy(a)
-    for k, v in (b or {}).items():
-        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else copy.deepcopy(v)
-    return out
+    """common/merge.py's deep merge (one rule for every YAML layer: a null deletes the key)."""
+    from ..common.merge import deep_merge
+    return deep_merge(a, b)
 
 
 def _json_default(o):
@@ -48,8 +47,11 @@ def _json_default(o):
 
 
 class Store:
-    def __init__(self, data_dir: str = DEFAULT_DATA_DIR, keep: int = KEEP):
+    def __init__(self, data_dir: str = DEFAULT_DATA_DIR, keep: int = KEEP, base: Optional[dict] = None):
+        """``base``: the description to start from (a robot profile's, robots/); default the shipped
+        default_description.yaml."""
         self.dir = Path(data_dir)
+        self.base = base
         self.keep = keep
         self.lock = threading.RLock()
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +59,8 @@ class Store:
     # -- description --------------------------------------------------------------------------
 
     def default(self) -> dict:
+        if self.base is not None:
+            return copy.deepcopy(self.base)
         text = resources.files(__package__).joinpath("default_description.yaml").read_text()
         return yaml.safe_load(text)
 

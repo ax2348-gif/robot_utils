@@ -163,7 +163,8 @@ orientation and shows each joint's lead torque against its budget.
    without them counts as `armed: false`). **Nothing moves until the WBC is armed** (below):
    - reactive: `{"type": "target", "session", "seq", "t": null | <Pi monotonic s>, "est_reset": <optional>,
      "ees": {"arm": {"frame": "world", "pos": [x, y, z], "quat": [x, y, z, w], "twist": [vx, vy, vz, wx, wy,
-     wz] (optional, world axes), "gripper": 0..1 (optional; 0 closed, 1 open)}}, "base": {<hint overrides>}
+     wz] (optional, world axes), "gripper": 0..1 (optional; 0 closed, 1 open), "swivel": {"seq", "dpsi",
+     "elbow", "conf"} (optional; a 7-DOF arm's elbow: "The operator's elbow" below)}}, "base": {<hint overrides>}
      (optional)}`; `t: null` = now; the newest wins; the twist is the feedforward while fresh.
    - chunk: `{"type": "chunk", "session", "seq", "est_reset"?, "ees": {"arm": {"frame": "world", "t": [...],
      "pos": [[...]], "quat": [[...]], "twist": [[...]]?, "gripper": [...]?}}}`.
@@ -296,12 +297,25 @@ down to zero but exceed it by at most `band_twist` (0.1 m/s) / `band_omega` (0.3
 the arm. Within those bands the base moves to help the EE tasks; where a limit binds (reach, manipulability, joint
 limits) the base stops at the boundary.
 
+### Several arms (`--robot`)
+
+The model's end effectors are the robot profile's arms (`src/robot_utils/robots/`; `ee_specs`): the default robot's
+one EE `arm`, the bimanual robot's `arm_left` and `arm_right`. Each EE has its own arm node (named as the EE; a
+one-EE model keeps `--arm`): its own lease, joint channel, state, gains, joint limits and gap, all taken and
+released together at enable / disable. Every check (stale state, the arm's bye, off / fault), hold, resync, pause
+and e-stop covers every arm; the armed latch, the session and the base are shared, so one arm's fault holds both
+and one arm's e-stop goes to the base and the other arms. Datagrams carry each EE under `ees` as before; the stream
+has each EE's `<ee>_*` columns; `arm_age` is the oldest arm state's. `/state` keeps `arm` (the first arm) and adds
+`arms` (the same block per EE). The QP has no arm-arm collision constraint (decided); a redundant arm pair may have the soft, short-range
+arm-proximity term ("Null-space posture" below). The robot profile's `wbc:` block gives the config's defaults for
+that robot (the node's `--config` overrides them). docs/plans/bimanual_and_robot_swap.md.
+
 ## The controller
 
 `controller.Controller` is the swap point (QP now, MPC later): `step(Snapshot) -> Output` (base twist, arm joint
 steps, status, `limited_by`, diagnostics, an optional plan). The QP (`QPController`, pinocchio + qpsolvers/daqp)
-solves **one QP** for the velocity of `[x, y, yaw (world), 6 arm joints]` every tick (docs/plans/wbc_v1.md,
-"Formulation"):
+solves **one QP** for the velocity of `[x, y, yaw (world), the arms' joints]` every tick (6 per reBot arm, 7 per OpenArm;
+docs/plans/wbc_v1.md, "Formulation"):
 
 - **Costs:** EE tracking `|W (J q' - (v_ff + K e))|²` (`k_pos`, `k_rot` 4/s, errors clipped at `max_err_pos` /
   `max_err_rot`; orientation rows in the TCP's axes with the mask; Levenberg–Marquardt `lm |W e|²` plus adaptive
@@ -340,6 +354,192 @@ Arm output: integrated from the previous **commanded** joints; resynced to the m
 (0.25 rad, an event; with the lead bound a last-resort net) and held within the lead bound of them; q' is sent as
 the velocity feedforward. Gripper: `gripper × 49.6 mm` as the gap goal.
 
+### Null-space posture (a redundant arm: 7 DOF)
+
+An arm with more joints than the EE task's 6 rows (the OpenArm, `openarm_bimanual`; the DOF comes from the model)
+has one free angle per hand pose: the elbow's **swivel** about the shoulder-wrist line. Its posture terms live in the
+EE task's **null space**: the cost `½ Σ wᵢ |P (q' - vᵢ)|²`, P the null-space projector of the EE task's weighted rows
+over that arm's joints (damped pseudo-inverse), each term a joint-velocity attractor `vᵢ` with a weight `wᵢ`. P is a
+symmetric projector, so this is `H += (Σ w) P`, `c -= P Σ wᵢ vᵢ`, in the one QP: the joint box, the lead bound, the
+reach and the base coupling stay hard rows. Why not a lexicographic (second) QP: it would double the solves per tick
+and repeat every hard row; the projection gives the same priority for the unconstrained part. **Saturation**: a joint
+within `null_limit_margin` (0.1 rad) of a limit that the projected motion would push further in is taken out of the
+projector and the projection redone (otherwise the joint box refuses that motion and the rest of it moves the EE: a
+10 mm steady error with OpenArm joint 6 at its limit, before). The summed attractor is capped at
+`null_posture_speed` (0.3 rad/s). A 6-joint arm keeps the weighted posture tie-breaker above (no null space).
+
+`null_mode` picks the terms (`wbc/humanlike.py`):
+
+- **`humanlike`** (the default), modelled on human arms: one natural elbow placement per hand pose, settled into
+  unless something forces another. Priorities, by weight: EE task ≫ arm proximity > swivel > effort > centering.
+  - **Swivel model** (`w_swivel` 1, `k_swivel` 1/s): a target swivel ψ* from the hand pose, manipulability based
+    (Kim & Rosen's human-arm redundancy model): with the shoulder S and the wrist W fixed, the elbow lies on a
+    circle; on a 4-joint arm model (a spherical shoulder and the elbow) the wrist's velocity transmission along a
+    direction u is `|(W-S) × u|² + (u · n × (W-E))²` (n the elbow's axis); ψ* is its soft argmax over
+    `swivel_range` (−20..100°; 0 = elbow straight down, + out; `swivel_beta` 10), continuous in the hand pose (no
+    flips), low-passed (`swivel_tau` 0.3 s). ψ is measured numerically (the elbow off the S-W line against the
+    world's down; OpenArm's joint origins 2 / 4 / 6 as S / E / W, the arm type's `geometry`), so no spherical-joint
+    assumption. The attractor moves along the arm's self-motion only (`v = N (Nᵀ∇ψ) k (ψ*-ψ) / |Nᵀ∇ψ|²`, N the
+    TCP Jacobian's null space). `swivel_dir`: **`head`** (default; u from the wrist to a head point `swivel_head`,
+    base_link, the OpenArm profile's (0.12, 0, 1.229): its human-scale eye height; the "bring the hand toward the
+    face / look at the hand" direction of the human studies; gives a moderate elbow-out swivel, ψ* ≈ 50° at the
+    nominal hand pose, vs 61° for the fixed nominal posture), **`torso`** (u to the torso centre `swivel_torso`,
+    the profile's (0.12, 0, 0.95): elbows further out, ≈ 83°, for pulling toward the body), **`motion`** (u along the hand's wanted
+    velocity, blended in above 5 cm/s, the head direction while slow: the elbow turns to move the hand easily where
+    it is going).
+  - **Effort** (`w_effort` 0.3, `k_effort` 1): down the self-motion gradient of `log Σ (τ_g,i / τ_max,i)²`, the
+    gravity torque the arm holds relative to each joint's torque limit (pinocchio's gravity derivatives): the "lazy"
+    elbow-down-and-slightly-out posture (alone: ψ ≈ 19-21° at the nominal hand pose, Σ(τ/τmax)² 0.034 / 0.038 vs
+    the nominal posture's 0.042 / 0.047; with the defaults the elbow settles at ψ ≈ 48°, 2° below ψ*).
+  - **Joint centering** (`w_center` 0.1, `k_center` 0.1 rad/s): toward mid-range on the shoulder and wrist joints
+    (the arm type's `geometry.centering`; not the elbow), a light RULA-like comfort term.
+  - **Arm proximity** (`w_arm_proximity`, 0 = off; per robot profile: the OpenArm's `wbc:` block sets 30; off with
+    one arm): a soft term, **never a hard collision constraint**, between two arms' **upper-arm and forearm
+    capsules only** (the arm type's `geometry.capsules`: shoulder→elbow r 0.05 m, elbow→wrist r 0.045 m ending
+    4 cm short of the wrist centre). The wrists and grippers are left out so the hands come together freely
+    (handovers, two-hand grasps). **Strictly short range**: with clearance d below `proximity_clearance` c0 (0.05 m)
+    and `s = (c0 - d)/c0`, the weight is `w s²` and the wanted separation speed `proximity_speed s` (0.2 m/s at
+    contact), i.e. a push growing as s³ (C² at c0), exactly zero (value and gradient) at and beyond c0, so in the
+    natural posture it is dormant and the posture is identical with it on or off (tested tick for tick). Per pair it
+    moves each arm along its self-motion (the closest point's Jacobian along the pair's normal, the other arm held).
+    At weight 30 over the swivel's 1 it wins near contact and lets go as the arms part; the elbow then drifts back.
+- **`nominal`**: attract the fixed nominal posture (the profile's `posture`, the hint's `posture`) at
+  `w_null_posture`; kept for comparison.
+
+Tests (`tests/test_openarm.py`): the EE error history with every null-space term on matches the one with none,
+within 2 mm on 0.07 m reaches (the transient; the reach itself to < 1 mm), and while the hands sweep fast (a ~2.4
+cm lag behind reactive targets) within 5 mm (measured 3.2-3.7 mm: the null-space motion shares the joints' speed /
+acceleration caps); the elbow settles on ψ* within 2° (swivel
+alone) / 6° (with effort and centering) for three hand poses; ψ* and ψ change by < 0.5° per 10 ms tick as the hands
+sweep (and the model is continuous along a dense line of hand poses); an elbow pushed ±0.4 (scaled) along the
+self-motion returns within 1.5°, the hand within 1 mm; effort alone holds less gravity torque than the nominal
+posture at four hand poses (mean ratio < 0.95); with targets drawing the left forearm onto the right elbow the
+proximity term keeps the smallest upper-arm / forearm clearance larger (17.2 → 19.7 mm during the reach, where the
+elbow's swivel speed is capped; 27.1 → 42.4 mm settled) with the hands still on target; far apart it changes nothing (identical joints tick for tick).
+
+### Near the joint limits (a redundant arm): measured, and opt-in
+
+On the OpenArm the velocity-level QP's main workspace shortfall is joint-limit local minima: the hand driven straight
+at a target runs a joint into its limit and the arm stops there, though the target may be reachable in another
+configuration. Measured (the robot profile's Anvil wrist and gripper, perfect tracking, base locked; scratch study,
+2026-11-25, re-scored against the limits the WBC uses; docs/plans/bimanual_and_robot_swap.md "OpenArm workspace"):
+of 68 pull-up-top hand poses (hands at and above shoulder height, 0.05-0.25 m in front of it, pull-up grips)
+reachable within the URDF limits and collision-free, the QP reaches 51 from the nominal posture; 9 of the 17 misses
+need a joint inside the WBC's 2 deg limit margin (60 reached with a 1 deg margin), 8 are true failures (6 on another
+IK branch, 2 stopped where a local IK from there succeeds). Whole workspace (200 collision-free targets per arm, one
+per 5 cm cell): 64 % (65 % of those reachable within the WBC's limits), every miss at a joint limit, 82 % of the true
+failures on another IK branch. (These numbers predate Anvil's URDF, whose J6 range is the reverse of the one measured:
+of the four pull-up-top poses in tests/test_openarm.py one is still reached from the re-solved nominal posture, three
+stall; a re-run of the study is due.) Two null-space aids exist, **off by default** (they changed none of these numbers,
+and the swivel planner costs up to 18 ms in a tick's 99th percentile):
+
+- `swivel_limit_aware` (`wbc/swivel_feasible.py`): the self-motion manifold of the target pose traced numerically
+  (10 deg swivel steps along the TCP Jacobian's null vector, two DLS corrections each; no near-SRS closed form) every
+  `swivel_plan_period`; the human-like swivel target is clipped into the feasible run the arm is in (all joints within
+  the WBC's limits minus `null_limit_margin`), so the elbow never steers into a dead end of its own branch. Status per
+  arm in /state (`arms.<ee>.posture`: ok, limited, re-posing, unreachable) and an event on each change.
+- `w_limit` (with `limit_band`, `limit_speed`): a joint-limit repulsion in the null space, zero outside the band.
+
+Neither moves the hand: both act in the EE task's null space (tested: the hand within 1 mm while the elbow re-poses).
+The misses they cannot fix need the hand to leave its path (another branch) or a joint inside the margin; the WBC
+reports them (`limited_by: joint_limit`, the posture status `unreachable`) and does not move the hand on its own. A
+predictive (MPC) WBC is the candidate for the remaining cases: docs/plans/bimanual_and_robot_swap.md. The branch is
+the elbow's choice, and the operator can make it: below.
+
+### The operator's elbow: the swivel hint
+
+A teleop client can steer a redundant arm's elbow with a per-EE **`swivel`** object in its `target` datagrams. The
+split: the client sends the operator's raw measurements, the WBC does all the computation (anchoring, smoothing,
+fades). Absent (a client that never sends it, or a 6-joint arm): no hint, behaviour unchanged.
+
+```json
+"ees": {"arm_left": {"pos": [...], "quat": [...], "swivel": {"seq": 3, "dpsi": 0.42, "elbow": 2.1, "conf": 0.9}}}
+```
+
+- `seq` (int): the operator's engagement id; a new value is a new engagement (re-anchor).
+- `dpsi` (rad): the operator's swivel change since that engagement, accumulated incrementally about their
+  shoulder-wrist axis (the same measure as below), already sign-adjusted for mirror pairing (+ = elbow out).
+- `elbow` (rad, 0..π): the operator's upper-arm-forearm angle, π = straight.
+- `conf` (0..1): the client's confidence in the body tracking.
+
+Validated with the rest of the datagram: a malformed `swivel` (a missing or extra key, a non-integer `seq`, a
+non-finite number, `elbow` outside 0..π, `conf` outside 0..1) drops the datagram as `invalid`, counted in
+`/state.session.dropped`. Reactive targets only (a chunk's `swivel` is ignored). A datagram without the field
+leaves the last hint to age.
+
+- **The swivel without a fixed zero** (`wbc/swivel_geom.py`): the elbow's rotation about the shoulder-wrist line,
+  measured only as increments: between two ticks the elbow's offset from the S-W line is parallel-transported to the
+  new line (the smallest rotation taking one onto the other) and the signed angle to the new offset, about the new
+  line, is the step (+ elbow out, for either arm; zero while the elbow is on the line). The WBC sums the steps of the
+  **commanded** arm every tick into the robot's swivel ψ_r, with an arbitrary origin (only differences are used). A
+  fixed zero (the world's down projected, as the swivel model's ψ) is singular when the S-W line is vertical (reaching
+  straight down); the increments are not.
+- **Anchoring**: on a new `seq`, or the first fresh input after none or a stale one, `ψ_r0` = ψ_r and `dpsi0` = that
+  datagram's `dpsi` (0 at a fresh engagement; its value at a return after a dropout, so what the operator did
+  meanwhile is not replayed). The raw target is `ψ_r0 + swivel_hint_gain (dpsi - dpsi0)` (gain 1).
+- **Smoothing**: the target in force is the raw one low-passed (`swivel_hint_tau` 0.05 s) and rate-capped
+  (`swivel_hint_rate` 2 rad/s); at the first anchoring it starts at ψ_r (engaging moves nothing); a new `seq` while
+  a hint is in force keeps it continuous (it eases to the new anchor).
+- **The weight** = the ramped operator-side fade × the robot's fade. Operator side: the elbow fade (`π - elbow`, the
+  operator's flexion, a smoothstep over `swivel_hint_flex` 10..30°) × the confidence fade (a smoothstep over
+  `swivel_hint_conf` 0.3..0.6: none below 0.3), ramped toward that at 1 / `swivel_hint_blend` (0.15 s) per s. Robot
+  side: the same flexion smoothstep on the robot's own elbow (π - the angle at the elbow between S and W; the
+  OpenArm's equals joint 4). So it fades smoothly to zero toward either arm's full extension, where the swivel is
+  undefined.
+- **Stale or invalid** (released: teleop sends the field only while a hand is engaged; or the body lost): no valid
+  `swivel` for `swivel_hint_timeout` (0.3 s). **Held** by default (`swivel_hint_hold`): the target and the weight
+  stay, so the elbow stays where the operator left it, as the hand does when released, and the next engagement
+  re-anchors there: swivels accumulate across clutches. Before (2026-11-26) the weight ramped to 0 and the model's ψ*
+  took over, so every release drifted the elbow back and the relative mapping could not build up (the owner: "the
+  relative formulation becomes impossible to use"). With the hold off, that fade-out (no step). A controller reset
+  (disable) clears it. The next valid input re-anchors as a new `seq` does.
+- **The term, null space only**: the hint replaces the swivel model's attractor by its weight `a`: two attractors,
+  the model's ψ* at `(1 - a) w_swivel` and the hint's at `a w_swivel_hint` (3; below the proximity term's 30, which
+  still acts), the hint's rate `k_swivel_hint (target - ψ_r)` (5/s) capped at `swivel_hint_rate`, along the gradient
+  of ψ_r (central differences of the steps: defined for any S-W direction) in the self-motion. The null-space speed
+  cap rises from `null_posture_speed` toward `swivel_hint_speed` (1.2 rad/s) by `a`. The speeds (2026-11-26; before 3/s, 1.5 rad/s, 0.1 s,
+  1 rad/s, 0.3 s, which followed about half of the operator's swivel in 1–2 s grips): a 0.4 rad step reaches 90% in
+  0.9 s (1.2 s before); the price is up to 1.4 mm more hand error during a fast reach (0.75 mm before), 0.2 mm at
+  rest; at 6/s, 2 rad/s, 1.5 rad/s: 0.75 s, 2 mm, and 4.4 mm with the S–W line vertical. The hand stays primary, the joint
+  box and every hard row stay; a hint the arm cannot follow is followed as far as the null space and the limits
+  allow, never at the EE's cost. Only with `null_mode` humanlike.
+- **Out**: the stream's `<ee>_swivel` (ψ_r) and `<ee>_swivel_w` (the weight in force `a`; 0 none); `/state`
+  `arms.<ee>.posture.swivel` (ψ_r) and `.hint` (null when none): `seq`, `live` (fresh and anchored), `anchors`
+  (anchorings so far), `weight` (in force), `anchor` (ψ_r0), `anchor_dpsi` (dpsi0), `dpsi`, `raw`, `target` (in
+  force), `age`, `f_elbow`, `f_conf`, `blend` (the ramped operator side), `f_robot`.
+
+Measured (tests/test_swivel_hint.py; perfect tracking, base locked): the operator turning ±0.5 rad moves the elbow
+±0.5 from where it was at the engagement (gain 2: twice), to within 0.02 rad in 3 s, the hand within 0.5 mm, the
+other arm untouched; with the operator sweeping ±0.4 rad during reaches the EE error history is the plain run's
+within 1 mm; engaging moves nothing (< 0.005 rad/s change per tick); the fades at a dropout, its return and the end
+are ramps (≤ 0.04 rad/s per tick, under 1/5 of the same cycle with the weight switched in one tick); a new `seq`
+with the elbow still converging slows it over ~0.1 s; the robot's elbow at 3°: weight < 0.02 and the run is the
+plain one; the operator's elbow straight or `conf` 0.1: weight 0; half-way along either fade: 0.5; the S-W line
+within 3° of vertical: the hint moves the elbow as anywhere else; no hint, `conf` 0 or the operator's arm straight:
+identical joints tick for tick. The elbow converges with a time constant of ~0.35 s (`k_swivel_hint`, diluted by the
+effort and centering terms).
+
+The pull-up top (the workspace study's 8 true failures: docs/plans/bimanual_and_robot_swap.md "OpenArm workspace";
+the hand brought to the target along a 4 s path from the nominal posture, base locked; scratch `bm/hint_dpsi.py`):
+the operator's `dpsi` scripted as d × (the path's progress, or over the first second), d ±0.5..2 rad, elbow and
+conf full (mean weight 0.98: the robot's elbow stays bent). Final miss, mm (plain → best d):
+
+| target | arm | class | plain | best scripted dpsi |
+|---|---|---|---|---|
+| 11 (overhand, 5 cm ahead, 10 cm above) | left | local | 126.5 | **0** (+0.5 early; also +1..+2 either shape: 7 of 16) |
+| 26 | left | branch | 28.4 | 28.4 (none helps) |
+| 33 (chin-up) | left | local | 6.6 | 6.6 (none helps) |
+| 55 | right | branch | 319.7 | 277.2 (+0.5 early) |
+| 56 | right | branch | 384.6 | 189.4 (-2 ramp) |
+| 57 | right | branch | 345.9 | 190.3 (+0.5 ramp) |
+| 60 | right | branch | 201.2 | 120.5 (-1 ramp) |
+| 63 | right | branch | 183.5 | 119.7 (-1 ramp) |
+
+One of the 8 reached (the elbow raised, as a person grips overhead; tested), 5 roughly halved, 2 unchanged; the
+right arm's branch cases need the hand to leave its path, which the null space cannot do (the MPC's cases). In none
+of these is the hand on its path anyway (the plain runs' path error 43-430 mm: the arm meets its limits on the way);
+the hint changes where it meets them (max path error 228 vs 142 mm on 11, lower on 56, 57, 60, 63).
+
 Known limits of v1 (measured in the tests): a velocity-level QP can end in a local minimum with the arm at a joint
 limit (a target behind and below the base): the error stays, reported (`limited_by` joint_limit), no yank. With
 the arm limited and the base at rest, a small error can remain when moving the base would not be worth the start
@@ -370,7 +570,10 @@ Appended: `limited`, `limited_by` (0 none, 1 reach, 2 manipulability, 3 fence, 4
 start charge's decision is not streamed), `solves`, `wheel_max`, per EE the target (`_tgt_*`),
 `_err_pos`, `_err_rot`, `_ff_scale`, `_target_id`, `_manip`, `_reach`, `_q_cmd1..6`, `_qd1..6`; then `armed`,
 `tick_period` (ms), `tick_compute` (ms), `overruns`, `late_ticks`; then per EE `_err_meas_pos`, `_err_meas_rot`,
-`_lead_pos`, `_lead_rot`, `_lead_tau1..6` (above: "Three error numbers"). `/state` shows `armed`,
+`_lead_pos`, `_lead_rot`, `_lead_tau1..6` (above: "Three error numbers"); then per EE `_swivel`, `_swivel_w`
+(above: "The operator's elbow"; NaN for a 6-joint arm); then per EE `_limited_by`: that arm's own binding limit this
+tick (its rows only, the `limited_by` codes: 0 none, 1 reach, 2 manipulability, 4 joint_limit, 7 lead; by the same
+priority; `diag["limited_ees"]`), so the teleop's haptics buzz the hand driving that arm. `/state` shows `armed`,
 `disarm_reason`, `latch`, `tick`, `limited_by`, `hold_reason`, `fault`, the session counters, the inputs, the lead
 bound (`arm.lead`) and the latest row.
 
@@ -416,9 +619,24 @@ in pure-Python/numpy code here): ~1 ms p50, ~1.5 ms p99 of the 10 ms tick.
   integration, a stalled controller in real time). `tests/test_wbc_lead.py` (the lead bound on a measured arm that
   lags or is blocked: contact within the budget, free motion at the caps untouched, release, sudden blockage; the
   node: kp from the arm's /gains, runtime config, `/state.arm.lead`, the three error numbers; `/state` holding the
-  control lock only briefly, `/events` at most 2 Hz).
+  control lock only briefly, `/events` at most 2 Hz). `tests/test_swivel_hint.py` (the operator's swivel hint: the
+  incremental swivel, the null-space term, anchoring and fades, the pull-up-top case, the datagram field, the stream
+  and `/state`).
 
 ## Not done yet
 
 The base fence; the MPC; a measured `ff_timeout` / `hold_timeout` / `base_start_charge` from teleop sessions; `--udp-host` on
 the robot (the LAN address in `nodes.yaml`).
+
+## Known bugs
+
+- **A released arm near a singularity blocks the base** (found 2026-11-26, sim, OpenArm; deferred). With the hands
+  released, a stick translation barely moves the base, which turns at `band_omega` (0.30 rad/s) instead until the
+  direction frees up. Recording 20261126-025455, 03:08:49–03:09:29: stick (+0.4, −0.7) m/s gave base (+0.03, −0.04,
+  +0.30); the left arm's elbow was nearly straight (J4 4°), and the swerve delivered every command. Cause: released
+  arms ride on world-frame EE targets (the stream's base pose ∘ the relative pose at release, plus a twist
+  feedforward), so each base speed change is a tick of EE error that the arm must absorb. The EE task outweighs the
+  base command in the one QP, and a singular arm cannot absorb motion along its axis. The apparent dependence on world
+  orientation is the travel direction relative to the straight arm. Fix to build: base-relative riding in the WBC (a
+  released arm's EE target in the base frame, so base motion makes no EE error). Workaround: grip, bend that elbow,
+  release.

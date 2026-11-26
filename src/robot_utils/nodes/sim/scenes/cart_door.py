@@ -43,6 +43,9 @@ PULL_BAR_R = 0.0125         # m, the door's pull bar (25 mm tube; GAP_MAX 49.6 m
 PULL_BAR_L = 0.40           # m, vertical
 PULL_BAR_Z = 0.60           # m, its centre above the floor: the arm's band (a forward grasp reaches x 0.8 m at z
                             # <= 0.55, 0.78 m at 0.65, 0.73 m at 0.70), not a person's ~1.0 m
+PULL_BAR_Z_STD = 1.05       # m, a second bar at a person's standard handle height (ADA 0.86-1.22 m; the owner's ask:
+                            # the human-scale OpenArm reaches there)
+PULL_BARS_Z = (PULL_BAR_Z, PULL_BAR_Z_STD)   # both bars, on the same axis (0.40-0.80 and 0.85-1.25 m)
 PULL_STANDOFF = 0.065       # m, the leaf's face to the bar's axis: 52 mm behind the bar for the fingers
 PULL_EDGE = 0.07            # m, the bar's axis in from the leaf's free edge
 
@@ -97,8 +100,8 @@ def cart_room(name: str = "cart_room", closer: float = DOOR_CLOSER) -> dict:
     """The room (POST /scene/objects fields, shape articulated, fixed): four walls closing a ``ROOM_D`` x ``ROOM_W``
     room whose near wall faces the robot ``WALL_GAP`` ahead of its front, the doorway centred on the robot's x axis,
     and the door: hinged on the doorway's left (+y) jamb at the wall's near face, opening toward the robot (about -z,
-    0 = shut, up to ``OPEN_MAX``), shutting against the stop on the right jamb, with a vertical pull bar near its free
-    edge on the near face. ``closer`` (N m holding it shut, 0: none): a spring toward ``CLOSER_PRELOAD`` past shut
+    0 = shut, up to ``OPEN_MAX``), shutting against the stop on the right jamb, with two vertical pull bars near its free
+    edge on the near face (``PULL_BARS_Z``: the arm's band and a person's standard height). ``closer`` (N m holding it shut, 0: none): a spring toward ``CLOSER_PRELOAD`` past shut
     (``stiffness`` / ``springref``) and a closing-speed valve (a ``ratchet`` that resists closing only). Its origin is
     the doorway's centre at the wall's near face, on the floor."""
     g = door_geometry()
@@ -124,12 +127,14 @@ def cart_room(name: str = "cart_room", closer: float = DOOR_CLOSER) -> dict:
     yb = -LEAF_W + PULL_EDGE                          # the pull bar, in the door's frame (origin on the hinge axis)
     door = [{"shape": "box", "size": [LEAF_T, LEAF_W, LEAF_H], "pos": [LEAF_T / 2, -LEAF_W / 2, zc],
              "mass": LEAF_MASS, "rgba": DOOR_C},
-            {"shape": "cylinder", "radius": PULL_BAR_R, "length": PULL_BAR_L, "pos": [-PULL_STANDOFF, yb, PULL_BAR_Z],
-             "mass": 0.3, "rgba": METAL}]
-    for s in (1, -1):                                 # its two posts, along x
-        door.append({"shape": "cylinder", "radius": 0.008, "length": PULL_STANDOFF, "rpy": [0.0, math.pi / 2, 0.0],
-                     "pos": [-PULL_STANDOFF / 2, yb, PULL_BAR_Z + s * (PULL_BAR_L / 2 - 0.02)], "mass": 0.05,
-                     "rgba": METAL})
+            ]
+    for bz in PULL_BARS_Z:                            # each pull bar and its two posts, along x
+        door.append({"shape": "cylinder", "radius": PULL_BAR_R, "length": PULL_BAR_L, "pos": [-PULL_STANDOFF, yb, bz],
+                     "mass": 0.3, "rgba": METAL})
+        for s in (1, -1):
+            door.append({"shape": "cylinder", "radius": 0.008, "length": PULL_STANDOFF, "rpy": [0.0, math.pi / 2, 0.0],
+                         "pos": [-PULL_STANDOFF / 2, yb, bz + s * (PULL_BAR_L / 2 - 0.02)], "mass": 0.05,
+                         "rgba": METAL})
     joint = {"type": "hinge", "axis": [0, 0, -1], "range": [0.0, OPEN_MAX], "damping": HINGE_DAMPING,
              "frictionloss": HINGE_FRICTION}
     if closer:

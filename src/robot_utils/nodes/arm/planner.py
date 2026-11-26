@@ -7,8 +7,8 @@ during one plan). So that work runs here, in one worker process (a spawned inter
 own), one job at a time; the node only waits for the result in a request thread, which costs the
 control thread nothing.
 
-Each job carries what the worker needs to rebuild the same model: the setpoint limits and the
-TCP offset (the worker caches its ``ArmKinematics`` per pair). Results and ``PlanError`` pickle.
+Each job carries what the worker needs to rebuild the same model: the setpoint limits, the
+TCP offset and the arm's URDF (the worker caches its ``ArmKinematics`` per key). Results and ``PlanError`` pickle.
 """
 from __future__ import annotations
 
@@ -28,17 +28,17 @@ _kin: Optional[ArmKinematics] = None
 _key = None
 
 
-def _get(limits: dict, tcp: tuple) -> ArmKinematics:
+def _get(limits: dict, tcp: tuple, urdf=None) -> ArmKinematics:
     global _kin, _key
-    key = (tuple(sorted((k, tuple(v)) for k, v in limits.items())), tuple(tcp))
+    key = (tuple(sorted((k, tuple(v)) for k, v in limits.items())), tuple(tcp), urdf)
     if _kin is None or key != _key:
-        _kin, _key = ArmKinematics(limits, tcp_offset=tcp), key
+        _kin, _key = ArmKinematics(limits, tcp_offset=tcp, urdf=urdf), key
     return _kin
 
 
-def _job(kind: str, limits: dict, tcp: tuple, args: tuple, kwargs: dict):
+def _job(kind: str, limits: dict, tcp: tuple, args: tuple, kwargs: dict, urdf=None):
     from . import motion
-    kin = _get(limits, tcp)
+    kin = _get(limits, tcp, urdf)
     if kind == "servo":
         return motion.plan_servo(kin, *args, **kwargs)
     if kind == "joint":
@@ -95,10 +95,11 @@ class Planner:
         """Start the worker and build its model in the background (the first job otherwise
         waits a couple of seconds for the interpreter and pinocchio)."""
         limits = {n: (float(lo), float(hi)) for n, lo, hi in zip(kin.joint_names, kin.lo, kin.hi)}
-        cls.pool().submit(_job, "ik", limits, tuple(kin.tcp_offset), (kin.fk(np.zeros(len(kin.lo))), np.zeros(len(kin.lo))), {})
+        cls.pool().submit(_job, "ik", limits, tuple(kin.tcp_offset), (kin.fk(np.zeros(len(kin.lo))), np.zeros(len(kin.lo))), {},
+                          getattr(kin, "urdf", None))
 
     @classmethod
     def run(cls, job: str, kin: ArmKinematics, *args, **kwargs):
         limits = {n: (float(lo), float(hi)) for n, lo, hi in zip(kin.joint_names, kin.lo, kin.hi)}
-        fut = cls.pool().submit(_job, job, limits, tuple(kin.tcp_offset), args, kwargs)
+        fut = cls.pool().submit(_job, job, limits, tuple(kin.tcp_offset), args, kwargs, getattr(kin, "urdf", None))
         return fut.result(timeout=JOB_TIMEOUT)

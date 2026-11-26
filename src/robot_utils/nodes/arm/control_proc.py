@@ -196,10 +196,11 @@ class ControlCore(ArmNode):
     joint_channel_thread = False            # the loop polls the joint socket
 
     def __init__(self, shm: ipc.SharedFile, port: ipc.Port, bus_factory, *, profile: str, settings, locks_path,
-                 lock_names, joint_socket, description_node: str = "description"):
+                 lock_names, joint_socket, description_node: str = "description", urdf=None, arm_frame: str = "arm",
+                 robot=None):
         super().__init__(bus_factory, profile=profile, settings=settings,
                          locks=LockStore(locks_path) if locks_path else None, description_node=description_node,
-                         joint_socket=joint_socket)
+                         joint_socket=joint_socket, urdf=urdf, arm_frame=arm_frame, robot=robot)
         self.lock_names = set(lock_names)
         self.shm, self.port = shm, port
         self.hub = _Hub(self)
@@ -454,7 +455,8 @@ def control_main(params: dict) -> None:
     try:
         core = ControlCore(shm, port, params["bus_factory"], profile=params["profile"], settings=params["settings"],
                            locks_path=params["locks_path"], lock_names=params["lock_names"],
-                           joint_socket=params["joint_socket"], description_node=params["description_node"])
+                           joint_socket=params["joint_socket"], description_node=params["description_node"],
+                           urdf=params.get("urdf"), arm_frame=params.get("arm_frame", "arm"), robot=params.get("robot"))
         core.start_joint_channel()
     except Exception as e:  # noqa: BLE001
         log.exception("control process start")

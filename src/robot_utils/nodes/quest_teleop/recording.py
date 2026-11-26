@@ -41,6 +41,7 @@ class RecordConfig:
     out: str = DEFAULT_OUT            # sessions go to <out>/<YYYYMMDD-HHMMSS>
     robot: str = "local"              # the nodes over their unix sockets; or a frontend URL
     streams: Optional[str] = None     # comma-separated specs (default: collect's defaults)
+    robot_profile: Optional[str] = None   # robots/: the default streams record each of its arms (arm_left, arm_right)
     batch_ms: float = 50.0
     settle: float = 1.0
     stop_timeout: float = 15.0        # after SIGTERM: then SIGKILL
@@ -84,6 +85,8 @@ class SimRecorder:
                "--batch-ms", f"{c.batch_ms:g}", "--settle", f"{c.settle:g}", "--status-every", "1", "--status-json"]
         if c.streams:
             cmd += ["--streams", c.streams]
+        elif c.robot_profile:
+            cmd += ["--robot-profile", c.robot_profile]
         if self.sim and "://" not in self.sim:
             cmd += ["--scene3d", self.sim]
         if baseline_seq is not None:

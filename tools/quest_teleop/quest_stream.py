@@ -26,6 +26,10 @@ never re-arms anything: the client needs a new Y press). A frame without ``sampl
 Limits of the baseline (a later item: a windowed minimum or a real clock-offset estimate): the running minimum of
 arrival − sample time since the connect cannot see a latency that is already there, constant, from the connect, and
 it drifts with the two clocks' relative drift. For the first tests the headset runs on the direct LAN.
+
+Body tracking (``body.py``; quest_env BODY_TRACKING.md): a frame's optional ``body`` block is parsed and validated by
+the reader into ``Frame.body`` (None without one). A malformed block is counted (``counts["body_bad"]``, the
+message in ``last_body_error``) and dropped: the frame itself is delivered unchanged. The gate ignores the block.
 """
 from __future__ import annotations
 
@@ -37,6 +41,11 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+try:
+    from . import body as body_mod
+except ImportError:                    # run as a script with tools/quest_teleop on the path
+    import body as body_mod            # type: ignore[no-redef]
 
 SCHEMA = "teleop.quest_state.v1"
 INTENT_SCHEMA = "teleop.operator_intent.v1"
@@ -53,6 +62,7 @@ class Frame:
     data: dict
     arrived: float       # our monotonic clock
     conn: int            # connection number (increments on every (re)connect)
+    body: Optional["body_mod.Body"] = None   # the parsed body block (body.py), None without a valid one
 
 
 class QuestReader:
@@ -67,8 +77,9 @@ class QuestReader:
         self.frames: "queue.Queue[Frame]" = queue.Queue(maxsize)
         self.conn = 0
         self.connected = False
-        self.counts = {"frames": 0, "bad_lines": 0, "connects": 0, "overflow": 0}
+        self.counts = {"frames": 0, "bad_lines": 0, "connects": 0, "overflow": 0, "body": 0, "body_bad": 0}
         self.last_error: Optional[str] = None
+        self.last_body_error: Optional[str] = None
         self._stop = threading.Event()
         self._sock: Optional[socket.socket] = None
         self._thread = threading.Thread(target=self._run, name="quest-reader", daemon=True)
@@ -112,6 +123,19 @@ class QuestReader:
                 pass
             self.frames.put_nowait(f)
 
+    def _body(self, data: dict) -> Optional["body_mod.Body"]:
+        if "body" not in data:
+            return None
+        try:
+            b = body_mod.parse_body(data)
+        except body_mod.BodyError as e:
+            self.counts["body_bad"] += 1
+            self.last_body_error = str(e)
+            return None
+        if b is not None:
+            self.counts["body"] += 1
+        return b
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -134,7 +158,7 @@ class QuestReader:
                             self.counts["bad_lines"] += 1
                             continue
                         self.counts["frames"] += 1
-                        self._put(Frame(data, t, self.conn))
+                        self._put(Frame(data, t, self.conn, self._body(data)))
             except OSError as e:
                 self.last_error = f"{type(e).__name__}: {e}"
             finally:
@@ -172,21 +196,24 @@ class QuestGate:
         self.offset_min: Optional[float] = None    # min over the session of (arrival - sample time)
         self.latency: Optional[float] = None       # the newest valid frame's, over that baseline (s)
         self.arrivals: deque = deque()             # valid arrivals within rate_window
+        self._arrivals_lock = threading.Lock()     # rate() is also read by the node's /state and stream threads
         self.t_first: Optional[float] = None       # the first valid arrival of the session
         self.good_since: Optional[float] = None    # good frames continuously since (None: bad now)
         self.timing_reason = "no frames yet"
 
     def _reset_timing(self) -> None:
         self.offset_min = self.latency = self.t_first = self.good_since = None
-        self.arrivals.clear()
+        with self._arrivals_lock:
+            self.arrivals.clear()
 
     def rate(self, now: float) -> float:
         """Valid frames per second over the last ``rate_window`` (``rate_window`` 0: the rate check is off: inf)."""
         if self.rate_window <= 0:
             return float("inf")
-        while self.arrivals and self.arrivals[0] <= now - self.rate_window:
-            self.arrivals.popleft()
-        return sum(1 for t in self.arrivals if t <= now) / self.rate_window
+        with self._arrivals_lock:             # the loop appends while other threads read (a race crashed the step)
+            while self.arrivals and self.arrivals[0] <= now - self.rate_window:
+                self.arrivals.popleft()
+            return sum(1 for t in self.arrivals if t <= now) / self.rate_window
 
     def _rate_due(self, now: float) -> bool:
         """The rate is judged once a full window has passed since the session's (or connection's) first frame."""
@@ -225,7 +252,8 @@ class QuestGate:
         ns = f.data.get("sample_time_ns")
         if self.t_first is None:
             self.t_first = f.arrived
-        self.arrivals.append(f.arrived)
+        with self._arrivals_lock:
+            self.arrivals.append(f.arrived)
         why = None
         if not isinstance(ns, int) or isinstance(ns, bool):
             self.latency = None

@@ -40,6 +40,17 @@ SCENE3D_SPEC = "sim/scene3d/stream"
 SIM_STREAMS = DEFAULT_STREAMS + (SCENE3D_SPEC,)     # a sim stack: the defaults plus the rigid scene
 
 
+def default_streams(profile=None) -> tuple:
+    """DEFAULT_STREAMS for a robot profile (robots/; None: $ROBOT_UTILS_ROBOT, else rebot): ``arm/stream`` becomes
+    each arm's stream (a bimanual robot: ``arm_left/stream``, ``arm_right/stream``); the default robot's unchanged."""
+    from ..robots import load
+    arms = [a.name for a in load(profile).arms]
+    out = []
+    for s in DEFAULT_STREAMS:
+        out += [f"{a}/stream" for a in arms] if s == "arm/stream" else [s]
+    return tuple(out)
+
+
 @dataclass
 class StreamSpec:
     spec: str

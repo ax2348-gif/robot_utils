@@ -37,6 +37,9 @@ canvas.ru-plot{width:100%;height:70px}
 #events{max-height:160px;overflow:auto;font-size:12px}
 .lim{border-left:2px solid var(--rule);padding-left:8px;margin:6px 0}
 .lim.on{border-left-color:var(--caution)}
+.cues{display:grid;grid-template-columns:auto 1fr auto auto;gap:3px 8px;align-items:center;font-size:13px;margin-top:6px}
+.cues input[type=number]{width:58px}
+.cues .ru-muted{font-size:12px}
 </style><script src="../../themes/theme.js"></script>
 </head><body data-page="quest_teleop"><div id="band"></div><div class="ru-wrap">
 <div class="ru-row ru-head">
@@ -62,7 +65,17 @@ canvas.ru-plot{width:100%;height:70px}
         <span class="ru-muted" id="sending"></span></div>
       <div class="ctl"><button class="ru" id="mode3">Third person</button><button class="ru" id="mode1">First person</button>
         <span class="ru-muted" id="modenote">applies from the next grip</span></div>
-      <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button></div>
+      <div class="ctl"><button class="ru" id="headless">Headless left stick: on</button>
+        <button class="ru" id="tether" title="Engaged: the stick offset leads the robot's commanded base by at most 5 cm / 0.1 rad (the arm keeps the base's heading), so the arm does not reach ahead while the base accelerates. Applies from the next grip.">Stick tether: on</button>
+        <span class="ru-muted" id="tethernote"></span></div>
+      <div class="ctl" id="mirrorrow" hidden title="Which arm each hand drives: decided when the first hand engages, locked until both release. Auto mirrors when the robot faces you (headings more than 90° apart).">pairing
+        <button class="ru" data-mirror="off">Off</button><button class="ru" data-mirror="auto">Auto</button><button class="ru" data-mirror="straight">Straight</button><button class="ru" data-mirror="mirror">Mirror</button>
+        <span class="ru-muted" id="mirrornote"></span></div>
+      <div class="ctl">base follows <button class="ru" id="hs-head">Head</button><button class="ru" id="hs-chest">Chest</button><button class="ru" id="hs-hips">Hips</button>
+        <span class="ru-muted" id="hsnote"></span></div>
+      <div class="ctl" title="Each engaged arm's elbow swivel: the operator's change since the grip (body tracking), sent to the WBC. On applies from the next grip, off at once.">elbow hint <button class="ru" id="eh-on">On</button><button class="ru" id="eh-off">Off</button>
+        <span class="ru-muted" id="ehnote"></span></div>
+      <div class="ru-muted" id="swivel" style="font-size:13px"></div>
       <div class="ctl" id="simaids" hidden><button class="ru" id="ghost">Goal ghost: on</button>
         <button class="ru" id="autopause">Auto pause: off</button>
         <button class="ru" id="hview" title="Cycle how the headset draws the sim (the sim node's /scene3d/view)">Headset view</button>
@@ -71,11 +84,16 @@ canvas.ru-plot{width:100%;height:70px}
         <input type="number" id="wmax" step="0.1" min="0.1" max="4" style="width:64px"> rad/s
         <button class="ru" id="setspeed">Set</button></div>
       <div class="ru-muted" id="capsnote"></div>
+      <div class="ctl" title="Tiered recovery: a brief dropout (stale or late input, a gap, an unfocused frame, the WBC's own short dropout) holds the robot; once it clears, releasing and re-gripping resumes without Y. Longer than the grace window, or serious (reconnect, estimator reset, fault): a disarm, Y re-arms. X never resumes.">re-grip resume
+        <button class="ru" id="rs-on">On</button><button class="ru" id="rs-off">Off</button>
+        grace <input type="number" id="rsgrace" step="0.5" min="0" max="30" style="width:56px"> s
+        <button class="ru" id="rsset">Set</button></div>
+      <div class="ctl" id="rsclasses" style="font-size:13px"></div>
       <div class="ru-muted" id="reg"></div>
       <div class="steps" id="steps"></div>
       <div id="armed"></div>
       <div class="ru-muted" id="reason"></div>
-      <div class="ru-muted" style="font-size:13px">Start takes the WBC lease and enables it (arm + base); nothing moves until <b>Y</b> (left controller) arms it. <b>X</b> disarms and disables (the arm floats, the base coasts); Y re-enables. Armed, the grip clutches the arm after a release.</div>
+      <div class="ru-muted" style="font-size:13px">Start takes the WBC lease and enables it (arm + base); nothing moves until <b>Y</b> (left controller) arms it. <b>X</b> disarms and disables (the arm floats, the base coasts); Y re-enables. Armed, the grip clutches the arm after a release. A brief dropout <b>holds</b>: release and re-grip to resume (no Y); a long or serious one disarms (Y).</div>
     </div>
     <div class="ru-card" data-panel="episode" data-role="telemetry"><b>Episode</b> <span class="ru-muted">A starts, a B tap stops (right controller)</span>
       <div class="lim" id="epline"></div>
@@ -91,6 +109,10 @@ canvas.ru-plot{width:100%;height:70px}
     </div>
     <div class="ru-card" data-panel="hands" data-role="telemetry"><b>Hands</b> <span class="ru-muted">clutch ring · trigger (gripper)</span>
       <div class="hands" id="hands"></div>
+    </div>
+    <div class="ru-card" data-panel="haptics" data-role="control"><b>Haptics</b> <span class="ru-muted">controller vibration</span>
+      <div class="ctl"><button class="ru" id="hapon">Haptics: on</button><span class="ru-muted" id="hapnote"></span></div>
+      <div class="cues" id="cues"></div>
     </div>
     <div class="ru-card" data-panel="wbc" data-role="telemetry"><b>WBC</b>
       <div class="lim" id="lim"></div>
@@ -112,9 +134,14 @@ $("#stop").onclick = () => call("stop");
 $("#qup").onclick = () => call("quest/up");
 $("#qdown").onclick = () => call("quest/down");
 $("#mode3").onclick = () => call("mode/third");
-let headlessOn = true;
+let headlessOn = true, tetherOn = true;
 $("#headless").onclick = () => call("headless/" + (headlessOn ? "off" : "on"));
+$("#tether").onclick = () => call("tether/" + (tetherOn ? "off" : "on"));
 $("#mode1").onclick = () => call("mode/first");
+document.querySelectorAll("[data-mirror]").forEach(b => b.onclick = () => call("mirror/" + b.dataset.mirror));
+for (const k of ["head", "chest", "hips"]) $("#hs-" + k).onclick = () => call("hint_source/" + k);
+$("#eh-on").onclick = () => call("elbow_hint/on");
+$("#eh-off").onclick = () => call("elbow_hint/off");
 let ghostOn = true, pauseOn = false;
 $("#ghost").onclick = () => call("sim/ghost/" + (ghostOn ? "off" : "on"));
 $("#autopause").onclick = () => call("sim/auto_pause/" + (pauseOn ? "off" : "on"));
@@ -129,6 +156,25 @@ $("#setspeed").onclick = async () => {
   try { err(""); await RU.api("top_speed", {method: "POST", body: {max_speed: +$("#vmax").value, max_omega: +$("#wmax").value}}); }
   catch(e){ err(e.message); }
 };
+$("#rs-on").onclick = () => RU.api("resume", {method: "POST", body: {enabled: true}}).catch(e => err(e.message));
+$("#rs-off").onclick = () => RU.api("resume", {method: "POST", body: {enabled: false}}).catch(e => err(e.message));
+$("#rsset").onclick = () => RU.api("resume", {method: "POST", body: {grace_s: +$("#rsgrace").value}}).catch(e => err(e.message));
+$("#rsclasses").onclick = ev => { const b = ev.target.closest("[data-rsclass]"); if (!b) return;
+  RU.api("resume", {method: "POST", body: {classes: {[b.dataset.rsclass]: !b.classList.contains("live")}}}).catch(e => err(e.message)); };
+let rsGraceShown = null;
+let hapOn = true, cuesBuilt = false;
+const hapCfg = body => RU.api("haptics/config", {method: "POST", body}).catch(e => err(e.message));
+$("#hapon").onclick = () => hapCfg({enabled: !hapOn});
+function buildCues(C) {   // once: the cue rows (their state is refreshed from /state)
+  $("#cues").innerHTML = Object.entries(C).map(([k, c]) => `<label title="${esc(c.doc)}"><input type="checkbox" data-cue="${k}"> ${k}</label>
+    <span class="ru-muted">${c.kind === "level" ? "continuous" : "pulse"}</span>
+    <input type="number" min="0" max="1" step="0.05" data-amp="${k}" title="amplitude 0..1">
+    <button class="ru" data-test="${k}" title="play it now on both hands (even when off)">Test</button>`).join("");
+  document.querySelectorAll("[data-cue]").forEach(b => b.onchange = () => hapCfg({cues: {[b.dataset.cue]: {enabled: b.checked}}}));
+  document.querySelectorAll("[data-amp]").forEach(b => b.onchange = () => hapCfg({cues: {[b.dataset.amp]: {amplitude: +b.value}}}));
+  document.querySelectorAll("[data-test]").forEach(b => b.onclick = () => RU.api("haptics/test", {method: "POST", body: {cue: b.dataset.test}}).catch(e => err(e.message)));
+  cuesBuilt = true;
+}
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const f = (v, n) => v === null || v === undefined || !isFinite(v) ? "–" : Number(v).toFixed(n);
 const STEPS = [["released", "released", "good"], ["engaged", "engaged", "good"], ["needs_release", "needs release", "bad"],
@@ -161,6 +207,11 @@ RU.sse("events", s => {
   $("#headless").textContent = "Headless left stick: " + (headlessOn ? "on" : "off");
   $("#headless").classList.toggle("live", headlessOn);
   $("#headless").disabled = s.config.mode !== "third";
+  tetherOn = s.config.tether !== false;
+  $("#tether").textContent = "Stick tether: " + (tetherOn ? "on" : "off");
+  $("#tether").classList.toggle("live", tetherOn);
+  const TT = T.tether;
+  $("#tethernote").textContent = TT ? "xy " + TT.xy + " · yaw " + TT.yaw + " · lead " + (TT.lead_m * 100).toFixed(1) + " cm, " + TT.lead_rad.toFixed(2) + " rad" : "";
   const A = s.sim_aids;
   $("#simaids").hidden = !A;
   simNode = s.config.sim && !s.config.sim.includes("/") ? s.config.sim : null;
@@ -172,15 +223,57 @@ RU.sse("events", s => {
     $("#aidsnote").textContent = (pauseOn ? (A.paused ? "sim paused (idle)" : "sim time stops when neither clutched nor driving") : "")
       + (A.error ? " · " + A.error : "");
   }
+  const P = T.pairing;
+  $("#mirrorrow").hidden = !P;
+  if (P){
+    document.querySelectorAll("[data-mirror]").forEach(b => { b.classList.toggle("live", b.dataset.mirror === P.mode); b.disabled = P.locked; });
+    const D = P.decision;
+    $("#mirrornote").textContent = (P.pairing === "mirror" ? "mirrored: " : "straight: ")
+      + Object.entries(P.hands).map(([h, e]) => h + " → " + e).join(", ")
+      + (P.locked ? " · locked until both hands release" : P.mode === "auto" ? " · decided at the next grip" : "")
+      + (D && P.mode !== "off" ? " · last grip: " + D.pairing + (D.heading_diff_deg === null ? "" : ", headings " + Math.abs(D.heading_diff_deg).toFixed(0) + "° apart") : "");
+  }
+  for (const k of ["head", "chest", "hips"]) $("#hs-" + k).classList.toggle("live", s.config.hint_source === k);
+  { const hs = T.hint || {};
+    $("#hsnote").textContent = !T.hint ? "from the next grip" : (hs.in_force ? "in force: " + hs.in_force : (hs.engaged_source ? "lost" : "from the next grip"))
+      + (hs.confidence === null || hs.confidence === undefined ? "" : " · conf " + f(hs.confidence, 2))
+      + (hs.why_not && hs.selected !== "head" ? " · " + hs.why_not : ""); }
+  $("#eh-on").classList.toggle("live", !!s.config.elbow_hint); $("#eh-off").classList.toggle("live", !s.config.elbow_hint);
+  $("#ehnote").textContent = s.config.elbow_hint && s.config.body === "off" ? "needs body tracking (--body)" : "";
+  { const SW = T.swivel || {}, deg = x => x === null || x === undefined ? "–" : (x * 180 / Math.PI).toFixed(1) + "°";
+    $("#swivel").innerHTML = Object.entries(SW).map(([ee, v]) => `<div>${esc(ee)} <span title="the operator's hand driving it">(${esc(v.hand)})</span>: `
+      + (v.valid ? `elbow ${deg(v.elbow)} · conf ${f(v.conf, 2)}` : "input " + esc(v.reason || "not valid"))
+      + (v.engaged ? ` · Δψ ${deg(v.dpsi)}${v.straight ? " (arm straight: held)" : ""}` : "")
+      + (v.sending ? " · <b>sent</b>" : v.pending ? " · from the next grip" : v.enabled && v.engaged ? " · not sent" : "")
+      + (v.robot_swivel === null || v.robot_swivel === undefined ? "" : ` · robot ψ ${deg(v.robot_swivel)}`)
+      + (v.robot_swivel_w === null || v.robot_swivel_w === undefined ? "" : ` · hint in force ${f(v.robot_swivel_w, 2)}`)
+      + "</div>").join(""); }
   $("#mode3").classList.toggle("live", s.config.mode === "third"); $("#mode1").classList.toggle("live", s.config.mode === "first");
   $("#sending").textContent = running ? (T.sending ? `sending · ${T.sent ? T.sent.target : 0} targets` : "silent (holding)") : (T.stop_reason ? "stopped: " + T.stop_reason : "");
   $("#steps").innerHTML = STEPS.map(([k, label, tone]) => `<span class="${s.state === k ? "on " + tone : ""}">${label}</span>`).join("");
   const why = running ? (T.reason || "") : (s.error || "");
   $("#reason").textContent = why ? "last: " + why : (running && T.transport ? "datagrams: " + T.transport.split(" ")[0] + " socket" : "");
+  const TT = T.tier || {}, HD = TT.hold;
   $("#armed").className = "lim" + (running && T.armed ? " on" : "");
-  $("#armed").textContent = !running ? "" : T.armed ? `ARMED (press ${T.arm_seq})` : `disarmed${T.disarm_reason ? " — " + T.disarm_reason : ""}${T.disabled_by_x ? " · WBC disabled by X (Y re-enables)" : ""}`;
+  $("#armed").textContent = !running ? "" : T.armed ? `ARMED (press ${T.arm_seq})${TT.resumes ? ` · ${TT.resumes} resumed by re-grip` : ""}`
+    : TT.tier === "hold" && HD ? `HOLD — ${HD.cause}: ` + (HD.resumable ? "release and re-grip to resume" : `waiting for it to clear (${f(HD.cause_present_s, 1)} / ${f(HD.grace_s, 1)} s)`)
+      + (HD.last_refused ? ` · last re-grip refused: ${HD.last_refused}` : "")
+    : `DISARMED — press Y${T.disarm_reason ? " · " + T.disarm_reason : ""}${T.disabled_by_x ? " · WBC disabled by X (Y re-enables)" : ""}`;
+  { const R = s.config.resume || {};
+    $("#rs-on").classList.toggle("live", !!R.enabled); $("#rs-off").classList.toggle("live", !R.enabled);
+    if (R.grace_s !== rsGraceShown && document.activeElement !== $("#rsgrace")) { $("#rsgrace").value = R.grace_s; rsGraceShown = R.grace_s; }
+    $("#rsclasses").innerHTML = "holds on: " + Object.entries(R.classes || {}).map(([k, v]) =>
+      `<button class="ru${v ? " live" : ""}" data-rsclass="${esc(k)}">${esc(k.replace("_", " "))}</button>`).join(""); }
   $("#reason").title = T.transport || "";
   // headset link
+  function bodyText(b) {   // body tracking (quest_env BODY_TRACKING.md): information only
+    if (!b || (!b.present && !b.frames)) return "off";
+    if (!b.present) return `none for ${b.age === null ? "–" : b.age.toFixed(1) + " s"}`;
+    if (!b.available) return "unavailable: " + esc(b.reason || "");
+    if (!b.active) return "not active";
+    return `${b.tracked}/${b.sent} tracked · ${esc(b.joint_set)} · ${esc(b.fidelity || "fidelity –")} · conf ${f(b.confidence, 2)}`
+      + (b.bad ? ` · ${b.bad} bad` : "");
+  }
   const age = H.age === null ? "–" : (H.age < 1 ? (H.age * 1e3).toFixed(0) + " ms" : H.age.toFixed(1) + " s");
   const link = [
     ["stream", `${esc(s.config.quest_host)}:${s.config.quest_port} · ${H.connected ? "connected" : "not connected"}`],
@@ -189,6 +282,7 @@ RU.sse("events", s => {
     ["focus", H.focused === null ? "–" : (H.focused ? "focused" : "not focused")],
     ["battery", esc(H.battery ? H.battery.text : "not reported")],
     ["XR session", esc(H.xr_state || "–")],
+    ["body", bodyText(H.body)],
     ["session", esc(H.session_id || "–") + (H.scheme ? " · " + esc(H.scheme) : "")],
   ];
   if (!H.connected && H.last_error) link.push(["error", esc(H.last_error)]);
@@ -199,13 +293,29 @@ RU.sse("events", s => {
   out.textContent = C.lines.map(l => l.line).join("\n");
   if (atEnd) out.scrollTop = out.scrollHeight;
   // hands
-  const hands = H.hands || {};
+  const hands = H.hands || {}, TH = (s.teleop || {}).hands || {};
   $("#hands").innerHTML = ["left", "right"].map(k => { const h = hands[k] || {};
     const g = h.gripper === null || h.gripper === undefined ? null : Math.max(0, Math.min(1, h.gripper));
     return `<div class="hand"><div class="clutch ${h.valid ? "valid" : ""} ${h.engaged ? "engaged" : ""}" title="${h.engaged ? "clutch engaged" : "clutch released"}"></div>
-      <div style="flex:1"><div>${k}${k === s.config.hand ? ' <span class="ru-muted">(arm)</span>' : ""}</div>
+      <div style="flex:1"><div>${k}${s.config.hands ? (s.config.hands[k] ? ` <span class="ru-muted">(${esc(TH[k] ? TH[k].ee : s.config.hands[k])}${TH[k] && TH[k].mirrored ? ", mirrored" : ""}${TH[k] && TH[k].base ? ", base" : ""})</span>` : "") : k === s.config.hand ? ` <span class="ru-muted">(${s.config.ee === "arm" ? "arm" : s.config.ee})</span>` : ""}</div>
       <div class="ru-muted" style="font-size:12px">${!h.valid ? "not tracked" : h.engaged ? "engaged" : h.needs_release ? "release first" : "released"}</div>
       <div class="grip" title="trigger ${g === null ? "–" : g.toFixed(2)}"><i style="left:calc(${g === null ? 0 : g * 100}% - 1px);${g === null ? "display:none" : ""}"></i></div></div></div>`; }).join("");
+  // haptics
+  { const HP = s.haptics || {}, HS = HP.headset || {};
+    if (!cuesBuilt && HP.cues) buildCues(HP.cues);
+    hapOn = !!HP.enabled;
+    $("#hapon").textContent = "Haptics: " + (hapOn ? "on" : "off"); $("#hapon").classList.toggle("live", hapOn);
+    for (const [k, c] of Object.entries(HP.cues || {})) {
+      const cb = document.querySelector(`[data-cue="${k}"]`), am = document.querySelector(`[data-amp="${k}"]`);
+      if (cb) { cb.checked = c.enabled; cb.disabled = !hapOn; }
+      if (am && document.activeElement !== am) am.value = c.amplitude;
+    }
+    const A = HP.ack_ms, lv = HP.levels || {};
+    $("#hapnote").textContent = (HP.readers ? "the headset reads them" + (HS.capable ? "" : " (no ack in its frames)")
+                                 : H.connected ? "the headset does not read them (an older build, or --ar off)" : "no headset")
+      + (A ? ` · round trip ${f(A.median, 0)} ms (max ${f(A.max, 0)})` : "")
+      + (lv.left > 0 || lv.right > 0 ? ` · buzzing: ${["left", "right"].filter(h => lv[h] > 0).map(h => h + " (" + HP.level_cue[h] + ")").join(", ")}` : "");
+  }
   // WBC
   const lim = W.limited_by && W.limited_by !== "none";
   $("#lim").className = "lim" + (lim ? " on" : "");

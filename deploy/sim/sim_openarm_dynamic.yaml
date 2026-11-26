@@ -1,0 +1,20 @@
+# Sim config: the OpenArm v2 bimanual robot's two dynamic 7-DOF arms (robots/openarm_bimanual.yaml,
+# robots/openarm/README.md; docs/plans/bimanual_and_robot_swap.md "How the OpenArm torso slots in"), merged over
+# default_sim.yaml and the profile's own `sim:` (start poses, per-joint motor estimates):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_openarm_dynamic.yaml python -m robot_utils.nodes.sim.stack --robot openarm_bimanual
+# Each arm: its Damiao motors (the MIT law as joint torque, clamped at the arm type's torque limits: DM8009 40 N m on
+# joints 1-2, DM4340 27 N m on 3-4, DM4310 7 N m on 5-7; robots/openarm/arm_type.yaml), its own gravity fit (to its
+# arm node's model: Enactic's OpenArm v2.0 with Anvil's ranges and gripper) and its own watchdog. The tabletop is the default scene.
+#
+# Human scale (the profile): shoulders at 1.074 m, the work surface (table top, rings) at 0.70 m (the profile's
+# sim.scene.work_top). Reach there (fingertips 0-5 cm above the surface, tool within 45 deg of down; sampled with the
+# arm's kinematics): x up to 0.63 m ahead of the base centre, 95 % within 0.44 m (the table spans x 0.256-0.856 m;
+# re-sampled with Anvil's model of the arm, 2026-11-25: 0.633 / 0.441 m; the kinematics are the same).
+# The rings scene with this robot: deploy/sim/sim_rings_dynamic.yaml with --robot openarm_bimanual. The rings centre
+# on the right arm's mount (y = -0.03 m; World.ring_mount_y, from the model's frames_in_base). Both arms reach the
+# outer ring and onto the inner one from the start pose (measured with the previous, Enactic arms; 60k samples per arm:
+# right 119 / 17 hits on the outer / inner ring, left 92 / 22; the reBot bimanual at its 0.302 m: 169 / 83), the inner
+# ring's far side with the base driving in (the WBC's base coupling).
+components:
+  arm:
+    fidelity: dynamic

@@ -1,4 +1,9 @@
-"""The arm's shape as boxes, shared by the page (page.py) and the agent render (render.py)."""
+"""The arm's shape as boxes, shared by the page (page.py) and the agent render (render.py).
+
+``REBOT_BOXES`` are the reBot's. ``ARM_BOXES`` are this process's arm's: the reBot's, or in an arm node of
+another arm type (robots/arm_types.py: the type in the environment) that type's (``arm_types.arm_boxes``: its
+links' boxes from its URDF's collision meshes, then the reBot gripper's). Processes serving several arms (the
+description node, the sim, the pages) ask ``arm_types.arm_boxes`` per arm."""
 
 # The arm drawn as wireframe boxes: [frame, cx, cy, cz, sx, sy, sz], centre and size in mm, axis-aligned
 # in the frame. Derived offline from the visual meshes of rebot_ctl/urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf
@@ -19,7 +24,7 @@
 #       mm: the mesh has no vertices in between). The prong tapers from +-16.5 mm (z) at its root
 #       to +-4 mm at the tip; the box bounds it. The crossed rack moves with the finger but runs
 #       inside the rail, so it is not drawn.
-ARM_BOXES = [
+REBOT_BOXES = [
     ["base", 0.0, 0.0, 7.0, 200.0, 140.0, 14.0],        # mounting plate
     ["base", 0.0, -0.2, 43.8, 92.0, 92.3, 87.7],        # column, joint 1 motor
     ["link1", 6.7, 0.0, 42.0, 83.8, 77.2, 83.9],        # shoulder bracket, joint 2 motor
@@ -36,6 +41,24 @@ ARM_BOXES = [
 ]
 
 # One short name per ARM_BOXES entry (same order), for the text geometry (body.py, GET/POST /geometry).
-ARM_BOX_NAMES = ["mount plate", "column", "shoulder", "upper arm", "elbow hub", "forearm", "wrist hub", "wrist beam",
+REBOT_BOX_NAMES = ["mount plate", "column", "shoulder", "upper arm", "elbow hub", "forearm", "wrist hub", "wrist beam",
                  "joint 6 housing", "gripper motor block", "gripper rail", "jaw root", "jaw"]
-assert len(ARM_BOX_NAMES) == len(ARM_BOXES)
+assert len(REBOT_BOX_NAMES) == len(REBOT_BOXES)
+
+
+def _this_arm() -> tuple[list, list]:
+    from .config import ARM_TYPE
+    if ARM_TYPE is None or not ARM_TYPE.get("urdf"):
+        return REBOT_BOXES, REBOT_BOX_NAMES
+    from ...robots.arm_types import arm_boxes
+    return arm_boxes(ARM_TYPE["urdf"], ARM_TYPE.get("gripper", "rebot"))
+
+
+def _this_gripper():
+    from .config import ARM_TYPE
+    from ...robots.grippers import of_public
+    return of_public(None if ARM_TYPE is None else ARM_TYPE.get("gripper_spec"))
+
+
+ARM_BOXES, ARM_BOX_NAMES = _this_arm()
+GRIPPER = _this_gripper()        # this process's arm's gripper (robots/grippers.py): the reBot's by default

@@ -1,0 +1,55 @@
+# A bimanual prototype (sim only): the reBot robot with a second reBot arm, the mirror image of the first across the
+# robot's sagittal plane (x-z). docs/plans/bimanual_and_robot_swap.md. Stand-in for the bimanual OpenArm torso until
+# its own profile exists.
+#
+# Arms (one name per arm everywhere: arm node instance, model prefix, description frame, sim backend socket):
+#   arm_right: the current arm, unchanged (same URDF, same mount; links and joints arm_right_*)
+#   arm_left:  its mirror image (mirror: true; robots/mirror.py): mounted on the front-left corner, mirrored joint
+#              axes, the SAME joint limits and joint values (q on the left arm = the mirror image of q on the right)
+# The wrist camera stays on the right arm (instance wrist_camera, as before).
+doc: reBot with a mirrored second arm (sim only; bimanual prototype)
+sim_only: true
+description:
+  extends: rebot
+  overlay:
+    frames:
+      arm: null
+      arm_right:
+        parent: base
+        # the single-arm robot's `arm` frame: front-right corner of the top surface (default_description.yaml)
+        xyz: [0.1159, -0.1459, 0.22225]
+        rpy: [0.0, 0.0, 0.0]
+        doc: right arm base (ReBot base_link), mount plate underside on joint 1's axis; axes as base
+      arm_left:
+        parent: base
+        # arm_right mirrored across the x-z plane: the front-left corner
+        xyz: [0.1159, 0.1459, 0.22225]
+        rpy: [0.0, 0.0, 0.0]
+        doc: left arm base (mirrored ReBot base_link), mount plate underside on joint 1's axis; axes as base
+    components:
+      arm: null
+      arm_right:
+        source: urdf
+        file: rebot_ctl:urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf
+        prefix: arm_right_
+        parent: base_link
+        mount: {frame: arm_right}
+        frame: arm_right
+        doc: the reBot arm (DM motors), mounted turned 90 deg (front -y)
+      arm_left:
+        source: urdf
+        file: rebot_ctl:urdf/DM/urdf/ReBot_Arm_DM_mount_right.urdf
+        mirror: true
+        prefix: arm_left_
+        parent: base_link
+        mount: {frame: arm_left}
+        frame: arm_left
+        doc: the right arm's mirror image (sim only), front +y
+      wrist_camera:
+        parent: arm_right_end_link
+    arms:
+      arm_left: {side: left}         # side: the hand that drives it in two-hand teleop
+      arm_right: {side: right}
+stack:
+  # registry instances this robot cannot run (none: the WBC, quest_teleop and agent_interface drive both arms)
+  without: []

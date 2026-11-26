@@ -144,7 +144,7 @@ class KinIn(BaseModel):
 
 class GeometryIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
-    q: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Joint angles (rad): the geometry there.")
+    q: Optional[list[float]] = Field(None, min_length=1, max_length=12, description="Joint angles (rad): the geometry there.")
     pose: Optional[Pose] = Field(None, description="A TCP pose (arm frame): the geometry at its IK solution (or the nearest "
                                                    "reachable configuration; `ik` says which). Nothing moves.")
     seed: Literal["command", "measured"] = Field("measured", description="IK start for `pose`, as for POST /ik.")
@@ -169,8 +169,8 @@ class TcpIn(BaseModel):
 
 class LimitsIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
-    joint_vel: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="rad/s per joint.")
-    joint_acc: Optional[list[float]] = Field(None, min_length=6, max_length=6,
+    joint_vel: Optional[list[float]] = Field(None, min_length=1, max_length=12, description="rad/s per joint.")
+    joint_acc: Optional[list[float]] = Field(None, min_length=1, max_length=12,
                                              description="rad/s² per joint: limits only increases of commanded speed.")
     lin_vel: Optional[float] = Field(None, description="m/s, TCP speed of servo moves.")
     lin_acc: Optional[float] = Field(None, description="m/s², TCP acceleration of servo moves.")
@@ -196,7 +196,8 @@ STREAM_DOC = ("Binary records as every node's /stream (docs/nodes.md): a `schema
 class JamIn(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, json_schema_extra={"examples": [
         {"response": "report"}, {"bands": [1.0, 4.0, 4.0, 1.5, 0.8, 0.6], "hold_s": 1.0}, {"response": "off"}]})
-    bands: Optional[list[float]] = Field(None, min_length=6, max_length=6, description="Nm per joint (all > 0).")
+    bands: Optional[list[float]] = Field(None, min_length=1, max_length=12,
+                                         description="Nm per joint (all > 0; one per arm joint).")
     hold_s: Optional[float] = Field(None, gt=0, description="s over its band before it fires.")
     release: Optional[float] = Field(None, gt=0, lt=1, description="Clears below release x band.")
     static_qd: Optional[float] = Field(None, gt=0, description="rad/s: every joint slower than this = static.")
@@ -464,7 +465,13 @@ def create_app(node: ArmNode, start: bool = True, sim: bool = False) -> FastAPI:
 
     @app.get("/links", response_model=M.LinksOut, response_model_exclude_unset=True, tags=["kinematics"], summary="Joint frames, end_link and tcp at the measured pose (drawing)")
     async def links():
-        return {"frames": node.links(), "names": [f"joint{i}" for i in range(1, 7)] + ["end_link", "tcp"]}
+        out = {"frames": node.links(), "names": [f"joint{i}" for i in range(1, C.N + 1)] + ["end_link", "tcp"]}
+        if getattr(node, "mirror", False):
+            out["mirror"] = True                   # a mirrored arm (robots/): drawings mirror its boxes in y
+        if C.ARM_TYPE is not None:                 # another arm type: its own boxes (geometry.py ARM_BOXES)
+            from .geometry import ARM_BOXES
+            out["boxes"] = ARM_BOXES
+        return out
 
     # -- settings ---------------------------------------------------------------------------------------
 

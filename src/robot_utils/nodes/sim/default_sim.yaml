@@ -82,6 +82,9 @@ components:
                                                            # joints; ESTIMATE (viscous: stroke ~0.5 s as on the robot)
       command_delay: 0.002       # s from the world receiving an MIT frame to the motor applying it (serial bridge +
                                  # CAN). ESTIMATE; the node's own tick and pipelined read are modelled by the stack
+  # per arm (robots/: the model's arms, e.g. arm_left / arm_right): keys of `arm` above merged over it for that arm
+  # (a mirrored arm uses the same start_q: the same q is the mirrored pose)
+  arms: {}
 
 # Cameras (rendered offscreen): link = the model link the image is taken from (optical frame: x right, y down,
 # z out of the lens). Profiles as the camera node's catalog keys; delay = camera-to-host latency (measured).
@@ -121,7 +124,9 @@ scene:
   cart_door_setup:
     closer: 3.0                  # N m, the door closer's moment holding it shut (0: no closer; the door stays where left)
     cart_mass: 12.0              # kg, the cart in all
-  view_anchor: null             # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
+  view_anchor: null              # [x, y, yaw_deg]: the sim-world point a headset places ahead of the operator (null: origin)
+  work_top: null                 # m: the table top / rings surface height (null: the reBot's, its mount + 0.08 = 0.302;
+                                 # a robot profile's sim: sets its own, e.g. the human-scale OpenArm's 0.70)
   rings_setup:
     outer_rim_speed: 0.12        # m/s at the outer ring's outer edge; + counterclockwise seen from above (owner: 3x the first 0.04)
     inner_rim_speed: -0.068      # m/s at the inner ring's outer edge
@@ -135,7 +140,8 @@ scene:
 # sim host to keep the robot's timing.
 timing:
   lenient: auto                  # auto | true | false
-  arm_watchdog: 0.5              # s, when lenient
+  arm_watchdog: 2.5              # s, when lenient; at least the arm node's lenient ctl_heartbeat (2 s) + 0.5 s
+                                 # (world.resolve_timing: the sim must forgive a stall the node forgives)
   swerve_heartbeat: 0.5          # s, when lenient
 
 time:

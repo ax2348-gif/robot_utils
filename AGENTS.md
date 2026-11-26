@@ -20,8 +20,8 @@ computer. This file is what you need to help someone run the **simulator with Me
      arming, clutch, body-frozen mapping;
   3. **`wbc` node:** a QP moving the arm and base together, fed by datagrams on a unix socket;
   4. **arm and swerve nodes,** which drive the sim world.
-- **The headset side** lives in two other repositories, both on branch `collab` (quest_dev tag `collab-v2`,
-  quest_env tag `collab-v3`):
+- **The headset side** lives in two other repositories, both on branch `collab` (quest_dev tag `collab-v4`: runtime
+  1.7.0; quest_env tag `collab-v4`):
   - [quest_dev](https://github.com/ax2348-gif/quest_dev): an Android app giving the Quest an SSH server (port 8022)
     and a native XR host;
   - [quest_env](https://github.com/ax2348-gif/quest_env): the headset app, its `quest` script and native telemetry
@@ -44,9 +44,12 @@ In short:
   each step checks, fixes only what is missing, and is safe to rerun. `--check` changes nothing. Its pins
   (runtime version and SHA-256, quest_env tag) are at the top of the file. Its tests are in
   `tests/test_quest_setup.py` (a simulated headset).
-- **Run:** `python -m robot_utils.nodes.sim.stack --quest --no-pull`. It starts the stack plus quest_teleop, runs
-  `POST /nodes/quest_teleop/quest/up` (retried while the headset sleeps), then `POST /nodes/quest_teleop/start`.
-  The operator presses Y to arm.
+- **Run:** `python -m robot_utils.nodes.sim.stack --quest --no-pull`. It starts the stack plus quest_teleop (its
+  args in `src/robot_utils/nodes/sim/stack_nodes.yaml`: `--body core --elbow-hint`, the Mac's freshness limits,
+  `--resume-grace 4`), runs `POST /nodes/quest_teleop/quest/up` (retried while the headset sleeps), then
+  `POST /nodes/quest_teleop/start` (the sim resets; the launcher makes sure it runs afterwards). The operator presses
+  Y to arm. The default robot is the one-arm reBot; `--robot openarm_bimanual` runs the OpenArm (two 7-DOF arms:
+  Enactic's OpenArm v2.0 with Anvil's joint ranges and gripper, `src/robot_utils/robots/openarm/README.md`).
 
 ## Diagnosing
 

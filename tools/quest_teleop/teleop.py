@@ -27,14 +27,14 @@ if __package__ in (None, ""):
         import robot_utils  # noqa: F401
     except ImportError:
         sys.path.insert(0, str(_here.parents[2] / "src"))
-    from quest_teleop.arming import ArmLatch, LatchConfig   # noqa: E402
-    from quest_teleop.body_frozen import Config, RobotState, TeleopCore, set_top_speed   # noqa: E402
+    from quest_teleop.arming import ArmLatch, LatchConfig, ResumeConfig   # noqa: E402
+    from quest_teleop.body_frozen import MIRROR_MODES, Config, RobotState, make_core, set_top_speed   # noqa: E402
     from quest_teleop.quest_stream import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestGate,   # noqa: E402
                                            QuestReader)
     from quest_teleop.wbc_client import WbcClient, WbcStream   # noqa: E402
 else:
-    from .arming import ArmLatch, LatchConfig
-    from .body_frozen import Config, RobotState, TeleopCore, set_top_speed
+    from .arming import ArmLatch, LatchConfig, ResumeConfig
+    from .body_frozen import MIRROR_MODES, Config, RobotState, make_core, set_top_speed
     from .quest_stream import DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, QuestGate, QuestReader
     from .wbc_client import WbcClient, WbcStream
 
@@ -62,8 +62,8 @@ class Actions:
     def _run(self, what: str) -> None:
         self.busy = what
         try:
-            getattr(self.wbc, what)()
-            self._results.put((what, True, ""))
+            out = getattr(self.wbc, "disarm_reason" if what == "why" else what)()
+            self._results.put((what, True, out if what == "why" else ""))
         except Exception as e:  # noqa: BLE001 (reported to the latch)
             self._results.put((what, False, str(getattr(e, "detail", None) or e)[:200]))
         finally:
@@ -91,8 +91,9 @@ class Actions:
 
 def default_hints(cfg: Config) -> dict:
     """Session defaults set over HTTP at start; each datagram overrides ``base`` with the live state."""
+    ees = list((cfg.hands or {}).values()) or [cfg.ee]
     return {"base": {"mode": "locked"},
-            "ees": {cfg.ee: {"weights": {"position": 1.0, "orientation": 0.3}}}}
+            "ees": {e: {"weights": {"position": 1.0, "orientation": 0.3}} for e in ees}}
 
 
 class TeleopClient:
@@ -102,13 +103,15 @@ class TeleopClient:
     def __init__(self, cfg: Config, reader: QuestReader, stream: WbcStream, wbc: WbcClient, *,
                  stale_s: float = STALE_S, clock: Callable[[], float] = time.monotonic,
                  max_latency: float = MAX_LATENCY_S, min_rate: float = MIN_RATE_HZ,
-                 latch: LatchConfig = LatchConfig(), sync_http: bool = False):
+                 latch: LatchConfig = LatchConfig(), sync_http: bool = False,
+                 resume: Optional[ResumeConfig] = None):
         self.cfg = cfg
         self.reader, self.stream, self.wbc = reader, stream, wbc
         self.gate = QuestGate(stale_s, max_latency=max_latency, min_rate=min_rate)
-        self.core = TeleopCore(cfg)
+        self.core = make_core(cfg)                 # two hands (cfg.hands): one core per hand (MultiCore)
         self.core.on_disarm("not armed yet")       # nothing live until a Y press arms
-        self.latch = ArmLatch(latch, getattr(wbc, "arm_seq_floor", 0) or 0)
+        clutch = tuple(cfg.hands) if cfg.hands else (cfg.hand,)
+        self.latch = ArmLatch(latch, getattr(wbc, "arm_seq_floor", 0) or 0, resume, clutch)
         self.actions = Actions(wbc, sync_http)
         self.clock = clock
         self.sending = False
@@ -117,7 +120,8 @@ class TeleopClient:
         # on_frame(frame, verdict, now, fresh) after the latch and the core saw a frame, before its latch events;
         # on_step(now, fresh, why_stale) once per step before the latch's tick;
         # on_event(event) for each latch event (("armed", arm_seq) / ("disarmed", reason)) and HTTP result
-        # (("enable" | "disable", ok, detail))
+        # (("enable" | "disable", ok, detail)), and the core's (("pairing", detail): the mirror pairing locked at an
+        # engagement)
         self.on_frame: Optional[Callable] = None
         self.on_step: Optional[Callable] = None
         self.on_event: Optional[Callable] = None
@@ -126,9 +130,15 @@ class TeleopClient:
         """After ``POST /session``: number presses above the WBC's arm_seq floor."""
         self.latch.set_floor(int((info or {}).get("arm_seq") or 0))
 
-    def robot(self) -> Optional[RobotState]:
+    def robot(self):
+        """The newest WBC row as a ``RobotState`` (two hands: ``{ee: RobotState}``, one per arm)."""
         row, t = self.stream.latest()
-        return None if row is None else RobotState.from_row(row, t, self.cfg.ee)
+        if row is None:
+            return None
+        ees = getattr(self.core, "ees", None)
+        if ees:
+            return {e: RobotState.from_row(row, t, e) for e in ees}
+        return RobotState.from_row(row, t, self.cfg.ee)
 
     def _send(self, kind: str, body: Optional[dict] = None) -> Optional[dict]:
         armed, seq = self.latch.armed, self.latch.arm_seq
@@ -152,7 +162,15 @@ class TeleopClient:
             if ev[0] == "disarmed":
                 self.core.on_disarm(f"disarmed: {ev[1]}")
                 self._send("alive")
-            else:
+            elif ev[0] == "hold":                # transient: disarmed on the wire; a re-grip resumes
+                self.core.on_disarm(f"hold: {ev[1]}")
+                self._send("alive")
+            elif ev[0] == "resume_refused":      # the WBC did not take the resume: back to the hold
+                self.core.on_disarm("hold: the WBC refused the resume")
+                self._send("alive")
+            elif ev[0] == "resumed":             # keeps the engagement captured on this frame
+                self.core.on_resume(frame)
+            elif ev[0] == "armed":
                 self.core.on_arm(frame)
             if self.on_event is not None:
                 self.on_event(ev)
@@ -160,10 +178,22 @@ class TeleopClient:
         for what, ok, detail in self.actions.drain():
             if what == "enable":                 # the seq sent so far: a row that reflects the enable comes later
                 self.latch.enable_done(ok, detail, seq=getattr(self.wbc, "seq", None))
+            elif what == "why":                  # the WBC's disarm_reason: a short dropout keeps the hold
+                self.latch.wbc_disarm_reason(detail if ok else None, self.clock())
             else:
                 self.latch.disable_done(ok, detail)
-            if self.on_event is not None:
+            if self.on_event is not None and what != "why":
                 self.on_event((what, ok, detail))
+        if self.latch.events or self.latch.requests:   # e.g. a hold escalated by the WBC's disarm reason
+            self._latch_events(frame)
+
+    def _core_events(self) -> None:
+        """The core's own events (two hands: ``("pairing", detail)``, each locked mirror-pairing decision)."""
+        evs = getattr(self.core, "events", None)
+        while evs:
+            ev = evs.pop(0)
+            if self.on_event is not None:
+                self.on_event(ev)
 
     def step(self, wait: float = 0.05) -> Optional[dict]:
         self._latch_events(None)                 # HTTP results that arrived meanwhile
@@ -175,10 +205,13 @@ class TeleopClient:
             v = self.gate.check(f)
             now = self.clock()
             self.latch.on_frame(f.data, v, row, t_row, now, self.gate.fresh(now))
-            self.core.on_frame(f.data, v, robot, now)
+            self.core.on_frame(f.data, v, robot, now, getattr(f, "body", None))
+            if self.latch.resume_candidate is not None:   # a re-grip during a hold: resume if the core engaged
+                self.latch.confirm_resume(bool(getattr(self.core, "captured_now", False)), now)
             if self.on_frame is not None:
                 self.on_frame(f.data, v, now, self.gate.fresh(now))
             self._latch_events(f.data)
+            self._core_events()
         now = self.clock()
         fresh = self.gate.fresh(now)
         if self.on_step is not None:
@@ -189,7 +222,8 @@ class TeleopClient:
         if self.latch.armed:
             cmd = self.core.command(now, fresh, robot)
             if cmd is None:                      # nothing to send (hand invalid, ...): disarm explicitly
-                self.latch.disarm("no command: " + (self.core.status.reason or self.core.status.state))
+                self.latch.disarm("no command: " + (self.core.status.reason or self.core.status.state), "no_command",
+                                  now)
                 self._latch_events(None)
             elif frames:                         # at the stream rate
                 msg = self._send("alive") if cmd == "alive" else self._send("target", cmd)
@@ -252,6 +286,16 @@ def open_wbc(wbc: WbcClient, cfg: Config) -> dict:
     by ``close_wbc``), session-default hints, enable, a datagram session."""
     wbc.acquire()
     assert_caps(wbc, top_speed_caps(cfg))
+    try:                                  # the engaged stick ramps at the base's own limits (body_frozen ``_shape``)
+        cur = wbc.get_config()
+        if cfg.stick_shape:
+            cfg.stick_speed_frac = 0.85   # headroom: the base's speed cap above the engaged stick's full scale
+        if cfg.stick_shape and cur.get("max_accel"):
+            cfg.stick_accel = cfg.stick_accel_frac * float(cur["max_accel"])
+        if cfg.stick_shape and cur.get("max_alpha"):
+            cfg.stick_alpha = cfg.stick_accel_frac * float(cur["max_alpha"])
+    except Exception:  # noqa: BLE001 (a WBC without them: the defaults)
+        pass
     wbc.set_hints(default_hints(cfg))
     wbc.enable()
     return wbc.open_session()
@@ -281,7 +325,8 @@ def status_line(c: TeleopClient) -> str:
     lt = c.latch
     arm = f"ARMED#{lt.arm_seq}" if lt.armed else "disarmed"
     why = (s.reason if lt.armed else lt.reason) or ""
-    return (f"[{arm:9}|{s.state:13}] {'SENDING' if c.sending else 'silent '} quest={quest} lat={lat}"
+    pair = "MIRROR " if getattr(c.core, "mirrored", False) else ""
+    return (pair + f"[{arm:9}|{s.state:13}] {'SENDING' if c.sending else 'silent '} quest={quest} lat={lat}"
             f" rate={c.gate.rate(now):3.0f}Hz wbc_row={age} eng={s.engagements} sent={c.wbc.sent.get('target', 0)}"
             f" offset=({o[0]:+.2f},{o[1]:+.2f},{o[2]:+.2f}) hint={hint} {why[:40]:40}")
 
@@ -299,6 +344,14 @@ def main(argv=None) -> int:
     ap.add_argument("--udp-host", default=None, help="datagram destination host (default: the --wbc host)")
     ap.add_argument("--hand", choices=("left", "right"), default="right", help="the hand that drives the arm")
     ap.add_argument("--ee", default="arm", help="end-effector name in the WBC (default %(default)s)")
+    ap.add_argument("--hands", default=None, metavar="left=EE,right=EE",
+                    help="two hands, two arms: each hand's grip clutches its EE (e.g. left=arm_left,right=arm_right)")
+    ap.add_argument("--mirror", choices=MIRROR_MODES, default="off",
+                    help="two hands: which arm each hand drives, decided when the first hand engages and locked until "
+                         "both release: off / straight (left hand -> left arm), mirror (swapped), auto (mirror when "
+                         "the robot faces the operator: headings > 90 deg apart); default %(default)s")
+    ap.add_argument("--elbow-hint", action="store_true",
+                    help="send each engaged EE's elbow-swivel input (swivel.py; needs the headset's --body)")
     ap.add_argument("--no-head-walk", action="store_true",
                     help="engaged: the base hint follows only the stick offset, not the head's travel and yaw")
     ap.add_argument("--stale-ms", type=float, default=STALE_S * 1e3, help="headset freshness timeout")
@@ -309,6 +362,9 @@ def main(argv=None) -> int:
                     help="third person: the left stick moves the robot along its own forward instead of the "
                          "operator's facing (headless, the default)")
     ap.add_argument("--no-gripper", action="store_true")
+    ap.add_argument("--tether", action="store_true",
+                    help="engaged: hold the stick offset near the WBC's commanded base (the stick tether; off by "
+                         "default: the stick ramp instead; body_frozen.py)")
     ap.add_argument("--max-speed", type=float, default=Config.stick_max_speed,
                     help="m/s: the left stick's full deflection and the base hint's clamp (default %(default)s)")
     ap.add_argument("--max-omega", type=float, default=Config.stick_max_omega,
@@ -319,7 +375,11 @@ def main(argv=None) -> int:
                     help="headset frame rate (over 0.5 s) below this counts as stale (disarm)")
     args = ap.parse_args(argv)
 
-    cfg = Config(hand=args.hand, ee=args.ee, head_walk=not args.no_head_walk, mode=args.mode, headless=not args.no_headless, gripper=not args.no_gripper)
+    hands = dict(kv.split("=", 1) for kv in args.hands.split(",")) if args.hands else None
+    cfg = Config(hand=args.hand, ee=(hands or {}).get(args.hand, args.ee), hands=hands, head_walk=not args.no_head_walk,
+                 mode=args.mode, headless=not args.no_headless, gripper=not args.no_gripper,
+                 mirror=args.mirror if hands else "off", elbow_hint=args.elbow_hint,
+                 tether=args.tether)
     try:
         set_top_speed(cfg, args.max_speed, args.max_omega)
     except ValueError as e:
@@ -334,7 +394,10 @@ def main(argv=None) -> int:
         info = open_wbc(wbc, cfg)
         client.session_opened(info)
         print(f"WBC session {info['session']} -> udp {wbc.udp_host}:{wbc.udp_port}; headset {args.quest}:"
-              f"{args.quest_port}, {args.hand} grip clutches the arm. Nothing moves until Y (left) arms; X disables."
+              f"{args.quest_port}, " + (", ".join(f"{h} grip clutches {e}" for h, e in hands.items()) if hands else
+                                        f"{args.hand} grip clutches the arm") +
+              (f" (mirror pairing: {cfg.mirror})" if cfg.mirror != "off" else "") +
+              ". Nothing moves until Y (left) arms; X disables."
               " Ctrl-C to stop.", flush=True)
         client.run(stop, print_status)
     except KeyboardInterrupt:

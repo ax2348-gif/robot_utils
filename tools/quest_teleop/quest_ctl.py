@@ -2,7 +2,7 @@
 """Headset-side control for the Quest teleop: ``up``, ``down``, ``status`` (also as ``quest_up`` / ``quest_down`` /
 ``quest_status``). Mac or erid; stdlib only. Automates only the headset, not the teleop workflow.
 
-    quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--restart] [--wait 30]
+    quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--body off|core|all] [--restart] [--wait 30]
     quest_down
     quest_status
 
@@ -17,10 +17,12 @@ shell; profile.sh defines ``q`` only for interactive shells, so it is not used o
    refuses a dirty tree: a dirty tree is reported and left alone, never forced.
 3. Telemetry, headless: ``quest run --no-viewer --scheme=<scheme>`` (``-s`` too with ``--demo``, which renders the
    headset's own kinematic demo; ``--ar=URL`` with ``--ar``: the robot AR view, quest_env ROBOT_AR.md; bare ``--ar``
-   is this machine's sim stack at its address toward the headset). The scheme works without ``-s``: the script
+   is this machine's sim stack at its address toward the headset; ``--body=core|all`` with ``--body``: Meta body
+   tracking in each frame, quest_env BODY_TRACKING.md, runtime 1.7.0). The scheme works without ``-s``: the script
    writes ``off body-frozen`` to ``~/.config/quest-env/demo-mode`` and native reads the second word into
    ``operatorIntent_.bodyFrozen`` regardless of the demo. ``run`` restarts the XR process, so it is skipped when the stream already answers, the
-   mode file and the AR URL (``~/.config/quest-env/robot-ar``) match and nothing was pulled (``--restart`` forces
+   mode file, the AR URL (``~/.config/quest-env/robot-ar``) and the body setting (``body-tracking``) match and
+   nothing was pulled (``--restart`` forces
    it).
 4. Waits until port 9391 answers with ``teleop.quest_state.v1`` frames, then prints the status.
 
@@ -45,6 +47,8 @@ SCHEMA = "teleop.quest_state.v1"
 ROOT = 'R=$(cat "$HOME/.config/quest-env/root" 2>/dev/null || echo "$HOME/workspace/quest_env"); '
 MODE_FILE = '"$HOME/.config/quest-env/demo-mode"'
 AR_FILE = '"$HOME/.config/quest-env/robot-ar"'
+BODY_FILE = '"$HOME/.config/quest-env/body-tracking"'
+BODY_MODES = ("off", "core", "all")
 XR_STATES = {"0": "UNKNOWN", "1": "IDLE (headset not worn?)", "2": "READY", "3": "SYNCHRONIZED", "4": "VISIBLE",
              "5": "FOCUSED", "6": "STOPPING", "7": "LOSS_PENDING", "8": "EXITING"}
 UNREACHABLE = ("the headset does not answer SSH ({detail}). Is it asleep, off, or off the network, or is the "
@@ -237,6 +241,15 @@ class QuestCtl:
                 return line[4:].strip()
         return None
 
+    def body_mode(self) -> str:
+        """The body tracking the running telemetry was launched with (``joints=`` in the body file): core / all, or
+        off without the file (quest_env BODY_TRACKING.md)."""
+        r = self.run(f"cat {BODY_FILE} 2>/dev/null", 15)
+        for line in r.out.splitlines() if r.rc == 0 else []:
+            if line.startswith("joints="):
+                return line[7:].strip()
+        return "off"
+
     def xr_state(self) -> str:
         """The telemetry process's last OpenXR session state, from ``quest status`` (its pid) and logcat (read-only).
         The stream only flows once the session runs (FOCUSED/VISIBLE): IDLE means the headset is not being worn."""
@@ -276,7 +289,7 @@ class QuestCtl:
         return info
 
     def up(self, scheme: str = "body-frozen", demo: bool = False, restart: bool = False, wait: float = 30.0,
-           ar: Optional[str] = None) -> int:
+           ar: Optional[str] = None, body: str = "off") -> int:
         if not self.reachable():
             return 2
         pulled = False
@@ -296,22 +309,28 @@ class QuestCtl:
             else:
                 self.log("headset clone is up to date" + (f" ({dirty} local change(s))" if dirty else ""))
         want = f"{'live' if demo else 'off'}{' body-frozen' if scheme == 'body-frozen' else ''}"
-        current, current_ar = self.mode(), self.ar_url()
+        body = body if body in BODY_MODES else "off"
+        current, current_ar, current_body = self.mode(), self.ar_url(), self.body_mode()
         live = self.probe(self.stream_host, self.port, 1.0)
         stale = live.live and not pulled and not restart and self.package_stale()
-        if live.live and current == want and current_ar == ar and not pulled and not restart and not stale:
+        if live.live and current == want and current_ar == ar and current_body == body and not pulled and \
+                not restart and not stale:
             self.log(f"telemetry already running ({want}{', AR ' + ar if ar else ''}); not restarting")
         else:
             why = ("--restart" if restart else "updated" if pulled else
                    "stream not answering" if not live.live else
                    "the running library is not the clone's package" if stale else
                    f"mode {current or 'unset'!r} -> {want!r}" if current != want else
-                   f"AR {current_ar or 'off'} -> {ar or 'off'}")
-            args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "") + (f" --ar={ar}" if ar else "")
+                   f"AR {current_ar or 'off'} -> {ar or 'off'}" if current_ar != ar else
+                   f"body {current_body} -> {body}")
+            # --body only when wanted: a quest_env without body tracking rejects the option.
+            args = f"run --no-viewer --scheme={scheme}" + (" -s" if demo else "") + (f" --ar={ar}" if ar else "") \
+                + (f" --body={body}" if body != "off" else "")
             self.log(f"starting telemetry: quest {args} ({why})")
             r = self.q(args, 120)
             if r.rc != 0:
-                self.log(f"quest run failed (exit {r.rc}): {(r.err.strip() or r.out.strip())[-300:]}")
+                self.log(f"quest run failed (exit {r.rc}): {(r.err.strip() or r.out.strip())[-300:]}"
+                         + (" (--body needs quest_env with body tracking)" if body != "off" and r.rc == 2 else ""))
                 return 4
         info = self.wait_stream(wait)
         if not info.live:
@@ -360,6 +379,9 @@ def main(argv=None, prog: Optional[str] = None) -> int:
     ap.add_argument("--ar", nargs="?", const="auto", metavar="URL|:PORT",
                     help="robot AR view of a robot frontend (plain http). Bare --ar: this machine's sim stack "
                     f"(port {SIM_STACK_PORT}) at its address toward the headset; :PORT another port; or a URL / host")
+    ap.add_argument("--body", choices=BODY_MODES, default="off",
+                    help="Meta body tracking in each frame (quest_env BODY_TRACKING.md; runtime 1.7.0): core joints, "
+                         "all joints, or off (default)")
     ap.add_argument("--restart", action="store_true", help="restart telemetry even if it is already running")
     ap.add_argument("--wait", type=float, default=30.0, help="seconds to wait for the stream")
     args = ap.parse_args(argv)
@@ -375,7 +397,7 @@ def main(argv=None, prog: Optional[str] = None) -> int:
                 print(f"--ar: no route to the headset at {stream_host} ({e}); pass the URL", flush=True)
                 return 2
             print(f"robot AR: {ar}", flush=True)
-        return ctl.up(args.scheme, args.demo, args.restart, args.wait, ar)
+        return ctl.up(args.scheme, args.demo, args.restart, args.wait, ar, args.body)
     return ctl.down() if command == "down" else ctl.status()
 
 

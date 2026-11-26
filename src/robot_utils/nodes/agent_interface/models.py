@@ -97,6 +97,12 @@ class ArmEnabled(BaseModel):
     error: Optional[str] = Field(None, description="Why the arm could not be enabled (the base part still applies).")
 
 
+class ArmsOut(BaseModel):
+    """GET /arms."""
+    arms: list[str] = Field(description="The arm nodes this node drives, by name (each is /arms/{name}/...).")
+    primary: Optional[str] = Field(None, description="The first: what /arm/... and POST /enable's `arm` mean.")
+
+
 class EnableOut(Reply):
     enabled: bool = Field(description="Always true.")
     base: Optional[bool] = Field(None, description="The base was enabled (absent with `base: false`).")
@@ -107,6 +113,8 @@ class EnableOut(Reply):
     pose_servo: Optional[dict[str, Any]] = Field(None, description="pose_servo's config in force (its POST /enable "
                                                                    "reply's `config`; with the base).")
     arm: Optional[ArmEnabled] = Field(None, description="The arm part (absent with `arm: false`).")
+    arms: Optional[dict[str, ArmEnabled]] = Field(None, description="Several arms (a bimanual robot): each arm's part "
+                                                                    "by name (`arm` is the first's).")
 
 
 class DisableOut(Reply):
@@ -798,6 +806,8 @@ class NavState(BaseModel):
     reflex: Reflex
     alignment: Alignment
     arm: ArmBrief
+    arms: Optional[dict[str, ArmBrief]] = Field(None, exclude_if=lambda v: v is None, description="Several arms: each arm's lease state by name "
+                                                                 "(`arm` is the first's).")
     anomaly: AnomalyBrief
     snapshots: list[str] = Field(description="Latest snapshot ids (up to 10), oldest first.")
     goals: dict[int, GoalBrief] = Field(description="Latest goals of the session (up to 10), by goal id.")

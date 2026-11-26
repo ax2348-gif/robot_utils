@@ -101,6 +101,65 @@ class Config:
     rest_ang: float = 0.05          # rad/s
     base_yaw_radius: float = 0.3    # m: yaw is weighted like a point this far from the centre
     posture_weight: float = 1e-4    # default (hints override); 2e-3 biased the EE by ~3 mm
+    # a redundant arm (more joints than the EE task's 6 rows, e.g. a 7-DOF OpenArm): the posture is a cost on the
+    # task's NULL SPACE only (controller.py "Null-space posture"): it cannot move the EE, so it may be strong; a hint's
+    # posture_weight scales it relative to posture_weight (the default hint = this weight)
+    w_null_posture: float = 0.5
+    null_posture_speed: float = 0.3   # rad/s per joint: the null-space posture's velocity cap (a slow preference)
+    null_limit_margin: float = 0.1    # rad: a joint this close to a limit is left out of the null-space terms
+    # what the null space of a redundant arm does (wbc/humanlike.py, docs/wbc.md "Null-space posture"):
+    # "humanlike" (the default): the swivel model + effort + centering (+ the arm-proximity term); "nominal": attract
+    # the fixed nominal posture (the hint's posture, w_null_posture), kept for comparison
+    null_mode: str = "humanlike"
+    w_swivel: float = 1.0           # the swivel attractor's weight (priority: proximity > swivel > effort > centering)
+    k_swivel: float = 1.0           # 1/s: the swivel's convergence rate
+    swivel_dir: str = "head"        # the manipulability direction: head | torso | motion; down = no direction, the
+                                    # elbow hangs below the S-W line (psi* 0: the relaxed arm; humanlike.py)
+    swivel_range: tuple = (-20.0, 100.0)   # deg: the swivel target's range (0 elbow down, + out)
+    swivel_head: tuple = (0.12, 0.0, 1.0)  # m, base_link: the head point (swivel_dir head / motion)
+    swivel_torso: tuple = (0.12, 0.0, 0.45)  # m, base_link: the torso centre (swivel_dir torso)
+    swivel_beta: float = 10.0       # the soft argmax's sharpness (higher: closer to the hard argmax)
+    swivel_tau: float = 0.3         # s: the swivel target's low-pass
+    w_effort: float = 0.3           # gravity effort minimisation's weight
+    k_effort: float = 1.0           # rad²/s: its gain on the self-motion gradient of log Σ (τ_g / τ_max)²
+    w_center: float = 0.1           # joint-limit centering (shoulder, wrist)'s weight
+    k_center: float = 0.1           # rad/s at a limit
+    # the soft arm-proximity term (upper arm / forearm capsules only; 0 = off; off with one arm): strictly short
+    # range: exactly zero beyond proximity_clearance (m of clearance between the capsules), ramping in as s²
+    w_arm_proximity: float = 0.0
+    proximity_clearance: float = 0.05
+    proximity_speed: float = 0.2    # m/s: the wanted separation speed at contact (s = 1)
+    # limit-aware swivel (wbc/swivel_feasible.py): the swivel target clipped into the elbow's room within the joint
+    # limits (minus null_limit_margin) at the target pose, re-planned every swivel_plan_period s (the arms in turn)
+    swivel_limit_aware: bool = False  # opt-in: measured no coverage gain, up to 18 ms p99 per tick (docs/wbc.md)
+    swivel_plan_period: float = 0.1  # s
+    # joint-limit repulsion in the null space: within limit_band of a limit, away at limit_speed s (rad/s), weight
+    # w_limit s^2 (s = (band - distance) / band); exactly zero outside the band (0 = off)
+    w_limit: float = 0.0            # opt-in: 10 measured no gain (docs/wbc.md "Near the joint limits")
+    limit_band: float = 0.15        # rad
+    limit_speed: float = 0.5        # rad/s
+    # the operator's swivel hint (a per-EE ``swivel`` {seq, dpsi, elbow, conf} in the target datagrams: the operator's
+    # swivel change since their engagement; humanlike.py, docs/wbc.md "The operator's elbow"): anchored at the robot's
+    # commanded swivel on each new engagement, it replaces the model's swivel target by its weight, null space only
+    swivel_hint_gain: float = 1.0   # robot swivel per operator swivel (target = anchor + gain dpsi)
+    w_swivel_hint: float = 3.0      # its weight (below the proximity term's: that one still acts)
+    # the speeds (2026-11-26, the owner: "barely does anything"; it followed ~half of the operator's swivel in 1-2 s
+    # grips at 3 / 1.5 / 0.1 / 1.0 / 0.3): the hand stays primary (null space), so a fast elbow costs no EE error
+    k_swivel_hint: float = 5.0      # 1/s: the elbow's convergence rate to the target
+    swivel_hint_tau: float = 0.05   # s: the target's low-pass
+    swivel_hint_rate: float = 2.0   # rad/s: the target's rate cap (and the swivel speed the term asks for at most)
+    swivel_hint_speed: float = 1.2  # rad/s: the null-space velocity cap while it is in force (null_posture_speed
+                                    # otherwise; blended by its weight)
+    swivel_hint_blend: float = 0.15  # s: its weight ramps over this (0 -> 1): in, out, and on every fade change
+    swivel_hint_timeout: float = 0.3  # s: no swivel field for this long: stale (released, or the body lost)
+    swivel_hint_hold: bool = True   # stale: keep the target and the weight (the elbow stays where the operator left it,
+                                    # as the hand does when released; the next engagement re-anchors there) instead of
+                                    # fading back to the model's swivel, which undid every grip's swivel between clutches
+                                    # (the owner, 2026-11-26). A controller reset (disable) clears it
+    swivel_hint_flex: tuple = (10.0, 30.0)   # deg of elbow flexion (pi - the upper-arm-forearm angle), the
+                                    # operator's and the robot's alike: the weight is 0 below the first, 1 above the
+                                    # second (smoothstep): it vanishes toward either arm's full extension
+    swivel_hint_conf: tuple = (0.3, 0.6)     # the operator's conf: 0 below the first, 1 above the second (smoothstep)
     k_posture: float = 1.0          # 1/s
     tie_speed: float = 0.05         # m/s: posture and manipulability act fully at this desired EE speed, scaled
                                     # down below it (0 when the task is satisfied: no self-motion)
@@ -155,6 +214,13 @@ def default_arm_gains() -> tuple[np.ndarray, float, str]:
         return np.asarray(KP_FALLBACK, float), MAX_LEAD, "fallback (soft profile copy)"
 
 
+def fit(v, n: int) -> np.ndarray:
+    """A per-joint vector for an arm of ``n`` joints: ``v``'s first n, its last value repeated past its end (a 6-joint
+    default, e.g. lead_torque, on a 7-joint arm: the wrist value for the extra wrist joint)."""
+    v = np.asarray(v, float).reshape(-1)
+    return v[:n] if len(v) >= n else np.concatenate([v, np.full(n - len(v), v[-1])])
+
+
 def check_lead_torque(lead_torque, kp, max_lead: float) -> None:
     """The hard ceiling: lead_torque_i <= kp_i x max_lead (beyond it the arm drops the goals)."""
     ceil = np.asarray(kp, float)[:6] * float(max_lead)
@@ -183,8 +249,26 @@ def make_config(changes: Optional[dict] = None, base: Optional[Config] = None) -
         changes["lead_torque"] = tuple(float(x) for x in v)
         if not all(math.isfinite(x) and x > 0 for x in changes["lead_torque"]):
             raise ValueError("lead_torque must be positive finite numbers (Nm)")
+    for k, n in (("swivel_range", 2), ("swivel_head", 3), ("swivel_torso", 3), ("swivel_hint_flex", 2),
+                 ("swivel_hint_conf", 2)):
+        if changes.get(k) is not None:
+            v = changes[k]
+            if not isinstance(v, (list, tuple)) or len(v) != n or any(
+                    isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in v):
+                raise ValueError(f"{k} must be {n} finite numbers")
+            changes[k] = tuple(float(x) for x in v)
     c = replace(base or Config(), **changes)
-    nonneg = ("w_min", "lead_delay", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
+    if c.null_mode not in ("humanlike", "nominal"):
+        raise ValueError("null_mode must be humanlike or nominal")
+    if c.swivel_dir not in ("head", "torso", "motion", "down"):
+        raise ValueError("swivel_dir must be head, torso, motion or down")
+    if not c.swivel_range[0] < c.swivel_range[1]:
+        raise ValueError("swivel_range must be [low, high] degrees, low < high")
+    if not 0 <= c.swivel_hint_flex[0] < c.swivel_hint_flex[1] <= 180:
+        raise ValueError("swivel_hint_flex must be [low, high] degrees with 0 <= low < high <= 180")
+    if not 0 <= c.swivel_hint_conf[0] < c.swivel_hint_conf[1] <= 1:
+        raise ValueError("swivel_hint_conf must be [low, high] with 0 <= low < high <= 1")
+    nonneg = ("w_min", "w_null_posture", "w_swivel", "w_effort", "w_center", "w_arm_proximity", "w_limit", "w_swivel_hint", "lead_delay", "w_manip", "w_base_free", "lm_singular", "posture_weight", "w_base_flat",
               "w_base_flat_yaw", "base_start_charge")   # 0 = off
     pos = [f.name for f in fields(Config) if f.type in ("float", float) and f.name not in ("damping", "reach")]
     for k in pos:
@@ -424,7 +508,7 @@ def parse_ee(name: str, e: dict, cfg: Config, postures: dict, n_joints: int) -> 
                   _num(e, "posture_weight", 0, 1.0, cfg.posture_weight, f"ees.{name}."))
 
 
-def parse_hints(doc: dict, cfg: Config, ee_names, postures: dict, n_joints: int = 6, to_world=None,
+def parse_hints(doc: dict, cfg: Config, ee_names, postures: dict, n_joints=6, to_world=None,
                 cur: Optional[Hints] = None) -> Hints:
     """A full hint document (``base``, ``ees``): absent keys take the defaults (not the hints in force)."""
     doc = doc or {}
@@ -434,7 +518,8 @@ def parse_hints(doc: dict, cfg: Config, ee_names, postures: dict, n_joints: int 
     for name, e in (doc.get("ees") or {}).items():
         if name not in ee_names:
             raise ValueError(f"ees: no end effector {name!r} (have {', '.join(ee_names)})")
-        ees[name] = parse_ee(name, e or {}, cfg, postures, n_joints)
+        ees[name] = parse_ee(name, e or {}, cfg, postures,
+                             n_joints.get(name, 6) if isinstance(n_joints, dict) else n_joints)
     return replace(h, ees=ees)
 
 

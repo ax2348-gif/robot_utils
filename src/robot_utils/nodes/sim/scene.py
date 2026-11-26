@@ -28,11 +28,18 @@ TABLE_THICKNESS = 0.03      # m
 LEG = 0.04                  # m, square legs
 
 
-def tabletop() -> list[dict]:
+def work_top(top: float | None = None) -> float:
+    """The work surface's height (the table top, the rings' surface): ``top`` (the sim config's ``scene.work_top``, a
+    robot profile's: e.g. the human-scale OpenArm's), else the reBot's: its mount + ``TOP_ABOVE_MOUNT``."""
+    from ..swerve.constants import TOP_Z
+    return TOP_Z + TOP_ABOVE_MOUNT if top is None else float(top)
+
+
+def tabletop(top: float | None = None) -> list[dict]:
     """The scene's objects (POST /scene/objects fields), poses in the world with the base at its start pose."""
     from ..arm.config import GAP_MAX
     from ..swerve.constants import FRAME, TOP_Z
-    top = TOP_Z + TOP_ABOVE_MOUNT
+    top = work_top(top)
     x0 = FRAME / 2 + EDGE_GAP                       # front edge
     xc = x0 + TABLE_DEPTH / 2
     wood, legc = [0.62, 0.50, 0.38, 1.0], [0.40, 0.33, 0.26, 1.0]
@@ -227,17 +234,19 @@ def _sector(r_in: float, r_out: float, a0: float, a1: float, z: float, h: float,
     return out
 
 
-def ring_geometry() -> dict:
-    """The rings' numbers (m): surface height, centre (world, base at its start pose), and radii."""
+def ring_geometry(mount_y: float | None = None, top: float | None = None) -> dict:
+    """The rings' numbers (m): surface height, centre (world, base at its start pose), and radii. ``mount_y``: the
+    arm mount's y the rings centre on (World.ring_mount_y: the robot profile's right arm; None: the reBot's)."""
     from ..swerve.constants import FRAME, TOP_Z
     r_o = RING_D / 2
     r_oi = r_o - OUTER_W
     r_io = r_oi - RING_GAP
-    return {"top": TOP_Z + TOP_ABOVE_MOUNT, "centre": [FRAME / 2 + EDGE_GAP + r_o, arm_mount_y()],
+    return {"top": work_top(top), "centre": [FRAME / 2 + EDGE_GAP + r_o, arm_mount_y() if mount_y is None else float(mount_y)],
             "outer": (r_oi, r_o), "inner": (r_io - INNER_W, r_io)}
 
 
-def rings(name: str = "rings", outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04) -> dict:
+def rings(name: str = "rings", outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04,
+          mount_y: float | None = None, top: float | None = None) -> dict:
     """Two concentric horizontal rings (POST /scene/objects fields, shape articulated, fixed) turning about a vertical
     axis, each driven at a rim speed (m/s at its outer edge; + counterclockwise seen from above): the outer
     ``OUTER_W`` wide, the inner ``INNER_W`` wide, the centre hollow (an object off the inner edge falls to the floor).
@@ -246,7 +255,7 @@ def rings(name: str = "rings", outer_rim_speed: float = 0.04, inner_rim_speed: f
     rides above a thin cylindrical wall set back from its edges (the outer one 3 cm inside the outer ring's inner
     edge, clear of the base's approach; the inner one 10 cm outside the hollow). Its origin is the rings' centre on
     the floor."""
-    g = ring_geometry()
+    g = ring_geometry(mount_y, top)
     top, (r_oi, r_o), (r_ii, r_io) = g["top"], g["outer"], g["inner"]
     wall_h = top - RING_T - SUPPORT_CLEAR
     grey, ring_c = [0.45, 0.45, 0.48, 1.0], [0.80, 0.80, 0.78, 1.0]
@@ -270,7 +279,8 @@ def rings(name: str = "rings", outer_rim_speed: float = 0.04, inner_rim_speed: f
                       *ring("inner", r_ii, r_io, inner_rim_speed)]}
 
 
-def ring_objects(per_ring: int = 8, seed: int = 0) -> list[dict]:
+def ring_objects(per_ring: int = 8, seed: int = 0, mount_y: float | None = None,
+                 top: float | None = None) -> list[dict]:
     """``per_ring`` graspable objects on each ring, half red and half blue, at seeded random angles (spread so no two
     touch), radii (clear of the edges) and headings: cubes, cylinders and blocks, each horizontal width < 0.8 x the
     gripper's opening, masses and friction as the tabletop's."""
@@ -282,7 +292,7 @@ def ring_objects(per_ring: int = 8, seed: int = 0) -> list[dict]:
              ({"shape": "cylinder", "radius": w / 2, "length": 0.06, "mass": 0.08}, 0.06),
              ({"shape": "box", "size": [0.025, w, 0.05], "mass": 0.05}, 0.05)]
     rnd = random.Random(seed)
-    g = ring_geometry()
+    g = ring_geometry(mount_y, top)
     (cx, cy), top = g["centre"], g["top"]
     out = []
     for tag in ("outer", "inner"):
@@ -306,10 +316,11 @@ def ring_objects(per_ring: int = 8, seed: int = 0) -> list[dict]:
 
 
 def rings_scene(outer_rim_speed: float = 0.04, inner_rim_speed: float = -0.04, per_ring: int = 8,
-                seed: int = 0) -> list[dict]:
-    """The rings (``rings()``) with ``per_ring`` red and blue objects scattered on each (``ring_objects()``)."""
-    return [rings(outer_rim_speed=outer_rim_speed, inner_rim_speed=inner_rim_speed),
-            *ring_objects(per_ring=per_ring, seed=seed)]
+                seed: int = 0, mount_y: float | None = None, top: float | None = None) -> list[dict]:
+    """The rings (``rings()``) with ``per_ring`` red and blue objects scattered on each (``ring_objects()``), centred
+    on ``mount_y`` (ring_geometry)."""
+    return [rings(outer_rim_speed=outer_rim_speed, inner_rim_speed=inner_rim_speed, mount_y=mount_y, top=top),
+            *ring_objects(per_ring=per_ring, seed=seed, mount_y=mount_y, top=top)]
 
 
 # -- a revolving door: a passive one-way rotor in a drum, entrance and exit side by side -------------------------
@@ -425,17 +436,22 @@ def _cart_door(sc: dict) -> list:
     return cart_door_scene(**(sc.get("cart_door_setup") or {}))
 
 
-def tasks(setup: dict | None = None) -> dict:
+def tasks(setup: dict | None = None, mount_y: float | None = None) -> dict:
     """Every task: name -> {title, objects() -> list, view_anchor ([x, y, yaw_deg] or None: the origin)}.
-    ``setup``: the config's ``scene`` block (``rings_setup`` etc.), so a task matches what the flags would build."""
+    ``setup``: the config's ``scene`` block (``rings_setup`` etc.), so a task matches what the flags would build;
+    ``mount_y``: the arm mount the rings centre on (World.ring_mount_y)."""
     sc = setup or {}
     near = [0.6, 0.0, 0.0]               # the robot ~1 m in front of the operator, the task beyond it
     return {
-        "tabletop": {"title": "Tabletop (pick and place)", "objects": tabletop, "view_anchor": None},
+        "tabletop": {"title": "Tabletop (pick and place)", "objects": lambda: tabletop(sc.get("work_top")),
+                     "view_anchor": None},
         "cabinet": {"title": "Cabinet (drawers, a door) by the table",
-                    "objects": lambda: tabletop() + cabinet_scene(), "view_anchor": None},
+                    "objects": lambda: tabletop(sc.get("work_top")) + cabinet_scene(),
+                    "view_anchor": None},
         "rings": {"title": "Counter-rotating rings (sorting)",
-                  "objects": lambda: rings_scene(**(sc.get("rings_setup") or {})), "view_anchor": near},
+                  "objects": lambda: rings_scene(**{"mount_y": mount_y, "top": sc.get("work_top"),
+                                                    **(sc.get("rings_setup") or {})}),
+                  "view_anchor": near},
         "revolving_door": {"title": "Revolving door", "objects": revolving_door_scene, "view_anchor": near},
         "cart_door": {"title": "Pull a cart through a pull door",
                       "objects": lambda: _cart_door(sc), "view_anchor": near},

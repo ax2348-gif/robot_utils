@@ -4,7 +4,10 @@ JSON header, no payload):
 
 - ``{"type": "headset", "t_rx": <monotonic s>, "frame": {...}}``: each headset frame as received;
 - ``{"type": "sent", "t_send": <monotonic s>, "datagram": {...}}``: each datagram sent to the WBC, exactly;
-- ``{"type": "event", <the event line: seq, t, wall, kind, episode, detail>}``.
+- ``{"type": "event", <the event line: seq, t, wall, kind, episode, detail>}``;
+- ``{"type": "hint", "t_rx", "session_id", "frame_seq", "sample_time_ns", "selected", "engaged_source", "in_force",
+  "candidates": {"head" | "chest" | "hips": {ok, reason, confidence, p, yaw, f_p, f_yaw}}}``: while teleop runs, per
+  valid headset frame, the base hint's three candidate sources side by side (tools/quest_teleop/hint_source.py).
 
 Publishers (the teleop loop, the event log) never block: each subscriber has a bounded queue; one that falls more
 than ``max_records`` behind loses the oldest records and the next record's header carries ``dropped`` (how many),

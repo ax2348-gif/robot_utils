@@ -1,0 +1,50 @@
+# OpenArm v2 arm (Enactic's) with Anvil's joint ranges and gripper, Enactic's J1 window (README.md): what the arm node,
+# the sim and the WBC need of an arm that is not the reBot (robots/arm_types.py). Joint order joint1..joint7; the joint
+# limits come from the URDFs (Anvil's ranges, J1 Enactic's).
+name: openarm_v2
+dof: 7
+# the MIT gains: OpenArm's own (openarm_description assets/arm/openarm_v2.0/config/control/control_gains.yaml)
+kp: [70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0]
+kd: [2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5]
+# Notes (2026-11-26), not in force:
+# - the owner's trial (on the maintainer's model with Anvil's arm links), kd x2 on J1-4 and x3 on J5-7 for Anvil's
+#   heavier wrist (link7 236 g + a 0.7 kg hand vs Enactic's ~0.6 kg: about 2x the wrist joints' inertia, so a velocity step's time constant J / kd doubled, 9 -> 18 ms on J5):
+#   kd [5.5, 5.0, 4.0, 4.0, 2.1, 1.8, 1.5] (tmp/anvil-kd 94192f3); reverted
+# - Anvil's own (github.com/anvil-robotics/anvil-loader config/openarm_v2_*.yaml, the 8th value the gripper): Quest
+#   teleop and inference kp [40, 40, 40, 40, 6, 7, 7, 0.1] kd [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2, 0.04]; leader-follower
+#   (follower) kp [120, 120, 120, 120, 12, 15.5, 12.5, 0.1], same kd; homing kp [20 x4, 5 x4] kd [2.75, 2.5, 0.7, 0.4,
+#   0.7, 0.6, 0.5, 0.1]; gravity torque_scaling [0.9, 0.9, 0.8, 1.0, 0.8, 0.8, 0.8]; control mode position forwarding
+#   (whether a velocity reference is sent is unchecked: without one kd only damps, which may be why their wrist kd is low)
+tau_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # the gravity feedforward: the model's torque (no calibration yet)
+# torque limits at the output (N m): the joint efforts (Enactic's, the same as Anvil's
+# config/joint/joint_limits.yaml), the peak torques of the Damiao motors they match: DM8009 (joints 1-2), DM4340 (3-4), DM4310 (5-7) (openarm_can supports these; the mapping
+# is inferred from the efforts, not from a joint -> motor table)
+torque_max: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 7.0]
+# the gripper (robots/grippers.py): anvil, Anvil's gripper (0-100 mm, DM-J4310-2EC; robots/openarm/gripper/); its motor's torque
+# limit and gains come from there
+gripper: anvil
+# the arm node's hard joint speed / acceleration caps: our policy, as the reBot's (the URDFs allow Anvil's 10.47 rad/s on
+# joints 1-2, 3.77 on 3-4, 12.57 on 5-7; Enactic's joint_limits.yaml 16.8 / 5.4 / 20.9: never raised past them)
+joint_vel: [2.0, 2.0, 2.0, 2.0, 6.0, 6.0, 6.0]
+joint_acc: [20.0, 20.0, 20.0, 20.0, 60.0, 60.0, 60.0]
+# the arm node's jam detection: |measured torque - gravity model| bands (N m per joint): ESTIMATES, scaled from the
+# reBot's draft bands (1.0-4.0 N m on its DM4340 joints, 0.6-0.8 on its DM4310s) by the motors' torque
+jam_bands: [6.0, 6.0, 4.0, 4.0, 0.8, 0.8, 0.6]
+# the arm page's view centre (m, the arm's base_link): the arm hangs from its shoulder, its workspace below and ahead
+# (the reBot's, standing on its plate: 0.12, 0, 0.2)
+view_centre: [0.2, 0.0, -0.3]
+# the WBC's human-like posture of the redundant arm (nodes/wbc/humanlike.py): the shoulder, elbow and wrist points are
+# joint origins (indices into joint1..joint7): joint2 (on joint1's axis: the shoulder centre), joint4 (the elbow),
+# joint6 (= joint7's origin: the wrist centre). Upper arm 0.22 m, forearm 0.216 m.
+geometry:
+  shoulder: 1
+  elbow: 3
+  wrist: 5
+  centering: [0, 1, 2, 4, 5, 6]        # the comfort term: the shoulder and wrist joints (not the elbow)
+  # the arm-proximity term's capsules: the upper arm (shoulder -> elbow) and the forearm (elbow -> wrist, ending
+  # `trim` m short of the wrist centre); the wrist and the gripper are left out (hands come together freely).
+  # Radii: the links' housings (DM8009 / DM4340 bodies, ~0.10 / 0.08 m across), about; measured on the arm's meshes
+  # (2026-11-25; Enactic's: 0.047 / 0.051 m, the vertices' distance to the segments)
+  capsules:
+    - {name: upper_arm, from: 1, to: 3, radius: 0.05}
+    - {name: forearm, from: 3, to: 5, radius: 0.045, trim: 0.04}

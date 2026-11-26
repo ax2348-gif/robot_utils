@@ -22,14 +22,22 @@ nodes:
   - {name: pose_servo, kind: pose_servo, start: {module: robot_utils.nodes.pose_servo}}
   # whole-body control (docs/wbc.md); target datagrams on UDP 127.0.0.1:9410 and <runtime>/robot/wbc.target.sock
   # (a teleop client on this machine). It and pose_servo hold the same leases while enabled: one at a time.
-  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc}}
+  # --hold-timeout 0.4: the sim's input-stale disarm after 0.4 s without a datagram (the robot's 0.25 s is too tight
+  # for a loaded Mac and the headset over Tailscale; the owner's setting since 2026-11-25)
+  - {name: wbc, kind: wbc, start: {module: robot_utils.nodes.wbc, args: [--hold-timeout, "0.4"]}}
   # Quest whole-body teleop through the wbc above (docs/quest_teleop_node.md; Start button, not started by default).
   # The headset by `ssh quest` (this machine's ~/.ssh/config); --ar :8080 = the robot AR view at this stack's landing
   # page, at this machine's address toward the headset (start the stack with --host 0.0.0.0 so the headset reaches it).
   # --sim sim: Start and the A button reset this sim (and the estimator) first (docs/quest_teleop_node.md, "Episodes");
   # --autostart: teleop starts by itself once the WBC answers (it then records: docs/collect.md).
+  # The rest is how the owner runs it (collab-v4): --body core (Meta body tracking: runtime 1.7.0, quest_env collab-v4)
+  # with --elbow-hint (the operator's elbow swivel to the WBC); the headset's freshness limits for a loaded Mac over
+  # Tailscale (--max-latency-ms 300, --stale-ms 350, --min-rate 15: the robot's 150 / 200 / 30 hold too often); a
+  # resumable short dropout up to 4 s (--resume-grace 4).
   - {name: quest_teleop, kind: quest_teleop, start: {module: robot_utils.nodes.quest_teleop,
-                                                     args: [--ar, ":8080", --sim, sim, --autostart]}}
+                                                     args: [--ar, ":8080", --sim, sim, --autostart, --body, core,
+                                                            --elbow-hint, --max-latency-ms, "300", --stale-ms, "350",
+                                                            --min-rate, "15", --resume-grace, "4"]}}
   - {name: 3d_perception, kind: 3d_perception, start: {module: robot_utils.nodes.perception3d, args: [--allow-nominal]}}
   - {name: agent_interface, kind: agent_interface, start: {module: robot_utils.nodes.agent_interface,
                                                            args: [--no-require-imu]}}

@@ -4,6 +4,10 @@ stream, the rigid scene's pose frames and the scenes they index.
 Accepted: a session directory (``session.json``; ``<name>.NNN.bin`` per stream; optionally one of its episodes by
 id, from ``episodes.jsonl``) or an episode directory (``episode.json``; ``<name>.bin``). Times are the robot's
 monotonic clock (the records' ``t_rx``).
+
+Body tracking (the frames' optional ``body`` block, quest_env BODY_TRACKING.md) is not drawn: a replay counts the
+frames that carry one (``Recording.body_frames``) and leaves the block in the recording, where
+``tools/quest_teleop/body.py`` parses it.
 """
 from __future__ import annotations
 
@@ -43,6 +47,7 @@ class Recording:
     scenes_meta: dict = field(default_factory=dict)       # scene_id -> scenes.jsonl line
     window: Optional[tuple[float, float]] = None       # what to render (an episode); everything is loaded, so a
     label: str = ""                                    # reconstructed placement sees the session's history
+    body_frames: int = 0                               # headset frames carrying a body block (not drawn)
     _scenes: dict = field(default_factory=dict)
 
     # -- lookups ----------------------------------------------------------------------------------------------
@@ -120,6 +125,7 @@ def load(path, episode: Optional[str] = None) -> Recording:
     if not oplog:
         raise ValueError(f"{d}: no operator stream (quest_teleop.oplog) recorded")
     headset: list[HeadsetSample] = []
+    body_frames = 0
     prev_block = None
     for _, h, _ in iter_raw(oplog):
         if h.get("type") != "headset" or not isinstance(h.get("frame"), dict):
@@ -128,6 +134,7 @@ def load(path, episode: Optional[str] = None) -> Recording:
         if t is None:
             continue
         f = h["frame"]
+        body_frames += isinstance(f.get("body"), dict)
         block = f.get("robot_ar") if isinstance(f.get("robot_ar"), dict) else None
         if _same_block(block, prev_block):
             block = prev_block
@@ -148,4 +155,4 @@ def load(path, episode: Optional[str] = None) -> Recording:
     scene_t = [scene_t[i] for i in order]
     scene_raw = [scene_raw[i] for i in order]
     meta = {x["scene_id"]: x for x in read_scenes(d) if "missed" not in x}
-    return Recording(d, headset, scene_t, scene_raw, d / SCENE_DIR, meta, window, label)
+    return Recording(d, headset, scene_t, scene_raw, d / SCENE_DIR, meta, window, label, body_frames)

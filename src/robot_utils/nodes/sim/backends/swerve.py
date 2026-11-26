@@ -106,6 +106,8 @@ class WorldSpark(SimulatedSpark):
 
     def __init__(self, interface: str, device_id: int, coupler: Coupler, module, role: str):
         self.coupler, self.module, self.role = coupler, module, role
+        self._pos_offset = 0.0              # drive: what SET_PRIMARY_ENCODER_POSITION moved the reading by
+        self._pos_written: Optional[float] = None   # drive: the reading this class last wrote
         super().__init__(interface, device_id)
 
     def _step(self, dt: float) -> None:
@@ -134,8 +136,14 @@ class WorldSpark(SimulatedSpark):
         else:
             rpm = st["speed"] / DRIVE_MPS_PER_RPM                     # motor RPM for the wheel speed
             self.velocity = rpm
-            # wheel travel (m) / m per motor rotation = motor rotations
-            self.position = st["wheel"] * self.coupler.radius[self.module.name] / (DRIVE_MPS_PER_RPM * 60)
+            # wheel travel (m) / m per motor rotation = motor rotations, plus the offset of an encoder set: a
+            # SET_PRIMARY_ENCODER_POSITION (the swerve node's rebase) wrote self.position since the last step (both
+            # under the SPARK's lock). Without it the next step overwrote the set and every rebase timed out: 0.5 s
+            # with the odometry dropped and the base held still, retried every 10 s (2026-11-25)
+            if self._pos_written is not None and self.position != self._pos_written:
+                self._pos_offset += self.position - self._pos_written
+            raw = st["wheel"] * self.coupler.radius[self.module.name] / (DRIVE_MPS_PER_RPM * 60)
+            self.position = self._pos_written = raw + self._pos_offset
             self.applied_output = max(-0.99, min(0.99, rpm / 6784.0))
 
 

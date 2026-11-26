@@ -16,7 +16,10 @@ is not integrated past.
 
 import json
 
+from .config import ARM_TYPE
 from .geometry import ARM_BOXES
+
+VIEW_C0 = [0.12, 0.0, 0.2] if ARM_TYPE is None else list(ARM_TYPE.get("view_centre") or [0.12, 0.0, 0.2])
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -208,7 +211,7 @@ const col = (R, j) => [R[0][j], R[1][j], R[2][j]];
 const VIEWS = {iso: {az: Math.PI - 0.7, el: 0.5}, top: {az: Math.PI, el: Math.PI / 2 - 1e-4}, side: {az: -Math.PI / 2, el: 0.02}, front: {az: 0, el: 0.02}};
 const AXC = ["#ef4444", "#22c55e", "#3b82f6"];        // x y z, as on the description page
 const SIG = {warn: 0.02, crit: 0.007};                  // sigma_min thresholds (6x6 TCP Jacobian)
-const ARM_BOXES = __ARM_BOXES__;                       // [frame, centre xyz, size xyz] mm (geometry.py ARM_BOXES)
+const ARM_BOXES = __ARM_BOXES__, VIEW_C0 = __VIEW_C0__;                       // [frame, centre xyz, size xyz] mm (geometry.py ARM_BOXES)
 class ArmView {
   constructor(cv){
     this.cv = cv; this.g = cv.getContext("2d"); this.d = {}; this.raf = 0; this.view = Object.assign({zoom: 1}, VIEWS.iso);
@@ -239,7 +242,7 @@ class ArmView {
     const fresh = !!links, frames = D_.links;
     const {az, el, zoom} = this.view, e = [Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el)];
     const r = [-Math.sin(az), Math.cos(az), 0], u = [e[1] * r[2] - e[2] * r[1], e[2] * r[0] - e[0] * r[2], e[0] * r[1] - e[1] * r[0]];
-    const c0 = [0.12, 0, 0.2], s = Math.min(W, H) / (2 * 0.34) * zoom;
+    const c0 = VIEW_C0, s = Math.min(W, H) / (2 * 0.34) * zoom;      // the arm's workspace centre (arm type)
     const P = q => { const x = q[0] - c0[0], y = q[1] - c0[1], z = q[2] - c0[2]; return [W / 2 + (x * r[0] + y * r[1] + z * r[2]) * s, H / 2 - (x * u[0] + y * u[1] + z * u[2]) * s]; };
     const seg = (a, b, colr, w, dash) => { const A = P(a), B = P(b); g.strokeStyle = colr; g.lineWidth = w || 1; g.setLineDash(dash || []); g.beginPath(); g.moveTo(A[0], A[1]); g.lineTo(B[0], B[1]); g.stroke(); };
     const path = (pts, colr, w, dash, close) => { g.strokeStyle = colr; g.lineWidth = w || 1; g.setLineDash(dash || []); g.beginPath();
@@ -261,23 +264,25 @@ class ArmView {
       g.stroke(); };
     const I3 = {p: [0, 0, 0], R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]};
     const ink = fresh ? C.ink : C.muted;
-    for (const b of ARM_BOXES) if (b[0] === "base") box(I3, b, ink, 1.25, 1);
+    const my = D_.mirror ? -1 : 1;                       // a mirrored arm (robots/mirror.py): its boxes mirrored in y
+    for (const b of ARM_BOXES) if (b[0] === "base") box(I3, b, ink, 1.25, my);
     if (!frames){ g.font = "13px " + C.font; g.fillStyle = C.muted; g.fillText("waiting for the arm's joint readings", 12, 22); return; }
     const T = frames.map(fr => ({p: fr.pos, R: qToR(fr.quat)}));
-    const E = T[6], tcp = T[7], gap = fin(D_.gap) ? Math.max(0, Math.min(D_.gap, 0.057)) : 0;
-    const FR = {link1: T[0], link2: T[1], link3: T[2], link4: T[3], link5: T[4], link6: T[5], end: E};
+    const NJ = T.length - 2;                              // joint1..jointN, end_link, tcp (N = 6 reBot, 7 OpenArm)
+    const E = T[NJ], tcp = T[NJ + 1], gap = fin(D_.gap) ? Math.max(0, Math.min(D_.gap, 0.2)) : 0;
+    const FR = {end: E}; for (let k = 0; k < NJ; k++) FR["link" + (k + 1)] = T[k];
     // shadow on the base plane: where the arm is over the floor
-    const chain = [[0, 0, 0], T[0].p, T[1].p, T[2].p, T[3].p, T[4].p, T[5].p, E.p];
+    const chain = [[0, 0, 0], ...T.slice(0, NJ).map(t => t.p), E.p];
     path(chain.map(q => [q[0], q[1], 0]), C.rule, 1.5, [4, 4]);
     // links and the gripper's motor block and rail
-    for (const b of ARM_BOXES) if (FR[b[0]]) box(FR[b[0]], b, ink, 1.25, 1);
+    for (const b of ARM_BOXES) if (FR[b[0]]) box(FR[b[0]], b, ink, 1.25, my);
     // the jaws at the measured gap: each moves gap/2 along end_link y (the right one mirrored)
     for (const sgn of [1, -1]){ const Tj = {p: tp(E, [0, sgn * gap / 2, 0]), R: E.R};
-      for (const b of ARM_BOXES) if (b[0] === "finger") box(Tj, b, ink, 1.5, sgn); }
+      for (const b of ARM_BOXES) if (b[0] === "finger") box(Tj, b, ink, 1.5, sgn * my); }
     // joint axes and joints
-    for (let k = 0; k < 6; k++){ const z = col(T[k].R, 2); seg(add(T[k].p, z, -0.05), add(T[k].p, z, 0.05), C.muted, 1.25, [3, 3]); }
+    for (let k = 0; k < NJ; k++){ const z = col(T[k].R, 2); seg(add(T[k].p, z, -0.05), add(T[k].p, z, 0.05), C.muted, 1.25, [3, 3]); }
     g.setLineDash([]);
-    for (let k = 0; k < 6; k++){ const a = P(T[k].p); g.beginPath(); g.arc(a[0], a[1], 3.5, 0, 2 * Math.PI); g.fillStyle = C.panel; g.fill(); g.strokeStyle = ink; g.lineWidth = 1.5; g.stroke(); }
+    for (let k = 0; k < NJ; k++){ const a = P(T[k].p); g.beginPath(); g.arc(a[0], a[1], 3.5, 0, 2 * Math.PI); g.fillStyle = C.panel; g.fill(); g.strokeStyle = ink; g.lineWidth = 1.5; g.stroke(); }
     // the velocity ellipsoid at the TCP: principal sections, semi-axes = singular values x 0.25 m per (m/s per rad/s)
     const K = D_.kin;
     if (K && K.lin_axes && now - D_.kinAt < 2000){
@@ -446,16 +451,17 @@ $("#clear").onclick = () => call("estop/clear");
 $("#reset").onclick = () => call("reset");
 
 // -- settings ------------------------------------------------------------------------------------------
-// soft limits in page units; the joint ones are 6 values each (comma separated)
+// soft limits in page units; the joint ones are one value per joint (comma separated)
 const LIM = [["lin_vel", "speed", "mm/s", 1000], ["lin_acc", "accel", "mm/s²", 1000], ["ang_vel", "turn", "°/s", D], ["ang_acc", "ang. accel", "°/s²", D],
              ["home_vel", "home", "°/s", D], ["", "", "", 0],
-             ["joint_vel", "joint speed", "°/s, joints 1-6", D, true], ["joint_acc", "joint accel", "°/s², joints 1-6", D, true]];
+             ["joint_vel", "joint speed", "°/s, one per joint", D, true], ["joint_acc", "joint accel", "°/s², one per joint", D, true]];
 $("#limform").innerHTML = LIM.map(([k, lab, u, , vec]) => !k ? "<span></span><span></span>" : vec
   ? `<span title="${u}">${lab}</span><input id="l_${k}" type="text" inputmode="decimal" title="${u}" style="grid-column:2/-1">`
   : `<span title="${u}">${lab}</span><input id="l_${k}" type="number" step="any" min="0" title="${u}">`).join("");
 const limGet = (k, sc, vec) => { const v = $("#l_" + k).value.trim(); if (v === "") return undefined;
   if (!vec) return Number(v) / sc;
-  const a = v.split(/[,\s]+/).filter(Boolean).map(Number); if (a.length !== 6 || !a.every(isFinite)) throw new Error(`${k}: give 6 numbers`); return a.map(x => x / sc); };
+  const a = v.split(/[,\s]+/).filter(Boolean).map(Number); const nj = (st && st.limits && st.limits.hard && st.limits.hard.joint_vel || []).length || 6;
+  if (a.length !== nj || !a.every(isFinite)) throw new Error(`${k}: give ${nj} numbers`); return a.map(x => x / sc); };
 const limShow = (v, sc, vec) => vec ? v.map(x => +(x * sc).toFixed(0)).join(", ") : +(v * sc).toFixed(1);
 let limDirty = false, tcpDirty = false, profShown = null;
 const limEdited = new Set();      // send only what was edited: shown values are rounded
@@ -617,7 +623,8 @@ function kv(){
     ["stream", age === null ? "waiting" : age > 1 ? `stopped ${f(age, 0)} s ago` : "live, 30 rows/s"],
   ];
   $("#kv").innerHTML = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
-  if (last){ const J6 = [1, 2, 3, 4, 5, 6], g = (i, n) => r[`j${i}_${n}`];
+  if (last){ const J6 = [], g = (i, n) => r[`j${i}_${n}`];
+    for (let i = 1; r[`j${i}_q`] !== undefined; i++) J6.push(i);           // the arm's joints (6 reBot, 7 OpenArm)
     $("#joints").innerHTML = "<tr><th>joint</th><th>q °</th><th>cmd °</th><th>err °</th><th>τ Nm</th><th>τ<sub>g</sub></th><th>°C</th><th title='the acceleration limit held back this joint&#39;s speed increase'>acc lim</th></tr>" +
       J6.map(i => `<tr><td>${i}</td><td>${f(g(i, "q") * D, 1)}</td><td>${f(g(i, "q_cmd") * D, 1)}</td><td>${f(g(i, "e_mot") * D, 2)}</td><td>${f(g(i, "tau"), 2)}</td><td>${f(g(i, "tau_g"), 2)}</td><td>${f(g(i, "t_mos"), 0)}</td><td>${g(i, "acc_lim") === 1 ? "held" : ""}</td></tr>`).join(""); }
 }
@@ -629,7 +636,7 @@ async function poll(){
   const t0 = performance.now();
   if (!document.hidden){
     pollN++;
-    const jobs = [RU.api("links").then(x => view.update({links: x.frames, linksAt: performance.now()}))];
+    const jobs = [RU.api("links").then(x => view.update({links: x.frames, linksAt: performance.now(), mirror: !!x.mirror}))];
     if (pollN % 2 === 0) jobs.push(RU.api("kinematics").then(k => view.update({kin: k, kinAt: performance.now()})));
     else if (pollN % 4 === 1 && st && st.servo) jobs.push(RU.api("kinematics?which=command").then(k => { kinCmd = k; }, () => { kinCmd = null; }));
     try { await Promise.all(jobs); $("#viewnote").textContent = ""; } catch(e){ $("#viewnote").textContent = "drawing: " + e.message; }
@@ -641,4 +648,4 @@ function frame(){ plot.draw(); requestAnimationFrame(frame); }
 requestAnimationFrame(frame);
 render();
 </script></body></html>
-""".replace("__ARM_BOXES__", json.dumps(ARM_BOXES))
+""".replace("__ARM_BOXES__", json.dumps(ARM_BOXES)).replace("__VIEW_C0__", json.dumps(VIEW_C0))

@@ -296,7 +296,9 @@ class SimState(BaseModel):
     base: BaseState
     modules: list[ModuleState] = Field(description="Swerve modules.")
     objects: list[ObjectState] = Field(description="Scene objects.")
-    arm: Optional[ArmState] = Field(None, description="The arm (absent without one).")
+    arm: Optional[ArmState] = Field(None, description="The primary arm (`arm`, else the first; absent without one).")
+    arms: Optional[dict[str, ArmState]] = Field(None, description="Every arm by name (robots/: one per arm node "
+                                                                  "instance and backend socket).")
     cameras: dict[str, CameraState] = Field(description="Rendered cameras by name.")
     backends: dict[str, BackendState] = Field(description="Backend sockets: arm, swerve, camera-<name>.")
     view: Optional[dict] = Field(None, description="How headsets draw /scene3d: {style, role} (GET /scene3d/view).")
@@ -541,6 +543,7 @@ class RobotStateOverlays(BaseModel):
     markers: list[Marker] = Field(description="Every live marker (POST /markers): the WBC's targets, commanded poses...")
     sim: dict = Field(description="{running, rtf}.")
     arm: Optional[dict] = Field(None, description="{enabled, fault}: the arm motors as the world sees them.")
+    arms: Optional[dict] = Field(None, description="With several arms: {name: {enabled, fault}} per arm.")
 
 
 class RobotState(BaseModel):

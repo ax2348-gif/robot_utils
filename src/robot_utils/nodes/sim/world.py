@@ -10,6 +10,9 @@ lights and scene objects. Every physics step it first runs the per-component con
   each torque-capped at what the duty / current limits allow, make the wheels turn; wheel-floor friction moves the free chassis. A
   disabled drive coasts (no torque); a disabled steer holds its angle. Soft wheel contact is the
   modules' compliance.
+- **arms** (one ``Arm`` per arm of the model: ``model_info["arms"]`` from the description's model.json, else the
+  one arm ``arm``; each with its own backend socket, node.py, its own config ``components.arms.<name>`` over
+  ``components.arm``, its own jaws, and with dynamic fidelity its own motors and gravity fit):
 - **arm** (kinematic fidelity): the joint reference follows the MIT position setpoint within
   arm node's hard joint speed caps (a joint sent kp = 0 holds); a stiff servo plus a gravity / bias feedforward
   (``qfrc_bias`` as a joint torque, so the chassis carries the arm's weight) keeps the joints on it.
@@ -24,7 +27,6 @@ thread. The world never touches a node: backends reach it through ``protocol`` s
 from __future__ import annotations
 
 import collections
-import copy
 import io
 import logging
 import math
@@ -45,9 +47,14 @@ log = logging.getLogger("sim.world")
 GAP_PER_RAD = 0.016                  # m of jaw gap per rad of the gripper motor (arm/config.py: 2 x pitch radius)
 GRIPPER_OPEN_RAD = -3.1              # fully open (arm/config.py); 0 = closed
 FINGER_TRAVEL = 0.0285               # m, each finger (the arm URDF's finger_left limit)
+# (the reBot gripper's; an arm of another gripper type has its own: World.gripper(name), robots/grippers.py)
 ARM_JOINTS = [f"arm_joint{i}" for i in range(1, 7)]
-# dynamic arm: the bodies whose mass / centre of mass are fitted to the calibrated gravity (World._fit_arm_gravity)
-GRAVITY_FIT_BODIES = ["arm_link2", "arm_link3", "arm_link4", "arm_link5", "arm_link6", "arm_end_link"]
+# the arms when the model info names none (a bundle without `arms`, a World built directly): the one reBot arm `arm`
+DEFAULT_ARMS = [{"name": "arm", "prefix": "arm_", "joints": ARM_JOINTS, "gripper": "arm_finger_left", "mirror": False}]
+# dynamic arm: the bodies whose mass / centre of mass are fitted to the calibrated gravity (World._fit_arm_gravity), in
+# the arm's URDF (each arm's prefixed: GRAVITY_FIT_BODIES is the one arm `arm`'s)
+GRAVITY_FIT_LINKS = ["link2", "link3", "link4", "link5", "link6", "end_link"]
+GRAVITY_FIT_BODIES = [f"arm_{n}" for n in GRAVITY_FIT_LINKS]
 MODULE_JOINT = re.compile(r"^base_(\w+)_steer$")
 ROBOT_CONTYPE, ROBOT_CONAFFINITY = 2, 1      # the robot never collides with itself
 WORLD_CONTYPE, WORLD_CONAFFINITY = 1, 3      # floor and objects collide with the robot and each other
@@ -65,11 +72,18 @@ class SimError(ValueError):
     """A bad request to the world (HTTP 400 / an ``ok: false`` reply)."""
 
 
-def resolve_timing(cfg: dict, platform: Optional[str] = None) -> dict:
+def resolve_timing(cfg: dict, platform: Optional[str] = None, arms: Optional[list] = None) -> dict:
     """The watchdogs the world enforces: the robot's own (the Damiao motors' CAN timeout, the SPARKs' heartbeat), or
     with ``timing.lenient`` longer ones. ``auto`` is lenient on macOS: no real-time scheduling there, and under load
     the arm node's control ticks arrive 90-140 ms apart (measured 2026-11-24), past the motors' 0.1 s, so every joint
-    faulted "communication lost". Lenient only forgives stalls; nothing else about the motors changes."""
+    faulted "communication lost". Lenient only forgives stalls; nothing else about the motors changes.
+
+    Ordering rule (lenient): the sim's arm watchdog must outlast the arm node's own lenient stall limit (its control
+    process silent for ``ctl_heartbeat``, 2 s: arm/config.py LENIENT_TIMING), so a stall the node forgives is
+    forgiven here too; otherwise the motors drop off at the watchdog and the node then faults on a motor reporting
+    disabled while on. So the lenient arm watchdog is at least that + 0.5 s (2.5 s), whatever the config says.
+    ``arms``: the arms' names: ``arm_watchdogs`` per arm (``components.arms.<name>.watchdog`` over
+    ``components.arm``'s)."""
     t = cfg.get("timing") or {}
     mode = t.get("lenient", "auto")
     plat = sys.platform if platform is None else platform
@@ -77,27 +91,36 @@ def resolve_timing(cfg: dict, platform: Optional[str] = None) -> dict:
         lenient, why = plat == "darwin", "auto: macOS" if plat == "darwin" else "auto: not macOS"
     else:
         lenient, why = bool(mode), "config"
-    arm = float(cfg["components"]["arm"]["watchdog"])
-    out = {"lenient": lenient, "why": why, "arm_watchdog": arm, "swerve_heartbeat": SWERVE_HEARTBEAT}
+    from ..arm.config import LENIENT_TIMING
+    floor = LENIENT_TIMING["ctl_heartbeat"] + 0.5             # the ordering rule above
+
+    def watchdog(base: float) -> float:
+        return max(base, float(t.get("arm_watchdog", floor)), floor) if lenient else base
+    c = cfg["components"]
+    out = {"lenient": lenient, "why": why, "arm_watchdog": watchdog(float(c["arm"]["watchdog"])),
+           "swerve_heartbeat": SWERVE_HEARTBEAT}
     if lenient:
-        out["arm_watchdog"] = max(arm, float(t.get("arm_watchdog", 0.5)))
         out["swerve_heartbeat"] = max(SWERVE_HEARTBEAT, float(t.get("swerve_heartbeat", 0.5)))
+    if arms:
+        out["arm_watchdogs"] = {n: watchdog(float(((c.get("arms") or {}).get(n) or {}).get("watchdog",
+                                                                                        c["arm"]["watchdog"])))
+                                for n in arms}
     return out
 
 
 def _merge(a: dict, b: dict) -> dict:
-    out = copy.deepcopy(a)
-    for k, v in (b or {}).items():
-        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else copy.deepcopy(v)
-    return out
+    """common/merge.py's deep merge (one rule for every YAML layer: a null deletes the key)."""
+    from ..common.merge import deep_merge
+    return deep_merge(a, b)
 
 
 def default_config() -> dict:
     return yaml.safe_load(resources.files(__package__).joinpath("default_sim.yaml").read_text())
 
 
-def load_config(path: Optional[str] = None, overrides: Optional[dict] = None) -> dict:
-    cfg = default_config()
+def load_config(path: Optional[str] = None, overrides: Optional[dict] = None, robot: Optional[dict] = None) -> dict:
+    """default_sim.yaml, then ``robot`` (a robot profile's ``sim:``), the file ``path``, ``overrides``."""
+    cfg = _merge(default_config(), robot or {})
     if path:
         with open(path) as f:
             cfg = _merge(cfg, yaml.safe_load(f) or {})
@@ -162,6 +185,52 @@ class Arm:
         self.pending = collections.deque()    # dynamic: (due sim time, cmd, gcmd) frames in transport
 
 
+class _UrdfGravity:
+    """The gravity torque of an arm's joints from its URDF (pinocchio; an arm type's node model): ``gravity(q)``."""
+
+    def __init__(self, urdf: str, n: int):
+        import pinocchio as pin
+        self.pin, self.n = pin, n
+        self.model = pin.buildModelFromUrdf(urdf)
+        self.data = self.model.createData()
+
+    def gravity(self, q) -> np.ndarray:
+        qq = self.pin.neutral(self.model)
+        qq[:self.n] = q
+        return np.asarray(self.pin.computeGeneralizedGravity(self.model, self.data, qq))[:self.n].copy()
+
+
+class ArmIndex:
+    """Where one arm lives in the compiled model (``World._index``): its joints' qpos / qvel addresses and actuators,
+    its gripper finger's."""
+
+    def __init__(self, m, spec: dict):
+        self.name, self.prefix, self.mirror = spec["name"], spec["prefix"], bool(spec.get("mirror"))
+        self.joints = list(spec["joints"])
+        self.gripper = spec["gripper"]
+        self.q = np.array([m.joint(n).qposadr[0] for n in self.joints])
+        self.v = np.array([m.joint(n).dofadr[0] for n in self.joints])
+        self.a = np.array([m.actuator(n).id for n in self.joints])
+        fj = m.joint(spec["gripper"])
+        self.finger_q, self.finger_v = int(fj.qposadr[0]), int(fj.dofadr[0])
+        self.finger_a = m.actuator(f"{self.name}_finger").id
+
+
+def arm_specs(model_info: Optional[dict]) -> list:
+    """The arms to simulate: the model info's ``arms`` (GET /model's, robots.ArmSpec.public()), else DEFAULT_ARMS."""
+    arms = (model_info or {}).get("arms")
+    if not arms:
+        return [dict(a) for a in DEFAULT_ARMS]
+    out = []
+    for a in arms:
+        if not a.get("gripper"):
+            raise SimError(f"arm {a.get('name')!r}: the sim's arm model needs a gripper joint")
+        out.append({"name": a["name"], "prefix": a["prefix"], "joints": list(a["joints"]), "gripper": a["gripper"],
+                    "mirror": bool(a.get("mirror")), "type": a.get("type") or "rebot", "file": a.get("file"),
+                    "component": a.get("component"), "frame": a.get("frame"), "ee_link": a.get("ee_link")})
+    return out
+
+
 class World:
     def __init__(self, urdf: str, assets: dict, config: Optional[dict] = None, model_info: Optional[dict] = None):
         self.cfg = config or default_config()
@@ -178,6 +247,7 @@ class World:
         self.dynamic = self.fidelity == "dynamic"
         self._settling = False            # reset's settle: a dynamic arm is held at the start pose (a teleport)
         self.model_info = model_info or {}
+        self.arm_specs = arm_specs(self.model_info)
         self.lock = threading.RLock()
         self.objects: dict = {}           # name -> spec dict (shape, size, mass, pose at add / reset)
         self.wrenches: list = []          # [body id, until (sim s), wrench 6]
@@ -192,11 +262,13 @@ class World:
         self.m = self.spec.compile()
         self.d = mujoco.MjData(self.m)
         self._index()
-        self.gravity_fit: Optional[dict] = None
-        if self.dynamic and self.has_arm and self.cfg["components"]["arm"]["dynamic"].get("gravity_fit", True):
-            self._fit_arm_gravity()
+        self.timing = resolve_timing(self.cfg, arms=list(self.arm_ix))     # each arm's watchdog
+        self.gravity_fits: dict = {}      # arm -> its gravity fit (dynamic fidelity)
+        for name in self.arm_ix:
+            if self.dynamic and self.arm_cfg(name)["dynamic"].get("gravity_fit", True):
+                self._fit_arm_gravity(name)
         self.modules = [Module(n) for n in self.module_names]
-        self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
+        self.arms = {n: Arm(self.arm_cfg(n)["start_q"]) for n in self.arm_ix}
         self.swerve_last = -math.inf
         tc = self.cfg.get("time") or {}
         self.rtf = float(tc.get("rtf", 1.0))
@@ -210,6 +282,73 @@ class World:
         self.rtf_measured = 0.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+    # -- arms ------------------------------------------------------------------------------------
+
+    @property
+    def primary_arm(self) -> Optional[str]:
+        """``arm`` when the model has it, else the first arm: what the one-arm names (``arm``, ``arm_q``, ``arm_op``
+        without ``arm=``, /state ``arm``) refer to."""
+        if not self.arm_ix:
+            return None
+        return "arm" if "arm" in self.arm_ix else next(iter(self.arm_ix))
+
+    @property
+    def arm(self) -> "Arm":
+        return self.arms[self.primary_arm]
+
+    @arm.setter
+    def arm(self, value: "Arm") -> None:
+        self.arms[self.primary_arm] = value
+
+    @property
+    def gravity_fit(self) -> Optional[dict]:
+        """The primary arm's gravity fit (dynamic fidelity)."""
+        return self.gravity_fits.get(self.primary_arm)
+
+    def arm_limits(self, name: str) -> dict:
+        """One arm's limits: the reBot's from its robot config (self.limits), another arm type's from its own
+        (robots/arm_types.py; limits.type_limits). Never from the sim config."""
+        cache = self.__dict__.setdefault("_arm_lims", {})
+        if name not in cache:
+            spec = next(a for a in self.arm_specs if a["name"] == name)
+            if spec.get("type", "rebot") == "rebot":
+                cache[name] = self.limits
+            else:
+                from ...robots.arm_types import load
+                from .limits import type_limits
+                cache[name] = {**self.limits, **type_limits(load(spec["type"]))}
+        return cache[name]
+
+    def gripper(self, name: str):
+        """One arm's gripper type (robots/grippers.py): the reBot's, or its arm type's."""
+        cache = self.__dict__.setdefault("_grippers", {})
+        if name not in cache:
+            from ...robots.grippers import get
+            spec = next(a for a in self.arm_specs if a["name"] == name)
+            if spec.get("type", "rebot") == "rebot":
+                cache[name] = get("rebot")
+            else:
+                from ...robots.arm_types import load
+                cache[name] = load(spec["type"]).gripper_type()
+        return cache[name]
+
+    def arm_cfg(self, name: str) -> dict:
+        """One arm's sim config: ``components.arm`` with ``components.arms.<name>`` merged over it (cached: the
+        physics step reads it)."""
+        cache = self.__dict__.setdefault("_arm_cfgs", {})
+        if name not in cache:
+            c = self.cfg["components"]
+            cache[name] = _merge(c["arm"], (c.get("arms") or {}).get(name) or {})
+        return cache[name]
+
+    def _arm(self, name: Optional[str]) -> tuple:
+        """(name, Arm, ArmIndex) of an arm by name (None: the primary arm)."""
+        name = name or self.primary_arm
+        if name not in self.arm_ix:
+            raise SimError("the model has no arm" if not self.arm_ix else
+                           f"no arm {name!r} (arms: {', '.join(self.arm_ix)})")
+        return name, self.arms[name], self.arm_ix[name]
 
     # -- model -----------------------------------------------------------------------------------
 
@@ -274,19 +413,28 @@ class World:
                 self._servo(spec, f"steer_{mm.group(1)}", j.name, float(s["kp"]), float(s["kv"]), L["steer_torque_max"])
                 self._servo(spec, f"wheel_{mm.group(1)}", f"base_{mm.group(1)}_wheel_joint", 0.0, float(w["kv"]),
                             L["wheel_torque_max"], velocity=True)
-        ac = self.cfg["components"]["arm"]
         names = {j.name for j in spec.joints}
-        if self.dynamic and set(ARM_JOINTS) <= names:
-            self._dynamic_arm_spec(spec, names)
-        elif set(ARM_JOINTS) <= names:
-            for jn in ARM_JOINTS:
+        declared = bool(self.model_info.get("arms"))
+        for arm in list(self.arm_specs):                   # each arm: its motors (dynamic) or its servos (kinematic)
+            if not set(arm["joints"]) <= names or arm["gripper"] not in names:
+                if declared:
+                    raise SimError(f"arm {arm['name']!r}: the model lacks its joints")
+                self.arm_specs.remove(arm)               # the default arm on a model without one
+                continue
+            ac = self.arm_cfg(arm["name"])
+            if ac.get("fidelity", self.fidelity) != self.fidelity:
+                raise SimError(f"arm {arm['name']!r}: fidelity {ac.get('fidelity')!r} differs from components.arm's "
+                               f"{self.fidelity!r} (one fidelity for every arm)")
+            if self.dynamic:
+                self._dynamic_arm_spec(spec, arm)
+                continue
+            for jn in arm["joints"]:
                 self._servo(spec, jn, jn, float(ac["servo"]["kp"]), float(ac["servo"]["kv"]), None)
-            if "arm_finger_left" in names:
-                self._servo(spec, "arm_finger", "arm_finger_left", 2000.0, 40.0, self.limits["finger_force_max"])
-                # the URDF's finger effort (8 N, MuJoCo's actuatorfrcrange) is no gripper limit: it capped the servo
-                # far below finger_force_max (4 N per jaw: held objects dropped)
-                next(j for j in spec.joints if j.name == "arm_finger_left").actfrclimited = \
-                    mujoco.mjtLimited.mjLIMITED_FALSE
+            self._servo(spec, f"{arm['name']}_finger", arm["gripper"], 2000.0, 40.0,
+                        self.arm_limits(arm["name"])["finger_force_max"])
+            # the URDF's finger effort (8 N, MuJoCo's actuatorfrcrange) is no gripper limit: it capped the servo
+            # far below finger_force_max (4 N per jaw: held objects dropped)
+            next(j for j in spec.joints if j.name == arm["gripper"]).actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
         # cameras: MuJoCo looks along -z with y up; the optical frame looks along +z with y down
         w_max, h_max = 640, 480
         for cam, cc in (self.cfg.get("cameras") or {}).items():
@@ -319,16 +467,18 @@ class World:
         mimic coupling of the right finger is stiffened (``contact.fingers.mimic_solref``): one pinion drives both."""
         from ..description.model import arm_box_geometry
         fc = (self.cfg.get("contact") or {}).get("fingers") or {}
-        boxes = arm_box_geometry()
-        for link in ("finger_left_link", "finger_right_link"):
-            body = spec.body(f"arm_{link}")
+        for arm, link in ((a, lk) for a in self.arm_specs for lk in ("finger_left_link", "finger_right_link")):
+            g = self.gripper(arm["name"])                           # its gripper type's jaw boxes
+            boxes = arm_box_geometry(arm.get("mirror", False), [list(b) for b in g.boxes], list(g.box_names))
+            px = arm["prefix"]
+            body = spec.body(f"{px}{link}")
             if body is None:
                 continue
             for g in list(body.geoms):
                 if g.contype or g.conaffinity:
                     spec.delete(g)
             for name, c, size in boxes.get(link, []):
-                g = body.add_geom(name=f"arm_{link}_{name}_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
+                g = body.add_geom(name=f"{px}{link}_{name}_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
                                   pos=c, size=[v / 2 for v in size], group=3)
                 g.contype, g.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
                 # priority: the jaws' contact parameters govern their contacts. Without it MuJoCo mixes solref /
@@ -345,68 +495,92 @@ class World:
             for e in spec.equalities:
                 e.solref = [float(v) for v in fc["mimic_solref"]]
 
-    def _dynamic_arm_spec(self, spec: mujoco.MjSpec, names: set) -> None:
+    def _dynamic_arm_spec(self, spec: mujoco.MjSpec, arm: dict) -> None:
         """fidelity dynamic: one torque motor per arm joint and the gripper's (on the left finger, the right one
         follows through the mimic), each an affine actuator whose gains the MIT frame sets every step
         (``_arm_dynamic``), force-limited at the motor's torque limit (robot config); the joints get the motors'
         armature and friction (``components.arm.dynamic``: estimates). The gripper motor's angle q and the finger's
         travel x relate as x = -q r (r = 8 mm, the pinion), so its armature / friction / limit are divided by r^2 / r.
         The URDF's joint effort limits (MuJoCo's actuatorfrcrange) are lifted: the motor's limit is the actuator's (the
-        arm's equal the URDF's 27 / 7 N m; the finger's URDF 8 N is no motor limit: the 4310 pushes ~875 N there)."""
-        dc = self.cfg["components"]["arm"]["dynamic"]
-        L = self.limits
+        arm's equal the URDF's 27 / 7 N m; the finger's URDF 8 N is no motor limit: the 4310 pushes ~875 N there).
+        ``arm``: one arm's spec (``arm_specs``); its config ``arm_cfg``."""
+        dc = self.arm_cfg(arm["name"])["dynamic"]
+        L = self.arm_limits(arm["name"])
         joints = {j.name: j for j in spec.joints}
-        for i, jn in enumerate(ARM_JOINTS):
+        for i, jn in enumerate(arm["joints"]):
             j = joints[jn]
             j.armature, j.damping = float(dc["armature"][i]), [float(dc["viscous"][i]), 0.0, 0.0]
             j.frictionloss = float(dc["coulomb"][i])
             j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
             self._motor(spec, jn, jn, float(L["joint_torque_max"][i]))
-        if "arm_finger_left" in names:
-            r, gc = GAP_PER_RAD / 2, dc["gripper"]
-            j = joints["arm_finger_left"]
-            j.armature, j.damping = float(gc["armature"]) / r ** 2, [float(gc["viscous"]) / r ** 2, 0.0, 0.0]
-            j.frictionloss = float(gc["coulomb"]) / r
-            j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
-            self._motor(spec, "arm_finger", "arm_finger_left", float(L["gripper_torque_max"]) / r)
+        r, gc = self.gripper(arm["name"]).pitch_radius, dc["gripper"]
+        j = joints[arm["gripper"]]
+        j.armature, j.damping = float(gc["armature"]) / r ** 2, [float(gc["viscous"]) / r ** 2, 0.0, 0.0]
+        j.frictionloss = float(gc["coulomb"]) / r
+        j.actfrclimited = mujoco.mjtLimited.mjLIMITED_FALSE
+        self._motor(spec, f"{arm['name']}_finger", arm["gripper"], float(L["gripper_torque_max"]) / r)
 
-    def _gravity_rows(self, d, q, ids) -> tuple:
-        """At arm joints ``q`` (base level, fingers closed): the arm joints' gravity torque of the model now (6,) and
-        its linear map from each body in ``ids``'s [mass, mass x COM (body frame)] (6, 4 len(ids))."""
+    def _gravity_rows(self, d, q, ids, ix: Optional["ArmIndex"] = None) -> tuple:
+        """At arm joints ``q`` (base level, fingers closed; ``ix``: which arm, default the primary): the arm joints'
+        gravity torque of the model now (6,) and its linear map from each body in ``ids``'s [mass, mass x COM (body
+        frame)] (6, 4 len(ids))."""
         m = self.m
+        ix = ix or self.arm_ix[self.primary_arm]
         d.qpos[:] = m.qpos0
         d.qpos[self.base_q:self.base_q + 3] = 0.0
-        d.qpos[self.arm_q] = q
+        d.qpos[ix.q] = q
         d.qvel[:] = 0.0
         mujoco.mj_forward(m, d)
         g = m.opt.gravity
-        A = np.zeros((6, 4 * len(ids)))
+        A = np.zeros((len(ix.v), 4 * len(ids)))
         jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
         for k, b in enumerate(ids):
             mujoco.mj_jacBody(m, d, jp, jr, b)
             R = d.xmat[b].reshape(3, 3)
-            A[:, 4 * k] = -jp[:, self.arm_v].T @ g                 # holding torque of a unit mass at the origin
+            A[:, 4 * k] = -jp[:, ix.v].T @ g                       # holding torque of a unit mass at the origin
             for j in range(3):                                    # ... and of a unit first moment along body axis j
-                A[:, 4 * k + 1 + j] = -jr[:, self.arm_v].T @ np.cross(R[:, j], g)
-        return d.qfrc_bias[self.arm_v].copy(), A
+                A[:, 4 * k + 1 + j] = -jr[:, ix.v].T @ np.cross(R[:, j], g)
+        return d.qfrc_bias[ix.v].copy(), A
 
-    def _fit_arm_gravity(self) -> None:
+    def _fit_arm_gravity(self, name: Optional[str] = None) -> None:
         """fidelity dynamic: make the arm's gravity the calibrated real arm's, so the node's feedforward
         g_pinocchio(q) x tau_scale (its gain profile) holds it as on the robot. The masses and centres of mass of
         ``GRAVITY_FIT_BODIES`` are fitted (least squares over random poses in the joint ranges, held near the URDF's
         by a small ridge) to that torque. tau_scale scales joints 4 and 5 but not 3 and 6, which no mass
         distribution reproduces exactly, so the residual is shared out by each joint's dry friction (rows weighted
         1 / coulomb): what stiction must hold. Validated on a second set of poses; ``gravity_fit`` has the residuals.
-        Inertia tensors stay (gravity does not see them)."""
+        Inertia tensors stay (gravity does not see them). Per arm (``name``; default the primary): its own bodies, its
+        own node model (a mirrored arm's the mirrored URDF, robots/mirror.py, as its arm node loads it)."""
         from ..arm import config as C
         from ..arm.kin import ArmKinematics
-        dc = self.cfg["components"]["arm"]["dynamic"]
+        name = name or self.primary_arm
+        ix = self.arm_ix[name]
+        dc = self.arm_cfg(name)["dynamic"]
         m = self.m
         d = mujoco.MjData(m)
-        ids = [m.body(n).id for n in GRAVITY_FIT_BODIES]
-        kin = ArmKinematics({})
-        scale = C.load_profile(C.DEFAULT_PROFILE).tau_scale
-        jid = [m.joint(n).id for n in ARM_JOINTS]
+        spec = next(a for a in self.arm_specs if a["name"] == name)
+        if spec.get("type", "rebot") == "rebot":
+            bodies = [ix.prefix + n for n in GRAVITY_FIT_LINKS]
+        else:                                 # every moving link after the first joint (a massless flange left out)
+            bodies = [m.body(int(m.jnt_bodyid[m.joint(j).id])).name for j in ix.joints[1:]]
+            ee = spec.get("ee_link") or ix.prefix + "end_link"      # the model's (prefixed) end link
+            bodies = [b for b in bodies if m.body_mass[m.body(b).id] > 0.01 and b != ee] + [ee]
+        ids = [m.body(n).id for n in bodies]
+        urdf = None
+        if ix.mirror:                                         # the node's model of a mirrored arm: its mirrored URDF
+            from ...robots import ArmSpec
+            sp = next(a for a in (self.model_info.get("arms") or []) if a["name"] == name)
+            urdf = ArmSpec(name=name, component=sp.get("component", name), prefix=ix.prefix, file=sp["file"],
+                           mirror=True, frame=sp.get("frame", name)).urdf_path()
+        if spec.get("type", "rebot") == "rebot":
+            kin = ArmKinematics({}, urdf=urdf)
+            scale = C.load_profile(C.DEFAULT_PROFILE).tau_scale
+        else:                                 # another arm type: its URDF's gravity (its node's model) x its tau_scale
+            from ...robots.arm_types import load
+            from ..description.model import resolve_file
+            kin = _UrdfGravity(str(resolve_file(spec["file"])), len(ix.joints))
+            scale = np.asarray(load(spec["type"]).tau_scale, float)
+        jid = [m.joint(n).id for n in ix.joints]
         lo, hi = m.jnt_range[jid, 0], m.jnt_range[jid, 1]
         phi0 = np.concatenate([[m.body_mass[b], *(m.body_mass[b] * m.body_ipos[b])] for b in ids])
         rw = 1.0 / np.maximum(np.asarray(dc["coulomb"], float), 1e-3)
@@ -416,7 +590,7 @@ class World:
             A, b = [], []
             for _ in range(n):
                 q = rng.uniform(lo, hi)
-                tau, Ak = self._gravity_rows(d, q, ids)
+                tau, Ak = self._gravity_rows(d, q, ids, ix)
                 A.append(Ak)
                 b.append(kin.gravity(q) * scale - (tau - Ak @ phi0))      # what the fitted bodies must supply
             return np.vstack(A), np.concatenate(b)
@@ -430,27 +604,29 @@ class World:
             phi = np.linalg.solve(Aw.T @ Aw + lam * np.diag(reg ** 2), Aw.T @ (b * W) + lam * reg ** 2 * phi0)
         masses = phi[0::4]
         if not np.all(np.isfinite(phi)) or np.any(masses <= 0.2 * phi0[0::4]):
-            raise SimError(f"arm gravity fit: implausible masses {np.round(masses, 3).tolist()}")
+            raise SimError(f"{name} gravity fit: implausible masses {np.round(masses, 3).tolist()}")
         Av, bv = grid(1, n)                                   # validation poses
         with np.errstate(all="ignore"):
-            r0 = (Av @ phi0 - bv).reshape(n, 6)
-            r1 = (Av @ phi - bv).reshape(n, 6)
-        for k, name in enumerate(GRAVITY_FIT_BODIES):
-            sb = self.spec.body(name)
+            r0 = (Av @ phi0 - bv).reshape(n, len(ix.v))
+            r1 = (Av @ phi - bv).reshape(n, len(ix.v))
+        for k, bname in enumerate(bodies):
+            sb = self.spec.body(bname)
             sb.mass = float(masses[k])
             sb.ipos = (phi[4 * k + 1:4 * k + 4] / masses[k]).tolist()
         self.m, self.d = self.spec.recompile(self.m, self.d)
         self._index()
         rnd = lambda v: np.round(v, 4).tolist()               # noqa: E731
-        self.gravity_fit = {"target": "g_pinocchio(q) x tau_scale", "tau_scale": rnd(scale), "poses": n,
+        self.gravity_fits[name] = {"target": "g_pinocchio(q) x tau_scale", "tau_scale": rnd(scale), "poses": n,
                             "rms_before": rnd(np.sqrt((r0 ** 2).mean(0))), "max_before": rnd(np.abs(r0).max(0)),
                             "rms": rnd(np.sqrt((r1 ** 2).mean(0))), "max": rnd(np.abs(r1).max(0)),
                             "bodies": {nm: {"mass": [round(float(phi0[4 * k]), 4), round(float(masses[k]), 4)],
                                             "com": [rnd(phi0[4 * k + 1:4 * k + 4] / phi0[4 * k]),
                                                     rnd(phi[4 * k + 1:4 * k + 4] / masses[k])]}
-                                       for k, nm in enumerate(GRAVITY_FIT_BODIES)}}
-        log.info("arm gravity fit to the node's model x tau_scale: residual max %s N m (was %s)",
-                 self.gravity_fit["max"], self.gravity_fit["max_before"])
+                                       for k, nm in enumerate(bodies)}}
+        if ix.mirror:
+            self.gravity_fits[name]["model"] = "mirrored URDF (robots/mirror.py)"
+        log.info("%s gravity fit to the node's model x tau_scale: residual max %s N m (was %s)", name,
+                 self.gravity_fits[name]["max"], self.gravity_fits[name]["max_before"])
 
     @staticmethod
     def _motor(spec, name: str, joint: str, force: float):
@@ -505,14 +681,12 @@ class World:
         load = float(m.body_subtreemass[self.base_body]) * 9.81 / max(1, len(self.mod))
         for ix in self.mod:
             m.dof_frictionloss[ix["wv"]] = rr * load * ix["r"]
-        self.has_arm = all(n in names for n in ARM_JOINTS)
-        if self.has_arm:
-            self.arm_q = np.array([m.joint(n).qposadr[0] for n in ARM_JOINTS])
-            self.arm_v = np.array([m.joint(n).dofadr[0] for n in ARM_JOINTS])
-            self.arm_a = np.array([m.actuator(n).id for n in ARM_JOINTS])
-            fj = m.joint("arm_finger_left")
-            self.finger_q, self.finger_v = int(fj.qposadr[0]), int(fj.dofadr[0])
-            self.finger_a = m.actuator("arm_finger").id
+        self.arm_ix = {a["name"]: ArmIndex(m, a) for a in self.arm_specs}
+        self.has_arm = bool(self.arm_ix)
+        if self.has_arm:                    # the primary arm's addresses under the one-arm names
+            ix = self.arm_ix[self.primary_arm]
+            self.arm_q, self.arm_v, self.arm_a = ix.q, ix.v, ix.a
+            self.finger_q, self.finger_v, self.finger_a = ix.finger_q, ix.finger_v, ix.finger_a
         self.imu_adr = {}                   # camera -> (accel adr, gyro adr) in sensordata
         for cam in (self.cfg.get("cameras") or {}):
             try:
@@ -540,19 +714,28 @@ class World:
                 jj = m.joint(f"obj_{name}_free")
                 self.obj_idx[name] = (m.body(f"obj_{name}").id, int(jj.qposadr[0]), int(jj.dofadr[0]))
 
+    def ring_mount_y(self) -> Optional[float]:
+        """The y (base_link) the rings centre on: the robot profile's right arm's mount (one arm: its own), from the
+        model's ``frames_in_base``; None (the reBot's, scene.arm_mount_y) without a model description."""
+        arms = self.model_info.get("arms") or []
+        pick = next((a for a in arms if a.get("side") == "right"), arms[0] if arms else None)
+        T = (self.model_info.get("frames_in_base") or {}).get(pick.get("base_link")) if pick else None
+        return None if T is None else float(T[1][3])
+
     def start_objects(self) -> list:
         """The scene at start: the default tabletop (scene.py) when ``scene.tabletop``, then ``scene.objects``."""
         sc = self.cfg.get("scene") or {}
         out = []
         if sc.get("tabletop"):
             from .scene import tabletop
-            out += tabletop()
+            out += tabletop(sc.get("work_top"))
         if sc.get("cabinet"):
             from .scene import cabinet_scene
             out += cabinet_scene()
         if sc.get("rings"):
             from .scene import rings_scene
-            out += rings_scene(**(sc.get("rings_setup") or {}))
+            out += rings_scene(**{"mount_y": self.ring_mount_y(), "top": sc.get("work_top"),
+                                  **(sc.get("rings_setup") or {})})
         if sc.get("revolving_door"):
             from .scene import revolving_door_scene
             out += revolving_door_scene()
@@ -918,12 +1101,12 @@ class World:
             d.qpos[self.base_q + 3:self.base_q + 7] = yaw_quat(float(st.get("yaw", 0.0)))
             for i, mod in enumerate(self.modules):
                 mod.__init__(mod.name)
-            prev = self.arm if self.has_arm else None
-            if self.has_arm:
+            prev = dict(self.arms)
+            for name, ix in self.arm_ix.items():
                 # the arm's motors don't power off on a reset (real ones wouldn't): a fresh Arm settles the
                 # pose (motors off, so no watchdog), then the enable state and fault carry over below
-                self.arm = Arm(self.cfg["components"]["arm"]["start_q"])
-                d.qpos[self.arm_q] = self.arm.q_ref
+                self.arms[name] = Arm(self.arm_cfg(name)["start_q"])
+                d.qpos[ix.q] = self.arms[name].q_ref
             for name, o in self.objects.items():
                 b, qa, _ = self.obj_idx[name]
                 if qa is None:
@@ -941,9 +1124,9 @@ class World:
             finally:
                 self._settling = False
             self._spin()                     # after the settle: at time 0 those joints are at 0 and at their qvel0
-            if prev is not None:
-                a = self.arm
-                a.enabled, a.g_enabled, a.fault, a.frames = prev.enabled, prev.g_enabled, prev.fault, prev.frames
+            for name, old in prev.items():
+                a = self.arms[name]
+                a.enabled, a.g_enabled, a.fault, a.frames = old.enabled, old.g_enabled, old.fault, old.frames
                 a.last_frame = 0.0       # the clock restarted at 0: the watchdog counts from the reset
             if count:
                 self.reset_seq += 1
@@ -991,67 +1174,71 @@ class World:
         self.wrenches = [w for w in self.wrenches if d.time < w[1]]
         for w in self.wrenches:
             d.xfrc_applied[w[0]] = w[2]
-        if self.has_arm:
-            self._arm_control(dt)
+        for name in self.arm_ix:
+            self._arm_control(dt, name)
 
-    def _arm_control(self, dt: float) -> None:
-        d, a, ac = self.d, self.arm, self.cfg["components"]["arm"]
-        if a.enabled and d.time - a.last_frame > self.timing["arm_watchdog"]:
+    def _arm_control(self, dt: float, name: Optional[str] = None) -> None:
+        name, a, ix = self._arm(name)
+        d, ac = self.d, self.arm_cfg(name)
+        if a.enabled and d.time - a.last_frame > self.timing.get("arm_watchdogs", {}).get(name, self.timing["arm_watchdog"]):
             a.enabled, a.g_enabled, a.fault = False, False, 0xD
         if self.dynamic:
-            self._arm_dynamic()
+            self._arm_dynamic(name)
             return
         if a.enabled and a.cmd is not None:
             q, _, kp, _, _ = a.cmd
             target = np.where(kp > 0, q, a.q_ref)     # kp = 0 (floating): hold where it is
-            vmax = self.limits["joint_speed_max"] * dt
+            vmax = self.arm_limits(name)["joint_speed_max"] * dt
             a.q_ref = a.q_ref + np.clip(target - a.q_ref, -vmax, vmax)
-        d.ctrl[self.arm_a] = a.q_ref
-        d.qfrc_applied[self.arm_v] = d.qfrc_bias[self.arm_v]      # gravity / bias feedforward
+        d.ctrl[ix.a] = a.q_ref
+        d.qfrc_applied[ix.v] = d.qfrc_bias[ix.v]      # gravity / bias feedforward
+        gt = self.gripper(name)
         if a.enabled and a.g_enabled and a.gcmd is not None:
             g_q, _, g_kp, _, g_tau = a.gcmd
-            goal = g_q if g_kp > 0 else (0.0 if g_tau > 0 else GRIPPER_OPEN_RAD if g_tau < 0 else a.g_ref)
+            goal = g_q if g_kp > 0 else (0.0 if g_tau > 0 else gt.open_rad if g_tau < 0 else a.g_ref)
             gs = float(ac["gripper_speed"]) * dt
-            a.g_ref = min(0.0, max(GRIPPER_OPEN_RAD, a.g_ref + max(-gs, min(gs, goal - a.g_ref))))
-        d.ctrl[self.finger_a] = min(FINGER_TRAVEL, max(0.0, -a.g_ref * GAP_PER_RAD / 2))
+            a.g_ref = min(0.0, max(gt.open_rad, a.g_ref + max(-gs, min(gs, goal - a.g_ref))))
+        d.ctrl[ix.finger_a] = min(gt.travel, max(0.0, -a.g_ref * gt.pitch_radius))
 
-    def _arm_dynamic(self) -> None:
+    def _arm_dynamic(self, name: Optional[str] = None) -> None:
         """fidelity dynamic: each motor applies its latest MIT frame (after ``command_delay``) as joint torque,
         tau = kp (q - q_m) + kd (qd - qd_m) + tau_ff, clamped at its torque limit (the actuator's forcerange). The
         law is the affine actuator force ctrl + biasprm[1] q + biasprm[2] qd, so the integrator treats kd implicitly
         (the wrist's kd 2 on its ~1e-3 kg m^2 would be unstable explicitly at 1 kHz). Off, disabled, watchdog: zero
-        torque. A joint sent kp = 0 floats (kd and tau_ff only)."""
-        m, d, a = self.m, self.d, self.arm
+        torque. A joint sent kp = 0 floats (kd and tau_ff only). Per arm (``name``; default the primary)."""
+        name, a, ix = self._arm(name)
+        m, d = self.m, self.d
         while a.pending and a.pending[0][0] <= d.time + 1e-9:
             _, cmd, gcmd = a.pending.popleft()
             a.cmd = cmd
             if gcmd is not None:
                 a.gcmd = gcmd
-        q_m = d.qpos[self.arm_q]
+        q_m = d.qpos[ix.q]
         if self._settling:                # a reset puts the arm at its start pose: held there, as a teleport
-            sc = self.cfg["components"]["arm"]["servo"]
-            q, qd, tau = a.q_ref, np.zeros(6), d.qfrc_bias[self.arm_v].copy()
-            kp, kd = np.full(6, float(sc["kp"])), np.full(6, float(sc["kv"]))
+            sc = self.arm_cfg(name)["servo"]
+            nj = len(ix.joints)
+            q, qd, tau = a.q_ref, np.zeros(nj), d.qfrc_bias[ix.v].copy()
+            kp, kd = np.full(nj, float(sc["kp"])), np.full(nj, float(sc["kv"]))
         elif a.enabled and a.cmd is not None:
             q, qd, kp, kd, tau = a.cmd
             a.q_ref = np.where(kp != 0, q, q_m)
         else:
-            q = qd = kp = kd = tau = np.zeros(6)
+            q = qd = kp = kd = tau = np.zeros(len(ix.joints))
             a.q_ref = q_m.copy()
-        m.actuator_biasprm[self.arm_a, 1] = -kp
-        m.actuator_biasprm[self.arm_a, 2] = -kd
-        d.ctrl[self.arm_a] = np.where(kp != 0, kp * q, 0.0) + kd * qd + tau
+        m.actuator_biasprm[ix.a, 1] = -kp
+        m.actuator_biasprm[ix.a, 2] = -kd
+        d.ctrl[ix.a] = np.where(kp != 0, kp * q, 0.0) + kd * qd + tau
         # the gripper motor on the left finger: q = -x / r, so tau = C - kp q - kd qd is the finger force -tau / r
-        r = GAP_PER_RAD / 2
+        r = self.gripper(name).pitch_radius
         if a.enabled and a.g_enabled and a.gcmd is not None and not self._settling:
             g_q, g_qd, g_kp, g_kd, g_tau = a.gcmd
-            a.g_ref = g_q if g_kp != 0 else -float(d.qpos[self.finger_q]) / r
+            a.g_ref = g_q if g_kp != 0 else -float(d.qpos[ix.finger_q]) / r
         else:
             g_q = g_qd = g_kp = g_kd = g_tau = 0.0
         c = (g_kp * g_q if g_kp != 0 else 0.0) + g_kd * g_qd + g_tau
-        m.actuator_biasprm[self.finger_a, 1] = -g_kp / r ** 2
-        m.actuator_biasprm[self.finger_a, 2] = -g_kd / r ** 2
-        d.ctrl[self.finger_a] = -c / r
+        m.actuator_biasprm[ix.finger_a, 1] = -g_kp / r ** 2
+        m.actuator_biasprm[ix.finger_a, 2] = -g_kd / r ** 2
+        d.ctrl[ix.finger_a] = -c / r
 
     # -- time ------------------------------------------------------------------------------------------
 
@@ -1167,18 +1354,17 @@ class World:
 
     # -- arm backend -------------------------------------------------------------------------------------
 
-    def arm_op(self, op: str, a: dict) -> dict:
-        if not self.has_arm:
-            raise SimError("the model has no arm")
+    def arm_op(self, op: str, a: dict, arm: Optional[str] = None) -> dict:
+        """One request of an arm backend (``arm``: which arm; None = the primary one)."""
+        name, arm, ix = self._arm(arm)
         with self.lock:
-            arm = self.arm
             if op == "hello":
-                return {"joints": ARM_JOINTS, "fidelity": self.fidelity,
-                        "reply_latency": float(self.cfg["components"]["arm"]["reply_latency"])}
+                return {"arm": name, "joints": ix.joints, "fidelity": self.fidelity,
+                        "reply_latency": float(self.arm_cfg(name)["reply_latency"])}
             if op == "enable":
                 arm.enabled = arm.g_enabled = True
                 arm.fault = 0
-                arm.q_ref = self.d.qpos[self.arm_q].copy()
+                arm.q_ref = self.d.qpos[ix.q].copy()
                 arm.last_frame = float(self.d.time)
                 arm.cmd = arm.gcmd = None
                 arm.pending.clear()
@@ -1192,17 +1378,17 @@ class World:
                     arm.gcmd = None
             elif op == "check_gripper":
                 arm.g_ref = 0.0
-                self.d.qpos[self.finger_q] = 0.0
-                self.d.ctrl[self.finger_a] = 0.0
+                self.d.qpos[ix.finger_q] = 0.0
+                self.d.ctrl[ix.finger_a] = 0.0
                 if self.dynamic:
-                    self.d.qvel[self.finger_v] = 0.0
+                    self.d.qvel[ix.finger_v] = 0.0
             elif op == "send":
                 if arm.enabled:
                     cmd = tuple(np.asarray(a[k], float) for k in ("q", "qd", "kp", "kd", "tau"))
                     gcmd = tuple(float(a[k]) for k in ("g_q", "g_qd", "g_kp", "g_kd", "g_tau")) \
                         if a.get("gripper") else None
                     if self.dynamic:                   # the motors apply it after the transport delay
-                        delay = float(self.cfg["components"]["arm"]["dynamic"].get("command_delay", 0.0))
+                        delay = float(self.arm_cfg(name)["dynamic"].get("command_delay", 0.0))
                         arm.pending.append((float(self.d.time) + delay, cmd, gcmd))
                     else:
                         arm.cmd = cmd
@@ -1213,29 +1399,34 @@ class World:
                 return {"t": float(self.d.time)}
             elif op != "read":
                 raise SimError(f"unknown arm op {op!r}")
-            return self._arm_reading()
+            return self._arm_reading(name)
 
-    def _arm_reading(self) -> dict:
-        d, arm = self.d, self.arm
-        tau = d.actuator_force[self.arm_a] + d.qfrc_applied[self.arm_v]
-        f = float(d.qpos[self.finger_q])
-        status = [arm.fault or (1 if arm.enabled else 0)] * 6 + [1 if arm.g_enabled else 0]
+    def _arm_reading(self, name: Optional[str] = None) -> dict:
+        name, arm, ix = self._arm(name)
+        d = self.d
+        tau = d.actuator_force[ix.a] + d.qfrc_applied[ix.v]
+        f = float(d.qpos[ix.finger_q])
+        gpr = self.gripper(name).gap_per_rad
+        status = [arm.fault or (1 if arm.enabled else 0)] * len(ix.joints) + [1 if arm.g_enabled else 0]
         if self.dynamic:     # the gripper motor's torque, MIT sign (closing > 0): the finger force is -tau / r
-            g_tau = -float(d.actuator_force[self.finger_a]) * GAP_PER_RAD / 2
+            g_tau = -float(d.actuator_force[ix.finger_a]) * gpr / 2
         else:
-            g_tau = float(d.actuator_force[self.finger_a]) * GAP_PER_RAD / 2
-        return {"t": float(d.time), "q": d.qpos[self.arm_q].tolist(), "qd": d.qvel[self.arm_v].tolist(),
-                "tau": tau.tolist(), "status": status, "g_q": -2 * f / GAP_PER_RAD,
-                "g_qd": -2 * float(d.qvel[self.finger_v]) / GAP_PER_RAD,
+            g_tau = float(d.actuator_force[ix.finger_a]) * gpr / 2
+        return {"t": float(d.time), "q": d.qpos[ix.q].tolist(), "qd": d.qvel[ix.v].tolist(),
+                "tau": tau.tolist(), "status": status, "g_q": -2 * f / gpr,
+                "g_qd": -2 * float(d.qvel[ix.finger_v]) / gpr,
                 "g_tau": g_tau, "q_ref": arm.q_ref.tolist(),
                 "g_ref": arm.g_ref}
 
-    def arm_lost(self) -> None:
-        """The arm backend's connection closed: like a lost bus, the motors stop being commanded."""
+    def arm_lost(self, arm: Optional[str] = None) -> None:
+        """An arm backend's connection closed: like a lost bus, that arm's motors stop being commanded."""
         with self.lock:
-            if self.has_arm and self.arm.enabled:
-                self.arm.enabled = self.arm.g_enabled = False
-                self.arm.fault = 0xD
+            if not self.has_arm:
+                return
+            a = self._arm(arm)[1]
+            if a.enabled:
+                a.enabled = a.g_enabled = False
+                a.fault = 0xD
 
     # -- swerve backend --------------------------------------------------------------------------------
 
@@ -1312,12 +1503,16 @@ class World:
                                 **{k: round(v, 6) for k, v in self.module_states()["modules"][mod.name].items()}}
                                for mod in self.modules],
                    "objects": [self.object_state(n) for n in self.objects], "timing": dict(self.timing)}
-            if self.has_arm:
-                a = self.arm
-                out["arm"] = {"enabled": a.enabled, "gripper_enabled": a.g_enabled, "fault": a.fault,
-                              "q": [round(float(x), 6) for x in self.d.qpos[self.arm_q]],
+            arms = {}
+            for name, ix in self.arm_ix.items():
+                a = self.arms[name]
+                arms[name] = {"enabled": a.enabled, "gripper_enabled": a.g_enabled, "fault": a.fault,
+                              "q": [round(float(x), 6) for x in self.d.qpos[ix.q]],
                               "q_ref": [round(float(x), 6) for x in a.q_ref],
-                              "gap_mm": round(2 * float(self.d.qpos[self.finger_q]) * 1000, 3), "frames": a.frames}
-                if self.gravity_fit is not None:
-                    out["arm"]["gravity_fit"] = self.gravity_fit
+                              "gap_mm": round(2 * float(self.d.qpos[ix.finger_q]) * 1000, 3), "frames": a.frames}
+                if self.gravity_fits.get(name) is not None:
+                    arms[name]["gravity_fit"] = self.gravity_fits[name]
+            if arms:
+                out["arm"] = arms[self.primary_arm]          # the primary arm (one-arm clients)
+                out["arms"] = arms
             return out

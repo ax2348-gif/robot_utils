@@ -86,10 +86,11 @@ def kinematics_batch(kin, qs: list, frame: str = "arm") -> list:
     return Planner.run("kinematics", kin, [list(map(float, q)) for q in arr], frame="arm" if frame == "base" else frame)
 
 
-def arm_in_base(description_node: str, cache: Optional[dict]) -> tuple[dict, dict]:
+def arm_in_base(description_node: str, cache: Optional[dict], frame: str = "arm",
+                robot: Optional[str] = None) -> tuple[dict, dict]:
     """The arm frame's pose in the robot base frame (p_base = T p_arm), from the description node's
-    ``arm`` frame (cached AIB_CACHE_S); its shipped default if that node is unreachable. Says which.
-    Returns (the answer, the cache to keep)."""
+    ``frame`` (the arm's; cached AIB_CACHE_S); the robot profile's (``robot``, robots/) shipped default if that
+    node is unreachable. Says which. Returns (the answer, the cache to keep)."""
     now = time.monotonic()
     c = cache
     if c and now - c["t"] < AIB_CACHE_S:
@@ -97,16 +98,12 @@ def arm_in_base(description_node: str, cache: Optional[dict]) -> tuple[dict, dic
     try:
         from ..common.client import NodeClient
         with NodeClient(description_node, timeout=1.5) as cl:
-            d = cl.get("/transform", **{"from": "base", "to": "arm"})
-        T, src = np.asarray(d["matrix"], float), f"description node ({description_node!r}): frame 'arm'"
+            d = cl.get("/transform", **{"from": "base", "to": frame})
+        T, src = np.asarray(d["matrix"], float), f"description node ({description_node!r}): frame {frame!r}"
     except Exception as e:
-        from importlib import resources
-
-        import yaml
-
-        from ..description.frames import frame_T
-        f = yaml.safe_load(resources.files("robot_utils.nodes.description").joinpath("default_description.yaml").read_text())
-        T = frame_T(f["frames"]["arm"])
+        from ...robots import load as load_robot
+        from ..description.frames import FrameTree
+        T = FrameTree(load_robot(robot).description["frames"]).T("base", frame)
         src = f"shipped default (description node unreachable: {type(e).__name__})"
     v = {"T": T, "source": src}
     return v, {"t": now, "v": v}

@@ -26,6 +26,7 @@ class FakeQuest:
         self.running, self.pull_rc, self.run_rc, self.battery = running, pull_rc, run_rc, battery
         self.xr = xr
         self.ar = None                        # the robot AR URL in ~/.config/quest-env/robot-ar (None: no file)
+        self.body = None                      # joints= in ~/.config/quest-env/body-tracking (None: no file)
         self.loaded = self.package = None     # sha256 of the running library / of the clone's package (None: unknown)
         self.commands: list[str] = []
 
@@ -48,6 +49,7 @@ class FakeQuest:
                 if "--scheme=body-frozen" in cmd:
                     self.mode += " body-frozen"
                 self.ar = cmd.split("--ar=", 1)[1].split()[0] if "--ar=" in cmd else None
+                self.body = cmd.split("--body=", 1)[1].split()[0] if "--body=" in cmd else None
                 self.loaded = self.package
             return Result(self.run_rc, "", "" if self.run_rc == 0 else "No built telemetry package")
         if 'quest" stop' in cmd:
@@ -63,6 +65,8 @@ class FakeQuest:
             return Result(0, f"{self.package}  libapp.so\n") if self.package else Result(1, "", "No such file")
         if cmd.startswith("logcat"):
             return Result(0, f"11-21 18:50:44.031 11444 11475 I QuestRuntimeXR: OpenXR session state {self.xr}\n")
+        if "body-tracking" in cmd:
+            return Result(0, f"joints={self.body}\n") if self.body else Result(1, "")
         if "robot-ar" in cmd:
             return Result(0, f"url={self.ar}\n") if self.ar else Result(1, "")
         if "demo-mode" in cmd:
@@ -115,6 +119,19 @@ def test_up_already_running_and_up_to_date_does_not_restart():
     assert any("not restarting" in s for s in logs)
     assert any(s.startswith("stream: live, 72 Hz, session 1700000000000000001, focused") for s in logs)
     assert "battery: 87%, 31 C" in logs                    # from the stream's device block
+    assert_safe(fq)
+
+
+def test_up_body_tracking_restarts_only_when_the_setting_changes():
+    fq = FakeQuest()
+    ctl, logs = ctl_for(fq)
+    assert ctl.up(body="core") == 0
+    (cmd,) = fq.ran('quest" run')
+    assert cmd.endswith("--body=core") and any("body off -> core" in s for s in logs)
+    assert ctl.up(body="core") == 0 and len(fq.ran('quest" run')) == 1       # already so: no restart
+    assert ctl.up() == 0
+    assert "--body" not in fq.ran('quest" run')[-1] and fq.body is None      # off: the option is never sent
+    assert any("body core -> off" in s for s in logs)
     assert_safe(fq)
 
 

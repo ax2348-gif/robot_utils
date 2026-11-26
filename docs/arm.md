@@ -512,6 +512,13 @@ for a simulated arm on macOS, which has no real-time scheduling: under load its 
 at start and was reported dead. The sim world's own motor watchdog is lenient there too (docs/sim.md). The node's
 events say which is in force.
 
+Several arms (`--robot`, robot profiles in `src/robot_utils/robots/`): one arm node instance per arm, named as the
+arm (`--name arm_left --robot rebot_bimanual --sim world`). The profile gives the instance its arm: the backend
+socket `<arm>.sock`, its description frame (`arm_in_base`), and for a mirrored arm its mirrored URDF for the
+kinematics (IK, track, servo, geometry; the planner process too). A one-arm robot's arm serves any instance name.
+A mirrored arm or a `sim_only` robot refuses hardware (a real mirrored arm needs a per-joint sign map in the
+driver). docs/plans/bimanual_and_robot_swap.md.
+
 ## Config changes
 
 - `rebotarm_dm_safe.yaml`: gripper kp 8.0 → 0.5.

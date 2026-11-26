@@ -1,5 +1,5 @@
 """python -m robot_utils.nodes.wbc [--name wbc] [--model description|local|FILE.urdf] [--arm NAME] [--swerve NAME|URL]
-[--estimator NAME|URL] [--udp-host ADDR] [--udp-port N] [--config FILE.yaml] [--control process|thread]
+[--estimator NAME|URL] [--udp-host ADDR] [--udp-port N] [--config FILE.yaml] [--hold-timeout S] [--control process|thread]
 [--switch-interval S]
 
 Runs the whole-body control node (docs/wbc.md): end-effector targets in the world frame (datagrams), the arm
@@ -23,12 +23,18 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="description",
                    help="robot model: a description node (instance name or URL), 'local', or a .urdf (base=planar)")
-    p.add_argument("--arm", default="arm", help="arm node instance (its HTTP and <name>.joint.sock); 'none' = off")
+    p.add_argument("--robot", default=None,
+                   help="robot profile (robots/; default $ROBOT_UTILS_ROBOT, else rebot): its arms are the end effectors")
+    p.add_argument("--arm", default="arm", help="arm node instance (its HTTP and <name>.joint.sock) of a one-arm "
+                                                 "robot; with several arms each EE's arm node is named as the EE; "
+                                                 "'none' = off")
     p.add_argument("--swerve", default="swerve", help="swerve node: instance name or URL; 'none' = no base")
     p.add_argument("--estimator", default="estimator", help="estimator node: instance name or URL; 'none' = off")
     p.add_argument("--udp-host", default="127.0.0.1", help="address for target datagrams ('none' = UDP off)")
     p.add_argument("--udp-port", type=int, default=9410)
     p.add_argument("--config", help="YAML of Config keys (caps, gains, timeouts) over the defaults")
+    p.add_argument("--hold-timeout", type=float, default=None, metavar="S",
+                   help="Config hold_timeout (s without a client datagram: disarm), over --config (the sim stack: 0.4)")
     p.add_argument("--control", choices=("process", "thread"), default="process",
                    help="where the control loop runs: its own process (default) or a thread of the server process")
     p.add_argument("--switch-interval", type=float,
@@ -54,11 +60,13 @@ def main() -> None:
         import yaml
         with open(a.config) as f:
             cfg = yaml.safe_load(f) or {}
+    if a.hold_timeout is not None:
+        cfg = {**(cfg or {}), "hold_timeout": a.hold_timeout}
     cfg = apply_timing(cfg, a.timing, sys.platform)
     off = lambda v: None if v in (None, "", "none") else v   # noqa: E731
     from .server import create_app
     kw = dict(model_source=a.model, arm=off(a.arm), swerve=off(a.swerve), estimator=off(a.estimator), config=cfg,
-              udp_host=off(a.udp_host), udp_port=a.udp_port, name=a.name)
+              udp_host=off(a.udp_host), udp_port=a.udp_port, name=a.name, robot=a.robot)
     if a.control == "process":
         from .proc_node import ProcNode
         node = ProcNode(**kw, log_level=logging.DEBUG if a.verbose else logging.INFO)

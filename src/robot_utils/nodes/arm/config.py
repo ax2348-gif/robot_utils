@@ -32,19 +32,29 @@ from typing import Optional
 import numpy as np
 import yaml
 
-N = 6   # arm joints (the gripper is separate); defined here only: bus, kin, the node, ... import it
+# The arm type of this process (robots/arm_types.py: the arm node's __main__ sets it in the environment before
+# importing the rest; None = the reBot, rebot_ctl's config): another type gives N, the gains and the limits below.
+from ...robots.arm_types import current as _current_type
+ARM_TYPE = _current_type()
+
+N = 6 if ARM_TYPE is None else int(ARM_TYPE["dof"])   # arm joints (the gripper is separate); defined here only:
+                                                        # bus, kin, the node, ... import it
 PROFILES = {"soft": "rebotarm_dm_soft.yaml", "safe": "rebotarm_dm_safe.yaml"}
 DEFAULT_PROFILE = "soft"
 
 # Gripper: module 1, 16 teeth pinion (pitch radius 8 mm) driving both racks.
 PITCH_RADIUS = 0.008                 # m
-GAP_PER_RAD = 2 * PITCH_RADIUS       # m of jaw gap per rad
 GRIPPER_OPEN_RAD = -3.1              # fully open (calibrated on the robot; 0 = closed)
-GAP_MAX = -GRIPPER_OPEN_RAD * GAP_PER_RAD   # 49.6 mm
-FF_OPEN_MARGIN = 0.005               # m: the force-limit feedforward is off this close to fully open
-                                     # (the position command is pulled back instead)
 DEFAULT_MAX_FORCE = 50.0             # N squeeze
 HARD_MAX_FORCE = 120.0               # N
+if ARM_TYPE is not None and ARM_TYPE.get("gripper_spec"):     # another arm type's gripper (robots/grippers.py)
+    _g = ARM_TYPE["gripper_spec"]
+    PITCH_RADIUS, GRIPPER_OPEN_RAD = float(_g["pitch_radius"]), float(_g["open_rad"])
+    DEFAULT_MAX_FORCE, HARD_MAX_FORCE = float(_g["default_max_force"]), float(_g["hard_max_force"])
+GAP_PER_RAD = 2 * PITCH_RADIUS       # m of jaw gap per rad
+GAP_MAX = -GRIPPER_OPEN_RAD * GAP_PER_RAD   # 49.6 mm (the reBot's)
+FF_OPEN_MARGIN = 0.005               # m: the force-limit feedforward is off this close to fully open
+                                     # (the position command is pulled back instead)
 
 # Damiao motor torque at the output shaft (N m): the peak (datasheet) and TMAX, the MIT frame's torque mapping range
 # (motorbridge's model table, motor_vendors/damiao/src/motor.rs: what a frame's tau_ff and the feedback can encode).
@@ -54,8 +64,11 @@ MOTOR_TORQUE = {"4340P": {"peak": 27.0, "tmax": 28.0}, "4340": {"peak": 27.0, "t
 
 
 def motor_torque_limits(profile: str = DEFAULT_PROFILE) -> tuple:
-    """(arm joints' torque limits (6,), the gripper motor's) in N m at the output: min(datasheet peak, TMAX) of each
-    joint's motor model as the profile's hardware file names it (rebotarm_dm_*.yaml ``model``)."""
+    """(arm joints' torque limits (N,), the gripper motor's) in N m at the output: min(datasheet peak, TMAX) of each
+    joint's motor model as the profile's hardware file names it (rebotarm_dm_*.yaml ``model``); another arm type:
+    its own (robots/arm_types.py)."""
+    if ARM_TYPE is not None:
+        return np.array(ARM_TYPE["torque_max"], float), float(ARM_TYPE["gripper_torque_max"])
     from reBotArm_control_py.actuator.rebotarm import load_cfg
     joints = {j.name: j for j in load_cfg(PROFILES[profile])["joints"]}
 
@@ -98,6 +111,10 @@ class Profile:
 
 
 def load_profile(name: str) -> Profile:
+    if ARM_TYPE is not None:                      # another arm type: its gains (one profile for every name)
+        t = ARM_TYPE
+        return Profile(name, f"arm type {t['name']}", np.array(t["kp"], float), np.array(t["kd"], float),
+                       float(t["g_kp"]), float(t["g_kd"]), np.array(t["tau_scale"], float))
     if name not in PROFILES:
         raise ValueError(f"unknown gain profile {name!r} (one of {', '.join(PROFILES)})")
     from reBotArm_control_py.actuator.rebotarm import _resolve_hw_cfg_path, load_cfg
@@ -111,11 +128,16 @@ def load_profile(name: str) -> Profile:
                    float(joints["gripper"].kp), float(joints["gripper"].kd), np.array(scale[:N], float))
 
 
+# the hard joint caps: the reBot's, or the arm type's
+_HARD_VEL = np.array([2.0, 2.0, 2.0, 6.0, 6.0, 6.0] if ARM_TYPE is None else ARM_TYPE["joint_vel"], float)
+_HARD_ACC = np.array([20.0, 20.0, 20.0, 60.0, 60.0, 60.0] if ARM_TYPE is None else ARM_TYPE["joint_acc"], float)
+
+
 @dataclass
 class Limits:
     """Speed limits. ``hard`` are fixed (config); the lease holder may lower ``soft`` within them."""
-    joint_vel: np.ndarray = field(default_factory=lambda: np.array([2.0, 2.0, 2.0, 6.0, 6.0, 6.0]))  # rad/s
-    joint_acc: np.ndarray = field(default_factory=lambda: np.array([10.0, 10.0, 10.0, 30.0, 30.0, 30.0]))  # rad/s²
+    joint_vel: np.ndarray = field(default_factory=lambda: _HARD_VEL.copy())          # rad/s
+    joint_acc: np.ndarray = field(default_factory=lambda: _HARD_ACC.copy() / 2)      # rad/s²
     lin_vel: float = 0.15        # m/s   servo default
     lin_acc: float = 0.5         # m/s²
     ang_vel: float = 1.0         # rad/s
@@ -133,7 +155,7 @@ class Limits:
                       self.ang_acc, self.home_vel)
 
 
-HARD = Limits(joint_vel=np.array([2.0, 2.0, 2.0, 6.0, 6.0, 6.0]), joint_acc=np.array([20.0, 20.0, 20.0, 60.0, 60.0, 60.0]),
+HARD = Limits(joint_vel=_HARD_VEL.copy(), joint_acc=_HARD_ACC.copy(),
               lin_vel=0.5, lin_acc=2.0, ang_vel=3.0, ang_acc=10.0, home_vel=1.0)
 DEFAULT_SOFT = Limits(joint_vel=HARD.joint_vel.copy())
 

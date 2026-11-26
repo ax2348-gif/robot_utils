@@ -196,3 +196,30 @@ def test_every_frame_and_datagram_with_the_events_in_order(env):
     # the same events are in the log
     logged = [ln["seq"] for ln in map(__import__("json").loads, node.eventlog.since(seqs[0] - 1))]
     assert logged[:len(seqs)] == seqs
+
+
+def test_the_base_hint_source_toggle_state_and_hint_records(env):
+    """The page's toggle (POST /hint_source/...), /state teleop.hint, and the hint records in the operator stream:
+    the three candidates side by side per frame while teleop runs (no body here: head only ok)."""
+    node, url = env["node"], env["url"]
+    got, halt = [], threading.Event()
+    th = threading.Thread(target=read_records, args=(url, got, halt), daemon=True)
+    th.start()
+    wait_for(lambda: node.oplog.subscribers == 1)
+    with httpx.Client(base_url=url, timeout=10) as c:
+        assert c.post("/hint_source/legs").status_code == 400
+        assert c.post("/hint_source/hips").json() == {"hint_source": "hips"}
+        assert c.post("/start").status_code == 200
+        time.sleep(0.5)
+        s = c.get("/state").json()
+        assert s["config"]["hint_source"] == "hips"
+        h = s["teleop"]["hint"]
+        assert h["selected"] == "hips" and h["why_not"] == "no body" and h["engaged_source"] is None
+        assert c.post("/stop").status_code == 200
+    halt.set()
+    node.oplog.headset(0.0, {})
+    th.join(5)
+    hints = [r for r in got if r["type"] == "hint"]
+    assert len(hints) > 10
+    assert set(hints[-1]["candidates"]) == {"head", "chest", "hips"} and hints[-1]["selected"] == "hips"
+    assert hints[-1]["candidates"]["head"]["ok"] and not hints[-1]["candidates"]["hips"]["ok"]

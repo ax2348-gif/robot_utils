@@ -129,6 +129,13 @@ class SwerveModule(BaseModel):
     y: float = Field(description="m, wheel contact point left of base.")
 
 
+class BaseBody(BaseModel):
+    """A procedural box on base_link (the description's component), for drawing."""
+    name: str = Field(description="The component's name.")
+    size: list[float] = Field(description="m, x y z.")
+    T: list[list[float]] = Field(description="4x4 pose of its centre in base (row-major).")
+
+
 class RobotGeometry(BaseModel):
     """The swerve base's geometry (swerve.constants), for drawing the robot."""
     frame_size: float = Field(description="m, side of the square chassis frame (17 in).")
@@ -139,6 +146,8 @@ class RobotGeometry(BaseModel):
                                      "plate sits.")
     modules: list[SwerveModule] = Field(description="The four swerve modules (wheels), FL, FR, RR, RL order "
                                                     "as in swerve.constants.")
+    bodies: list[BaseBody] = Field(default_factory=list, description="The description's procedural boxes on "
+                                   "base_link (a torso on the base, e.g. the OpenArm's column and shoulder block).")
 
 
 class NominalPose(BaseModel):
@@ -210,6 +219,9 @@ class DescriptionOut(BaseModel):
         description="4×4 pose of each frame in base (p_base = T p_frame), row-major; frames not under base are left "
                     "out.")
     robot: RobotGeometry
+    profile: Optional[str] = Field(None, description="The robot profile the description node runs (--robot).")
+    arms: list[dict] = Field(default_factory=list, description="The robot's arms: {name (its arm node instance), frame "
+                                                              "(its description frame), mirror}.")
     cameras: dict[str, CameraOut] = Field(description="Each camera of the description by name.")
     conventions: Conventions
 
@@ -680,6 +692,26 @@ class ModelTree(BaseModel):
     units: TreeUnits
 
 
+class ModelArm(BaseModel):
+    """One arm of the robot (robots.ArmSpec): its name is its arm node instance, sim backend and WBC end effector."""
+    name: str = Field(description="Arm name: arm node instance, model prefix owner, description frame, sim backend.")
+    component: str = Field(description="Its model component.")
+    prefix: str = Field(description="Prefix of its links and joints in the model.")
+    file: str = Field(description="Its URDF (<package>:<path>).")
+    mirror: bool = Field(description="The component is the mirror image of its URDF (x-z plane): the same joint "
+                                     "values give the mirrored pose.")
+    frame: str = Field(description="The description frame its base hangs from (the arm frame).")
+    joints: list[str] = Field(description="Its arm joints in the model, in order.")
+    ee_link: str = Field(description="Its end link in the model.")
+    base_link: str = Field(description="Its root (mount) link in the model.")
+    gripper: Optional[str] = Field(None, description="Its gripper's driving joint in the model (none: no gripper).")
+    tcp: list[float] = Field(description="Default TCP offset in the end link, m.")
+    side: Optional[str] = Field(None, description="left | right: the side of the robot (the hand that drives it in "
+                                                  "two-hand teleop); null with one arm.")
+    type: str = Field("rebot", description="The arm type (robots/arm_types.py): rebot, openarm_v2, ...")
+    posture: Optional[list[float]] = Field(None, description="The nominal posture (rad; the WBC's null-space posture).")
+
+
 class ModelOut(BaseModel):
     """The robot model (GET /model): what /model/urdf assembles with the same options."""
     model_version: str = Field(description="Hash of the description YAML, the active calibrations, the camera "
@@ -697,6 +729,8 @@ class ModelOut(BaseModel):
     description_frames: dict[str, str] = Field(description="Description frame (GET /description) -> the model "
                                                            "link at the same pose (base -> base_link, "
                                                            "camera/depth_optical -> camera_depth_optical, ...).")
+    arms: list[ModelArm] = Field(default_factory=list, description="The robot's arms (the description's `arms`; "
+                                 "one `arm` by default).")
     units: ModelUnits
     conventions: ModelConventions
 

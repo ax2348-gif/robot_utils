@@ -1,0 +1,18 @@
+# Sim config: the bimanual robot's two dynamic arms (docs/sim.md; docs/plans/bimanual_and_robot_swap.md), merged over
+# default_sim.yaml (and the robot profile's own `sim:`):
+#   ROBOT_SIM_CONFIG=deploy/sim/sim_bimanual_dynamic.yaml python -m robot_utils.nodes.sim.stack --robot rebot_bimanual
+# Every arm gets the dynamic fidelity of components.arm (one fidelity for every arm): its own Damiao motors (the MIT
+# law as joint torque, clamped at the robot config's limits), its own gravity fit (arm_right to the node's model,
+# arm_left to its mirrored model, as its own arm node loads it: World.gravity_fits) and its own watchdog. Per-arm
+# overrides go under components.arms.<name> (merged over components.arm), e.g. a different start pose or friction:
+components:
+  arm:
+    fidelity: dynamic
+  # arms:
+  #   arm_left:
+  #     dynamic:
+  #       coulomb: [0.4, 0.4, 0.4, 0.05, 0.05, 0.05]
+# The rings scene works with the bimanual robot too: deploy/sim/sim_rings_dynamic.yaml with --robot rebot_bimanual. The
+# rings are centred on the right arm's mount y (scene.py ring_geometry), so the left arm (0.29 m to the left) sees both
+# rings 4-5 cm further away; both arms still reach the outer ring and onto the inner one (sampled 2026-11-24: left
+# 263 / 117 TCP hits on the outer / inner ring vs right 339 / 157).

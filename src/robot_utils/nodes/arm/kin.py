@@ -25,7 +25,13 @@ from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
 
 from .config import N
 
-DEFAULT_TCP_OFFSET = (-0.15, 0.0, 0.0)   # m in end_link: the Quest teleop's TCP
+DEFAULT_TCP_OFFSET = (-0.15, 0.0, 0.0)   # m in end_link: the Quest teleop's TCP (another gripper type: its own)
+try:
+    from .config import ARM_TYPE as _AT
+    if _AT is not None and _AT.get("gripper_spec"):
+        DEFAULT_TCP_OFFSET = tuple(float(v) for v in _AT["gripper_spec"]["tcp"])
+except ImportError:  # noqa: S110 - config always imports; kept defensive
+    pass
 PINV_DAMPING = 0.01                       # damped pseudo-inverse for the twist feedforward
 IK_POS_TOL = 0.002                        # m: an IK solve is accepted within this position error
 IK_ROT_TOL = math.radians(10.0)           # rad: and this orientation error (see ArmKinematics.__init__)
@@ -87,10 +93,12 @@ def pose_error(a: pin.SE3, b: pin.SE3) -> tuple[float, float]:
 
 
 class ArmKinematics:
-    def __init__(self, extra_limits: Optional[dict] = None, tcp_offset=DEFAULT_TCP_OFFSET):
+    def __init__(self, extra_limits: Optional[dict] = None, tcp_offset=DEFAULT_TCP_OFFSET, urdf: Optional[str] = None):
         """``extra_limits``: {joint name: (lo, hi) rad} narrowing the URDF limits (the config's
-        q_min_deg / q_max_deg; RebotArm.setpoint_limits gives URDF and config combined)."""
-        self.model = load_robot_model()
+        q_min_deg / q_max_deg; RebotArm.setpoint_limits gives URDF and config combined). ``urdf``: the arm's URDF
+        file (a mirrored arm's, robots.ArmSpec.urdf_path); None: rebot_ctl's hardware config's."""
+        self.urdf = urdf
+        self.model = load_robot_model(urdf)
         self._ee = get_end_effector_frame_id(self.model)
         self.joint_names = [self.model.names[j] for j in range(1, N + 1)]
         for i, name in enumerate(self.joint_names):

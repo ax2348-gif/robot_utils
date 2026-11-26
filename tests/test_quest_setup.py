@@ -82,6 +82,8 @@ class FakeHeadset:
         self.uninstalls = 0
         self.provider_down = 0                # reads that fail before the provider answers (just installed)
         self.owner_entry = False
+        self.body_granted = False
+        self.grant_on_install = True
 
     def status(self):
         if not self.keys:
@@ -99,7 +101,9 @@ class FakeHeadset:
         if a[:2] == ["shell", "ip"]:
             return 0, IP_ADDR.replace("100.101.102.103", self.ip)
         if a[:2] == ["shell", "dumpsys"]:
-            return 0, f"versionName={self.runtime}" if self.runtime else ""
+            perm = f"\n      {Q.BODY_TRACKING}: granted={'true' if self.body_granted else 'false'}" \
+                if self.runtime and Q.version_tuple(self.runtime) >= (1, 7, 0) else ""
+            return 0, (f"versionName={self.runtime}" + perm) if self.runtime else ""
         if a[:3] == ["shell", "content", "read"]:
             if self.provider_down:
                 self.provider_down -= 1
@@ -125,6 +129,7 @@ class FakeHeadset:
         if a[0] == "install":
             self.installs.append(a[-1])
             self.runtime = Q.RUNTIME_VERSION
+            self.body_granted = self.grant_on_install      # the headset grants BODY_TRACKING with the install
             return 0, "Success"
         raise AssertionError(f"unexpected adb {a}")
 
@@ -332,3 +337,17 @@ def test_a_copied_quest_env_becomes_a_tracking_clone_with_git(tmp_path, monkeypa
     hs.quest_env = "copy"                                       # an older wizard's plain copy, no git
     assert wizard(tmp_path, monkeypatch, hs, quest_env_branch="main").run_all() == 0
     assert hs.git_tools and hs.quest_env == "tracking"
+
+
+def test_the_body_tracking_permission_is_reported_never_granted(tmp_path, monkeypatch):
+    """Runtime 1.7.0 declares BODY_TRACKING and the headset grants it with the install: the wizard reports it and never
+    runs ``pm grant`` (refused for it; the fake's adb raises on any unexpected command); not granted is not a
+    failure."""
+    hs = FakeHeadset(keys=None, runtime="1.6.0")
+    wiz = wizard(tmp_path, monkeypatch, hs)
+    assert wiz.step_runtime()
+    assert hs.runtime == Q.RUNTIME_VERSION == "1.7.0" and hs.body_granted
+    assert wiz.body_tracking_granted() is True
+    hs.body_granted = False                          # e.g. revoked in Settings: reported, left to the operator
+    assert wiz.step_runtime()
+    assert hs.body_granted is False and wiz.body_tracking_granted() is False

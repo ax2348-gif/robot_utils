@@ -146,3 +146,29 @@ def test_latency_and_rate_are_in_the_status_line():
     assert "lat=" in line and "rate=" in line and "disarmed" in line
     rig.arm()
     assert "ARMED#1" in status_line(rig.client)
+
+
+def test_rate_read_from_another_thread_while_frames_arrive():
+    """The node's /state and stream threads read gate.rate() while the loop checks frames: no "deque mutated during
+    iteration" (it crashed the step and stopped teleop, disabling the WBC)."""
+    import threading
+    gate, hs = QuestGate(), Headset()
+    frames = [Frame(hs.frame(IDLE, i / 72), i / 72, 1) for i in range(20000)]
+    errors, done = [], threading.Event()
+
+    def reader():
+        try:
+            while not done.is_set():
+                gate.rate(frames[-1].arrived)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    th = threading.Thread(target=reader)
+    th.start()
+    try:
+        for f in frames:
+            gate.check(f)
+    finally:
+        done.set()
+        th.join()
+    assert not errors

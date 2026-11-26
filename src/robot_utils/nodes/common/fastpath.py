@@ -5,11 +5,15 @@ Internal, robot-local interface (docs/arm.md "Internal joint channel"; design do
 only", contract docs/plans/wbc_v1.md "Interfaces for the first build" 1). A Unix datagram socket, owner-only; no
 UDP, no HTTP. Three kinds of datagram travel on it, told apart by their first bytes:
 
-- ``RUC1`` command, client -> node, 88 bytes, little-endian ``<4sBBHIIdd6f6fff``: magic, version (1), mode
-  (0 keep-alive, 1 joint goal), flags (reserved 0), session, seq, t_send, t_basis, q (6), qd (6), gap, reserved.
-- ``RUS1`` state, node -> client, 136 bytes, ``<4sBBHIIdIBB2x6f6f6f6fff``: magic, version, a reserved u8 (0; the
-  command's ``mode`` position), flags (u16, STATE_*), session, tick, t_tick, seq in force, source, state, q, qd, tau,
-  q_cmd (6 each), gap, read_age.
+- ``RUC1`` command, client -> node, 88 bytes for a 6-joint arm, little-endian ``<4sBBHIIdd6f6fff``: magic, version
+  (1), mode (0 keep-alive, 1 joint goal), flags (reserved 0), session, seq, t_send, t_basis, q (6), qd (6), gap,
+  reserved.
+- ``RUS1`` state, node -> client, 136 bytes for a 6-joint arm, ``<4sBBHIIdIBB2x6f6f6f6fff``: magic, version, a
+  reserved u8 (0; the command's ``mode`` position), flags (u16, STATE_*), session, tick, t_tick, seq in force, source,
+  state, q, qd, tau, q_cmd (6 each), gap, read_age.
+- An arm with n joints (e.g. a 7-DOF OpenArm, robots/arm_types.py) uses the same layouts with n in place of 6: a
+  command is ``40 + 8 n`` bytes, a state ``40 + 16 n``; the size gives n (``NJ_MAX`` at most), so the reBot's packets
+  are unchanged byte for byte. A keep-alive carries the arm's n too (its q / qd NaN / 0).
 - control: a JSON object (first byte ``{``) with ``type``: ``hello`` / ``bye`` (client -> node), ``welcome`` /
   ``refused`` / ``bye`` (node -> client).
 
@@ -36,7 +40,28 @@ CMD = struct.Struct("<4sBBHIIdd6f6fff")
 STATE = struct.Struct("<4sBBHIIdIBB2x6f6f6f6fff")
 CMD_SIZE = CMD.size          # 88
 STATE_SIZE = STATE.size      # 136
-NJ = 6                       # joints per packet
+NJ = 6                       # joints per packet: the reBot's (the default)
+NJ_MAX = 12                  # the most joints a packet may carry
+_CMD_N, _STATE_N = {}, {}
+
+
+def cmd_struct(n: int) -> struct.Struct:
+    if n not in _CMD_N:
+        _CMD_N[n] = struct.Struct(f"<4sBBHIIdd{n}f{n}fff")
+    return _CMD_N[n]
+
+
+def state_struct(n: int) -> struct.Struct:
+    if n not in _STATE_N:
+        _STATE_N[n] = struct.Struct(f"<4sBBHIIdIBB2x{n}f{n}f{n}f{n}fff")
+    return _STATE_N[n]
+
+
+def _n_of(size: int, per: int, what: str, six: int) -> int:
+    n, r = divmod(size - 40, per)
+    if r or not 1 <= n <= NJ_MAX:
+        raise PacketError("size", f"a {what} is {six} bytes (6 joints; 40 + {per} n for n), got {size}")
+    return n
 
 MODE_KEEPALIVE = 0           # renews (the lease, the session), no goal change
 MODE_GOAL = 1                # joint goal (q, qd feedforward, gap)
@@ -96,35 +121,38 @@ def pack_command(session: int, seq: int, q: Sequence[float] = (math.nan,) * NJ,
                  reserved: float = 0.0) -> bytes:
     """An RUC1 command. ``t_send`` defaults to the sender's monotonic clock; ``t_basis`` is the ``t_tick`` of the
     state packet the goal was computed from (NaN: none)."""
-    return CMD.pack(CMD_MAGIC, VERSION, mode, flags, session, seq,
-                    time.monotonic() if t_send is None else t_send, t_basis, *q, *qd, gap, reserved)
+    q, qd = tuple(q), tuple(qd)
+    if len(qd) != len(q):
+        qd = (0.0,) * len(q) if mode == MODE_KEEPALIVE else qd
+    return cmd_struct(len(q)).pack(CMD_MAGIC, VERSION, mode, flags, session, seq,
+                                   time.monotonic() if t_send is None else t_send, t_basis, *q, *qd, gap, reserved)
 
 
 def unpack_command(buf) -> Command:
-    if len(buf) != CMD_SIZE:
-        raise PacketError("size", f"a command is {CMD_SIZE} bytes, got {len(buf)}")
-    v = CMD.unpack(buf)
+    n = _n_of(len(buf), 8, "command", CMD_SIZE)
+    v = cmd_struct(n).unpack(buf)
     if v[0] != CMD_MAGIC:
         raise PacketError("magic", f"bad magic {v[0]!r}")
     if v[1] != VERSION:
         raise PacketError("version", f"unknown version {v[1]}")
-    return Command(v[2], v[3], v[4], v[5], v[6], v[7], v[8:14], v[14:20], v[20], v[21])
+    return Command(v[2], v[3], v[4], v[5], v[6], v[7], v[8:8 + n], v[8 + n:8 + 2 * n], v[8 + 2 * n], v[9 + 2 * n])
 
 
 def pack_state(s: State) -> bytes:
-    return STATE.pack(STATE_MAGIC, VERSION, 0, s.flags, s.session, s.tick, s.t_tick, s.seq, s.source, s.state,
+    return state_struct(len(s.q)).pack(STATE_MAGIC, VERSION, 0, s.flags, s.session, s.tick, s.t_tick, s.seq, s.source, s.state,
                       *s.q, *s.qd, *s.tau, *s.q_cmd, s.gap, s.read_age)
 
 
 def unpack_state(buf) -> State:
-    if len(buf) != STATE_SIZE:
-        raise PacketError("size", f"a state packet is {STATE_SIZE} bytes, got {len(buf)}")
-    v = STATE.unpack(buf)
+    n = _n_of(len(buf), 16, "state packet", STATE_SIZE)
+    v = state_struct(n).unpack(buf)
     if v[0] != STATE_MAGIC:
         raise PacketError("magic", f"bad magic {v[0]!r}")
     if v[1] != VERSION:
         raise PacketError("version", f"unknown version {v[1]}")
-    return State(v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10:16], v[16:22], v[22:28], v[28:34], v[34], v[35])
+    a = 10
+    return State(v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[a:a + n], v[a + n:a + 2 * n], v[a + 2 * n:a + 3 * n],
+                 v[a + 3 * n:a + 4 * n], v[a + 4 * n], v[a + 4 * n + 1])
 
 
 # -- control messages --------------------------------------------------------------------------------------

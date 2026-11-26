@@ -47,6 +47,15 @@ False). If the free solve is infeasible (e.g. caps lowered while faster), the ba
 (``rate fallback``). An infeasible or failed solve returns ``status`` infeasible / error with zero velocity: the
 node holds and raises a fault.
 
+**Null-space posture** (an arm with more joints than the EE task's 6 rows, e.g. a 7-DOF arm: the elbow's swivel is
+free): the posture is a cost on the task's null space only, ``½ w |P (q' - k (q_nom - q))|²`` with ``P = I - A⁺ A``
+from the EE task's own weighted rows restricted to that arm's joints (damped pseudo-inverse). P is a symmetric
+projector, so this is ``H += w P``, ``c -= w P v``: a motion along it leaves the task's velocity unchanged, so the
+posture never trades EE error for posture (it needs no ``tie`` gating and converges at rest, the EE still), in the one
+QP: the joint box, the lead bound, the reach and the base coupling stay hard rows and bind it as everything else. A
+second (lexicographic) QP would double the solves per tick and repeat those rows; the projection gives the same
+priority for the unconstrained part. A 6-joint arm keeps the weighted posture term (its null space is empty).
+
 - **lead bound** (per arm joint): the next command within ``lead`` (= ``lead_torque / kp``, at most the arm's
   ``max_lead``) of ``q_ref``, the measured joints extrapolated by their measured velocity over the measurement's
   age + ``lead_delay``: ``|q_cmd + q' ds - q_ref| <= lead`` (the window is the union of the ones around the
@@ -55,7 +64,8 @@ node holds and raises a fault.
   joint box allows (the joint box wins: always feasible).
 
 ``Output.limited_by``: which hard constraint bound the solution (reach, manipulability, joint_limit, lead,
-base_limit; none), for operator feedback.
+base_limit; none), for operator feedback; ``diag["limited_ees"]``: per arm, the highest-priority of its own rows that
+binds (reach, manipulability, joint_limit, lead; an arm absent = none), so feedback can go to the hand driving it.
 """
 from __future__ import annotations
 
@@ -70,12 +80,13 @@ import pinocchio as pin
 import qpsolvers
 
 from .model import WbcModel
-from .spec import Config, EEHint, Hints, effective_limits
+from .spec import Config, EEHint, Hints, effective_limits, fit
 from .targets import Target
 
 C8 = math.cos(math.pi / 8)
 OCT = np.array([[math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)] for k in range(8)])   # 8 unit normals
 LIMITED = ["none", "reach", "manipulability", "fence", "joint_limit", "base_limit", "base_band", "lead"]  # append-only
+LIMIT_PRIORITY = ["reach", "manipulability", "joint_limit", "lead", "none"]   # per arm (diag limited_ees), as limited_by
 BIND_TOL = 1e-6          # velocity units: a row this close to its bound is binding
 
 
@@ -138,6 +149,8 @@ class EEState:
     q_meas: Optional[np.ndarray] = None   # the arm's measured joints (None: no lead bound this tick)
     qd_meas: Optional[np.ndarray] = None  # its measured joint velocity (extrapolates q_meas; None = 0)
     meas_age: float = 0.0             # s since that measurement (the arm state's t_tick to this tick)
+    swivel_hint: Optional[tuple] = None   # the operator's swivel hint (swivel_geom.HintInput) or None
+                                          # (humanlike.py)
 
 
 @dataclass
@@ -196,23 +209,32 @@ class QPController(Controller):
         # per arm (joint_vel, joint_acc): the arm's own (the arm config's soft defaults until the node applies the
         # joint-channel welcome), narrowed by the config's when it gives them
         from ..arm.config import DEFAULT_SOFT
-        self.caps = {k: self.arm_caps(len(v), DEFAULT_SOFT.joint_vel, DEFAULT_SOFT.joint_acc)
+        from ...robots.arm_types import load as arm_type
+        types = {k: arm_type(model.ees[k].arm_type) for k in model.arm_v}     # None: the reBot's defaults
+        self.caps = {k: self.arm_caps(len(v), DEFAULT_SOFT.joint_vel if types[k] is None else types[k].joint_vel,
+                                      DEFAULT_SOFT.joint_acc if types[k] is None else
+                                      np.asarray(types[k].joint_acc, float) / 2)
                      for k, v in model.arm_v.items()}
-        # per arm the servo's kp (Nm/rad) and the arm's max_lead (rad): the arm's default profile until the node
-        # applies the arm's own (GET /gains, the welcome)
+        # per arm the servo's kp (Nm/rad) and the arm's max_lead (rad): the arm's default profile (an arm type's own
+        # gains) until the node applies the arm's own (GET /gains, the welcome)
         from .spec import default_arm_gains
         kp, ml, self.kp_source = default_arm_gains()
-        self.kp = {k: kp[:len(v)].copy() for k, v in model.arm_v.items()}
+        self.kp = {k: (kp[:len(v)].copy() if types[k] is None else np.asarray(types[k].kp, float))
+                   for k, v in model.arm_v.items()}
         self.max_lead = {k: ml for k in model.arm_v}
         self.active = False                                   # base deadband state
         self.solves = 0
+        from .humanlike import Humanlike
+        self.human = Humanlike(model, cfg)                    # the redundant arms' null-space posture terms
 
     def reset(self) -> None:
         self.active = False
+        self.human.reset()
+        self.human.__dict__.pop("_feas", None)
 
     def arm_caps(self, n: int, arm_vel, arm_acc) -> tuple:
         """(joint_vel, joint_acc) from the arm's limits and the config's optional narrower ones."""
-        vm, a = np.asarray(arm_vel, float)[:n], np.asarray(arm_acc, float)[:n]
+        vm, a = fit(arm_vel, n), fit(arm_acc, n)
         if self.cfg.joint_vel is not None:
             vm = np.minimum(vm, np.asarray(self.cfg.joint_vel, float)[:n])
         if self.cfg.joint_acc is not None:
@@ -222,7 +244,7 @@ class QPController(Controller):
     def lead(self, ee: str) -> np.ndarray:
         """The lead bound per joint (rad): lead_torque / kp, at most the arm's max_lead."""
         kp = self.kp[ee]
-        return np.minimum(np.asarray(self.cfg.lead_torque, float)[:len(kp)] / kp, self.max_lead[ee])
+        return np.minimum(fit(self.cfg.lead_torque, len(kp)) / kp, self.max_lead[ee])
 
     def lead_ref(self, ee: str, e: "EEState"):
         """(q_ref, its velocity): the measured joints extrapolated by their measured velocity (capped at the joint
@@ -407,6 +429,25 @@ class QPController(Controller):
         groups: list = []          # (kind, G, h): G x <= h, x the velocity
         dmax = 0.0
         manip_rows, reach_rows, task_rows, lead_rows = [], [], [], []
+        ee_of: dict = {"groups": [], "manip": [], "reach": [], "lead": []}   # the EE of each per-arm row (limited_ees)
+        human = self.human
+        prox: dict = {}
+        nulls: dict = {}
+        if human.arms and cfg.null_mode == "humanlike":
+            human.cfg = cfg
+            human.prepare(q)
+            # each redundant arm's self-motion directions: the null space of its TCP Jacobian (the proximity and
+            # swivel attractors move along them only)
+            nulls = {}
+            for k in human.arms:
+                if k in snap.ees and snap.ees[k].target is not None:
+                    Ja = m.jacobian(q, k)[:, m.arm_v[k]]
+                    _, sv, Vt = np.linalg.svd(Ja)
+                    nulls[k] = Vt[int(np.sum(sv > 1e-6 * max(sv[0], 1e-12))):].T
+            prox, clear = human.proximity(nulls)
+            diag["arm_clearance"] = clear
+            diag["swivel_cont"] = dict(human.psi_acc)          # the continuous swivels (every tick: the stream)
+            diag["proximity"] = {k: float(sum(w for w, _ in v)) for k, v in prox.items()}
         for name, e in snap.ees.items():
             iv = m.arm_v[name]
             x_prev[iv] = e.v_prev
@@ -415,10 +456,12 @@ class QPController(Controller):
             S[np.arange(len(iv)), iv] = 1.0
             groups.append(("joint_limit_box", np.vstack([S, -S]), np.concatenate([U, -L]), posmask,
                            np.concatenate([Ur, -Lr])))
+            ee_of["groups"].append(name)
             lb = self._lead_bounds(name, e, L, U, snap.dt or dt)
             if lb is not None:
                 Ll, Ul, ld = lb
                 lead_rows.append((np.vstack([S, -S]), np.concatenate([Ul, -Ll])))
+                ee_of["lead"].append(name)
                 diag.setdefault("lead", {})[name] = {k: [float(v) for v in vv] for k, vv in ld.items()}
             mu, g = m.manipulability_gradient(q, name)
             diag["manip"][name] = mu
@@ -456,8 +499,50 @@ class QPController(Controller):
             # EE speed, so a satisfied task (or a hold) never makes the arm move on its own (no self-motion)
             tie = min(1.0, (float(np.linalg.norm(vd[:3])) + 0.1 * float(np.linalg.norm(vd[3:]))) / cfg.tie_speed)
             diag.setdefault("tie", {})[name] = tie
-            H[np.ix_(iv, iv)] += (cfg.w_arm + hint.posture_weight + lam) * np.eye(len(iv))
-            c[iv] -= tie * hint.posture_weight * cfg.k_posture * (e.posture - e.q_cmd)
+            if len(iv) > 6:                           # a redundant arm (a 6-joint arm keeps the weighted term)
+                # redundant: the posture in the task's null space (module docstring, "Null-space posture")
+                if cfg.null_mode == "humanlike" and name in human.arms:
+                    # the human-like terms (humanlike.py): (w, v) attractors, their weighted sum on the null space
+                    terms = prox.get(name, []) + human.terms(name, snap.base, vd[:3], snap.dt or dt, diag,
+                                                                  nulls.get(name), tg, snap.t, e.swivel_hint)
+                    wn = float(sum(w for w, _ in terms))
+                    vp = sum((w * v for w, v in terms), np.zeros(len(iv))) / wn if wn > 0 else np.zeros(len(iv))
+                else:                                       # "nominal": the fixed nominal posture (the hint's)
+                    wn = cfg.w_null_posture * hint.posture_weight / max(cfg.posture_weight, 1e-12)
+                    vp = cfg.k_posture * (e.posture - e.q_cmd)
+                n_ = float(np.linalg.norm(vp))
+                cap = cfg.null_posture_speed
+                hs = ((diag.get("swivel") or {}).get(name) or {}).get("hint")
+                if hs and hs["weight"] > 0:                   # the operator's swivel hint: its own speed, by its weight
+                    cap += hs["weight"] * max(cfg.swivel_hint_speed - cap, 0.0)
+                if n_ > cap:
+                    vp = vp * (cap / n_)
+                # saturation in the null space: a joint within null_limit_margin of a limit that the projected
+                # motion would push further into it is taken out of the projector (its column dropped, its row and
+                # column zero) and the projection redone. Projecting with it in asks for motion the joint box then
+                # refuses, and the remainder is paid for by the EE task (a 10 mm steady error with OpenArm joint6 at
+                # its limit, before this); a joint moving away from its limit stays in
+                lo_, hi_ = m.arm_limits(name)
+                free = np.ones(len(iv), bool)
+                Aa = A[:, iv]
+                for _ in range(len(iv)):
+                    Pn = np.zeros((len(iv), len(iv)))
+                    if free.sum() > Aa.shape[0]:
+                        Af = Aa[:, free]
+                        Pn[np.ix_(free, free)] = np.eye(int(free.sum())) - Af.T @ np.linalg.solve(
+                            Af @ Af.T + 1e-6 * np.eye(Af.shape[0]), Af)
+                    vn = Pn @ vp
+                    bad = free & (((vn > 0) & (hi_ - e.q_cmd < cfg.null_limit_margin)) |
+                                  ((vn < 0) & (e.q_cmd - lo_ < cfg.null_limit_margin)))
+                    if not bad.any():
+                        break
+                    free &= ~bad
+                H[np.ix_(iv, iv)] += (cfg.w_arm + lam) * np.eye(len(iv)) + wn * Pn
+                c[iv] -= wn * Pn @ vp
+                diag.setdefault("null_posture", {})[name] = float(np.linalg.norm(Pn @ (e.posture - e.q_cmd)))
+            else:
+                H[np.ix_(iv, iv)] += (cfg.w_arm + hint.posture_weight + lam) * np.eye(len(iv))
+                c[iv] -= tie * hint.posture_weight * cfg.k_posture * (e.posture - e.q_cmd)
             if cfg.w_manip > 0 and mu > 1e-12:
                 c[iv] -= tie * cfg.w_manip * (g / mu)
             # manipulability floor: grad w . q' >= -eta (w - w_min) / (w_i - w_min)
@@ -470,6 +555,7 @@ class QPController(Controller):
                 G = np.zeros((1, nv))
                 G[0, iv] = -g
                 manip_rows.append((G, np.array([rhs])))
+                ee_of["manip"].append(name)
             # reach: shoulder to target within reach_fraction of the nominal reach (rows on the base only)
             s, Js = m.shoulder_point(q, name)
             d_vec = tg.p - s
@@ -493,6 +579,7 @@ class QPController(Controller):
                 f_prev = float((G @ x_prev)[0])
                 floor = max(f_prev - a_eff * dt, 0.0)              # stopping (within the rate limits) is allowed
                 reach_rows.append((G, np.array([max(hr, floor)])))
+                ee_of["reach"].append(name)
         # -- the base: references, bands, caps (one QP; docs/plans/wbc_v1.md "Formulation") ----------------
         fixed, why = self._fixed_twist(snap, dt)
         p_ref, yaw_ref, v_ref, tol_p, tol_y = self._base_refs(snap)
@@ -534,12 +621,16 @@ class QPController(Controller):
         Wy = np.zeros(nv)
         Wy[bw] = 1.0
         rows: list = []                            # (kind, G (N cols), h)
-        for _, G_, h_, pm, _r in groups:           # the arm joint boxes (hard); position bounds report joint_limit
+        row_ee: dict = {}                          # index in rows -> the EE of a per-arm row (limited_ees)
+        for (_, G_, h_, pm, _r), ee_ in zip(groups, ee_of["groups"]):   # the arm joint boxes (hard); position
+            row_ee[len(rows)] = ee_                                      # bounds report joint_limit
             rows.append(("joint_limit", pad(G_[pm]), h_[pm]))
             rows.append(("joint_cap", pad(G_[~pm]), h_[~pm]))
-        for G_, h_ in manip_rows:
+        for (G_, h_), ee_ in zip(manip_rows, ee_of["manip"]):
+            row_ee[len(rows)] = ee_
             rows.append(("manipulability", pad(G_), h_))
-        for G_, h_ in lead_rows:                   # the lead bound (hard; feasible with the joint box)
+        for (G_, h_), ee_ in zip(lead_rows, ee_of["lead"]):   # the lead bound (hard; feasible with the joint box)
+            row_ee[len(rows)] = ee_
             rows.append(("lead", pad(G_), h_))
         rows.append(("slack", np.hstack([np.zeros((ns, nv)), -np.eye(ns)]), np.zeros(ns)))
         # t_lin >= octagon norm of the base's linear velocity, t_yaw >= |yaw rate| (world axes: the norm is rotation
@@ -565,7 +656,8 @@ class QPController(Controller):
             rows.append(("rate", pad(np.vstack([OCT @ Bm, Wy, -Wy])),
                          np.concatenate([accel * dt * C8 + OCT @ prev[:2],
                                          [cfg.max_alpha * dt + prev[2], cfg.max_alpha * dt - prev[2]]])))
-            for G_, h_ in reach_rows:
+            for (G_, h_), ee_ in zip(reach_rows, ee_of["reach"]):
+                row_ee[len(rows)] = ee_
                 rows.append(("reach", pad(G_), h_))
             # pose band: the deviation from the pose reference grows at most at k_band (band - deviation), never
             # forced back faster than that (outside the band: it may only shrink); slack 0
@@ -652,6 +744,14 @@ class QPController(Controller):
                 break
         if limited == "rate":
             limited = "base_limit"                 # the base's twist-rate rows (LIMITED is the stream's enum)
+        # per arm: the highest-priority per-arm limit binding its rows (operator feedback per hand: the haptics)
+        limited_ees: dict = {}
+        for i_, ee_ in row_ee.items():
+            k_, G_, h_ = rows[i_]
+            if (G_.shape[0] and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL)
+                    and LIMIT_PRIORITY.index(k_) < LIMIT_PRIORITY.index(limited_ees.get(ee_, "none"))):
+                limited_ees[ee_] = k_
+        diag["limited_ees"] = limited_ees
         diag["lead_binding"] = any(k_ == "lead" and np.any(G_ @ xs >= np.atleast_1d(h_) - BIND_TOL)
                                    for k_, G_, h_ in rows)
         tw = fixed if fixed is not None else twist_of(u)

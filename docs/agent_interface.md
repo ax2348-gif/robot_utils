@@ -251,10 +251,15 @@ See `guide.md` (Reference) and `/docs`. In addition:
 - `GET /sessions`, `GET /sessions/{id}/log.jsonl`, `GET /sessions/{id}/thumbs/{file}`;
 - human only (`X-Operator: human`): `POST /release`, `POST /profile/{name}`, `POST /reflex?enabled=`.
 
+Several arms (a bimanual robot, `--robot rebot_bimanual`): `/arm/*` is the first arm (`arm_left`), and
+`/arms/{name}/*` (enable, disable, servo, home, gripper, cancel, ik, geometry, state) drives each arm with its own
+lease held here; `GET /arms` lists them; `POST /enable`, `/disable` and the e-stop cover every arm (`arms` in the
+replies and in `/state`).
+
 ## Options
 
 `--pose-servo`, `--perception`, `--estimator`, `--description`, `--arm` (instance names or URLs; `none` to
-skip the last two), `--profile cautious|normal`,
+skip the last two; `--arm` takes several, comma-separated, default the `--robot` profile's arms), `--profile cautious|normal`,
 `--data-dir`, `--no-require-imu` (simulation only: lets goals proceed without an IMU-fused heading).
 
 ## Simulation

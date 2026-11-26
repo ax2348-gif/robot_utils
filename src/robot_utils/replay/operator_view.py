@@ -129,7 +129,8 @@ class OperatorView:
         placements_n = max((p.placements for p in self.placements if p is not None), default=0)
         return {"placement": self.source, "placements": placements_n, "eye": self.opts.eye,
                 "fov_source": self.eye.source, "fov_rad": [round(a, 4) for a in self.eye.fov], "width": self.width,
-                "height": self.height, "t0": self.t0, "frames_planned": self.n}
+                "height": self.height, "t0": self.t0, "frames_planned": self.n,
+                "body_frames": self.rec.body_frames}
 
     def frames(self) -> Iterator[tuple[np.ndarray, FrameInfo]]:
         rec, opts, eye = self.rec, self.opts, self.eye

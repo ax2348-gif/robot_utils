@@ -142,11 +142,13 @@ function render(s) {
                         const m = (s.model.camera_mounts || {})[n];
                         const how = m && (m.ground || m.yaw) ? "calibrated" + (m.ground ? " ground " + esc(m.ground) : "") + (m.yaw ? " yaw " + esc(m.yaw) : "") : '<span class="ru-warn">nominal</span>';
                         return `${esc(n)} ${esc(v)}: ${how}`; }).join("<br>") || "–"], ["fidelity", `base ${esc(s.fidelity.base)}; arm ${esc(s.fidelity.arm)}`]]);
-  const b = s.base, a = s.arm;
+  const b = s.base, arms = Object.entries(s.arms || (s.arm ? {arm: s.arm} : {}));
+  const armRows = arms.length ? arms.flatMap(([n, a]) => [
+    [n, `${a.enabled ? '<span class="ru-ok">motors on</span>' : "off"}${a.fault ? ' <span class="ru-err">fault 0x' + a.fault.toString(16) + "</span>" : ""}, gap ${a.gap_mm.toFixed(1)} mm`],
+    [`${n} q`, a.q.map(v => (v * 180 / Math.PI).toFixed(0)).join(" ") + " °"]]) : [["arm", "none"]];
   kv($("#robot"), [["base xyz", b.xyz.map(f3).join(", ") + " m"], ["yaw", (b.rpy[2] * 180 / Math.PI).toFixed(1) + "°"],
                     ["twist", b.twist.map(f3).join(", ")],
-                    ["arm", a ? `${a.enabled ? '<span class="ru-ok">motors on</span>' : "off"}${a.fault ? ' <span class="ru-err">fault 0x' + a.fault.toString(16) + "</span>" : ""}, gap ${a.gap_mm.toFixed(1)} mm` : "none"],
-                    ["arm q", a ? a.q.map(v => (v * 180 / Math.PI).toFixed(0)).join(" ") + " °" : "–"],
+                    ...armRows,
                     ["backends", Object.entries(s.backends).map(([k, v]) => `${k} ${v.clients ? '<span class="ru-ok">' + v.clients + "</span>" : '<span class="ru-muted">0</span>'}`).join(" · ")]]);
   $("#mods").innerHTML = "<tr><th>module</th><th>steer °</th><th>goal °</th><th>m/s</th><th>goal</th></tr>" +
     s.modules.map(m => `<tr><td>${m.name}${m.steer_on || m.drive_on ? "" : ' <span class="ru-muted">off</span>'}</td><td>${(m.steer * 57.3).toFixed(1)}</td><td>${(m.steer_goal * 57.3).toFixed(1)}</td><td>${f3(m.speed)}</td><td>${f3(m.speed_goal)}</td></tr>`).join("");

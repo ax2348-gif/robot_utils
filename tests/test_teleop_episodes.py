@@ -235,19 +235,58 @@ def test_abort_on_a_wbc_fault(env):
     assert len(env.events("fault")) == 1                                # seen once
 
 
-def test_abort_on_staleness_and_latency(env):
-    recording(env)
+def test_a_brief_dropout_holds_and_keeps_the_episode(env):
+    """A transient (stale or late input) holds the robot and keeps the recording; a re-grip resumes in the same
+    episode."""
+    eid = recording(env)
     env.rig.frame(IDLE, dt=0.3, deliver=False)                          # no frame for 300 ms
-    reason, ev = last_abort(env)
-    assert reason == "stale"
     assert env.events("stale")[-1]["detail"]["reason"] == "staleness"
+    assert len(env.events("held")) == 1 and not env.events("episode_abort")
+    assert env.ep.state == "recording"
     env2 = Env()
     recording(env2)
     env2.rig.run(IDLE, 3, late=0.4)                                     # 400 ms late
+    assert env2.events("stale")[-1]["detail"]["reason"] == "latency"
+    assert not env2.events("episode_abort") and env2.ep.state == "recording"
+
+
+def test_a_dropout_past_the_grace_window_escalates_and_aborts(env):
+    recording(env)
+    env.rig.frame(IDLE, dt=0.3, deliver=False)
+    env.rig.frame(IDLE, dt=2.5, deliver=False)                          # still no input past the 2 s window
+    assert len(env.events("escalated")) == 1
+    assert last_abort(env)[0] == "disarm"
+
+
+def test_abort_on_staleness_and_latency_with_resume_off():
+    """--no-resume: every dropout disarms and aborts, as before the tiers."""
+    env = Env()
+    env.node.set_resume(enabled=False)
+    env.rig.latch.resume = env.node.resume
+    recording(env)
+    env.rig.frame(IDLE, dt=0.3, deliver=False)
+    reason, ev = last_abort(env)
+    assert reason == "stale"
+    env2 = Env()
+    env2.node.set_resume(enabled=False)
+    env2.rig.latch.resume = env2.node.resume
+    recording(env2)
+    env2.rig.run(IDLE, 3, late=0.4)
     assert last_abort(env2)[0] == "stale" and env2.events("stale")[-1]["detail"]["reason"] == "latency"
 
 
-def test_abort_on_telemetry_loss(env):
+def test_a_telemetry_blackout_the_latch_holds_through_keeps_the_episode(env):
+    """The reader drops a connection silent for 1 s and reopens it: armed (or holding), the episode goes on."""
+    recording(env)
+    env.node.reader.connected = False
+    env.rig.run(IDLE, 1)
+    assert not env.events("episode_abort") and env.ep.state == "recording"
+
+
+def test_abort_on_telemetry_loss_when_not_resumable():
+    env = Env()
+    env.node.set_resume(enabled=False)
+    env.rig.latch.resume = env.node.resume
     recording(env)
     env.node.reader.connected = False
     env.rig.run(IDLE, 1)

@@ -175,6 +175,18 @@ links and joints with the robot drawn as this page draws it (boxes only; tested 
 file; it changes when a calibration is activated, not with the options. `/description` and `/transform` agree
 with the model at zero joint positions (tested for every frame both have).
 
+### Robot profiles, arms and mirrored components
+
+`--robot NAME` (`src/robot_utils/robots/<name>.yaml`; default `$ROBOT_UTILS_ROBOT`, else `rebot`) chooses the
+description the node starts from (the data dir's overrides still apply on top): `rebot` is
+`default_description.yaml`; `rebot_bimanual` extends it with the arm replaced by `arm_right` and its mirror image
+`arm_left`. The description's `arms:` map names the robot's arms (absent: the one arm `arm`); `GET /model` lists
+them (`arms`: name, prefix, joints, ee_link, base_link, gripper, mirror, frame, tcp), so the sim and the WBC learn
+the arms from the model. A URDF component with `mirror: true` is its URDF's mirror image across the URDF's x-z
+plane (`robots/mirror.py`: frames conjugated, the same joint values give the mirrored pose, limits unchanged; the
+`boxes` variant mirrors its boxes). URDF visual / collision names are prefixed like links, so one URDF can be used
+twice. `/description` says which profile (`profile`). docs/plans/bimanual_and_robot_swap.md.
+
 ## API replies
 
 Every JSON reply has a typed, described schema in `/docs` (`/openapi.json`). The ones that are not obvious:

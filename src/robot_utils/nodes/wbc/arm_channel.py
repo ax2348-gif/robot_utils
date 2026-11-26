@@ -94,6 +94,7 @@ class ArmChannel:
         self.stale_ms: Optional[float] = None
         self.rate_hz: Optional[float] = None
         self.limits: dict = {}
+        self.n: Optional[int] = None                  # the arm's joints (its state packets': 6 for a reBot, 7 ...)
         self.seq = 0
         self.closed_reason: Optional[str] = None     # the node's bye (or refusal) ended the session
         self.counts = {"sent": 0, "keepalives": 0, "send_errors": 0, "states": 0, "bad": 0, "other_session": 0}
@@ -170,7 +171,8 @@ class ArmChannel:
         mode = F.MODE_KEEPALIVE if keepalive else F.MODE_GOAL
         try:
             if keepalive:
-                pkt = F.pack_command(self.session, self.seq, mode=mode)
+                n = self.n or F.NJ                       # the arm's joints (its state packets'): a keep-alive
+                pkt = F.pack_command(self.session, self.seq, (math.nan,) * n, (0.0,) * n, mode=mode)
             else:
                 pkt = F.pack_command(self.session, self.seq, np.asarray(q, float).tolist(),
                                      np.asarray(qd, float).tolist(), float(gap), mode, t_basis=float(t_basis))
@@ -210,5 +212,6 @@ class ArmChannel:
                 self.counts["other_session"] += 1
                 continue
             self.counts["states"] += 1
+            self.n = len(st.q)
             latest = st
         return None if latest is None else ArmState.of(latest, now)

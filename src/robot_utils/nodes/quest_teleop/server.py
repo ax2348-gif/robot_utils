@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..common.server import add_base_routes, add_page_routes, node_meta, rows_stream, setup_app, sse
@@ -19,6 +19,8 @@ TAGS = [
     {"name": "control", "description": "Start / stop teleop (the WBC lease), e-stop, the headset (quest up / down)."},
     {"name": "stream", "description": f"Rows every {ROW_PERIOD * 1e3:.0f} ms (binary float64); the operator stream."},
     {"name": "episodes", "description": "The task, the event log (docs/plans/data_collection_v1.md, the contract)."},
+    {"name": "haptics", "description": "Controller vibration cues sent to the headset (docs/quest_teleop_node.md "
+                                       "\"Haptics\")."},
 ]
 
 
@@ -30,6 +32,35 @@ class TopSpeedIn(BaseModel):
     max_speed: Optional[float] = Field(None, description="m/s: the left stick's full deflection, the hint clamp and "
                                                          "(while running) the WBC's max_speed; omitted: unchanged")
     max_omega: Optional[float] = Field(None, description="rad/s: likewise for yaw (the WBC's max_omega)")
+
+
+class ResumeIn(BaseModel):
+    enabled: Optional[bool] = Field(None, description="the tiered recovery on (a transient holds; a re-grip resumes) "
+                                                       "or off (every disarm needs Y); omitted: unchanged")
+    grace_s: Optional[float] = Field(None, description="s: a transient cause present longer than this escalates to a "
+                                                       "disarm (needs Y)")
+    hold_max_s: Optional[float] = Field(None, description="s: a hold not resumed within this escalates")
+    classes: Optional[dict] = Field(None, description="{class: bool}: which transient causes hold (input_stale, "
+                                                      "input_late, input_gap, input_invalid, left_inactive, wbc_stale, "
+                                                      "wbc_disarm, no_command)")
+
+
+class HapticsCueIn(BaseModel):
+    enabled: Optional[bool] = None
+    amplitude: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class HapticsIn(BaseModel):
+    enabled: Optional[bool] = Field(None, description="The master switch (every cue)")
+    cues: dict[str, HapticsCueIn] = Field(default_factory=dict,
+                                          description="Per cue (GET /haptics `config.cues`): on / off, amplitude 0..1")
+    limit_kinds: Optional[list[str]] = Field(None, description="The WBC limits the limit cue buzzes for (default "
+                                                                "reach, manipulability, joint_limit)")
+
+
+class HapticsTestIn(BaseModel):
+    cue: str = Field("armed", description="Any cue, played even when off (a level cue: a 1 s pulse at its amplitude)")
+    hand: str = Field("both", pattern="^(left|right|both)$")
 
 
 class EStopIn(BaseModel):
@@ -120,6 +151,39 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
     async def eventlog_files():
         return await asyncio.to_thread(node.eventlog.files)
 
+    @app.get("/haptics", tags=["haptics"], response_class=JSONResponse,
+             summary="The haptics state (teleop.quest_haptics.v1). `stream=1`: the headset's stream of it, one JSON "
+                     "line per change and a keepalive line every 0.2 s (busy) / 1 s (idle)",
+             responses={200: {"content": {"application/json": {}, "application/x-ndjson": {}}}})
+    async def haptics(stream: bool = Query(False, description="NDJSON lines until the client goes (the headset)")):
+        h = node.haptics
+        if stream:
+            return StreamingResponse(h.stream_lines(), media_type="application/x-ndjson",
+                                     headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        return JSONResponse(h.message(), headers={"Cache-Control": "no-store"})
+
+    @app.get("/haptics/info", tags=["haptics"],
+             summary="The cues' config, the levels, the headset's ack and round trip, the stream readers, counters")
+    async def haptics_info():
+        return node.haptics.info()
+
+    @app.post("/haptics/config", tags=["haptics"], summary="The master switch, cues on / off and their amplitudes, "
+                                                            "the limit kinds")
+    async def haptics_config(body: HapticsIn):
+        try:
+            return node.haptics.configure(body.enabled, {k: v.model_dump(exclude_none=True) for k, v in body.cues.items()},
+                                          body.limit_kinds)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/haptics/test", tags=["haptics"], summary="Play one cue now on a hand or both (even when off)")
+    async def haptics_test(body: HapticsTestIn):
+        from .haptics import CUES, HANDS
+        if body.cue not in CUES:
+            raise HTTPException(422, f"unknown cue {body.cue!r} (cues: {', '.join(CUES)})")
+        made = node.haptics.cue(body.cue, HANDS if body.hand == "both" else (body.hand,), test=True, source="test")
+        return {"pulses": [p["id"] for p in made], "headset": node.haptics.headset}
+
     @app.post("/start", tags=["control"], summary="Start teleop: WBC lease, hints, enable, a datagram session "
                                                    "(409 with the WBC's reason if it refuses)")
     async def start_teleop():
@@ -130,6 +194,15 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
     async def set_mode(mode: str):
         try:
             return node.set_mode(mode)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/mirror/{mode}", tags=["control"],
+              summary="Two hands: the hand-to-arm pairing (`off` | `auto` | `straight` | `mirror`), decided when the "
+                      "first hand engages and locked until both release; 409 while a hand is engaged")
+    async def set_mirror(mode: str):
+        try:
+            return await asyncio.to_thread(node.set_mirror, mode)
         except ValueError as e:
             raise HTTPException(400, str(e))
 
@@ -151,6 +224,31 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
             raise HTTPException(422, "on or off")
         return await asyncio.to_thread(node.aids.set_ghost, state == "on")
 
+    @app.post("/hint_source/{source}", tags=["control"],
+              summary="What moves the base hint while engaged (`head` | `chest` | `hips`; body tracking, smoothed, "
+                      "falling back to the headset); applies from the next grip")
+    async def set_hint_source(source: str):
+        try:
+            return node.set_hint_source(source)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/elbow_hint/{state}", tags=["control"],
+              summary="Send each engaged arm's elbow-swivel input to the WBC (`on` | `off`; body tracking): on "
+                      "applies from each hand's next grip, off at once")
+    async def set_elbow_hint(state: str):
+        if state not in ("on", "off"):
+            raise HTTPException(400, "state must be 'on' or 'off'")
+        return node.set_elbow_hint(state == "on")
+
+    @app.post("/tether/{state}", tags=["control"],
+              summary="Stick tether (`on` | `off`): engaged, the stick offset leads the WBC's commanded base by at "
+                      "most 5 cm / 0.1 rad and the arm keeps the commanded base's heading; from the next grip")
+    async def set_tether(state: str):
+        if state not in ("on", "off"):
+            raise HTTPException(400, "state must be 'on' or 'off'")
+        return node.set_tether(state == "on")
+
     @app.post("/headless/{state}", tags=["control"], summary="Headless left stick (`on` | `off`, third person, "
                                                               "registered): the stick moves along the operator's facing")
     async def set_headless(state: str):
@@ -163,6 +261,14 @@ def create_app(node: QuestTeleopNode, start: bool = True) -> FastAPI:
     async def set_top_speed(body: TopSpeedIn):
         try:
             return await asyncio.to_thread(node.set_top_speed, body.max_speed, body.max_omega)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/resume", tags=["control"], summary="The tiered recovery: transient dropouts hold and a re-grip "
+                                                  "resumes; the grace window and the per-cause classes")
+    async def set_resume(body: ResumeIn):
+        try:
+            return node.set_resume(body.enabled, body.grace_s, body.hold_max_s, body.classes)
         except ValueError as e:
             raise HTTPException(400, str(e))
 

@@ -8,6 +8,7 @@ The description YAML's ``components:`` map names each part of the robot and wher
   inertias. Its ``boxes`` variant draws the reBot arm as the description and arm pages do: each link's
   ``ARM_BOXES`` (arm/geometry.py) as box visuals and collisions in that link's frame (``arm_box_geometry``),
   masses and inertias again the full model's; a URDF that is not the reBot arm gets ``simple``'s capsules.
+  ``mirror: true``: the URDF's mirror image across its x-z plane (robots/mirror.py; a second, mirrored arm).
 - ``source: procedural``: generated from dimensions: ``box``, ``cylinder``, ``capsule``, ``sphere``,
   ``swerve_base`` (frame + four modules, each a steer joint and a wheel joint) and ``camera`` (a box
   body with the Orbbec frame names ``<name>_depth_optical``, ``<name>_color_optical``, ...). Mass is
@@ -342,19 +343,26 @@ ARM_BOX_LINKS = {"base": "base_link", "link1": "link1", "link2": "link2", "link3
 ARM_FINGER_LINKS = {"finger_left_link": 1.0, "finger_right_link": -1.0}
 
 
-def arm_box_geometry() -> dict:
-    """{arm URDF link (unprefixed): [(name, centre xyz m, size xyz m)]}: ARM_BOXES in each link's frame
-    (axis-aligned; the finger boxes on each finger link, mirrored in y on the right one)."""
-    from ..arm.geometry import ARM_BOX_NAMES, ARM_BOXES
+def arm_box_geometry(mirror: bool = False, boxes: Optional[list] = None, names: Optional[list] = None) -> dict:
+    """{arm URDF link (unprefixed): [(name, centre xyz m, size xyz m)]}: the arm's boxes (``boxes`` / ``names``: an
+    arm type's, robots/arm_types.arm_boxes; default the reBot's ARM_BOXES) in each link's frame (axis-aligned; the
+    finger boxes on each finger link, mirrored in y on the right one; frame ``linkN`` on link ``linkN``, ``base`` on
+    base_link, ``end`` on end_link). ``mirror``: for the arm's mirror image (robots/mirror.py: every link frame
+    conjugated, so each box's centre y changes sign)."""
+    from ..arm.geometry import REBOT_BOX_NAMES, REBOT_BOXES
+    if boxes is None:
+        boxes, names = REBOT_BOXES, REBOT_BOX_NAMES
     out: dict = {}
-    for b, nm in zip(ARM_BOXES, ARM_BOX_NAMES):
+    for b, nm in zip(boxes, names):
         slug = nm.replace(" ", "_")
         c, s = [v / 1000 for v in b[1:4]], [v / 1000 for v in b[4:7]]
         if b[0] == "finger":
             for link, sy in ARM_FINGER_LINKS.items():
                 out.setdefault(link, []).append((slug, [c[0], sy * c[1], c[2]], s))
         else:
-            out.setdefault(ARM_BOX_LINKS[b[0]], []).append((slug, c, s))
+            out.setdefault(ARM_BOX_LINKS.get(b[0], b[0]), []).append((slug, c, s))
+    if mirror:
+        out = {k: [(n, [c[0], -c[1], c[2]], s) for n, c, s in v] for k, v in out.items()}
     return out
 
 
@@ -371,6 +379,7 @@ class Assembly:
     mesh_uris: dict              # (component, relative path) -> the URI written in the URDF
     options: Options
     desc_frames: dict            # description frame name -> model link (the frames both have)
+    arms: list = field(default_factory=list)   # the robot's arms (robots.ArmSpec.public(): names in the model)
 
     def T_root(self, link: str) -> np.ndarray:
         T = np.eye(4)
@@ -507,6 +516,11 @@ class ModelBuilder:
         if opts.base == "planar":
             self._planar(robot, a)
         a.desc_frames = {d: l for d, l in desc_map.items() if l in a.links}
+        from ...robots import ProfileError, arms_of
+        try:
+            a.arms = [s.public() for s in arms_of(self.desc)]
+        except ProfileError as e:
+            raise ModelError(str(e)) from None
         ET.indent(robot, space="  ")
         a.urdf = '<?xml version="1.0"?>\n' + ET.tostring(robot, encoding="unicode") + "\n"
         return a
@@ -575,12 +589,21 @@ class ModelBuilder:
         path = resolve_file(c["file"])
         prefix = c.get("prefix", f"{name}_")
         tree = ET.fromstring(path.read_text(encoding="utf-8-sig"))
+        mirror = bool(c.get("mirror", False))
+        if mirror:                              # the URDF's mirror image across its x-z plane (robots/mirror.py)
+            from ...robots.mirror import mirror_urdf
+            tree = mirror_urdf(tree)
         mesh_root = Path(c["mesh_root"]).resolve() if c.get("mesh_root") else path.parent.parent
         joints = {j.find("child").get("link"): j for j in tree.findall("joint")}
         boxes = None
-        if variant == "boxes" and (set(ARM_BOX_LINKS.values()) | set(ARM_FINGER_LINKS)) <= {
+        arm_type = self._arm_type(name)
+        if variant == "boxes" and arm_type not in (None, "rebot"):
+            # another arm type (robots/arm_types.py): its own boxes (its links' collision meshes + the reBot gripper)
+            from ...robots.arm_types import arm_boxes, load as load_type
+            boxes = arm_box_geometry(mirror, *arm_boxes(str(path), load_type(arm_type).gripper))
+        elif variant == "boxes" and (set(ARM_BOX_LINKS.values()) | set(ARM_FINGER_LINKS)) <= {
                 lk.get("name") for lk in tree.findall("link")}:
-            boxes = arm_box_geometry()          # the reBot arm; any other URDF: simple's capsules
+            boxes = arm_box_geometry(mirror)    # the reBot arm; any other URDF: simple's capsules
         root = None
         for el in tree:
             if el.tag == "material":
@@ -590,6 +613,9 @@ class ModelBuilder:
                 lk = copy.deepcopy(el)
                 lname = el.get("name")
                 lk.set("name", prefix + lname)
+                for g in (*lk.findall("visual"), *lk.findall("collision")):
+                    if g.get("name"):                   # unique when the same URDF is used twice (two arms)
+                        g.set("name", prefix + g.get("name"))
                 for mesh in lk.iter("mesh"):
                     mesh.set("filename", self._mesh_uri(name, mesh.get("filename"), path, mesh_root, opts))
                 if boxes is not None:
@@ -622,6 +648,14 @@ class ModelBuilder:
         if root is None:
             raise ModelError(f"{c['file']}: no root link")
         return root
+
+    def _arm_type(self, component: str) -> Optional[str]:
+        """The arm type of the description arm built from ``component`` (None: not an arm's)."""
+        from ...robots import ProfileError, arms_of
+        try:
+            return next((a.type for a in arms_of(self.desc) if a.component == component), None)
+        except (ProfileError, KeyError, TypeError, ValueError):
+            return None
 
     def _mesh_path(self, ref: str, urdf: Path, mesh_root: Path) -> Path:
         if ref.startswith("package://"):
@@ -877,7 +911,7 @@ def model_public(a: Assembly, version: str) -> dict:
               for j in a.joints if j["type"] != "fixed"]
     return {"model_version": version, "root": a.root, "base_link": base, "options": a.options.public(),
             "mass": round(a.mass(), 6), "components": a.components, "frames": frames, "frames_in_base": in_base,
-            "joints": joints, "description_frames": a.desc_frames,
+            "joints": joints, "description_frames": a.desc_frames, "arms": a.arms,
             "units": {"length": "m", "angle": "rad", "mass": "kg", "inertia": "kg m^2"},
             "conventions": {"base_link": "the description's base frame: floor level, centre of the wheels; x forward, "
                                          "y left, z up",

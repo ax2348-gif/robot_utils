@@ -175,9 +175,15 @@ def test_matches_the_native_body_frozen_delta():
 # -- the consumer rules and the engagement state machine ------------------------------------------
 
 class Rig:
-    """A headset, the gate and the core, on a hand-advanced clock (frames every 10 ms)."""
+    """A headset, the gate and the core, on a hand-advanced clock (frames every 10 ms).
 
-    def __init__(self, cfg=Config(), rob=None):
+    The robot here is a fixed stream row that never follows the hint, so the stick tests in this file are about the
+    untethered (``tether`` off) stick offset: the raw stick integral. The tether (the offset held to the WBC's
+    commanded base) needs a base that moves: test_quest_stick_tether.py. ``tether=True`` keeps the config's."""
+
+    def __init__(self, cfg=Config(), rob=None, tether=False):
+        if not tether:
+            cfg.tether = False
         self.hs = Headset()
         self.gate = consumer_gate()
         self.core = TeleopCore(cfg)

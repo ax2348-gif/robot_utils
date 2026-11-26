@@ -47,10 +47,12 @@ from quest_ctl import QuestCtl, SshRunner  # noqa: E402
 
 # -- pins: what a collaborator gets (bump together with the tags) ----------------------------------------------
 RUNTIME_PACKAGE = "dev.quest.runtime"
-RUNTIME_VERSION = "1.6.0"
-RUNTIME_URL = "https://raw.githubusercontent.com/ax2348-gif/quest_dev/collab-v2/artifacts/quest-dev-runtime.apk"
-RUNTIME_SHA256 = "edc738e0154f2df6c3ae23c7e26ab5f0f46aa3e5518cf92aba807981ce3e4e9d"
-QUEST_ENV_REF = "collab-v3"
+# 1.7.0: com.oculus.permission.BODY_TRACKING for native apps (quest_env BODY_TRACKING.md); same release key as 1.6.0
+RUNTIME_VERSION = "1.7.0"
+RUNTIME_URL = "https://raw.githubusercontent.com/ax2348-gif/quest_dev/collab-v4/artifacts/quest-dev-runtime.apk"
+RUNTIME_SHA256 = "cfa4237f4ad3b3aee28c9db8f68c0965b6f484683b9d35ad62b9f7be9d3f5a9b"
+BODY_TRACKING = "com.oculus.permission.BODY_TRACKING"     # 1.7.0 declares it; granted with the install (reported only)
+QUEST_ENV_REF = "collab-v4"
 QUEST_ENV_GIT = "https://github.com/ax2348-gif/quest_env.git"
 QUEST_ENV_URL = f"https://codeload.github.com/ax2348-gif/quest_env/tar.gz/refs/tags/{QUEST_ENV_REF}"
 TAILSCALE_PACKAGE = "com.tailscale.ipn"
@@ -525,7 +527,8 @@ class Wizard:
         self.step("4. Quest developer runtime (SSH server, native XR host)")
         have = self.runtime_version()
         if have and version_tuple(have) >= version_tuple(RUNTIME_VERSION) and not self.a.reinstall_runtime:
-            return self.record("runtime installed", True, f"version {have}")
+            self.record("runtime installed", True, f"version {have}")
+            return self.report_body_tracking()
         if self.check_only:
             return self.record("runtime installed", False, f"version {have}" if have else "not installed")
         apk = Path(self.a.apk).expanduser() if self.a.apk else self.download(
@@ -533,7 +536,25 @@ class Wizard:
         self.say(f"   installing the runtime {RUNTIME_VERSION}" + (f" (replacing {have})" if have else ""))
         if not self.install_apk(apk, RUNTIME_PACKAGE, "runtime"):
             return self.record("runtime installed", True, f"kept version {have}, another build")
-        return self.record("runtime installed", True, f"version {self.runtime_version()}")
+        self.record("runtime installed", True, f"version {self.runtime_version()}")
+        return self.report_body_tracking()
+
+    def body_tracking_granted(self) -> Optional[bool]:
+        rc, out = self.adb_cmd("shell", "dumpsys", "package", RUNTIME_PACKAGE, timeout=30)
+        m = re.search(re.escape(BODY_TRACKING) + r": granted=(true|false)", out) if rc == 0 else None
+        return None if m is None else m.group(1) == "true"
+
+    def report_body_tracking(self) -> bool:
+        """Body tracking for native apps (quest_env ``q run --body``, the teleop node's --body / --elbow-hint): runtime
+        1.7.0 declares the permission and the headset grants it with the install. Reported, never granted here (``pm
+        grant`` is refused for it) and never a failure: without it the teleop runs without the body."""
+        have = self.runtime_version()
+        if not have or version_tuple(have) < (1, 7, 0):
+            return True
+        granted = self.body_tracking_granted()
+        return self.record("body tracking permission", True, "granted" if granted else
+                           "not granted (optional: open the runtime from Library -> Unknown sources and tap "
+                           "Allow body tracking)" if granted is False else "unknown")
 
     # 5. key, ssh config, provisioning
     def runtime_status(self) -> str:

@@ -53,6 +53,10 @@ The robot never collides with itself; it collides with the floor and objects.
 (`deploy/sim/sim_dynamic_arm.yaml`; `ROBOT_SIM_CONFIG=deploy/sim/sim_dynamic_arm.yaml python -m
 robot_utils.nodes.sim.stack`); anything else is refused. `hello` on `arm.sock` reports it.
 
+URDF mimic joints become MuJoCo joint equalities (`contact.fingers.mimic_solref` stiffens them all): the right
+finger. The OpenArm's arm links (`robots/openarm/README.md`) collide as Enactic's collision meshes (one hull each),
+its flange adapter and gripper as boxes (the gripper type's).
+
 ### Dynamic arm
 
 What becomes physical: the commanded-vs-measured deflection (`q_cmd − q`: effort / kp), contact forces at handles
@@ -150,7 +154,10 @@ rings turning in opposite directions about a vertical axis, red and blue objects
   arm's best top-down band.
 - **placement**: the outer edge **4 cm ahead of the base's front** (x 0.256 m) at the start pose, the centre on the
   arm mount's line (y −0.146 m, the mount plate is flush with the right face), so the arm reaches radially over the
-  outer ring onto the inner one. Along that line the outer ring spans x 0.256–0.456 and the inner ring x 0.466–0.766.
+  outer ring onto the inner one. The mount comes from the robot profile (`World.ring_mount_y`: its right arm's
+  `base_link` in the model's `frames_in_base`; one arm: its own): the reBot's −0.146 m, the OpenArm bimanual's
+  −0.03 m (`deploy/sim/sim_openarm_dynamic.yaml` has its reach numbers). The surface height is `scene.work_top`
+  (default null: the reBot's mount + 0.08 = 0.302 m; the table top too); the human-scale OpenArm profile sets 0.70 m. Along that line the outer ring spans x 0.256–0.456 and the inner ring x 0.466–0.766.
 - **reach** (IK on the model's joint ranges, fingertip 5 mm above the surface at the mount's y, no arm geom touching
   the ring surface): straight down to **x 0.60 m** (the first **13 cm** of the inner ring), tilted 15° outward to
   **x 0.68 m** (21 cm). The same at other surface heights: 0.26 m → 0.62 / 0.68, 0.34 m → 0.58 / 0.66, 0.38 m →
@@ -265,6 +272,8 @@ module, as the scenes to come; `scene.cart_door_setup`: `closer`, `cart_mass`).
   behind the bar for the fingers), its axis 7 cm in from the free edge (0.83 m from the hinge axis). It is lowered
   into the arm's band: a forward grasp reaches x 0.8 m from the base's centre at z ≤ 0.55, 0.78 at 0.65, 0.73 at
   0.70 (IK on the model; a person's handle at ~1.0 m is above the arm). 25 mm in the 49.6 mm `GAP_MAX`.
+- **A second pull bar** at a person's standard handle height, centred **1.05 m** up (z 0.85–1.25), the same tube,
+  posts and axis: for the human-scale OpenArm (shoulders 1.07 m) and for comparing a handle placed for people.
 - **The closer** (on by default, `closer` = its moment holding the door shut, **3.0 N m**; 0 = none, the door stays
   where it is left): a spring (`stiffness` 2.0 N m/rad, `springref` −1.5 rad, i.e. relaxed 1.5 rad past shut, so a
   near-constant moment) — **3.0 N m shut, 4.1 at 30°, 5.1 at 60°, 6.1 at 90°, 6.8 at 110°** — and a closing-speed
@@ -469,6 +478,25 @@ first, then the landing page (tested: no socket left behind). If the description
 launcher prints its last log lines and stops. The landing page's proxy streams fine, but browsers allow 6
 connections per origin (the sim page uses 2: `events`, `viz/stream`).
 
+### Another robot (`--robot`)
+
+```bash
+python -m robot_utils.nodes.sim.stack --robot rebot_bimanual --port 8095 --runtime-dir /tmp/bm   # two arms
+# next to another stack, with the fake headset (tools/quest_teleop/fake_headset.py --port 9396 --scenario two_hands)
+python -m robot_utils.nodes.sim.stack --robot rebot_bimanual --port 8095 --runtime-dir /tmp/bm --wbc-udp-port 9495 \
+    --quest 127.0.0.1:9396 --nodes description,sim,arm,swerve,estimator,wbc,quest_teleop
+```
+
+`--robot NAME` (robot profiles, `src/robot_utils/robots/`; default `$ROBOT_UTILS_ROBOT`, else `rebot`) runs that
+robot: the stack writes a registry for it (`<runtime dir>/robot/stack_nodes.<robot>.yaml`): the nodes that read the
+profile (description, sim, wbc, quest_teleop, agent_interface) get `--robot`, the `arm` instance becomes one arm node
+per arm of the robot (`arm_left`, `arm_right`; `arm` in `--nodes` means all of them), and the instances the robot
+cannot run (its profile's `stack.without`; none for the bimanual robot) are left out. `--wbc-udp-port` moves the WBC's
+datagrams off 9410, `--quest` points quest_teleop at another headset stream, and its AR view follows `--port`. The world simulates every arm of the model (the description's `arms`, in
+model.json): one `Arm` each, one backend socket each (`<arm>.sock`; the one-arm robot keeps `arm.sock`),
+`/state` `arms` (and `arm`: the primary one), robot_state.v1 overlay `arms`. Per-arm sim config:
+`components.arms.<name>` over `components.arm`. docs/plans/bimanual_and_robot_swap.md.
+
 ## The robot's calibrations in the sim
 
 The sim's camera mounts come from the description node it loads the model from, with `mounts=calibrated`. In the
@@ -606,6 +634,19 @@ nginx (robot, Docker) the body after the headers is plain lines. Uvicorn (the no
 page proxy) always uses chunked encoding: each record is its own chunk, so read lines and skip those not starting
 with `{` (the chunk sizes), as `tests/test_sim_stack.py` does.
 
+
+### Timing on macOS (`timing`)
+
+`timing.lenient` (auto: on macOS) lengthens the world's watchdogs: each arm's motor watchdog (per arm:
+`components.arms.<name>.watchdog` over `components.arm`'s) and the SPARKs' heartbeat. Ordering rule: the lenient arm
+watchdog is at least the arm node's lenient control-process stall limit (`ctl_heartbeat` 2 s, arm/config.py
+LENIENT_TIMING) + 0.5 s, i.e. 2.5 s, whatever the config says (world.resolve_timing): otherwise a stall the node
+forgives drops the motors here and the node then faults on a motor reporting disabled while on. The WBC follows the
+same rule (`--timing`, auto = lenient on macOS: `arm_stale` 2.5 s, `ctl_heartbeat` 2 s; the robot, a Pi, keeps its
+0.2 s): measured 2026-11-24, a 678 ms arm-node tick on a loaded Mac with two dynamic arms faulted the strict WBC.
+
+YAML layers (default_sim.yaml, the robot profile's `sim:`, `--config`, overrides) merge with nodes/common/merge.py: a
+dict merges, anything else replaces, a `null` deletes the key (the same rule as the description's layers).
 
 ## Config (`default_sim.yaml`)
 

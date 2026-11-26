@@ -20,18 +20,26 @@ FIELDS = ["t_tick", "seq", "state", "base_mode", "solve_ms", "status", "base_x",
           "base_vx", "base_vy", "base_w"] + [f"arm_{c}" for c in EE_COLS] + ["arm_age", "est_age", "target_age"]
 
 
+def fields(ees=("arm",)) -> list:
+    """The contract's columns for these end effectors (two arms: arm_left, arm_right)."""
+    return FIELDS[:13] + [f"{e}_{c}" for e in ees for c in EE_COLS] + ["arm_age", "est_age", "target_age"]
+
+
 class FakeWbc:
-    def __init__(self, unix_path: str | None = None):
-        """``unix_path``: also receive datagrams on a unix datagram socket there (named in ``POST /session``)."""
+    def __init__(self, unix_path: str | None = None, ees=("arm",)):
+        """``unix_path``: also receive datagrams on a unix datagram socket there (named in ``POST /session``);
+        ``ees``: the end effectors of the rows (each EE's cmd / meas columns start as the one arm's)."""
+        self.fields = fields(ees)
         self.calls: list[tuple[str, dict | None]] = []
         self.datagrams: list[tuple[float, dict]] = []
         self.token = "tok-1"
         self.session = 4242
-        self.row = {f: 0.0 for f in FIELDS}
-        self.row.update(base_x=1.0, base_y=2.0, base_yaw=0.3, arm_meas_x=1.5, arm_meas_y=2.1, arm_meas_z=0.8,
-                        arm_meas_qz=math.sin(0.2), arm_meas_qw=math.cos(0.2),
-                        arm_cmd_x=1.52, arm_cmd_y=2.1, arm_cmd_z=0.8, arm_cmd_qz=math.sin(0.2),
-                        arm_cmd_qw=math.cos(0.2))
+        self.row = {f: 0.0 for f in self.fields}
+        self.row.update(base_x=1.0, base_y=2.0, base_yaw=0.3)
+        for e in ees:
+            self.row.update({f"{e}_meas_x": 1.5, f"{e}_meas_y": 2.1, f"{e}_meas_z": 0.8, f"{e}_meas_qz": math.sin(0.2),
+                             f"{e}_meas_qw": math.cos(0.2), f"{e}_cmd_x": 1.52, f"{e}_cmd_y": 2.1, f"{e}_cmd_z": 0.8,
+                             f"{e}_cmd_qz": math.sin(0.2), f"{e}_cmd_qw": math.cos(0.2)})
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind(("127.0.0.1", 0))
         self.udp.settimeout(0.2)
@@ -157,10 +165,10 @@ class FakeWbc:
         @app.get("/stream")
         async def stream():
             async def gen():
-                yield schema_record(1, FIELDS, [""] * len(FIELDS), node="wbc")
+                yield schema_record(1, fake.fields, [""] * len(fake.fields), node="wbc")
                 while not fake._stop.is_set():
                     row = dict(fake.row, t_tick=time.monotonic())
-                    yield rows_record([[row[f] for f in FIELDS]], 1)
+                    yield rows_record([[row[f] for f in fake.fields]], 1)
                     await asyncio.sleep(0.01)
                 yield pack_record({"type": "ping"})
             return StreamingResponse(gen(), media_type="application/octet-stream")

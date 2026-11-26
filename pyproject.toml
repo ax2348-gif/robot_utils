@@ -49,6 +49,9 @@ where = ["src"]
 "robot_utils.frontend" = ["nodes.yaml", "page.html", "tools/*.html", "themes/*.css"]
 "robot_utils.nodes.description" = ["default_description.yaml"]
 "robot_utils.nodes.sim" = ["default_sim.yaml", "stack_nodes.yaml"]
+"robot_utils.robots" = ["*.yaml"]
+"robot_utils.robots.openarm" = ["*.yaml", "README.md", "LICENSE", "urdf/*.urdf", "meshes/collision/*.stl", "gripper/*.urdf",
+                               "gripper/meshes/*"]
 "robot_utils.nodes.agent_interface" = ["guide.md"]
 "robot_utils.nodes.common" = ["fonts/*"]
 

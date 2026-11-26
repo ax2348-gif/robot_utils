@@ -21,6 +21,16 @@ world as the native view does (robot_utils ``replay.ar.Placement``, a port of qu
 each change of the sim's ``reset_seq``, polled from ``URL/nodes/sim/scene3d/frame``) with a floor 1.6 m below the
 first head, and every frame carries the ``robot_ar`` block a real headset logs (placement and eyes; quest_env
 ROBOT_AR.md "Logged placement"). The eyes are a nominal Quest 3 pair (``replay.ar.default_views``).
+
+``--body core|all`` adds the ``body`` block a headset sends with ``quest run --body`` (quest_env BODY_TRACKING.md):
+a plausible upper body (``body.plausible_skeleton``: the headset worn on the neck, shoulders from the torso, elbows
+from two-link IK to the controllers), the default joint set, fully tracked, inactive while the head is untracked.
+``HeadsetState.elbow_swivel`` turns each elbow about its shoulder → wrist axis (the ``elbow`` scenario).
+
+Haptics (quest_env HAPTICS.md): ``--haptics URL`` (the node's ``GET /haptics?stream=1``, e.g.
+``http://127.0.0.1:8080/nodes/quest_teleop/haptics?stream=1``) reads the node's ``teleop.quest_haptics.v1`` lines
+like the headset (``HapticsStream``) and plays them with ``HapticsPlayer``, a port of the headset's player, ticked
+once per frame; every frame then carries the ``haptics`` block (the ack). Without it: an older build, no block.
 """
 from __future__ import annotations
 
@@ -39,8 +49,10 @@ import numpy as np
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from quest_teleop import body as B     # noqa: E402
     from quest_teleop import frames as F   # noqa: E402
 else:
+    from . import body as B
     from . import frames as F
 
 # -- native intent, ported ------------------------------------------------------------------------
@@ -206,6 +218,14 @@ class HeadsetState:
     focused: bool = True
     session: int = 1
     align: bool = False                  # the A button
+    # the body block (Headset(body=...)): the upper body's and the pelvis's yaw (None: the head's), the pelvis
+    # shifted in the plane (FLU), the confidence and whether the body is tracked at all
+    chest_yaw: Optional[float] = None
+    hips_yaw: Optional[float] = None
+    hips_shift: tuple = (0.0, 0.0)
+    body_confidence: float = 0.9
+    body_active: bool = True
+    elbow_swivel: tuple = (0.0, 0.0)     # (left, right) rad: each elbow turned about its shoulder → wrist axis
 
 
 def _rpy(r, p, y):
@@ -222,12 +242,27 @@ def head_r_op(yaw: float, pitch: float = 0.0):
     return F.rot_z(yaw) @ F.rot_axis((0, 1, 0), pitch) @ F.C
 
 
+def _body_joints(s: HeadsetState, neck_worn: bool = True) -> dict:
+    """The plausible skeleton for a state, in LOCAL: id -> (p, R, flags)."""
+    hands = {k: (np.asarray(h.pos, float) if h.tracked else None) for k, h in (("left", s.left), ("right", s.right))}
+    out = {}
+    for i, (p, r) in B.plausible_skeleton(s.head_pos, s.head_yaw, hands, neck_worn=neck_worn,
+                                          chest_yaw=s.chest_yaw, hips_yaw=s.hips_yaw,
+                                          hips_shift=s.hips_shift,
+                                          swivel={"left": s.elbow_swivel[0], "right": s.elbow_swivel[1]}).items():
+        pl, rl = to_local(p, r)
+        out[i] = (pl, rl, B.VALID | B.TRACKED)
+    return out
+
+
 class Headset:
     """Builds native-shaped frames from a HeadsetState."""
 
     def __init__(self, body_frozen: bool = True, session_base: int = 1_700_000_000_000_000_000,
-                 ar: Optional["ArView"] = None):
+                 ar: Optional["ArView"] = None, body: Optional[str] = None, neck_worn: bool = True):
         self.ar = ar
+        self.neck_worn = neck_worn                                   # the body's headset: on the neck or the head
+        self.body = body if body in ("core", "all") else None      # the body block's joint subset; None: no block
         self.intent = NativeIntent(body_frozen)
         self.session_base = session_base
         self.seq = 0
@@ -259,6 +294,8 @@ class Headset:
         }
         if self.ar is not None:
             frame["robot_ar"] = self.ar.block(sid, head, s.align and s.focused)
+        if self.body is not None:
+            frame["body"] = self.body_block(s, int(t * 1e9))
         for name, hs, hi in (("left", s.left, hands_in[0]), ("right", s.right, hands_in[1])):
             frame["hands"][name] = {
                 "pose_source": "tracked_remote", "active": hs.tracked, "position_valid": hs.tracked,
@@ -269,6 +306,13 @@ class Headset:
                             "thumb_rest": False, "stick": hs.click}}
         self.seq += 1
         return frame
+
+    def body_block(self, s: HeadsetState, time_ns: int) -> dict:
+        """The body tracking block for a state (inactive while the head is untracked)."""
+        if not s.head_tracked or not s.body_active:
+            return B.encode({}, active=False, confidence=0.0, time_ns=time_ns, subset=self.body)
+        return B.encode(_body_joints(s, self.neck_worn), confidence=s.body_confidence, time_ns=time_ns,
+                        subset=self.body)
 
 
 class ArView:
@@ -320,6 +364,8 @@ class SimResetSeq:
 
 
 def _lerp(a, b, u):
+    if a is None or b is None:                       # optional fields (the body's yaws): step
+        return a if u < 1 else b
     if isinstance(a, bool) or isinstance(a, int) and isinstance(b, int):
         return a if u < 1 else b
     if isinstance(a, tuple):
@@ -451,24 +497,304 @@ def record_scenario() -> list:
             (16.31, release2), (18.0, release2)]
 
 
+def two_hands_scenario(lead: float = 10.0) -> list:
+    """Two hands, two arms (a bimanual robot, ``--hands``): idle for ``lead`` s (time to start the teleop), Y arms,
+    the right grip engages and reaches 10 cm forward, the left engages too and lifts 10 cm while squeezing its
+    trigger, the right releases, then the left; idle until 40 s after the lead."""
+    idle = HeadsetState()
+    y = replace(idle, left=replace(idle.left, secondary=True))
+    r = replace(idle, right=replace(idle.right, grip=1.0))
+    r_move = replace(r, right=replace(r.right, pos=(0.45, -0.2, -0.35)))
+    rl = replace(r_move, left=replace(r_move.left, grip=1.0))
+    rl_move = replace(rl, left=replace(rl.left, pos=(0.35, 0.2, -0.25), trigger=0.6))
+    l_only = replace(rl_move, right=replace(rl_move.right, grip=0.0))
+    none = replace(l_only, left=replace(l_only.left, grip=0.0))
+    t = lead
+    return [(0.0, idle), (t, idle), (t + 0.01, y), (t + 0.2, y), (t + 0.21, idle), (t + 1.0, idle), (t + 1.01, r),
+            (t + 1.5, r), (t + 3.0, r_move), (t + 4.0, r_move), (t + 4.01, rl), (t + 4.5, rl), (t + 6.0, rl_move),
+            (t + 8.0, rl_move), (t + 8.01, l_only), (t + 9.0, l_only), (t + 9.01, none), (t + 40.0, none)]
+
+
+def hands_close_scenario(lead: float = 10.0) -> list:
+    """Two hands brought close (a bimanual robot: the arm-proximity term, the elbows' swivel): idle for ``lead`` s,
+    Y arms, both grips engage; the hands meet in front (each 16 cm in, 5 cm forward: a handover), hold; the left
+    reaches across under the right arm (8 cm back, 26 cm in, 10 cm up) while the right reaches forward and in, hold;
+    both return, hold, release; idle until 40 s after the lead."""
+    idle = HeadsetState()
+    y = replace(idle, left=replace(idle.left, secondary=True))
+    lp, rp = idle.left.pos, idle.right.pos
+
+    def at(dl, dr, grip=1.0):
+        return replace(idle, left=replace(idle.left, grip=grip, pos=tuple(a + b for a, b in zip(lp, dl))),
+                       right=replace(idle.right, grip=grip, pos=tuple(a + b for a, b in zip(rp, dr))))
+    both = at((0, 0, 0), (0, 0, 0))
+    meet = at((0.05, -0.16, 0.0), (0.05, 0.16, 0.0))
+    across = at((-0.08, -0.26, 0.10), (0.10, 0.16, 0.08))
+    none = at((0, 0, 0), (0, 0, 0), grip=0.0)
+    t = lead
+    return [(0.0, idle), (t, idle), (t + 0.01, y), (t + 0.2, y), (t + 0.21, idle), (t + 1.0, idle), (t + 1.01, both),
+            (t + 2.0, both), (t + 5.0, meet), (t + 8.0, meet), (t + 11.0, across), (t + 14.0, across),
+            (t + 17.0, both), (t + 19.0, both), (t + 19.01, none), (t + 40.0, none)]
+
+
+
+def turned(s: HeadsetState, yaw: float) -> HeadsetState:
+    """The whole operator turned by ``yaw`` about the LOCAL origin's vertical: the head and both hands (positions
+    and orientations) rotate together."""
+    rz = F.rot_z(yaw)
+
+    def hand(h: HandState) -> HandState:
+        return replace(h, pos=tuple(float(x) for x in rz @ np.asarray(h.pos, float)),
+                       rpy=(h.rpy[0], h.rpy[1], h.rpy[2] + yaw))
+    return replace(s, head_pos=tuple(float(x) for x in rz @ np.asarray(s.head_pos, float)),
+                   head_yaw=s.head_yaw + yaw, left=hand(s.left), right=hand(s.right))
+
+
+def mirror_scenario(lead: float = 10.0) -> list:
+    """Mirror pairing (two hands, ``--mirror auto``): idle for ``lead`` s, Y arms (registers: the operator faces
+    where the robot faces), the operator turns round to face the robot, the right grip engages (mirrored: it drives
+    the robot's left arm) and reaches 10 cm forward with the trigger squeezed, the operator turns back halfway while
+    still engaged (the pairing holds), releases, turns back fully and the right grip engages again (straight: the
+    right arm) and reaches; idle until 40 s after the lead."""
+    idle = HeadsetState()
+    y = replace(idle, left=replace(idle.left, secondary=True))
+    back = turned(idle, math.pi)
+    g = replace(back, right=replace(back.right, grip=1.0))
+    reach = replace(g, right=replace(g.right, pos=tuple(np.add(g.right.pos, (-0.1, 0.0, 0.0))), trigger=0.7))
+    half = turned(replace(reach, head_yaw=0.0, head_pos=(0.0, 0.0, 0.0), left=idle.left,
+                          right=replace(idle.right, grip=1.0, trigger=0.7, pos=(0.45, -0.2, -0.35))), math.pi / 2)
+    released = replace(half, right=replace(half.right, grip=0.0, trigger=0.0))
+    front = idle
+    g2 = replace(front, right=replace(front.right, grip=1.0))
+    reach2 = replace(g2, right=replace(g2.right, pos=(0.45, -0.2, -0.35)))
+    t = lead
+    return [(0.0, idle), (t, idle), (t + 0.01, y), (t + 0.2, y), (t + 0.21, idle), (t + 0.5, idle), (t + 1.5, back),
+            (t + 1.8, back), (t + 1.81, g), (t + 2.0, g), (t + 2.8, reach), (t + 3.0, reach), (t + 3.8, half),
+            (t + 4.0, half), (t + 4.01, released), (t + 4.3, released), (t + 5.0, front), (t + 5.2, front),
+            (t + 5.21, g2), (t + 5.4, g2), (t + 6.2, reach2), (t + 40.0, reach2)]
+
+
+def elbow_scenario(lead: float = 10.0) -> list:
+    """The elbow-swivel hint (``--body``, the node's ``--elbow-hint``): idle for ``lead`` s, Y arms, the right grip
+    engages, the right elbow swivels +0.6 rad about the shoulder → wrist axis (hand still), back to +0.2, releases;
+    engages again (a new seq: the change restarts at zero) and swivels -0.4 rad; idle until 40 s after the lead."""
+    idle = HeadsetState()
+    y = replace(idle, left=replace(idle.left, secondary=True))
+    g = replace(idle, right=replace(idle.right, grip=1.0))
+    out = replace(g, elbow_swivel=(0.0, 0.6))
+    back = replace(g, elbow_swivel=(0.0, 0.2))
+    rel = replace(back, right=replace(back.right, grip=0.0))
+    g2 = replace(back, right=replace(back.right, grip=1.0))
+    in2 = replace(g2, elbow_swivel=(0.0, -0.2))
+    t = lead
+    return [(0.0, idle), (t, idle), (t + 0.01, y), (t + 0.2, y), (t + 0.21, idle), (t + 1.0, idle), (t + 1.01, g),
+            (t + 1.5, g), (t + 2.5, out), (t + 3.0, out), (t + 3.5, back), (t + 4.0, back), (t + 4.01, rel),
+            (t + 4.5, rel), (t + 4.51, g2), (t + 5.0, g2), (t + 6.0, in2), (t + 40.0, in2)]
+
+
+
 SCENARIOS: dict[str, Callable[[], list]] = {"demo": demo_scenario, "record": record_scenario,
-                                            "idle": lambda: [(0.0, HeadsetState())], "episodes": episodes_scenario}
+                                            "idle": lambda: [(0.0, HeadsetState())], "episodes": episodes_scenario,
+                                            "two_hands": two_hands_scenario, "hands_close": hands_close_scenario,
+                                            "mirror": mirror_scenario, "elbow": elbow_scenario}
+
+
+# -- haptics: the headset's player, ported -----------------------------------------------------------------------
+
+HAPTICS_SCHEMA = "teleop.quest_haptics.v1"
+
+
+class HapticsPlayer:
+    """A port of quest_env native/haptics.h (``haptics::Player``): the node's ``teleop.quest_haptics.v1`` lines in,
+    vibration commands out, one ``tick`` per XR frame. Pulses play once (by id, per epoch), ``delay_s`` after they
+    are first seen; a pulse older than ``MAX_AGE_S`` on arrival is skipped; a newer group on a hand replaces its
+    pulses still waiting. A level plays (re-applied in ``LEVEL_CHUNK_S`` pieces) until its line's ``ttl_s`` runs out;
+    pulses play over it. ``played`` logs every command (``t``, ``hand``, ``action`` apply / stop, ``amplitude``,
+    ``duration_s``, ``frequency_hz``, ``id``: the pulse's, None for a level)."""
+
+    MAX_AGE_S = 0.5
+    MAX_TTL_S = 1.0
+    LEVEL_CHUNK_S = 0.1
+    LEVEL_REFRESH_S = 0.05
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.epoch: Optional[str] = None
+        self.last_id = 0
+        self.lines = 0
+        self.bad = 0
+        self.connected = False             # the stream is up (HapticsStream)
+        self.played: list[dict] = []
+        self._reset_hands()
+
+    def _reset_hands(self) -> None:
+        self.pending = {"left": [], "right": []}          # [(start, pulse)]
+        self.level = {"left": (0.0, 0.0, 0.0), "right": (0.0, 0.0, 0.0)}   # (amplitude, frequency, until)
+        self.playing = {"left": None, "right": None}       # ("pulse", end) | ("level", amplitude, refresh)
+
+    def block(self) -> dict:
+        """The ``haptics`` block of each frame (the node's capability check and ack)."""
+        with self.lock:
+            return {"schema": HAPTICS_SCHEMA, "epoch": self.epoch, "last_id": self.last_id,
+                    "connected": self.connected}
+
+    def receive(self, line: str, now: Optional[float] = None) -> bool:
+        now = self.clock() if now is None else now
+        try:
+            m = json.loads(line)
+            ok = isinstance(m, dict) and m.get("schema") == HAPTICS_SCHEMA and isinstance(m.get("hands"), dict)
+        except ValueError:
+            ok = False
+        with self.lock:
+            if not ok:
+                self.bad += 1
+                return False
+            self.lines += 1
+            epoch = str(m.get("epoch"))
+            if epoch != self.epoch:
+                self.epoch, self.last_id = epoch, 0
+                self._reset_hands()
+            ttl = min(max(float(m.get("ttl_s") or 0.0), 0.0), self.MAX_TTL_S)
+            top = self.last_id
+            for hand in ("left", "right"):
+                h = m["hands"].get(hand)
+                if not isinstance(h, dict):
+                    continue
+                lv = min(max(float(h.get("level") or 0.0), 0.0), 1.0)
+                self.level[hand] = (lv, float(h.get("frequency_hz") or 0.0), now + ttl)
+                for p in sorted(h.get("pulses") or [], key=lambda p: p["id"]):
+                    if p["id"] <= self.last_id:
+                        continue
+                    top = max(top, p["id"])
+                    if float(p.get("age_s") or 0.0) > self.MAX_AGE_S:
+                        continue
+                    q = self.pending[hand]
+                    q[:] = [x for x in q if x[1]["group"] == p["group"]]     # a newer group replaces the waiting
+                    q.append((now + float(p.get("delay_s") or 0.0), p))
+            self.last_id = top
+            return True
+
+    def tick(self, now: Optional[float] = None) -> list[dict]:
+        now = self.clock() if now is None else now
+        out = []
+        with self.lock:
+            for hand in ("left", "right"):
+                q, cur = self.pending[hand], self.playing[hand]
+                due = [x for x in q if x[0] <= now]
+                if due:
+                    q[:] = [x for x in q if x[0] > now]
+                    p = due[-1][1]
+                    out.append({"t": now, "hand": hand, "action": "apply", "amplitude": p["amplitude"],
+                                "duration_s": p["duration_s"], "frequency_hz": p.get("frequency_hz", 0.0),
+                                "id": p["id"]})
+                    self.playing[hand] = ("pulse", now + p["duration_s"])
+                    continue
+                if cur is not None and cur[0] == "pulse" and now < cur[1]:
+                    continue
+                amp, freq, until = self.level[hand]
+                if amp > 0 and now < until:
+                    if cur is None or cur[0] != "level" or cur[1] != amp or now >= cur[2]:
+                        out.append({"t": now, "hand": hand, "action": "apply", "amplitude": amp,
+                                    "duration_s": self.LEVEL_CHUNK_S, "frequency_hz": freq, "id": None})
+                        self.playing[hand] = ("level", amp, now + self.LEVEL_REFRESH_S)
+                elif cur is not None:
+                    if cur[0] == "level":
+                        out.append({"t": now, "hand": hand, "action": "stop", "amplitude": 0.0, "duration_s": 0.0,
+                                    "frequency_hz": 0.0, "id": None})
+                    self.playing[hand] = None
+            self.played += out
+        return out
+
+    def disconnected(self) -> None:
+        """The stream lost: waiting pulses and levels dropped; a level playing gets a stop at the next tick (a pulse
+        ends by itself), as the native player."""
+        with self.lock:
+            self.connected = False
+            self.pending = {"left": [], "right": []}
+            self.level = {"left": (0.0, 0.0, 0.0), "right": (0.0, 0.0, 0.0)}
+
+
+class HapticsStream:
+    """The headset's haptics client, like quest_env native/haptics.h's: one long ``GET <url>`` (the node's
+    ``/haptics?stream=1``), each line into ``player.receive``; reconnects (250 ms, then up to 2 s) and drops the
+    connection after ``STALL_S`` without a byte (the node writes a line at least every second)."""
+
+    STALL_S = 2.0
+
+    def __init__(self, url: str, player: HapticsPlayer):
+        self.url, self.player = url, player
+        self.error: Optional[str] = None
+        self.connects = 0
+        self._stop = threading.Event()
+        self._resp = None
+        self._thread = threading.Thread(target=self._run, name="fake-headset-haptics", daemon=True)
+
+    def start(self) -> "HapticsStream":
+        self._thread.start()
+        return self
+
+    def close(self) -> None:
+        self._stop.set()
+        r = self._resp
+        if r is not None:
+            try:
+                r.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._thread.join(3)
+
+    def _run(self) -> None:
+        import urllib.request     # noqa: PLC0415
+        backoff = 0.25
+        while not self._stop.is_set():
+            try:
+                with urllib.request.urlopen(self.url, timeout=self.STALL_S) as r:
+                    self._resp = r
+                    self.connects += 1
+                    with self.player.lock:
+                        self.player.connected = True
+                    backoff = 0.25
+                    for raw in r:
+                        if self._stop.is_set():
+                            break
+                        self.player.receive(raw.decode(errors="replace"))
+            except Exception as e:  # noqa: BLE001 (any transport error: reconnect)
+                self.error = f"{type(e).__name__}: {e}"[:200]
+            finally:
+                self._resp = None
+            self.player.disconnected()
+            self._stop.wait(backoff)
+            backoff = min(2.0, backoff * 2)
 
 
 # -- the server ------------------------------------------------------------------------------------
 
 
 class FakeHeadsetServer:
-    """TCP server sending one JSON line per frame to every connected client (like the native app)."""
+    """TCP server sending one JSON line per frame to every connected client (like the native app). With
+    ``haptics_url`` (the node's ``/haptics?stream=1``) it plays the node's haptics like the headset: ``self.haptics``
+    (a ``HapticsPlayer``) fed by ``self.haptics_stream``, ticked once per frame sent, and every frame carries the
+    ``haptics`` block. Without: an older build (no block)."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 0, haptics_url: Optional[str] = None):
         self.sock = socket.create_server((host, port))
         self.port = self.sock.getsockname()[1]
         self.clients: list[socket.socket] = []
         self.lock = threading.Lock()
         self.sent = 0
+        self.haptics: Optional[HapticsPlayer] = None
+        self.haptics_stream: Optional[HapticsStream] = None
+        if haptics_url:
+            self.start_haptics(haptics_url)
         self._stop = threading.Event()
         threading.Thread(target=self._accept, name="fake-headset-accept", daemon=True).start()
+
+    def start_haptics(self, url: str) -> HapticsPlayer:
+        """Play the node's haptics from its stream at ``url`` from now on (the frames carry the block)."""
+        self.haptics = HapticsPlayer()
+        self.haptics_stream = HapticsStream(url, self.haptics).start()
+        return self.haptics
 
     def _accept(self):
         while not self._stop.is_set():
@@ -486,6 +812,9 @@ class FakeHeadsetServer:
             return len(self.clients)
 
     def send(self, frame: dict) -> None:
+        if self.haptics is not None:
+            self.haptics.tick()
+            frame = {**frame, "haptics": self.haptics.block()}
         line = (json.dumps(frame, separators=(",", ":")) + "\n").encode()
         with self.lock:
             for c in list(self.clients):
@@ -508,6 +837,8 @@ class FakeHeadsetServer:
 
     def close(self) -> None:
         self._stop.set()
+        if self.haptics_stream is not None:
+            self.haptics_stream.close()
         self.drop_clients()
         self.sock.close()
 
@@ -551,17 +882,22 @@ def main():
     ap.add_argument("--standard", action="store_true", help="intent in the standard scheme, not body-frozen")
     ap.add_argument("--ar", metavar="URL", help="emulate the robot AR view against this sim stack's frontend (the "
                                                 "robot_ar block of each record)")
+    ap.add_argument("--body", choices=("off", "core", "all"), default="off",
+                    help="add the body tracking block (quest_env BODY_TRACKING.md) with these joints")
+    ap.add_argument("--haptics", metavar="URL",
+                    help="play the node's haptics like the headset: its GET /haptics?stream=1 URL (e.g. "
+                         "http://127.0.0.1:8080/nodes/quest_teleop/haptics?stream=1)")
     ap.add_argument("--wait-client", action="store_true",
                     help="start the scenario only once a client is connected")
     args = ap.parse_args()
-    server = FakeHeadsetServer(args.host, args.port)
+    server = FakeHeadsetServer(args.host, args.port, haptics_url=args.haptics)
     print(f"fake headset on {args.host}:{server.port}, scenario {args.scenario} at {args.rate} Hz", flush=True)
     ar = ArView(SimResetSeq(args.ar)) if args.ar else None
     try:
         while args.wait_client and server.n_clients == 0:
             time.sleep(0.05)
         play(server, SCENARIOS[args.scenario](), args.rate, loop=args.loop,
-             headset=Headset(not args.standard, ar=ar))
+             headset=Headset(not args.standard, ar=ar, body=None if args.body == "off" else args.body))
     except KeyboardInterrupt:
         pass
     finally:

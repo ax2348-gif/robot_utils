@@ -112,8 +112,12 @@ class Job:
 class DescriptionNode:
     def __init__(self, data_dir: str, swerve_url: Optional[str] = "swerve",
                  camera_io: Optional[Callable[[str], object]] = None,
-                 swerve_io: Optional[Callable[[str], object]] = None):
-        self.store = Store(data_dir)
+                 swerve_io: Optional[Callable[[str], object]] = None, robot: Optional[str] = None):
+        """``robot``: the robot profile (robots/; default $ROBOT_UTILS_ROBOT, else rebot): the description it
+        starts from, under the data dir's live overrides."""
+        from ...robots import load as load_robot
+        self.profile = load_robot(robot)
+        self.store = Store(data_dir, base=self.profile.description)
         self.swerve_url = swerve_url
         self.camera_io = camera_io or HttpCameraIO
         self.swerve_io = swerve_io or HttpSwerveIO
@@ -131,7 +135,7 @@ class DescriptionNode:
     # -- lifecycle -----------------------------------------------------------------------------
 
     def start(self):
-        self.events.add(f"description node started (data: {self.store.dir})")
+        self.events.add(f"description node started (robot {self.profile.name!r}; data: {self.store.dir})")
         self._poller.start()
 
     def close(self):
@@ -217,8 +221,15 @@ class DescriptionNode:
         from ..swerve.constants import FRAME, FRAME_BOTTOM_Z, FRAME_TOP_Z, MODULES, TOP_RAIL_BOTTOM_Z, TOP_Z
         robot = {"frame_size": FRAME, "frame_z": [FRAME_BOTTOM_Z, FRAME_TOP_Z], "top_rail_z": [TOP_RAIL_BOTTOM_Z, TOP_Z],
                  "top_z": TOP_Z,
-                 "modules": [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES]}
-        return {"frames": frames, "frames_in_base": in_base, "robot": robot, "cameras": cams,
+                 "modules": [{"name": m.name, "x": m.x, "y": m.y} for m in MODULES],
+                 "bodies": self._base_bodies(d)}
+        from ...robots import ProfileError, arms_of
+        try:
+            arms = [{"name": a.name, "frame": a.frame, "mirror": a.mirror} for a in arms_of(d)]
+        except ProfileError:
+            arms = []
+        return {"frames": frames, "frames_in_base": in_base, "robot": robot, "profile": self.profile.name, "arms": arms,
+                "cameras": cams,
                 "conventions": {"base": "floor level, centre of the wheels; x forward, y left, z up",
                                 "optical": "x right, y down, z out of the lens",
                                 "transform": "p_parent = R p_child + t; rpy = fixed-axis X, Y, Z (URDF), rad"}}
@@ -257,6 +268,21 @@ class DescriptionNode:
         if p is None:
             raise KeyError(f"the model has no mesh {component}/{path}")
         return p
+
+    @staticmethod
+    def _base_bodies(d: dict) -> list:
+        """The description's procedural boxes on base_link (e.g. a torso: the OpenArm's column and shoulder block), for
+        drawing: [{name, size [x, y, z] m, T 4x4 in base}]. The base, cameras and URDF parts are drawn otherwise."""
+        from .frames import frame_T
+        out = []
+        for name, c in (d.get("components") or {}).items():
+            if not isinstance(c, dict) or c.get("source") != "procedural" or c.get("type") != "box" \
+                    or c.get("parent") not in ("base_link", "base"):
+                continue
+            m = c.get("mount") or {}
+            T = frame_T({"xyz": m.get("xyz", [0, 0, 0]), "rpy": m.get("rpy", [0, 0, 0])})
+            out.append({"name": name, "size": [float(v) for v in c["size"]], "T": np.round(T, 9).tolist()})
+        return out
 
     def model_bundle(self, opts) -> tuple[bytes, str]:
         """(zip: robot.urdf with relative mesh paths + meshes + model.json, model_version)."""

@@ -9,7 +9,7 @@ import sys
 from .cut import cut_session
 from .session import Session
 from .local import LOCAL, LOCAL_BASE, NodeSocketTransport
-from .streams import DEFAULT_STREAMS, OPLOG_SPEC, SCENE3D_SPEC
+from .streams import OPLOG_SPEC, SCENE3D_SPEC, default_streams
 
 
 def _size(s: str) -> int:
@@ -29,10 +29,14 @@ def main(argv=None) -> int:
                                                   "this machine over their unix sockets (no frontend)")
     r.add_argument("--out", required=True, help="parent directory; the session is <out>/<YYYYMMDD-HHMMSS>")
     r.add_argument("--task", required=True, help="task text of the next episodes (POST quest_teleop/task)")
-    r.add_argument("--streams", default=",".join(DEFAULT_STREAMS), help="comma-separated stream specs")
     r.add_argument("--scene3d", nargs="?", const="sim", default=None, metavar="SIM",
                    help="also record the sim's rigid scene: its pose stream (<SIM>/scene3d/stream) and each scene "
                         "(index + blob) once per scene_id (default SIM: sim)")
+    r.add_argument("--robot-profile", default=None,
+                   help="robot profile (robots/; default $ROBOT_UTILS_ROBOT, else rebot): the default streams record each "
+                        "of its arms (<arm>/stream)")
+    r.add_argument("--streams", default=None, help="comma-separated stream specs (default: " +
+                   ",".join(default_streams("rebot")) + ", with each arm of the robot profile for arm/stream)")
     r.add_argument("--teleop", default="quest_teleop",
                    help="the quest_teleop node instance (its /task, /start, /stop, /eventlog; the default streams' "
                         "operator stream becomes <teleop>/oplog/stream)")
@@ -70,7 +74,7 @@ def main(argv=None) -> int:
         from .browse.cli import run as run_browse
         return run_browse(a)
     if a.cmd == "run":
-        streams = [x for x in a.streams.split(",") if x.strip()]
+        streams = [x for x in (a.streams or ",".join(default_streams(a.robot_profile))).split(",") if x.strip()]
         if a.teleop != "quest_teleop":
             streams = [f"{a.teleop}/oplog/stream" if x.strip() == OPLOG_SPEC else x for x in streams]
         if a.scene3d:

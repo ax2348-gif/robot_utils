@@ -17,7 +17,8 @@ tools/quest_teleop/quest_down          # stop the headset's telemetry
 
 `teleop.py` options: `--hand left|right` (the hand that drives the arm, default right), `--ee` (default `arm`),
 `--no-head-walk` (engaged: the base hint follows only the stick offset), `--stale-ms` (default 200),
-`--max-latency-ms` (default 150), `--min-rate` (default 30 Hz), `--no-gripper`, `--udp-host`, `--max-speed` /
+`--max-latency-ms` (default 150), `--min-rate` (default 30 Hz), `--no-gripper`, `--tether` (off by default: the ramp instead; the raw stick
+offset, below), `--udp-host`, `--max-speed` /
 `--max-omega` (the top speed: the sticks' full deflection and the hint clamp, asserted as the WBC's caps for the
 lease and restored at the end; docs/quest_teleop_node.md). Ctrl-C stops sending, disables, restores the WBC caps
 and releases the lease. The status line shows ARMED / disarmed, the engagement state, whether
@@ -48,13 +49,55 @@ WBC holds (docs/wbc.md "The armed latch").
   arming datagram) showing it disarmed (an overrun, an estimator dropout, a fault, ...) or not enabled. The WBC also
   refuses an arming target more than 2 cm / 5° from its commanded pose (a stale riding pose). If
   the link is gone the WBC's `hold_timeout` (0.25 s) disarms anyway.
-- **Nothing re-arms on its own**: recovery from stale, late, unfocused, a reconnect or a new session, a lease renew,
-  an estimator reset: all need a new Y press.
+- **Nothing re-arms on its own**: after a serious or deliberate disarm (below), recovery needs a new Y press. A
+  **transient** one holds instead, and a release and re-grip resumes (next section): never on its own, always on a
+  fresh engagement.
 - **After arming** the grip needs its release first (as always: an engagement counts only from a release) and the
   sticks give no base velocity until both are seen neutral. **The gripper** (the owner's rebot_ctl behaviour): no
   gripper command before arming (after Start, after any disarm or disable: the gripper stays where it is); from the
   arming frame on, `1 - trigger` in every target (a released trigger opens it at once). A disarm drops the engagement
   and the riding pose: the next arm captures the current command (no jump back to a stale pose).
+
+### Hold and re-grip (tiered recovery; `arming.ResumeConfig`)
+
+Every disarm while armed falls in one of three tiers (`/state` `teleop.tier`: `tier`, `why`, `hold`):
+
+| Tier | Causes | The robot | Back to armed |
+| --- | --- | --- | --- |
+| **hold** (transient) | input stale, late, slow or recovering (`input_stale`, `input_late`); an arrival gap (`input_gap`); an invalid or unfocused frame (`input_invalid`); the left controller inactive (`left_inactive`); the WBC rows stale (`wbc_stale`); nothing to send (`no_command`); the WBC's own short-dropout disarm (`wbc_disarm`: its `disarm_reason` starts with `control tick overrun`, `input stale` (its `hold_timeout`), `estimator: ` (an unusable, not reset, pose) or `client: armed false`) | holds, exactly as a disarm (`armed: false` on the wire) | once the cause has cleared: **release and re-grip** a clutch hand; no Y (a Y press arms too) |
+| **disarmed** (serious) | a transient cause still present after `grace_s` (2 s); a hold older than `hold_max_s` (60 s); a new headset session or an operator-frame revision (a reconnect of the same session is an `input_gap`: the reader reopens a connection silent for 1 s); an estimator reset (the WBC's reason, or `est_reset` changing in its rows during a hold) or a pose jump; the WBC disabled or in a fault; any other WBC disarm reason (or none known within `grace_s`); `max_refusals` (3) resumes refused by the WBC; a refused Y arm | holds (disabled / fault: as before) | Y |
+| **disarmed** (deliberate) | X, a sim reset (`inhibit`), the page's Stop or e-stop, `POST /disable` | as before | Y (never resumed) |
+
+- **The resume.** The engagement edge is the arming press: a new `arm_seq` above the WBC's floor, so the WBC's latch
+  is unchanged (docs/wbc.md "The armed latch"), and its `arm_target_pos/rot` check still refuses a target off its
+  commanded pose. The core keeps the engagement it captured on that frame, anchored to the WBC's commanded state (the
+  rule above: no jump); the sticks need neutral again; the gripper follows the trigger from that frame on.
+- **Preconditions** (else the edge is used and refused, `hold.last_refused`; release and re-grip again): the hand
+  seen **released in a valid frame during the hold** (a grip held through the dropout never resumes), the cause
+  cleared, fresh input, X up, the left controller active, a fresh WBC row (< 0.3 s) showing it enabled without a
+  fault, no `inhibit`, and the core accepting the engagement. Only the clutch hands (`Config.hands`, else
+  `Config.hand`) resume.
+- **A refused resume** (the WBC's row stays disarmed after it processed the resume datagram: `arm_far`, an unusable
+  estimator, ...) returns to the hold (`resume_refused`); the next re-grip tries a new `arm_seq`.
+- **The WBC never disables itself on a transient** (only X, the page, Stop, the e-stop, a fault), so a disabled WBC
+  during a hold always escalates; a re-grip never enables.
+- A pose jump while the WBC is already disarmed is not visible in its rows; the resume anchors on the current
+  commanded state anyway.
+- **Events** (`ArmLatch.events`; the node's event kinds in brackets): `("hold", reason, info)` [`held`: `reason`,
+  `class`, `cue` "hold: re-grip to resume"], `("resumed", arm_seq, info)` [`resumed`: `arm_seq`, `hand`, `after_s`,
+  `cause`, `class`], `("resume_refused", arm_seq, info)` [`resume_refused`], `("escalated", reason, info)`
+  [`escalated`: `reason`, `cause`, `class`, `cue` "disarmed: press Y"]. A hold is not also a `disarmed`.
+- **Config:** `ResumeConfig(enabled, grace_s, hold_max_s, max_refusals, classes)`; `classes[c] = False` makes that
+  cause disarm as before; `enabled = False` restores "every disarm needs Y". The node: `--resume-grace`,
+  `--resume-hold-max`, `--resume-off CLASS,...`, `--no-resume`, `POST /resume`, the page's "re-grip resume" row.
+
+**Measured (event logs 2026-11-24 / 25, the sim on the Mac, load up to ~40).** Detection values sit just past
+their limits: input stale at 201–217 ms (limit 200; a few 314–1018 ms), latency 150–303 ms (median 164–175; limit
+150), the WBC's estimator pose 0.30–0.42 s old (a few 1.9 s; limit 0.3), its estimator stream 0.35–0.56 s (limit
+0.35), tick overruns 101–180 ms (one 606; limit 0.1 s). Disarm to the next Y: median 1.7–2.1 s (min 0.8). So nearly
+every dropout is short and overload-driven: the tiers keep every limit as it was (they decide when the robot stops
+following) and hold instead; `grace_s` 2 s covers every input gap logged and about the time a Y took. The event log
+records detections, not how long a dropout lasted (the hold's `held` → `resumed` / `escalated` now does).
 
 **Headset latency detection** (`QuestGate`): per frame, latency = arrival (our clock) − `sample_time_ns` (the
 headset's), over the running minimum of that difference in the session (the clock offset cancels). A frame more
@@ -70,7 +113,7 @@ connect, and it drifts with the two clocks' relative drift; for the first tests 
 | Operator / event | Client | WBC | Arm | Base | Gripper |
 | --- | --- | --- | --- | --- | --- |
 | X | `armed: false`, `POST /disable` | disarmed, disabled | floats (gravity compensation) | coasts | damping |
-| Stale / late / slow / unfocused input, a discontinuity, left controller off | `armed: false` (or silence) | disarmed (or `hold_timeout`) | held at its commanded joints | brakes to zero within its rate limit, held | keeps its goal |
+| Stale / late / slow / unfocused input, a discontinuity, left controller off | `armed: false` (or silence); transient: **hold** (re-grip resumes) | disarmed (or `hold_timeout`) | held at its commanded joints | brakes to zero within its rate limit, held | keeps its goal |
 | The WBC disarms itself (overrun, estimator reset, arm pause, fault, `POST /disarm`) | disarms when its row shows it | disarmed (fault: latched) | held | brakes to zero (a lost base: coasts) | keeps its goal |
 | E-STOP (node page) | teleop stops | e-stopped, disabled | its own e-stop: latched, off | its own e-stop: latched, coasts (no braking command) | off |
 
@@ -165,7 +208,8 @@ stream's commanded base twist `base_vx, base_vy` read as base-frame components a
 by `v / k` (measured in the QP at 0.5 m/s: the EE 142 mm behind, the base 250 mm). So the engaged EE target carries
 `twist` = the target's own velocity (the hand's motion through the frozen frames, linear and angular), and the base
 hint carries `vx, vy` (pose) and `omega` (heading) = the hint target's velocity (the head's motion mapped as the
-hint's position is, plus the stick offset's rate, exact). Both are least-squares slopes over the frames of the last
+hint's position is, plus the raw stick velocity, exact; the EE's twist, the target's own velocity, carries the
+tethered offset's rate). Both are least-squares slopes over the frames of the last
 `ff_window` = 60 ms on `sample_time_ns`: exact for a steady motion, about 30 ms (half the window) behind a change of
 speed. Clamped: the EE 1 m/s and 3 rad/s, the hint to the stick maxima (`hint_max_speed` / `hint_max_omega`, 0.8 m/s, 0.9 rad/s; the WBC clamps further to its own caps). Zero
 while the head is lost (its history restarts). **Every engagement starts them at zero**: only this engagement's
@@ -180,9 +224,76 @@ behind, the base about 18 mm (the same QP test). `Config(feedforward=False)` tur
   omega, frame: world, weight 0.5, tol 0.05}}}` (`vx, vy, omega`: the feedforward above) = the base pose at engagement + the head's motion since engagement (displacement in
   the engagement's operator frame mapped through the platform yaw at engagement; gravity-aligned yaw change) + the
   stick **offset**. The offset starts at zero on every engagement and integrates the sticks per frame: x/y along the
-  robot base frame at integration time (stick forward = robot forward), yaw from the right stick. Stand still and
-  drive with the sticks, walk and let the robot mirror, or both. Whatever the sticks achieved is in the base pose the
-  next engagement captures, so nothing carries over.
+  robot base frame at integration time (stick forward = robot forward), yaw from the right stick, tethered (below).
+  Stand still and drive with the sticks, walk and let the robot mirror, or both. Whatever the sticks achieved is in
+  the base pose the next engagement captures, so nothing carries over.
+- **The stick tether** (`Config.tether`, off by default since 2026-11-26: the stick ramp instead; `--tether`; read at each grip; body_frozen.py, "The stick tether").
+  Integrated raw, the offset moved the reference (and the EE target on it) at full stick speed at once while the
+  WBC accelerates the base at 1 m/s²: the reference led by up to v²/2a (0.32 m at 0.8 m/s; 0.27 rad turning), the
+  arm reached for it and swung back when the base braked past it. Tethered, each frame: the lead of the reference
+  over the WBC's **commanded** base (the stream row advanced by its twist over its age + `ride_lead`) is split into
+  walking's share (the lead when the stick starts, plus the head's motion since, minus the base's progress towards
+  it) and the stick's share, and only the stick offset moves so the stick's share is within `tether_pos` 0.05 m /
+  `tether_yaw` 0.1 rad while the stick is deflected, zero while the base still brakes from it (the robot stops
+  where its braking puts it), frozen once settled or without a fresh row. The base hint's `vx, vy, omega` keep the
+  raw stick (never clipped by the base's state, so steering and the WBC's start charge act as before). Link 2's
+  frame takes the commanded base's yaw for the stick's yaw (third person `sigma - arm_yaw`, first person `C` turned
+  back about the reference), so the hand's motion since the grip maps exactly onto the arm relative to the robot;
+  the translation lead (≤ 5 cm) only offsets it. Measured (`test_quest_stick_tether.py`, a stand-in base at 1 m/s²,
+  1.5 rad/s²): 1 s full forward, the arm off the commanded base 0.32 m → 0.05 m; braking, 0.31 m → 0; full yaw, the
+  arm's heading off the base 0.27 rad → 0.5 mrad (the row's prediction); a hand delta while driving and turning
+  (first person) 30 mm → 0 off.
+
+### The base hint's source (`Config.hint_source`; `hint_source.py`)
+
+"The head's motion" above is the default source, `head`: the headset, raw, as before. With body tracking
+(quest_env `--body`) the hint can follow the operator's body instead:
+
+- `chest`: the upper body; Meta's chest joint.
+- `hips`: the pelvis, i.e. where the operator walks.
+
+The source is read at each engagement, like the person mode, so a toggle mid-engagement changes nothing until the
+next grip.
+
+A body source has the same structure as the head. It uses its horizontal displacement, read in the engagement's
+operator frame, and its yaw change since the engagement. It drives link 1 (the base reference) and link 2's frame
+(the hand is read relative to it): a head turn alone with the hips selected turns neither the base nor the EE
+target.
+
+**Yaw.** A joint's yaw is the heading of one of its own axes: the most horizontal one, picked when the joint is first
+seen. Only its changes count, so no Meta axis convention is assumed. Height is never used, so the headset can sit
+on the neck or the head.
+
+**Smoothing.** Positions and yaw go through a low-pass (`hint_tau`, 0.15 s), then a deadband: the output trails by
+`hint_deadband_m` (2 cm) and `hint_deadband_rad` (0.03 rad), with no step.
+
+**Fallback.** The head takes over, smoothed the same way, when the body source is not usable:
+- no body block;
+- body not active;
+- confidence below `hint_min_confidence` (0.5);
+- the joint not valid, or not tracked (`hint_require_tracked`).
+
+The body takes back over once it has been usable for `hint_return_s` (0.3 s). Every switch, loss and return starts
+a new segment where the last one ended, so neither the hint nor the target jumps.
+
+**Logging.** All three candidates are computed on every frame, raw and smoothed, whichever source is selected. The
+node logs them as `hint` records in the operator stream.
+
+**Analysis.** `hint_analysis.py <recording>` reports, per candidate:
+- the jitter at rest (yaw-rate std, position mm), raw and smoothed;
+- the filter lag;
+- the yaw divergence between head and body.
+
+It can also recompute the candidates from the headset frames with other filter settings (`--recompute`).
+
+### The elbow-swivel hint (`Config.elbow_hint`, `--elbow-hint`; `swivel.py`)
+
+Off by default. On, each engaged hand's paired EE carries `swivel: {seq, dpsi, elbow, conf}`: the operator's elbow
+rotation about the shoulder → wrist axis since the engagement (body tracking: `arm_upper`, `arm_lower`,
+`hand_wrist`; parallel transport, no fixed reference), positive = the elbow moving out for either arm (the WBC's
+convention), so no sign for mirror pairing. Input only: the WBC fades,
+smooths and anchors it. Omitted without a valid body. The rules are in `swivel.py`; the node's side in
+docs/quest_teleop_node.md, "The elbow-swivel hint".
 
 ## The remote-consumer rules (DEMO.md)
 
@@ -193,7 +304,8 @@ discontinuity; `input_focused` and `action_sync_result == 0`, else the frame is 
 frame for 200 ms on our clock = **stale**.
 
 - Stale (also late or slow, "Arming"), unfocused, or the arm hand's intent `valid=false`: **disarm** (one
-  `armed: false`), then stop sending. The WBC holds; nothing resumes without a new Y press.
+  `armed: false`), then stop sending. The WBC holds; nothing resumes without a fresh engagement (a transient: a
+  release and re-grip, "Hold and re-grip") or a new Y press.
 - Any discontinuity, invalid frame, staleness, an engagement id change we did not see released, an estimator reset
   (`est_reset` changes in the WBC stream) or a refused capture ends the engagement and **requires a release**: an
   engagement counts only if this client saw the hand released (valid, not engaged) since. So attaching or
@@ -231,7 +343,7 @@ quest` in `~/.ssh/config`, the quest-dev-runtime SSH server): `sh "$QUEST_ENV_RO
 `~/.config/quest-env/root` as `profile.sh` does (`q` itself exists only in interactive shells). It automates only the
 headset side.
 
-- `quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--restart] [--wait 30]`: SSH reachability (a clear message if
+- `quest_up [--scheme body-frozen|standard] [--demo] [--ar [URL|:PORT]] [--body off|core|all] [--restart] [--wait 30]`: SSH reachability (a clear message if
   the headset is asleep or offline); `git fetch` and compare with the upstream, `quest pull` only when behind and
   never over a dirty tree (reported, not forced); `quest run --no-viewer --scheme=…` (`-s` with `--demo`), skipped
   when the stream already answers in the wanted mode and nothing was pulled; waits for port 9391; prints session,
@@ -240,7 +352,9 @@ headset side.
   `--ar` adds the headset's robot AR view (quest_env ROBOT_AR.md). Bare `--ar` is this machine's sim stack (started
   with `--host 0.0.0.0`, port 8080; `--ar :PORT` for another) at this machine's address on the route to the headset
   (its Tailscale address when the headset is reached over Tailscale); `--ar URL` or `--ar host[:port]` otherwise. A changed or dropped
-  URL restarts telemetry (it is read once at native start).
+  URL restarts telemetry (it is read once at native start). `--body core|all` adds Meta body tracking to every frame
+  (`quest run --body=…`, quest_env BODY_TRACKING.md; runtime 1.7.0). It is never passed when off, because an older
+  quest_env rejects the option. Changing it restarts telemetry.
 - `quest_down`: `quest stop`. `quest_status`: `quest status`, the mode file, the XR session state (the telemetry
   process's last `OpenXR session state` line in logcat), stream liveness, battery.
 - Live check (2026-11-21, headset awake but not worn): SSH, the root, fetch/behind/dirty, `quest run`, `quest stop`
@@ -259,7 +373,19 @@ Nothing destructive is ever sent (read-only queries, `fetch`, `pull --ff-only` t
 `control_intent` from `NativeIntent`, a Python port of the native `teleop::Intent`: hysteresis, release rules,
 body-frozen deltas, the stick mapping). Scenarios are keyframes in operator terms (`demo`: engage, reach, walk,
 turn the head, stick, release, focus loss, session change; `idle`). `play(..., pause=, on_tick=)` simulates
-network outages and dropped connections in tests.
+network outages and dropped connections in tests. `--body core|all` (`Headset(body=...)`) adds a plausible body
+block: the headset on the neck, shoulders from the torso, elbows by two-link IK to the controllers.
+
+## Body tracking (`body.py`)
+
+`body.py` holds the joint names (`XrFullBodyJointMETA`) and `parse_body(frame)`, which validates the
+`teleop.quest_body.v1` block (quest_env BODY_TRACKING.md). It returns None without a block or with a newer schema
+version, and raises `BodyError` on a malformed one.
+
+It also has `encode` (builds a block, as the headset writes it) and `plausible_skeleton` (the fake headset's).
+
+`QuestReader` puts the parsed block on `Frame.body`. It counts malformed blocks in `counts["body_bad"]` and still
+delivers their frames. Nothing in the teleop client reads it.
 
 ## Tests
 
@@ -277,4 +403,10 @@ HTTP, a rows stream, UDP) through engagement, stick, release, a network outage a
 `test_quest_ctl.py`: `quest_up/down/status` against a fake SSH runner and the fake headset stream.
 `test_quest_buttons.py` (Y / X, every client disarm trigger, no recovery re-arms, the gates after arming) and
 `test_quest_latency.py` (late, slow, recovery), pure on `tests/quest_latch_fakes.py`; `test_quest_stick_offset.py`
-(the target and the hint share this frame's stick offset).
+(untethered: the target and the hint share this frame's stick offset); `test_quest_stick_tether.py` (a stand-in base
+with an acceleration limit and a steering delay: the arm on the commanded base while driving, braking without
+snap-back, the steering delay, the yaw, the hand delta's exact mapping, walking unchanged, stale rows, two hands'
+handover, off, walking and the stick together, the node toggle). The stick tests in `test_quest_teleop.py` use a
+fixed robot that never follows the hint, so they run untethered. `test_quest_resume.py` (the tiers: a short gap
+holds and a re-grip resumes without Y or a jump, the window, X, an estimator reset, a reconnect, a grip held through, the WBC's
+own disarm reasons, a refused resume, unfocused spells, the node's events, `/state` and config).

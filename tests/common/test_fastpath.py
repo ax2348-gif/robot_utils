@@ -136,3 +136,23 @@ def test_client_talks_to_a_server(sockdir):
     finally:
         c.close()
         srv.close()
+
+
+def test_seven_joint_packets_round_trip_and_six_are_unchanged():
+    """An n-joint arm (a 7-DOF OpenArm): the same layouts with n joints, the size gives n; 6 joints: 88 / 136 bytes."""
+    q, qd = [0.1 * i for i in range(7)], [0.01 * i for i in range(7)]
+    b = F.pack_command(3, 9, q, qd, gap=0.02, t_send=1.0, t_basis=0.5)
+    assert len(b) == 40 + 8 * 7
+    c = F.unpack_command(b)
+    assert len(c.q) == 7 and c.q[6] == pytest.approx(0.6) and c.qd[6] == pytest.approx(0.06)
+    assert c.gap == pytest.approx(0.02)
+    k = F.unpack_command(F.pack_command(3, 10, (math.nan,) * 7, mode=F.MODE_KEEPALIVE))
+    assert len(k.q) == 7 and k.mode == F.MODE_KEEPALIVE
+    s = F.State(0, 3, 1, 2.0, 9, 1, 2, q, qd, [1.0] * 7, q, 0.01, 0.002)
+    b = F.pack_state(s)
+    assert len(b) == 40 + 16 * 7
+    u = F.unpack_state(b)
+    assert len(u.q_cmd) == 7 and u.q_cmd[6] == pytest.approx(0.6) and u.read_age == pytest.approx(0.002)
+    assert len(F.pack_command(1, 1)) == F.CMD_SIZE == 88                   # the reBot's: unchanged
+    with pytest.raises(F.PacketError):
+        F.unpack_state(b[:-4])

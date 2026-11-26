@@ -105,30 +105,35 @@ $("#apply").onclick = async () => {
 };
 $("#revert").onclick = () => RU.api("config").then(cfgRender);
 RU.api("config").then(cfgRender).catch(e => err(e.message));
-const plots = {
-  e: new RU.Plot($("#pe"), {seconds: 20, series: [{name: "QP shortfall"}, {name: "actual"}, {name: "lead"}]}),
-  r: new RU.Plot($("#pr"), {seconds: 20, series: [{name: "QP shortfall"}, {name: "actual"}, {name: "lead"}]}),
+// the end effectors from the stream's columns (<ee>_cmd_x): one ("arm") or one per arm (arm_left, arm_right)
+let EES = ["arm"], plots = null, last = null;
+const errSeries = () => EES.length > 1 ? EES.flatMap(e => [{name: e + " QP"}, {name: e + " actual"}, {name: e + " lead"}])
+                                       : [{name: "QP shortfall"}, {name: "actual"}, {name: "lead"}];
+const makePlots = () => ({
+  e: new RU.Plot($("#pe"), {seconds: 20, series: errSeries()}),
+  r: new RU.Plot($("#pr"), {seconds: 20, series: errSeries()}),
   b: new RU.Plot($("#pb"), {seconds: 20, series: [{name: "vx"}, {name: "vy"}, {name: "w"}]}),
   s: new RU.Plot($("#ps"), {seconds: 20, series: [{name: "solve ms"}]}),
-};
-let last = null;
+});
 RU.rows("stream?batch_ms=100", d => {
+  if (!plots){ const e = d.fields.filter(f => f.endsWith("_cmd_x")).map(f => f.slice(0, -6)); if (e.length) EES = e; plots = makePlots(); }
   for (let i = 0; i < d.n; i++){
     const p = {}; for (const f of d.fields) p[f] = d.col(f)[i];
-    plots.e.push(p.t_tick, [p.arm_err_pos, p.arm_err_meas_pos, p.arm_lead_pos]);
-    plots.r.push(p.t_tick, [p.arm_err_rot, p.arm_err_meas_rot, p.arm_lead_rot]);
+    plots.e.push(p.t_tick, EES.flatMap(e => [p[e + "_err_pos"], p[e + "_err_meas_pos"], p[e + "_lead_pos"]]));
+    plots.r.push(p.t_tick, EES.flatMap(e => [p[e + "_err_rot"], p[e + "_err_meas_rot"], p[e + "_lead_rot"]]));
     plots.b.push(p.t_tick, [p.base_vx, p.base_vy, p.base_w]);
     plots.s.push(p.t_tick, [p.solve_ms]);
     last = p;
   }
   if (!last) return;
   const f = v => v === undefined || !isFinite(v) ? "–" : v.toFixed(4);
-  const rows = ["x", "y", "z", "qx", "qy", "qz", "qw"].map(k => `<tr><td>${k}</td><td>${f(last["arm_cmd_" + k])}</td><td>${f(last["arm_meas_" + k])}</td><td>${f(last["arm_tgt_" + k])}</td></tr>`);
-  $("#ee").innerHTML = `<tr><th></th><th>commanded</th><th>measured</th><th>target</th></tr>` + rows.join("");
+  $("#ee").innerHTML = EES.map(e => (EES.length > 1 ? `<tr><th colspan="4">${e}</th></tr>` : "") +
+    `<tr><th></th><th>commanded</th><th>measured</th><th>target</th></tr>` +
+    ["x", "y", "z", "qx", "qy", "qz", "qw"].map(k => `<tr><td>${k}</td><td>${f(last[e + "_cmd_" + k])}</td><td>${f(last[e + "_meas_" + k])}</td><td>${f(last[e + "_tgt_" + k])}</td></tr>`).join("")).join("");
 });
 // per joint |kp (q_cmd - q_meas)| against its budget lead_torque (Nm); "bound" while the lead bound binds
-const leadText = (s, L) => { const ld = s.arm && s.arm.lead; if (!ld) return "–";
-  const t = [1, 2, 3, 4, 5, 6].map(i => L["arm_lead_tau" + i]);
+const leadText = (a, L, e) => { const ld = a && a.lead; if (!ld) return "–";
+  const t = [1, 2, 3, 4, 5, 6].map(i => L[(e || "arm") + "_lead_tau" + i]);
   if (t.some(v => v === null || v === undefined)) return `budget ${ld.lead_torque.join(" / ")} Nm`;
   return t.map((v, i) => `${Math.abs(v).toFixed(1)}/${ld.lead_torque[i]}`).join("  ") + ` Nm${ld.binding ? " (bound)" : ""}; binds ${ld.binds}`; };
 RU.sse("events", s => {
@@ -145,11 +150,12 @@ RU.sse("events", s => {
     ["base mode", s.hints.base.mode],
     ["limited by", s.limited_by],
     ["solve", `${g(L.solve_ms, 3)} ms, ${g(L.solves, 0)} QP(s), status ${L.status}`],
-    ["EE error", `QP shortfall ${g(L.arm_err_pos, 4)} m, ${g(L.arm_err_rot, 3)} rad; actual ${g(L.arm_err_meas_pos, 4)} m, ${g(L.arm_err_meas_rot, 3)} rad; lead ${g(L.arm_lead_pos, 4)} m, ${g(L.arm_lead_rot, 3)} rad`],
-    ["joint lead", leadText(s, L)],
+    ...EES.flatMap(e => { const x = k => L[e + "_" + k], arm = (s.arms && s.arms[e]) || (e === EES[0] ? s.arm : null), pre = EES.length > 1 ? e + " " : "";
+      return [[pre + "EE error", `QP shortfall ${g(x("err_pos"), 4)} m, ${g(x("err_rot"), 3)} rad; actual ${g(x("err_meas_pos"), 4)} m, ${g(x("err_meas_rot"), 3)} rad; lead ${g(x("lead_pos"), 4)} m, ${g(x("lead_rot"), 3)} rad`],
+              [pre + "joint lead", leadText(arm, L, e)]]; }),
     ["base", `${g(L.base_x, 3)}, ${g(L.base_y, 3)} m, ${g(L.base_yaw, 3)} rad (reset ${s.estimator.reset_id})`],
     ["estimator", `${s.estimator.health}, age ${g(s.estimator.age, 3)} s`],
-    ["arm", `${s.arm.state || "–"}, age ${g(s.arm.age, 3)} s, resyncs ${s.arm.resyncs}`],
+    ...Object.entries(s.arms || {arm: s.arm}).map(([e, a]) => [e, `${a.state || "–"}, age ${g(a.age, 3)} s, resyncs ${a.resyncs}`]),
     ["session", `${s.session.session || "–"} udp ${s.session.udp_port}, accepted ${s.session.accepted}, input age ${g(s.session.input_age, 3)} s`],
     ["dropped", JSON.stringify(s.session.dropped)],
     ["lease", s.lease.held ? `${s.lease.holder} (${g(s.lease.expires_in, 2)} s)` : "free"],
@@ -158,7 +164,7 @@ RU.sse("events", s => {
   $("#kv").innerHTML = kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
   $("#events").innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level === "warn" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
-function draw(){ Object.values(plots).forEach(p => p.draw()); requestAnimationFrame(draw); }
+function draw(){ Object.values(plots || {}).forEach(p => p.draw()); requestAnimationFrame(draw); }
 requestAnimationFrame(draw);
 </script></body></html>
 """

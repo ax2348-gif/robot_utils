@@ -132,10 +132,18 @@ class AgentNav:
     def __init__(self, pose_servo: str = "pose_servo", perception: str = "3d_perception",
                  estimator: str = "estimator", data_dir: str = DATA_DIR, profile: str = "cautious",
                  require_imu: bool = True, description: Optional[str] = "description", arm: Optional[str] = "arm",
-                 swerve: Optional[str] = "swerve", cameras: Optional[dict] = None):
+                 swerve: Optional[str] = "swerve", cameras: Optional[dict] = None, arms: Optional[list] = None):
+        """``arm``: the one arm node; ``arms``: several (a bimanual robot: arm_left, arm_right), the first the primary
+        one that ``/arm/*`` and ``enable`` mean; each is ``/arms/{name}/*`` with its own lease held here (a list of
+        instance names, or {name: target}))."""
         self.cameras = dict(CAMERAS if cameras is None else cameras)
+        arm_targets = dict(arms) if isinstance(arms, dict) else {a: a for a in (arms if arms is not None else [arm]) if a}
+        self.arm_names = list(arm_targets)
         self.targets = {"pose_servo": pose_servo, "perception": perception, "estimator": estimator,
-                        "description": description, "arm": arm, "swerve": swerve}
+                        "description": description, "arm": arm_targets[self.arm_names[0]] if self.arm_names else None,
+                        "swerve": swerve}
+        for a, t in arm_targets.items():
+            self.targets[f"arm:{a}"] = t
         self.data_dir = data_dir
         self.events = EventLog()
         self.lock = threading.RLock()
@@ -165,8 +173,8 @@ class AgentNav:
         self._failsafe_episode = False   # a fail-safe stop was sent for the current motion
         self.alignment = {"force": False, "deadzone_m": ALIGN_DEADZONE_M, "hysteresis_deg": ALIGN_HYSTERESIS_DEG,
                           "last": None}
-        self.arm = {"token": None, "lease_id": None, "heartbeat": 1.0, "enabled": False, "jams_seen": None,
-                    "error": None}
+        self.arm_states = {a: {"token": None, "lease_id": None, "heartbeat": 1.0, "enabled": False, "jams_seen": None,
+                               "error": None} for a in (self.arm_names or ["arm"])}
         self.anomaly = {"checking": False, "ref": None, "push": None, "count": 0, "last": None}
         self._base_busy_t = 0.0                 # monotonic s the base was last driven (goal, braking, holding, stop)
         self._swerve_lease = (0.0, None)        # (monotonic s read, holder or None)
@@ -181,6 +189,25 @@ class AgentNav:
                          threading.Thread(target=self._arm_loop, name="arm", daemon=True)]
 
     # -- clients ------------------------------------------------------------------------------
+
+    # -- the arms: one lease state per arm node; the primary (the first) under the one-arm names --------------
+
+    @property
+    def arm(self) -> dict:
+        """The primary arm's lease state."""
+        return self.arm_states[next(iter(self.arm_states))]
+
+    def _arm_name(self, arm: Optional[str]) -> str:
+        if arm is None:
+            return next(iter(self.arm_states))
+        if arm not in self.arm_states:
+            raise RequestError(404, f"no arm {arm!r} (arms: {', '.join(self.arm_names) or 'none'})")
+        return arm
+
+    def _arm_key(self, arm: Optional[str]) -> str:
+        """The targets key of an arm: ``arm`` for the primary, ``arm:<name>`` for the others."""
+        name = self._arm_name(arm)
+        return "arm" if name == next(iter(self.arm_states)) else f"arm:{name}"
 
     def _client(self, key: str, timeout: float = 5.0) -> NodeClient:
         t = self.targets.get(key)
@@ -428,11 +455,20 @@ class AgentNav:
         if base:
             reply.update(self._enable_base(actor, caps, name))
         if arm:
+            arms = {}
+            for a in (self.arm_names[1:] if len(self.arm_names) > 1 else []):    # the others first, the primary last
+                try:
+                    out = self._arm_enable(name, a)
+                    arms[a] = {"enabled": True, "state": out.get("state"), "lease_id": self.arm_states[a]["lease_id"]}
+                except RequestError as e:
+                    arms[a] = {"enabled": False, "error": str(e)}
             try:
                 out = self._arm_enable(name)
                 reply["arm"] = {"enabled": True, "state": out.get("state"), "lease_id": self.arm["lease_id"]}
             except RequestError as e:
                 reply["arm"] = {"enabled": False, "error": str(e)}
+            if arms:
+                reply["arms"] = {self.arm_names[0]: reply["arm"], **arms}
         if actor == "human":
             with self.lock:
                 self.latch = None
@@ -483,6 +519,9 @@ class AgentNav:
                 if actor == "human":
                     self.latch = {"why": "disabled on the page", "t": time.time()}
             arm_err = self._arm_release()
+            for a in self.arm_names[1:]:                  # the other arms too (a bimanual robot)
+                e = self._arm_release(a)
+                arm_err = arm_err or (e and f"{a}: {e}")
         reply = {"enabled": False, "latched": self.latch is not None}
         if arm_err:
             reply["arm_error"] = arm_err
@@ -521,14 +560,18 @@ class AgentNav:
             self.enabled_by = None
             if actor == "human":
                 self.latch = {"why": "e-stop from the page", "t": time.time()}
-        if self.targets.get("arm"):            # the arm too (anyone may; it latches there until its holder clears it)
+        for i, name in enumerate(self.arm_names):  # every arm (anyone may; it latches there until its holder clears it)
             try:
                 a = self._arm_call("POST", "/estop", {"reason": f"agent_interface ({actor}): {reason}", "source": actor},
-                                   timeout=2)
-                out = {**out, "arm": {"latched": bool(a.get("latched"))}}
+                                   timeout=2, arm=name)
+                res = {"latched": bool(a.get("latched"))}
             except RequestError as e:
-                out = {**out, "arm": {"latched": False, "error": str(e)}}
-            self._arm_forget()
+                res = {"latched": False, "error": str(e)}
+            self._arm_forget(name)
+            if i == 0:
+                out = {**out, "arm": res}
+            else:
+                out = {**out, "arms": {**out.get("arms", {self.arm_names[0]: out["arm"]}), name: res}}
         self.turn(actor, "estop", {"reason": reason}, out, comment, level="warn")
         return out
 
@@ -1320,27 +1363,31 @@ class AgentNav:
     # -- the arm (forwarded to the arm node; this node holds its lease for the session) -------------------
 
     def _arm_call(self, method: str, path: str, body=None, timeout: float = 5.0, lease: bool = False,
-                  client: Optional[NodeClient] = None):
+                  client: Optional[NodeClient] = None, arm: Optional[str] = None):
         """One arm node request. A refusal keeps the arm's status and its machine-readable fields (`code`, `retry`,
         `nearest`, ...); `lease`: with this node's arm lease token (409 if the arm isn't enabled through here);
-        `client`: a kept arm client to send it on (the arm loop's), else a fresh one for this call."""
+        `client`: a kept arm client to send it on (the arm loop's), else a fresh one for this call; `arm`: which
+        arm (None: the primary)."""
         headers = {}
+        st, key = self.arm_states[self._arm_name(arm)], self._arm_key(arm)
+        label = "arm" if key == "arm" else self._arm_name(arm)
         if lease:
-            tok = self.arm["token"]
+            tok = st["token"]
             if tok is None:
-                raise RequestError(409, "the arm is not enabled through agent_interface: POST /enable (or /arm/enable)")
+                raise RequestError(409, f"{label} is not enabled through agent_interface: POST /enable (or "
+                                        f"{'/arm' if key == 'arm' else '/arms/' + label}/enable)")
             headers["X-Lease-Token"] = tok
         try:
             if client is not None:
                 r = client.http.request(method, path, json=body if method == "POST" else None, headers=headers,
                                         timeout=timeout)
             else:
-                with self._client("arm", timeout) as c:
+                with self._client(key, timeout) as c:
                     r = c.http.request(method, path, json=body if method == "POST" else None, headers=headers)
         except RequestError:
             raise
         except Exception as e:
-            raise RequestError(503, f"arm unreachable: {type(e).__name__}: {e}")
+            raise RequestError(503, f"{label} unreachable: {type(e).__name__}: {e}")
         try:
             data = r.json() if r.content else None
         except ValueError:
@@ -1351,84 +1398,94 @@ class AgentNav:
             extra = {k: v for k, v in d.items() if k != "detail"}
             if not isinstance(detail, str):          # FastAPI validation errors: a list
                 extra["errors"], detail = detail, "invalid request"
-            raise RequestError(r.status_code if r.status_code < 500 else 502, f"arm: {detail}", extra)
+            raise RequestError(r.status_code if r.status_code < 500 else 502, f"{label}: {detail}", extra)
         return data
 
-    def _arm_enable(self, name: str) -> dict:
-        if self.arm["token"] is None:
-            got = self._arm_call("POST", "/lease", {"client": f"agent_interface: {name}"})
+    def _arm_enable(self, name: str, arm: Optional[str] = None) -> dict:
+        st = self.arm_states[self._arm_name(arm)]
+        if st["token"] is None:
+            got = self._arm_call("POST", "/lease", {"client": f"agent_interface: {name}"}, arm=arm)
             with self.lock:
-                self.arm.update(token=got["token"], lease_id=got["lease_id"], heartbeat=float(got.get("heartbeat") or 1.0),
-                                error=None, jams_seen=None)
-        out = self._arm_call("POST", "/enable", lease=True, timeout=40)      # the first: the gripper check (seconds)
+                st.update(token=got["token"], lease_id=got["lease_id"], heartbeat=float(got.get("heartbeat") or 1.0),
+                          error=None, jams_seen=None)
+        out = self._arm_call("POST", "/enable", lease=True, timeout=40, arm=arm)   # the first: the gripper check (s)
         with self.lock:
-            self.arm["enabled"] = True
+            st["enabled"] = True
         return out
 
-    def _arm_forget(self) -> None:
+    def _arm_forget(self, arm: Optional[str] = None) -> None:
         with self.lock:
-            self.arm.update(token=None, lease_id=None, enabled=False, jams_seen=None)
+            self.arm_states[self._arm_name(arm)].update(token=None, lease_id=None, enabled=False, jams_seen=None)
 
-    def _arm_release(self) -> Optional[str]:
-        """Disable the arm and release its lease (None, or why it failed; the lease is forgotten either way)."""
-        if self.arm["token"] is None:
+    def _arm_release(self, arm: Optional[str] = None) -> Optional[str]:
+        """Disable an arm and release its lease (None, or why it failed; the lease is forgotten either way)."""
+        if self.arm_states[self._arm_name(arm)]["token"] is None:
             return None
         err = None
         for path, method in (("/disable", "POST"), ("/lease", "DELETE")):
             try:
-                self._arm_call(method, path, lease=True)
+                self._arm_call(method, path, lease=True, arm=arm)
             except RequestError as e:
                 err = err or str(e)
-        self._arm_forget()
+        self._arm_forget(arm)
         return err
 
     def _arm_loop(self):
-        """Keep the arm lease while it is held here; report new arm jams as robot turns (`since_last_call`)."""
-        last_renew = 0.0
-        c = None        # one arm client for this thread's polls; dropped when the arm is unreachable (503)
+        """Keep each arm's lease while it is held here; report new arm jams as robot turns (`since_last_call`)."""
+        last_renew = {a: 0.0 for a in self.arm_states}
+        clients: dict = {}  # one client per arm for this thread's polls; dropped when that arm is unreachable (503)
         while not self.stop_ev.is_set():
             time.sleep(ARM_POLL_S)
-            if not self.targets.get("arm") or self.arm["token"] is None:
-                continue
-            if c is None:
-                try:
-                    c = self._client("arm", 2)
-                except RequestError:
+            for a, st in self.arm_states.items():
+                key = self._arm_key(a)
+                label = "arm" if key == "arm" else a
+                if not self.targets.get(key) or st["token"] is None:
                     continue
-            now = time.monotonic()
-            if now - last_renew >= self.arm["heartbeat"] / 3:
-                try:
-                    self._arm_call("POST", "/lease/renew", lease=True, timeout=2, client=c)
-                    last_renew = now
-                except RequestError as e:
-                    if e.status == 503:
-                        c.close()
-                        c = None
-                    if e.status in (401, 403, 409):
-                        self._arm_forget()
-                        self.arm["error"] = str(e)
-                        self._robot_turn(f"arm lease lost ({e}): the arm is no longer enabled through agent_interface; "
-                                         "POST /arm/enable to take it again", level="warn", source="arm")
+                c = clients.get(a)
+                if c is None:
+                    try:
+                        c = clients[a] = self._client(key, 2)
+                    except RequestError:
                         continue
-            try:
-                self._jam_events(self._arm_call("GET", "/jam", timeout=2, client=c))
-            except RequestError as e:
-                if e.status == 503 and c is not None:
-                    c.close()
-                    c = None
-        if c is not None:
-            c.close()
+                now = time.monotonic()
+                if now - last_renew[a] >= st["heartbeat"] / 3:
+                    try:
+                        self._arm_call("POST", "/lease/renew", lease=True, timeout=2, client=c, arm=a)
+                        last_renew[a] = now
+                    except RequestError as e:
+                        if e.status == 503:
+                            c.close()
+                            c = clients[a] = None
+                        if e.status in (401, 403, 409):
+                            self._arm_forget(a)
+                            st["error"] = str(e)
+                            route = "/arm" if key == "arm" else f"/arms/{a}"
+                            self._robot_turn(f"{label} lease lost ({e}): the {label} is no longer enabled through "
+                                             f"agent_interface; POST {route}/enable to take it again", level="warn",
+                                             source="arm")
+                            continue
+                try:
+                    self._jam_events(self._arm_call("GET", "/jam", timeout=2, client=c, arm=a), a)
+                except RequestError as e:
+                    if e.status == 503 and c is not None:
+                        c.close()
+                        clients[a] = None
+        for c in clients.values():
+            if c is not None:
+                c.close()
 
-    def _jam_events(self, j: dict) -> None:
+    def _jam_events(self, j: dict, arm: Optional[str] = None) -> None:
+        st = self.arm_states[self._arm_name(arm)]
+        label = "arm" if self._arm_key(arm) == "arm" else self._arm_name(arm)
         count = int(j.get("count") or 0)
-        seen = self.arm["jams_seen"]
-        self.arm["jams_seen"] = count
+        seen = st["jams_seen"]
+        st["jams_seen"] = count
         if seen is None or count <= seen:
             return                                   # the first read is the baseline: jams from before aren't ours
         for jam in (j.get("recent") or []):
             if jam.get("count", 0) <= seen:
                 continue
-            what = (f"arm jam: joint{jam['joint']} residual {jam['residual_nm']:+.1f} Nm (band {jam['band_nm']:g}) "
+            what = (f"{label} jam: joint{jam['joint']} residual {jam['residual_nm']:+.1f} Nm (band {jam['band_nm']:g}) "
                     f"for {jam['held_s']:.1f} s while static")
             if jam.get("response") == "hold":
                 what += (": the arm stopped pushing and holds where it is (its move ended `jammed`). Back off along "
@@ -1442,44 +1499,51 @@ class AgentNav:
         if self.latch is not None and actor != "human":
             raise RequestError(423, f"held by the human operator ({self.latch['why']})")
 
-    def arm_enable(self, actor: str, comment: str = "") -> dict:
+    def _with_arm(self, req: dict, arm: Optional[str]) -> dict:
+        """A transcript request, naming the arm when it is not the primary one."""
+        return req if arm is None or self._arm_key(arm) == "arm" else {**req, "arm": arm}
+
+    def arm_enable(self, actor: str, comment: str = "", arm: Optional[str] = None) -> dict:
         self._need_arm_motion(actor)
         name = (self.session or {}).get("agent", "human") if actor == "agent" else "human"
-        out = self._arm_enable(name)
-        self.turn(actor, "arm_enable", {}, out, comment)
+        out = self._arm_enable(name, arm)
+        self.turn(actor, "arm_enable", self._with_arm({}, arm), out, comment)
         return out
 
-    def arm_disable(self, actor: str, comment: str = "") -> dict:
-        err = self._arm_release()
+    def arm_disable(self, actor: str, comment: str = "", arm: Optional[str] = None) -> dict:
+        err = self._arm_release(arm)
         reply = {"enabled": False}
         if err:
             reply["error"] = err
-        self.turn(actor, "arm_disable", {}, reply, comment, level="warn" if err else "info")
+        self.turn(actor, "arm_disable", self._with_arm({}, arm), reply, comment, level="warn" if err else "info")
         return reply
 
     def arm_forward(self, actor: str, kind: str, method: str, path: str, body: Optional[dict] = None,
-                    comment: str = "", lease: bool = True, timeout: float = 15.0) -> dict:
-        """A forwarded arm call as a transcript turn; the reply is the arm node's, unchanged."""
+                    comment: str = "", lease: bool = True, timeout: float = 15.0, arm: Optional[str] = None) -> dict:
+        """A forwarded arm call as a transcript turn; the reply is the arm node's, unchanged (``arm``: which arm;
+        None the primary)."""
         if lease:
             self._need_arm_motion(actor)
+        req = self._with_arm(body or {}, arm)
         try:
-            out = self._arm_call(method, path, body, lease=lease, timeout=timeout)
+            out = self._arm_call(method, path, body, lease=lease, timeout=timeout, arm=arm)
         except RequestError as e:
-            self.turn(actor, kind, body or {}, {"error": str(e), "status": e.status, **e.extra}, comment, level="warn")
+            self.turn(actor, kind, req, {"error": str(e), "status": e.status, **e.extra}, comment, level="warn")
             e.logged = True
             raise
-        self.turn(actor, kind, body or {}, out if isinstance(out, dict) else {"reply": out}, comment)
+        self.turn(actor, kind, req, out if isinstance(out, dict) else {"reply": out}, comment)
         return out
 
-    def arm_servo(self, actor: str, body: dict, align_wheels: bool = True, comment: str = "") -> dict:
+    def arm_servo(self, actor: str, body: dict, align_wheels: bool = True, comment: str = "",
+                  arm: Optional[str] = None) -> dict:
         """POST /arm/servo: defensive wheel alignment first (unless off and not forced), then the arm's planned move."""
         self._need_arm_motion(actor)
-        if self.arm["token"] is None:
+        if self.arm_states[self._arm_name(arm)]["token"] is None:
             raise RequestError(409, "the arm is not enabled through agent_interface: POST /enable (or /arm/enable)")
-        align = self._defend(body.get("pose"), align_wheels)
-        req = {**body, "align_wheels": align_wheels}
+        align = self._defend(body.get("pose"), align_wheels, arm)
+        req = self._with_arm({**body, "align_wheels": align_wheels}, arm)
         try:
-            out = self._arm_call("POST", "/servo", body, lease=True, timeout=15)
+            out = self._arm_call("POST", "/servo", body, lease=True, timeout=15, arm=arm)
         except RequestError as e:
             self.turn(actor, "arm_servo", req, {"error": str(e), "status": e.status, **e.extra, "align": align},
                       comment, level="warn")
@@ -1491,7 +1555,7 @@ class AgentNav:
 
     # -- defensive wheel alignment ------------------------------------------------------------------------
 
-    def _defend(self, pose: Optional[dict], requested: bool) -> dict:
+    def _defend(self, pose: Optional[dict], requested: bool, arm: Optional[str] = None) -> dict:
         """Set the wheels (drives coasting) along the arm move's horizontal direction, so a push from the arm rolls
         the base instead of dragging the tyres sideways. Skipped (and said) when it can't or needn't."""
         a = self.alignment
@@ -1510,7 +1574,7 @@ class AgentNav:
         ps = self._call("pose_servo", "GET", "/state", timeout=2)
         if ps.get("status") != "idle":
             return skip(f"the base is {ps.get('status')}: only an idle base is aligned")
-        tcp = self._arm_call("GET", "/kinematics", timeout=3)["tcp"]["pos"]     # arm frame: axes parallel to the base's
+        tcp = self._arm_call("GET", "/kinematics", timeout=3, arm=arm)["tcp"]["pos"]   # arm frame: axes parallel to the base's
         dx, dy = pose["pos"][0] - tcp[0], pose["pos"][1] - tcp[1]
         d = math.hypot(dx, dy)
         res["travel_m"] = round(d, 3)
@@ -1733,6 +1797,9 @@ class AgentNav:
                 "alignment": dict(self.alignment),
                 "arm": {"held": self.arm["token"] is not None, "lease_id": self.arm["lease_id"],
                         "enabled": self.arm["enabled"], "jams_seen": self.arm["jams_seen"], "error": self.arm["error"]},
+                **({"arms": {a: {"held": s["token"] is not None, "lease_id": s["lease_id"], "enabled": s["enabled"],
+                                 "jams_seen": s["jams_seen"], "error": s["error"]} for a, s in self.arm_states.items()}}
+                   if len(self.arm_states) > 1 else {}),
                 "anomaly": {"checking": self.anomaly["checking"], "pushing": self.anomaly["push"] is not None,
                             "count": self.anomaly["count"], "last": self.anomaly["last"]},
                 "snapshots": list(self.snapshots.keys())[-10:],

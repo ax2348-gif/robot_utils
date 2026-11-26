@@ -50,9 +50,9 @@ def _font(px: int):
 
 def box_edges(frames: Sequence, gap: float) -> list:
     """World-space segments of the arm's boxes: [(kind, a, b)], kind = "base" | "link" | "jaw".
-    ``frames``: 8 (pos, R) pairs as /links gives them (joint1..joint6 frames, end_link, tcp)."""
+    ``frames``: N + 2 (pos, R) pairs as /links gives them (joint1..jointN frames, end_link, tcp)."""
     I = (np.zeros(3), np.eye(3))
-    F = {"base": I, "end": frames[6], **{f"link{i + 1}": frames[i] for i in range(6)}}
+    F = {"base": I, "end": frames[-2], **{f"link{i + 1}": frames[i] for i in range(len(frames) - 2)}}
     out = []
 
     def add(T, b, sy, kind):
@@ -64,7 +64,7 @@ def box_edges(frames: Sequence, gap: float) -> list:
     for b in ARM_BOXES:
         if b[0] in F:
             add(F[b[0]], b, 1, "base" if b[0] == "base" else "link")
-    E = frames[6]
+    E = frames[-2]
     for sgn in (1, -1):
         Tj = (np.asarray(E[0], float) + np.asarray(E[1], float) @ np.array([0, sgn * gap / 2, 0]), E[1])
         for b in ARM_BOXES:
@@ -170,11 +170,11 @@ def render_ik(meas: Sequence, gap: float, sol: Sequence, target, nearest, info: 
     for kind, a, b in segs_s:
         if kind != "base":                          # the base doesn't move
             line(a, b, ghost, 1.6 if kind == "jaw" else 1.2, (6, 4))
-    for k in range(6):
+    for k in range(len(meas) - 2):
         ring(meas[k][0], 3, INK, 1.5)
         ring(sol[k][0], 3, ghost, 1.5)
     at = set(info.get("joints_at_limit") or [])
-    for k, n in enumerate(joint_names[:6]):
+    for k, n in enumerate(joint_names[:len(meas) - 2]):
         if n in at:
             ring(sol[k][0], 9, LIMIT, 2.5)
             text(sol[k][0], f"{n} at limit", LIMIT, small, 10, 14)

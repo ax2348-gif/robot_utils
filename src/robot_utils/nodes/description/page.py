@@ -70,7 +70,7 @@ table.ru-table td,table.ru-table th{font-size:12px}
 const $ = s => document.querySelector(s), D = 180 / Math.PI;
 const err = m => $("#err").textContent = m || "";
 const estop = RU.estopButton($("#estop"));
-let DESC = null, ST = null, polys = [], cur = [], ARM = null;   // ARM: the arm's live links (below)
+let DESC = null, ST = null, polys = [], cur = [], ARMS = {};   // ARMS: each arm's live links by name (below)
 const cam = () => $("#cam").value || "camera";
 async function call(path, body, method){ try { err(""); return await RU.api(path, {method: method || "POST", body}); } catch(e){ err(e.message); throw e; } }
 
@@ -159,11 +159,13 @@ RU.sse("events", st => { ST = st; estop.update(st);
   $("#events").innerHTML = st.events.slice().reverse().map(e => `<div class="${e.level === "error" ? "ru-ev-error" : e.level !== "info" ? "ru-ev-warn" : ""}">${new Date(e.wall * 1000).toLocaleTimeString()} ${e.msg}</div>`).join("");
 });
 loadDesc().then(refreshImg); loadCals(); setInterval(loadDesc, 5000);
-// the arm, live: its link frames from the arm node (../arm/, the robot's proxy) at 5 Hz and the gripper gap;
-// read only. Without it the 3D view shows the mount alone.
-(async () => { for (;;){ try { const [l, gr] = await Promise.all([RU.api("../arm/links"), RU.api("../arm/gripper")]);
-    ARM = {frames: l.frames, gap: (gr.gap_mm ?? NaN) / 1000, at: performance.now()}; drawViews(); } catch (_) {}
-  await new Promise(r => setTimeout(r, 200)); } })();
+// each arm, live: its link frames from its arm node (../<arm>/, the robot's proxy; the description's arms: one "arm",
+// or arm_left / arm_right) at 5 Hz and the gripper gap; read only. Without it the 3D view shows the mount alone.
+(async () => { for (;;){ const names = ((DESC && DESC.arms) || [{name: "arm"}]).map(a => a.name);
+  await Promise.all(names.map(async n => { try { const [l, gr] = await Promise.all([RU.api("../" + n + "/links"), RU.api("../" + n + "/gripper")]);
+    ARMS[n] = {frames: l.frames, gap: (gr.gap_mm ?? NaN) / 1000, at: performance.now(), mirror: !!l.mirror,
+              boxes: l.boxes || null}; } catch (_) {} }));
+  drawViews(); await new Promise(r => setTimeout(r, 200)); } })();
 </script></body></html>
 """
 PAGE = PAGE.replace("/*VIZ_CSS*/", VIZ_CSS).replace("/*VIZ_HTML*/", VIZ_HTML).replace("/*VIZ_JS*/", VIZ_JS)

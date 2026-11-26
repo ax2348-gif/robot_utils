@@ -6,7 +6,9 @@
   target and measured TCP poses from its stream, its TCP offset from ``/state``), which the sim applies to its own
   end link. Both poses come from the same estimate, so estimator drift cancels. Colour: severity s = max(|tgt -
   meas| / ``ghost_pos_red``, angle / ``ghost_rot_red``): green at 0, yellow at 0.5, red from 1; see-through
-  (``ghost_alpha``). Hidden (its ttl lapses) while there is no target (disarmed, released, disabled).
+  (``ghost_alpha``). Hidden (its ttl lapses) while there is no target (disarmed, released, disabled). One ghost per
+  end effector the teleop drives (two hands: ``ee_goal_arm_left``, ``ee_goal_arm_right``, each from its own
+  ``<ee>_tgt_*`` / ``<ee>_meas_*``, its own end link and TCP, coloured by its own error; one: ``ee_goal``).
 - **Auto pause** (optional, off by default): sim time stops while the operator is neither clutched (grip engaged)
   nor commanding the base (both sticks inside their dead zone) for ``pause_hold`` s, and runs again at the first
   grip or stick motion. Only while teleop runs, never during an episode's sim reset; the node only resumes what it
@@ -37,7 +39,7 @@ GREEN, YELLOW, RED = (0.25, 0.9, 0.45), (1.0, 0.85, 0.2), (1.0, 0.25, 0.2)
 @dataclass
 class AidsConfig:
     ghost: bool = True
-    ghost_alpha: float = 0.35
+    ghost_alpha: float = 0.15             # see-through (0.35 was clutter with Anvil's detailed gripper, 2026-11-26)
     ghost_pos_red: float = 0.05            # m: target - measured at which the ghost is fully red
     ghost_rot_red: float = math.radians(20)  # rad
     ghost_ttl: float = 0.3                 # s: hidden when not posted again within it
@@ -75,8 +77,8 @@ class SimAids:
         self.cfg = cfg or AidsConfig()
         self.paused_by_us = False
         self.last_active = 0.0
-        self.ee_link: Optional[str] = None
-        self.tcp: Optional[list] = None
+        self.links: dict = {}            # EE -> the WBC's end link of it (the sim's body name)
+        self.tcps: dict = {}             # EE -> its TCP offset in that link
         self.error: Optional[str] = None
         self.posted = 0
         self.pauses = 0
@@ -95,6 +97,30 @@ class SimAids:
         self._resume("node shutting down")
         if self._sim is not None:
             self._sim.close()
+
+    def ees(self) -> list:
+        """The end effectors the teleop drives: both hands' (``cfg.hands``) or the one."""
+        cfg = self.node.cfg
+        return list((getattr(cfg, "hands", None) or {}).values()) or [cfg.ee]
+
+    def ghost_name(self, ee: str) -> str:
+        return GHOST if len(self.ees()) <= 1 else f"{GHOST}_{ee}"
+
+    @property
+    def ee_link(self) -> Optional[str]:
+        return self.links.get(self.node.cfg.ee)
+
+    @ee_link.setter
+    def ee_link(self, link: Optional[str]) -> None:
+        self.links[self.node.cfg.ee] = link
+
+    @property
+    def tcp(self) -> Optional[list]:
+        return self.tcps.get(self.node.cfg.ee)
+
+    @tcp.setter
+    def tcp(self, tcp: Optional[list]) -> None:
+        self.tcps[self.node.cfg.ee] = tcp
 
     def info(self) -> dict:
         c = self.cfg
@@ -115,7 +141,8 @@ class SimAids:
         self.cfg.ghost = bool(on)
         self.node.events.add(f"goal ghost {'on' if on else 'off'}")
         if not on:
-            self._call("delete", f"/ghosts/{GHOST}")
+            for ee in self.ees():
+                self._call("delete", f"/ghosts/{self.ghost_name(ee)}")
         self.node.hub.state_changed()
         return self.info()
 
@@ -188,30 +215,39 @@ class SimAids:
             self.node.hub.state_changed()
 
     def _ghost(self) -> None:
-        if self.tcp is None:
+        ees = self.ees()
+        if any(e not in self.tcps for e in ees):
             self._read_tcp()
-            if self.tcp is None:
+            if not self.tcps:
                 return
         row, _ = self.node.stream.latest()
-        g = goal_in_link(row or {}, self.node.cfg.ee, self.tcp)
-        if g is None:
-            return                                   # no target: the posted ghost lapses (hidden)
-        delta, ep, er = g
-        body = {"source": SOURCE, "ghosts": [{"name": GHOST, "body": self.ee_link, "subtree": True,
-                                              "relative": [round(float(x), 6) for x in delta],
-                                              "rgba": severity_color(ep, er, self.cfg), "ttl": self.cfg.ghost_ttl}]}
-        if self._call("post", "/ghosts", body) is not None:
-            self.posted += 1
+        ghosts = []
+        for ee in ees:                               # each EE its own ghost, from its own columns, link and TCP
+            if ee not in self.tcps:
+                continue
+            g = goal_in_link(row or {}, ee, self.tcps[ee])
+            if g is None:
+                continue                             # no target: the posted ghost lapses (hidden)
+            delta, ep, er = g
+            ghosts.append((ee, {"name": self.ghost_name(ee), "body": self.links[ee], "subtree": True,
+                                "relative": [round(float(x), 6) for x in delta],
+                                "rgba": severity_color(ep, er, self.cfg), "ttl": self.cfg.ghost_ttl}))
+        for ee, gh in ghosts:                        # one post per arm: its source names the arm (two hands)
+            src = SOURCE if len(ees) <= 1 else f"{SOURCE}/{ee}"
+            if self._call("post", "/ghosts", {"source": src, "ghosts": [gh]}) is not None:
+                self.posted += 1
 
     def _read_tcp(self) -> None:
-        """The WBC's end link and TCP offset for this EE (its /state model), and the sim's name for that link."""
+        """The WBC's end link and TCP offset of each EE (its /state model): the sim's names for those links."""
         try:
             with NodeClient.for_instance(self.node.wbc_target, timeout=1.0) as w:
-                ee = ((w.get("/state").get("model") or {}).get("ees") or {}).get(self.node.cfg.ee) or {}
-            link, tcp = ee.get("link"), ee.get("tcp")
-            if not link or tcp is None:
-                self.error = "the WBC's model has no EE link / TCP yet"
-                return
-            self.ee_link, self.tcp = link, [float(x) for x in tcp]
+                model_ees = (w.get("/state").get("model") or {}).get("ees") or {}
+            for name in self.ees():
+                ee = model_ees.get(name) or {}
+                link, tcp = ee.get("link"), ee.get("tcp")
+                if not link or tcp is None:
+                    self.error = f"the WBC's model has no link / TCP for {name} yet"
+                    continue
+                self.links[name], self.tcps[name] = link, [float(x) for x in tcp]
         except Exception as e:  # noqa: BLE001
             self.error = f"WBC /state: {type(e).__name__}: {e}"[:200]

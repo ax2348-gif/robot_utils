@@ -29,8 +29,9 @@ from ..common.lease import RequestError
 from ..common.server import EventLog
 from .client import (DEFAULT_PORT, MAX_LATENCY_S, MIN_RATE_HZ, STALE_S, Config, EpisodeButtons, LocalWbcClient,
                      QuestReader, TeleopClient, WbcStream, assert_caps, close_wbc, open_wbc, quest_ctl,
-                     set_top_speed, top_speed_caps, x_pressed)
+                     MIRROR_MODES, TRANSIENT_CLASSES, ResumeConfig, input_class, set_top_speed, top_speed_caps, x_pressed)
 from .episodes import RESET_TIMEOUT, Episodes
+from .haptics import Haptics, NodeSources
 from .sim_aids import AidsConfig, SimAids
 from .eventlog import CAP_BYTES, TeleopEventLog
 from .oplog import OpLog
@@ -89,7 +90,10 @@ _COLS = [
     ("quest_latency", "s", "the newest headset frame's latency over the session's best (arrival - sample time)"),
     ("quest_rate_short", "Hz", "valid headset frames over the last 0.5 s (below 30 Hz: stale, disarms)"),
     ("battery_pct", "%", "the headset battery (its telemetry's device block; NaN when not reported)"),
+    ("tier", "enum", "the client's recovery tier: 0 disarmed (Y arms), 1 hold (a transient: release and re-grip "
+                     "resumes), 2 armed"),
 ]
+TIERS = ["disarmed", "hold", "armed"]
 FIELDS = [c[0] for c in _COLS]
 UNITS = [c[1] for c in _COLS]
 FIELD_DOC = {c[0]: c[2] for c in _COLS if c[2]}
@@ -121,6 +125,9 @@ class HeadsetMonitor:
         self.last: Optional[dict] = None
         self.last_t: Optional[float] = None
         self.frames = 0
+        self.body = None                             # the newest parsed body block (quest_teleop body.py)
+        self.body_t: Optional[float] = None          # its arrival (our clock)
+        self.body_frames = 0
         self.on_frame: Optional[Callable] = None     # (t_rx, frame) for every frame (the operator stream)
         self._lock = threading.Lock()
 
@@ -131,6 +138,10 @@ class HeadsetMonitor:
             self.arrivals.append(f.arrived)
             self.last, self.last_t = f.data, f.arrived
             self.frames += 1
+            b = getattr(f, "body", None)
+            if b is not None:
+                self.body, self.body_t = b, f.arrived
+                self.body_frames += 1
         if self.on_frame is not None:
             self.on_frame(f.arrived, f.data)
 
@@ -170,6 +181,20 @@ class HeadsetMonitor:
                 "temperature_c": dev.get("temperature_c") if isinstance(dev.get("temperature_c"), (int, float))
                 else None, "text": quest_ctl.QuestCtl.battery(SimpleNamespace(device=dev, live=True))}
 
+    def body_info(self, now: float) -> dict:
+        """The body tracking block (quest_env BODY_TRACKING.md), summarised: ``present`` (a valid block arrived in
+        the last second), the newest block's availability / fidelity / joint counts, its ``age`` on our clock,
+        and the reader's count of malformed blocks. Information only: nothing uses the body yet."""
+        with self._lock:
+            b, t, n = self.body, self.body_t, self.body_frames
+        counts = getattr(self.reader, "counts", {}) or {}
+        out = {"present": b is not None and t is not None and now - t <= 1.0,
+               "age": None if t is None else round(now - t, 4), "frames": n,
+               "bad": counts.get("body_bad", 0), "last_error": getattr(self.reader, "last_body_error", None)}
+        if b is not None:
+            out.update(b.summary())
+        return out
+
     def snapshot(self, now: float) -> dict:
         with self._lock:
             n = sum(1 for t in self.arrivals if now - t <= 1.0)
@@ -185,7 +210,8 @@ class HeadsetMonitor:
                 "scheme": intent.get("scheme"),
                 "connects": getattr(r, "counts", {}).get("connects"),
                 "last_error": getattr(r, "last_error", None),
-                "hands": self.hands() if d else None}
+                "hands": self.hands() if d else None,
+                "body": self.body_info(now)}
 
 
 class DeadlineRunner:
@@ -206,28 +232,36 @@ class QuestTeleopNode:
                  quest_host: Optional[str] = None, quest_port: int = DEFAULT_PORT,
                  ssh_host: str = "quest", cfg: Optional[Config] = None, stale_s: float = STALE_S,
                  max_latency: float = MAX_LATENCY_S, min_rate: float = MIN_RATE_HZ,
-                 ar: str = ":80", scheme: str = "body-frozen", ctl_timeout: float = 240.0, wait: float = 30.0,
+                 ar: str = ":80", scheme: str = "body-frozen", body: str = "off", ctl_timeout: float = 240.0,
+                 wait: float = 30.0,
                  runner_factory: Optional[Callable] = None, probe: Optional[Callable] = None,
                  wbc_client_factory: Callable = LocalWbcClient, name: str = "quest_teleop",
                  clock: Callable[[], float] = time.monotonic, data_dir: Optional[str] = None,
                  log_cap_bytes: int = CAP_BYTES, sim: Optional[str] = None, reset_timeout: float = RESET_TIMEOUT,
                  aids: Optional[AidsConfig] = None, autostart: bool = False, estimator: Optional[str] = "estimator",
                  record: Optional[RecordConfig] = None,
-                 recorder_factory: Callable = SimRecorder):
+                 recorder_factory: Callable = SimRecorder, resume: Optional[ResumeConfig] = None):
         """``data_dir``: the event log's directory (``__main__``: ``~/.local/share/robot_utils/quest_teleop``; None
         keeps it in memory only); ``sim``: the sim node (instance or URL) when the stack is a sim: A resets it;
         ``record``: with ``sim``, record every teleop run (recording.py; None: off)."""
         self.name = name
         self.wbc_target = wbc
-        self.arm_target, self.swerve_target = arm, swerve     # the e-stop goes to these directly too
+        # the e-stop goes to these directly too (``arm``: one arm node, or several, comma-separated / a list)
+        arms = [a for a in (arm.split(",") if isinstance(arm, str) else (arm or [])) if a]
+        self.arm_targets = arms
+        self.arm_target = ",".join(arms) or None
+        self.swerve_target = swerve
         self.ssh_host = ssh_host
         self.quest_host = quest_host or quest_ctl.ssh_hostname(ssh_host)   # `ssh -G`: local, no network
         self.quest_port = quest_port
         self.cfg = cfg or Config()
+        # the tiered recovery (arming.py): shared with each client, so a change applies at once
+        self.resume = resume if resume is not None else ResumeConfig()
         self.stale_s = stale_s
         self.max_latency, self.min_rate = max_latency, min_rate
         self.ar = ar
         self.scheme = scheme
+        self.body = body            # quest up: Meta body tracking off / core / all (the hint sources, the elbow hint)
         self.ctl_timeout, self.wait = ctl_timeout, wait
         self.runner_factory = runner_factory or (lambda host: quest_ctl.SshRunner(host))
         self.probe = probe or quest_ctl.probe_stream
@@ -238,11 +272,13 @@ class QuestTeleopNode:
         self.reader = QuestReader(self.quest_host, quest_port)
         self.monitor = HeadsetMonitor(self.reader, clock)
         self.oplog = OpLog()
-        self.monitor.on_frame = self.oplog.headset
+        self.haptics = Haptics(NodeSources(self), clock=clock)    # controller vibration (haptics.py)
+        self.monitor.on_frame = self._on_headset_frame
         self.data_dir = data_dir
         self.eventlog = TeleopEventLog(data_dir, log_cap_bytes, clock=clock)
         self.eventlog.listeners.append(self.oplog.event)
         self.eventlog.listeners.append(lambda line: self.hub.state_changed())
+        self.eventlog.listeners.append(self.haptics.on_event)
         self.episodes = Episodes(self, sim, reset_timeout, estimator=estimator)
         self.autostart = bool(autostart and sim)     # the sim: start teleop by itself once the WBC answers
         self.sim = sim
@@ -316,6 +352,7 @@ class QuestTeleopNode:
         self._stop.set()
         for t in self._threads:
             t.join(2)
+        self.haptics.close()
         self.reader.close()
         self.stream.close()
         self.eventlog.close()               # everything queued is written first
@@ -355,6 +392,10 @@ class QuestTeleopNode:
     def set_task(self, text: str) -> dict:
         return self.episodes.set_task(text)
 
+    def _on_headset_frame(self, t_rx: float, frame: dict) -> None:
+        self.oplog.headset(t_rx, frame)
+        self.haptics.on_frame(t_rx, frame)
+
     # -- the client's observers (the loop's thread) ----------------------------------------------------------
 
     def _hook(self, client: TeleopClient) -> None:
@@ -391,10 +432,15 @@ class QuestTeleopNode:
             else:
                 kind = "latency"
             self.emit("stale", {"reason": kind, "why": why})
-            self.episodes.abort("stale", why)
+            # a transient the latch holds through keeps the episode (the hold); its escalation aborts it
+            if not (c.latch.tier in ("armed", "hold") and self.resume.transient(input_class(why))):
+                self.episodes.abort("stale", why)
         connected = bool(getattr(self.reader, "connected", False))
         if self._connected_prev and not connected:
-            self.episodes.abort("telemetry_loss", "the headset stream closed")
+            # a blackout the latch holds through (the reader reopens a silent connection after 1 s: the same headset
+            # session is a gap) keeps the episode; its escalation aborts it
+            if not (c is not None and c.latch.tier in ("armed", "hold") and self.resume.transient("input_gap")):
+                self.episodes.abort("telemetry_loss", "the headset stream closed")
         self._connected_prev = connected
         row, _ = self.stream.latest()
         st = (row or {}).get("state")
@@ -409,6 +455,34 @@ class QuestTeleopNode:
             self.episodes.abort("x" if str(ev[1]).startswith("X:") else "disarm", ev[1])
         elif ev[0] in ("enable", "disable") and ev[1]:
             self.set_enabled(ev[0] == "enable", "Y" if ev[0] == "enable" else "X")
+        elif ev[0] == "hold":                     # a transient: disarmed on the wire, a re-grip resumes
+            info = ev[2] if len(ev) > 2 else {}
+            self.emit("held", {"reason": ev[1], "class": info.get("class"), "cue": "hold: re-grip to resume"})
+            self.events.add(f"hold: {ev[1]} (release and re-grip to resume)", "warn")
+        elif ev[0] == "resumed":
+            info = ev[2] if len(ev) > 2 else {}
+            self.emit("resumed", {"arm_seq": ev[1], **info})
+            self.events.add(f"resumed by a re-grip ({info.get('hand')}) after {info.get('after_s')} s: "
+                            f"{info.get('cause')}")
+        elif ev[0] == "y_refused":                # a Y press that did not arm: why (the page only showed it)
+            self.emit("y_refused", {"reason": ev[1]})
+            self.events.add(f"Y refused: {ev[1]}", "warn")
+        elif ev[0] == "resume_refused":
+            info = ev[2] if len(ev) > 2 else {}
+            self.emit("resume_refused", {"arm_seq": ev[1], **info})
+            self.events.add("the WBC refused the resume (still holding: release and re-grip)", "warn")
+        elif ev[0] == "escalated":                # the hold became a disarm: Y re-arms
+            info = ev[2] if len(ev) > 2 else {}
+            self.emit("escalated", {"reason": ev[1], **info, "cue": "disarmed: press Y"})
+            self.episodes.abort("disarm", ev[1])  # the episode survived the hold; a disarm ends it
+            self.events.add(f"hold escalated to a disarm: {ev[1]} (press Y)", "warn")
+        elif ev[0] == "pairing":                  # the mirror pairing locked at an engagement
+            d = ev[1]
+            self.emit("pairing", d)
+            diff = d.get("heading_diff_deg")
+            self.events.add(f"pairing: {d['pairing']} ({d['mode']}"
+                            + (f", headings {abs(diff):.0f} deg apart" if diff is not None else "") + "): "
+                            + ", ".join(f"{h} -> {e}" for h, e in d["hands"].items()))
 
     def _fault(self, reason: str) -> None:
         with self._known_lock:
@@ -451,10 +525,12 @@ class QuestTeleopNode:
             self.events.add(f"start refused: {msg}", "warn")
             raise RequestError(409, f"the WBC refused: {msg}") from None
         client = TeleopClient(self.cfg, self.monitor, self.stream, wbc, stale_s=self.stale_s, clock=self.clock,
-                              max_latency=self.max_latency, min_rate=self.min_rate)
+                              max_latency=self.max_latency, min_rate=self.min_rate, resume=self.resume)
         client.session_opened(info)
         self._hook(client)
         wbc.on_sent = self.oplog.sent
+        # the base hint's three candidates (head, chest, hips; raw and smoothed) per frame, for offline analysis
+        client.core.on_hint = lambda rec: self.oplog.publish({"type": "hint", **rec})
         self.monitor.drain()            # frames from before the start are not this client's
         with self.lock:
             self.wbc, self.client = wbc, client
@@ -465,8 +541,15 @@ class QuestTeleopNode:
         self.emit("teleop_start", {"session": info.get("session"), "transport": getattr(wbc, "transport", None)})
         self.set_enabled(True, "teleop start")
         self.events.add(f"teleop started: WBC session {info['session']} over {wbc.transport}; nothing moves until "
-                        f"Y (left) arms, X disables; the {self.cfg.hand} grip clutches the arm")
+                        f"Y (left) arms, X disables; " + self.hands_text())
         return self.teleop_info()
+
+    def hands_text(self) -> str:
+        """Which grip clutches which arm (for events and the page)."""
+        hands = self.cfg.hands
+        if hands:
+            return ", ".join(f"the {h} grip clutches {e}" for h, e in hands.items())
+        return f"the {self.cfg.hand} grip clutches the arm" + (f" ({self.cfg.ee})" if self.cfg.ee != "arm" else "")
 
     def set_mode(self, mode: str) -> dict:
         """Third or first person: where the sticks enter the frame chain (tools/quest_teleop/README.md). Read at
@@ -479,6 +562,83 @@ class QuestTeleopNode:
         self.hub.state_changed()
         return {"mode": self.cfg.mode}
 
+    def set_mirror(self, mode: str) -> dict:
+        """The hand-to-arm pairing mode (two hands; ``off`` / ``auto`` / ``straight`` / ``mirror``, body_frozen.py
+        "Mirror pairing"): decided at each engagement from all released. Changed only while no hand is engaged
+        (409 otherwise); off / straight / mirror apply at once (released), auto at the next grip. ValueError for an
+        unknown mode."""
+        if mode not in MIRROR_MODES:
+            raise ValueError(f"mirror must be one of {', '.join(MIRROR_MODES)}, not {mode!r}")
+        with self.step_lock:                      # between the loop's steps: no engagement starts meanwhile
+            c = self.client
+            core = c.core if c is not None else None
+            if hasattr(core, "set_mirror"):
+                try:
+                    core.set_mirror(mode)
+                except ValueError as e:
+                    raise RequestError(409, str(e)) from None
+            elif mode != "off" and not self.cfg.hands:
+                raise RequestError(409, "mirror pairing needs two hands (a two-arm robot)")
+            old, self.cfg.mirror = self.cfg.mirror, mode
+        if mode != old:
+            self.events.add(f"mirror pairing: {mode}" + (" (from the next grip)" if mode == "auto" else ""))
+        self.hub.state_changed()
+        return {"mirror": self.cfg.mirror, "pairing": self.pairing_info()}
+
+    def pairing_info(self) -> Optional[dict]:
+        """The hand-to-arm pairing in force (two hands; MultiCore.pairing_info), else None. Not running: the
+        configured one (straight unless the mode forces mirror)."""
+        c = self.client
+        core = c.core if c is not None else None
+        if hasattr(core, "pairing_info"):
+            return core.pairing_info()
+        hands = self.cfg.hands
+        if not hands:
+            return None
+        m = self.cfg.mirror == "mirror" and set(hands) == {"left", "right"}
+        pair = {"left": hands["right"], "right": hands["left"]} if m else dict(hands)
+        return {"mode": self.cfg.mirror, "pairing": "mirror" if m else "straight", "hands": pair, "locked": False,
+                "mirror": {e: m for e in hands.values()},
+                "decision": None}
+
+    def set_elbow_hint(self, on: bool) -> dict:
+        """Send each engaged arm's elbow-swivel input (tools/quest_teleop/swivel.py) in the datagrams. On applies
+        from each hand's next grip (the WBC anchors the robot's swivel at a new seq), off at once."""
+        old, self.cfg.elbow_hint = self.cfg.elbow_hint, bool(on)
+        if self.cfg.elbow_hint != old:
+            self.events.add("elbow hint: " + ("on (from the next grip)" if on else "off"))
+        self.hub.state_changed()
+        return {"elbow_hint": self.cfg.elbow_hint, "swivel": self.swivel_info()}
+
+    def swivel_info(self) -> Optional[dict]:
+        """Per EE: the elbow-swivel input and hint (``TeleopCore.swivel_info``), while running; else None."""
+        c = self.client
+        core = c.core if c is not None else None
+        if core is None or not hasattr(core, "swivel_info"):
+            return None
+        sw = core.swivel_info()
+        return {core.cfg.ee: sw} if "hand" in sw else sw
+
+    def set_hint_source(self, source: str) -> dict:
+        """What moves the base hint while engaged: ``head`` (the headset), ``chest`` or ``hips`` (body tracking,
+        smoothed, falling back to the headset). Read at each engagement: applies from the next grip."""
+        if source not in ("head", "chest", "hips"):
+            raise ValueError(f"hint source must be head, chest or hips, not {source!r}")
+        old, self.cfg.hint_source = self.cfg.hint_source, source
+        if source != old:
+            self.events.add(f"base hint source: {source} (from the next grip)")
+        self.hub.state_changed()
+        return {"hint_source": self.cfg.hint_source}
+
+    def set_tether(self, on: bool) -> dict:
+        """The stick tether (tools/quest_teleop/body_frozen.py): engaged, the stick offset stays within
+        ``tether_pos`` / ``tether_yaw`` of the WBC's commanded base. Read at each engagement: from the next grip."""
+        old, self.cfg.tether = self.cfg.tether, bool(on)
+        if self.cfg.tether != old:
+            self.events.add(f"stick tether {'on' if on else 'off'} (from the next grip)")
+        self.hub.state_changed()
+        return {"tether": self.cfg.tether}
+
     def set_headless(self, on: bool) -> dict:
         """Third person, registered: the left stick moves the robot along the operator's facing (applies at once)."""
         old, self.cfg.headless = self.cfg.headless, bool(on)
@@ -486,6 +646,32 @@ class QuestTeleopNode:
             self.events.add(f"headless left stick {'on' if on else 'off'}")
         self.hub.state_changed()
         return {"headless": self.cfg.headless}
+
+    def set_resume(self, enabled: Optional[bool] = None, grace_s: Optional[float] = None,
+                   hold_max_s: Optional[float] = None, classes: Optional[dict] = None) -> dict:
+        """The tiered recovery (arming.py ``ResumeConfig``): on / off, the grace window, the hold's maximum age and
+        each transient class on / off. Applies at once (a hold in force is judged by the new values)."""
+        r = self.resume
+        if grace_s is not None and not (0.0 <= float(grace_s) <= 30.0):
+            raise ValueError("grace_s must be within 0 .. 30 s")
+        if hold_max_s is not None and not (0.0 < float(hold_max_s) <= 3600.0):
+            raise ValueError("hold_max_s must be within 0 .. 3600 s")
+        unknown = set(classes or {}) - set(TRANSIENT_CLASSES)
+        if unknown:
+            raise ValueError(f"unknown classes {sorted(unknown)}; known: {list(TRANSIENT_CLASSES)}")
+        if enabled is not None:
+            r.enabled = bool(enabled)
+        if grace_s is not None:
+            r.grace_s = float(grace_s)
+        if hold_max_s is not None:
+            r.hold_max_s = float(hold_max_s)
+        for k, v in (classes or {}).items():
+            r.classes[k] = bool(v)
+        self.events.add("resume: " + ("on" if r.enabled else "off (every disarm needs Y)")
+                        + f", grace {r.grace_s:g} s, hold max {r.hold_max_s:g} s, transient: "
+                        + (", ".join(k for k, v in r.classes.items() if v) or "none"))
+        self.hub.state_changed()
+        return r.info()
 
     def set_top_speed(self, max_speed: Optional[float] = None, max_omega: Optional[float] = None) -> dict:
         """The top speed (m/s, rad/s; None keeps one): the sticks' full deflection, the hint clamp and, while teleop
@@ -548,15 +734,15 @@ class QuestTeleopNode:
 
         def post(name: str, target: str) -> None:
             try:
-                with NodeClient.for_instance(target, timeout=self.ESTOP_TIMEOUTS[name]) as c:
+                with NodeClient.for_instance(target, timeout=self.ESTOP_TIMEOUTS.get(name, self.ESTOP_TIMEOUTS["arm"])) as c:
                     r = c.post("/estop", {"reason": why, "source": src})
                 res[name] = {"latched": bool(isinstance(r, dict) and r.get("latched", True)), "error": None,
                              "reply": r if isinstance(r, dict) else None}
             except Exception as e:  # noqa: BLE001
                 res[name] = {"latched": False, "error": f"{type(e).__name__}: {e}"[:200], "reply": None}
 
-        targets = [(n, t) for n, t in (("arm", self.arm_target), ("swerve", self.swerve_target),
-                                        ("wbc", self.wbc_target)) if t]
+        arms = [("arm" if len(self.arm_targets) == 1 else a, a) for a in self.arm_targets]
+        targets = [(n, t) for n, t in (*arms, ("swerve", self.swerve_target), ("wbc", self.wbc_target)) if t]
         threads = [threading.Thread(target=post, args=nt, name=f"quest-estop-{nt[0]}", daemon=True) for nt in targets]
         for t in threads:
             t.start()
@@ -631,7 +817,9 @@ class QuestTeleopNode:
                 ar = self.ar_url()
                 self._ctl_log(f"robot AR: {ar or 'off'}")
                 wait = max(1.0, min(self.wait, deadline - self.clock()))
-                rc = ctl.up(self.scheme, False, False, wait, ar)
+                if self.body != "off":
+                    self._ctl_log(f"body tracking: {self.body}")
+                rc = ctl.up(self.scheme, False, False, wait, ar, self.body)
             else:
                 rc = ctl.down()
         except Exception as e:  # noqa: BLE001
@@ -673,6 +861,10 @@ class QuestTeleopNode:
                 self.monitor.get(timeout=0.02)
                 self.monitor.drain()
             now = self.clock()
+            try:
+                self.haptics.update(now)
+            except Exception:  # noqa: BLE001 (feedback never stops the loop)
+                log.exception("haptics")
             if now >= next_row:
                 next_row = now + ROW_PERIOD
                 self._publish(now, client)
@@ -725,6 +917,7 @@ class QuestTeleopNode:
         if client is not None:
             core = client.core
             row["armed"] = float(client.latch.armed)
+            row["tier"] = float(TIERS.index(client.latch.tier)) if client.latch.tier in TIERS else nan
             g = client.gate
             row["quest_latency"] = nan if g.latency is None else g.latency
             row["quest_rate_short"] = g.rate(now)
@@ -850,6 +1043,8 @@ class QuestTeleopNode:
                 "armed": bool(lt and lt.armed), "arm_seq": lt.arm_seq if lt else None,
                 "disarm_reason": (None if lt.armed else lt.reason) if lt else None,
                 "disabled_by_x": bool(lt and lt.disabled_by_client), "presses": lt.presses if lt else 0,
+                "tier": lt.tier_info(now) if lt else {"tier": "disarmed", "why": "teleop not running", "hold": None,
+                                                     "resumes": 0, "config": self.resume.info()},
                 "input": None if c is None else {
                     "fresh": c.gate.fresh(now), "why": None if c.gate.fresh(now) else c.gate.why_stale(now),
                     "latency_ms": None if c.gate.latency is None else round(c.gate.latency * 1e3, 1),
@@ -860,6 +1055,16 @@ class QuestTeleopNode:
                 "engagements": core.status.engagements if core else 0,
                 "registered": bool(core and core.status.registered),
                 "registration": core.status.registration if core else "",
+                "hands": core.hands_status() if core is not None and hasattr(core, "hands_status") else None,
+                "pairing": self.pairing_info(),
+                "hint": {"selected": self.cfg.hint_source,
+                         "engaged_source": core.eng.hint_source if core and core.eng else None,
+                         "in_force": core.status.hint_in_force if core else None,
+                         "confidence": core.status.hint_confidence if core else None,
+                         "why_not": (core.status.hint_reason or None) if core else None,
+                         "switches": core.status.hint_switches if core else 0},
+                "tether": core.status.tether if core else None,
+                "swivel": self.swivel_info(),
                 "sent": dict(w.sent) if w else None, "renew_errors": w.renew_errors if w else None,
                 "transport": w.transport if w else None, "session": w.session if w else None,
                 "wbc_caps": dict(w.caps) if w else None,
@@ -889,13 +1094,16 @@ class QuestTeleopNode:
             "config": {"wbc": self.wbc_target, "arm": self.arm_target, "swerve": self.swerve_target,
                        "max_latency_ms": round(self.max_latency * 1e3, 1), "min_rate": self.min_rate,
                        "quest_host": self.quest_host, "quest_port": self.quest_port,
-                       "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "hand": cfg.hand, "ee": cfg.ee,
-                       "head_walk": cfg.head_walk, "mode": cfg.mode, "headless": cfg.headless,
+                       "ssh_host": self.ssh_host, "ar": self.ar, "scheme": self.scheme, "body": self.body, "hand": cfg.hand, "ee": cfg.ee,
+                       "hands": dict(cfg.hands) if cfg.hands else None,
+                       "head_walk": cfg.head_walk, "mode": cfg.mode, "hint_source": cfg.hint_source, "headless": cfg.headless,
+                       "mirror": cfg.mirror, "elbow_hint": cfg.elbow_hint, "tether": cfg.tether,
                        "max_speed": cfg.stick_max_speed, "max_omega": cfg.stick_max_omega, "gripper": cfg.gripper, "stale_ms": round(self.stale_s * 1e3, 1),
                        "ctl_timeout": self.ctl_timeout, "data_dir": self.data_dir, "sim": self.sim,
-                       "reset_timeout": self.episodes.reset_timeout},
+                       "reset_timeout": self.episodes.reset_timeout, "resume": self.resume.info()},
             "latest": self.latest,
             "sim_aids": None if self.aids is None else self.aids.info(),
+            "haptics": self.haptics.info(now),
             "recording": {"enabled": False} if self.recorder is None else self.recorder.info(),
             "episode": self.episodes.open_episode(),
             "episodes": self.episodes.info(),

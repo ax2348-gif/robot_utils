@@ -232,14 +232,18 @@ def test_timing_is_the_robots_unless_lenient_and_auto_is_macos_only():
     assert resolve_timing(cfg, "linux") == {"lenient": False, "why": "auto: not macOS", "arm_watchdog": 0.1,
                                             "swerve_heartbeat": 0.1}
     mac = resolve_timing(cfg, "darwin")
-    assert mac["lenient"] and mac["arm_watchdog"] == 0.5 and mac["swerve_heartbeat"] == 0.5
+    assert mac["lenient"] and mac["arm_watchdog"] == 2.5 and mac["swerve_heartbeat"] == 0.5   # >= the node's 2 s + 0.5
+    two = resolve_timing({**cfg, "components": {**cfg["components"], "arms": {"arm_left": {"watchdog": 3.0}}}}, "darwin",
+                         ["arm_left", "arm_right"])
+    assert two["arm_watchdogs"] == {"arm_left": 3.0, "arm_right": 2.5}
+    assert resolve_timing(cfg, "linux", ["arm_left"])["arm_watchdogs"] == {"arm_left": 0.1}
     assert not resolve_timing({**cfg, "timing": {"lenient": False}}, "darwin")["lenient"]
     w = make_world(timing={"lenient": True})
     try:
         w.arm_op("enable", {})
         w.step(300)                                           # 0.3 s without frames: forgiven
         assert w.arm_op("read", {})["status"][:6] == [1] * 6
-        w.step(250)                                           # past 0.5 s: the watchdog still trips
+        w.step(2300)                                          # past 2.5 s (the node's 2 s + 0.5): it still trips
         assert w.arm_op("read", {})["status"][:6] == [0xD] * 6
         assert w.snapshot()["timing"]["lenient"] is True
     finally:

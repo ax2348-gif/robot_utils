@@ -678,6 +678,70 @@ def create_app(node: AgentNav, start: bool = True) -> FastAPI:
     async def arm_state(comment: str = "", x_operator: Optional[str] = Operator):
         return await run(node.arm_forward, actor(x_operator), "arm_state", "GET", "/state", None, comment, lease=False)
 
+    # -- several arms (a bimanual robot): /arms/{name}/... = the same as /arm/... for that arm --------------------
+    # (/arm/... is the first arm; each arm's lease is held here separately)
+
+    @app.get("/arms", response_model=M.ArmsOut, tags=["arm"], summary="The arms this node drives (the first is /arm/...)")
+    async def arms_list():
+        return {"arms": list(node.arm_names), "primary": node.arm_names[0] if node.arm_names else None}
+
+    @app.post("/arms/{name}/enable", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Enable one arm (as /arm/enable)", description=ARM_DOC)
+    async def arms_enable(name: str, body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_enable, actor(x_operator), body.comment, arm=name)
+
+    @app.post("/arms/{name}/disable", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="Disable one arm and release its lease (as /arm/disable)")
+    async def arms_disable(name: str, body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_disable, actor(x_operator), body.comment, arm=name)
+
+    @app.post("/arms/{name}/servo", response_model=M.ArmServoOut, response_model_exclude_unset=True, tags=["arm"],
+              summary="Planned move of one arm (as /arm/servo)", description=ARM_DOC)
+    async def arms_servo(name: str, body: ArmServoIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_servo, actor(x_operator), arm_body(body, ("comment", "align_wheels")),
+                         body.align_wheels, body.comment, arm=name)
+
+    @app.post("/arms/{name}/home", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="One arm home (as /arm/home)", description=ARM_DOC)
+    async def arms_home(name: str, body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_home", "POST", "/home", None, body.comment, arm=name)
+
+    @app.post("/arms/{name}/gripper", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="One arm's gripper (as /arm/gripper)", description=ARM_DOC)
+    async def arms_gripper(name: str, body: ArmGripperIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_gripper", "POST", "/gripper", arm_body(body),
+                         body.comment, arm=name)
+
+    @app.post("/arms/{name}/cancel", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="End one arm's planned move (as /arm/cancel)", description=ARM_DOC)
+    async def arms_cancel(name: str, body: Commented = Commented(), x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_cancel", "POST", "/cancel", None, body.comment,
+                         arm=name)
+
+    @app.post("/arms/{name}/ik", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="One arm's IK check (as /arm/ik)", description=ARM_DOC)
+    async def arms_ik(name: str, body: ArmIKIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_ik", "POST", "/ik", arm_body(body), body.comment,
+                         lease=False, arm=name)
+
+    @app.get("/arms/{name}/geometry", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+             summary="One arm's geometry now (as GET /arm/geometry)", description=ARM_DOC)
+    async def arms_geometry_now(name: str, comment: str = "", x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_geometry", "GET", "/geometry", None, comment,
+                         lease=False, arm=name)
+
+    @app.post("/arms/{name}/geometry", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+              summary="One arm's geometry at joint angles or a pose (as POST /arm/geometry)", description=ARM_DOC)
+    async def arms_geometry(name: str, body: ArmGeometryIn, x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_geometry", "POST", "/geometry", arm_body(body),
+                         body.comment, lease=False, arm=name)
+
+    @app.get("/arms/{name}/state", response_model=M.ArmReply, response_model_exclude_unset=True, tags=["arm"],
+             summary="One arm node's state (as /arm/state)", description=ARM_DOC)
+    async def arms_state(name: str, comment: str = "", x_operator: Optional[str] = Operator):
+        return await run(node.arm_forward, actor(x_operator), "arm_state", "GET", "/state", None, comment,
+                         lease=False, arm=name)
+
     # -- memory -----------------------------------------------------------------------------------------------
 
     @app.get("/memory", response_model=M.Memory, tags=["memory"], summary="This session's notes and places")

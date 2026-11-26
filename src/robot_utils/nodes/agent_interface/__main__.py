@@ -16,7 +16,9 @@ def main() -> None:
     p.add_argument("--perception", default="3d_perception")
     p.add_argument("--estimator", default="estimator")
     p.add_argument("--description", default="description", help="robot description node ('none' to skip)")
-    p.add_argument("--arm", default="arm", help="arm node, for the robot drawn by /plan/check ('none' to skip)")
+    p.add_argument("--arm", default=None, help="arm node(s), comma-separated: the first is /arm/..., each is "
+                                               "/arms/{name}/... (default: the robot's arms; 'none' to skip)")
+    p.add_argument("--robot", default=None, help="robot profile (robots/; default $ROBOT_UTILS_ROBOT, else rebot)")
     p.add_argument("--cameras", default="camera,wrist_camera",
                    help="cameras POST /view may read: names of camera node instances, or name=URL, comma separated")
     p.add_argument("--profile", default="cautious", choices=["cautious", "normal"])
@@ -33,9 +35,17 @@ def main() -> None:
     node = AgentNav(a.pose_servo, a.perception, a.estimator, a.data_dir or DATA_DIR, a.profile,
                     require_imu=not a.no_require_imu,
                     description=None if a.description.lower() == "none" else a.description,
-                    arm=None if a.arm.lower() == "none" else a.arm,
+                    arms=arm_nodes(a.arm, a.robot),
                     cameras=dict((c.split("=", 1) if "=" in c else (c, c)) for c in a.cameras.split(",") if c))
     serve(create_app(node), a, banner=f"agent {a.name!r} (profile {a.profile})")
+
+
+def arm_nodes(arm, robot) -> list:
+    """The arm nodes: ``--arm`` (comma-separated; 'none': none), else the robot profile's arms."""
+    if arm is not None:
+        return [] if arm.lower() == "none" else [x for x in arm.split(",") if x]
+    from ...robots import load
+    return [x.name for x in load(robot).arms]
 
 
 if __name__ == "__main__":

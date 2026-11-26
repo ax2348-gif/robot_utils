@@ -63,10 +63,12 @@ class ProcNode(ArmRequests):
 
     def __init__(self, bus_factory, profile: str = C.DEFAULT_PROFILE, settings: Optional[C.NodeSettings] = None,
                  locks: Optional[LockStore] = None, description_node: str = "description", joint_socket=None,
-                 log_level: int = logging.INFO):
+                 log_level: int = logging.INFO, urdf: Optional[str] = None, arm_frame: str = "arm",
+                 robot: Optional[str] = None):
         """``bus_factory``: picklable (it is called in the control process), e.g. a ``functools.partial`` of a bus
-        class."""
+        class. ``urdf``, ``arm_frame``, ``robot``: as ArmNode's."""
         self.bus_factory = bus_factory
+        self.urdf, self.arm_frame, self.robot = urdf, arm_frame, robot
         self.profile0 = C.load_profile(profile).name
         self._profiles = {self.profile0: C.load_profile(profile)}
         self.settings = settings or C.NodeSettings()
@@ -122,6 +124,7 @@ class ProcNode(ArmRequests):
                       "bus_factory": self.bus_factory, "profile": self.profile0, "settings": self.settings,
                       "locks_path": str(self.locks.path), "lock_names": sorted(self.lock_names),
                       "joint_socket": self.joint_socket, "description_node": self.description_node,
+                      "urdf": self.urdf, "arm_frame": self.arm_frame, "robot": self.robot,
                       "ppid": os.getpid(), "log_level": self.log_level}
             ctx = multiprocessing.get_context("spawn")
             self.proc = ctx.Process(target=control_main, args=(params,), name="arm-control", daemon=True)
@@ -256,7 +259,7 @@ class ProcNode(ArmRequests):
             return
         key = tuple(sorted((k, tuple(v)) for k, v in lim.items()))
         if self.kin is None or key != self._kin_key:
-            self.kin, self._kin_key = ArmKinematics(lim), key
+            self.kin, self._kin_key = ArmKinematics(lim, urdf=self.urdf), key
             Planner.warm(self.kin)
         tcp = (sn.get("core") or {}).get("tcp_offset")
         if tcp is not None and list(tcp) != list(self.kin.tcp_offset):

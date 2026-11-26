@@ -56,6 +56,15 @@ def arm_limits(settings=None) -> dict:
             "gripper_torque_max": float(g_tau)}                                # N m, the gripper motor
 
 
+def type_limits(arm_type) -> dict:
+    """``arm_limits`` of an arm that is not the reBot (robots/arm_types.py ArmType): its own caps and torque limits;
+    the gripper is the reBot's (its squeeze cap)."""
+    from ..arm import config as C
+    return {"joint_speed_max": np.asarray(arm_type.joint_vel, float), "finger_force_max": float(C.HARD_MAX_FORCE),
+            "joint_torque_max": np.asarray(arm_type.torque_max, float),
+            "gripper_torque_max": float(arm_type.gripper_torque_max)}
+
+
 def robot_limits() -> dict:
     return {**swerve_limits(), **arm_limits()}
 
@@ -71,6 +80,10 @@ def refuse_overrides(cfg: dict) -> list:
                 break
         if d is not None:
             out.append(".".join(path))
+    for name, a in (((cfg.get("components") or {}).get("arms")) or {}).items():   # per-arm overrides (robots/)
+        for k in ("joint_speed_max", "finger_force_max"):
+            if isinstance(a, dict) and k in a:
+                out.append(f"components.arms.{name}.{k}")
     return sorted(out)
 
 

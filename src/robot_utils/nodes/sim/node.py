@@ -26,15 +26,16 @@ from .world import SimError, World, unzip_bundle
 log = logging.getLogger("sim")
 
 
-def fetch_bundle(source: str, variant: str = "full") -> tuple[bytes, str]:
+def fetch_bundle(source: str, variant: str = "full", robot=None) -> tuple[bytes, str]:
     """GET /model/bundle.zip (base=swerve) from ``source``: a description node (instance name or URL), a
-    bundle .zip file, or ``local`` (assembled here from the shipped description, nominal camera poses).
+    bundle .zip file, or ``local`` (assembled here from the shipped description of the robot profile ``robot``
+    (robots/; default $ROBOT_UTILS_ROBOT, else rebot), nominal camera poses).
     Returns (zip bytes, where it came from)."""
     params = {"variant": variant, "base": "swerve", "mounts": "calibrated"}
     if source == "local":
         from ..description.model import Options
         from ..description.node import DescriptionNode
-        data, v = DescriptionNode(tempfile.mkdtemp(prefix="sim-desc-"), None).model_bundle(
+        data, v = DescriptionNode(tempfile.mkdtemp(prefix="sim-desc-"), None, robot=robot).model_bundle(
             Options.parse(variant, base="swerve"))
         return data, f"local description (model {v})"
     if source.endswith(".zip") and os.path.exists(source):
@@ -69,8 +70,9 @@ def apply_camera_serials(config: dict, description: Optional[dict]) -> dict:
     return serials
 
 
-def world_from(source: str, config: dict) -> World:
-    data, how = fetch_bundle(source, (config.get("model") or {}).get("variant", "full"))
+def world_from(source: str, config: dict, robot=None) -> World:
+    """``robot``: the robot profile for ``source=local`` (the description node's own otherwise)."""
+    data, how = fetch_bundle(source, (config.get("model") or {}).get("variant", "full"), robot)
     urdf, assets, info = unzip_bundle(data)
     try:
         desc = description_of(source)
@@ -81,7 +83,8 @@ def world_from(source: str, config: dict) -> World:
     mounts = {name: c.get("from") for name, c in ((desc or {}).get("cameras") or {}).items()}
     log.info("camera serials %s; camera mounts %s", serials, mounts or "nominal (no description node)")
     return World(urdf, assets, config, {"source": how, "model_version": info.get("model_version"),
-                                        "camera_serials": serials, "camera_mounts": mounts})
+                                        "camera_serials": serials, "camera_mounts": mounts,
+                                        "arms": info.get("arms"), "frames_in_base": info.get("frames_in_base")})
 
 
 class SimNode:
@@ -107,7 +110,10 @@ class SimNode:
 
     def start(self) -> None:
         w = self.world
-        self.servers["arm"] = IpcServer(backend_socket(self.name, "arm"), self._arm, on_close=self._arm_closed)
+        for arm in w.arm_ix:                      # one socket per arm: <arm name>.sock (the one arm: arm.sock)
+            self.servers[arm] = IpcServer(backend_socket(self.name, arm),
+                                          lambda h, p, c, arm=arm: self._arm(h, p, c, arm),
+                                          on_close=lambda c, arm=arm: self._arm_closed(c, arm))
         self.servers["swerve"] = IpcServer(backend_socket(self.name, "swerve"), self._swerve)
         for cam in self.cameras.cams:
             self.servers[f"camera-{cam}"] = IpcServer(backend_socket(self.name, f"camera-{cam}"),
@@ -116,7 +122,7 @@ class SimNode:
             w.run()
         self.events.add(f"sim world {self.name!r} started ({w.model_info.get('source', 'model')}; "
                         f"{'running' if w.running else 'paused'}); backend sockets in "
-                        f"{backend_socket(self.name, 'arm').parent}")
+                        f"{backend_socket(self.name, 'swerve').parent}")
 
     def close(self) -> None:
         for s in self.servers.values():
@@ -126,19 +132,19 @@ class SimNode:
 
     # -- backends ------------------------------------------------------------------------------------
 
-    def _arm(self, h: dict, payload: bytes, conn):
+    def _arm(self, h: dict, payload: bytes, conn, arm: str = "arm"):
         op = h.get("op")
         if op == "enable":
             conn.state["armed"] = True
-        out = self.world.arm_op(op, h)
+        out = self.world.arm_op(op, h, arm)
         if op in ("enable", "disable"):
-            self.events.add(f"arm motors {'on' if op == 'enable' else 'off'} (arm backend)")
+            self.events.add(f"{arm} motors {'on' if op == 'enable' else 'off'} ({arm} backend)")
         return out
 
-    def _arm_closed(self, conn) -> None:
+    def _arm_closed(self, conn, arm: str = "arm") -> None:
         if conn.state.get("armed"):
-            self.world.arm_lost()
-            self.events.add("arm backend disconnected: arm motors off (status 0xD)", "warn")
+            self.world.arm_lost(arm)
+            self.events.add(f"{arm} backend disconnected: {arm} motors off (status 0xD)", "warn")
 
     def _swerve(self, h: dict, payload: bytes, conn):
         return self.world.swerve_op(h.get("op"), h)
@@ -186,14 +192,15 @@ class SimNode:
 
     def tasks(self) -> dict:
         from .scene import tasks
-        return {"tasks": [{"name": k, "title": v["title"]} for k, v in tasks(self.world.cfg.get("scene")).items()],
+        return {"tasks": [{"name": k, "title": v["title"]}
+                          for k, v in tasks(self.world.cfg.get("scene"), self.world.ring_mount_y()).items()],
                 "current": getattr(self, "task", None)}
 
     def set_task(self, name: str) -> dict:
         """Switch to a task: its objects replace the scene's, the headset view goes to its anchor. The world is not
         reset (that would leave the estimator behind: a reset belongs with the teleop's A, which resets both)."""
         from .scene import tasks
-        ts = tasks(self.world.cfg.get("scene"))
+        ts = tasks(self.world.cfg.get("scene"), self.world.ring_mount_y())
         if name not in ts:
             raise KeyError(f"no task {name!r} (one of {', '.join(ts)})")
         out = self.world.load_scene(ts[name]["objects"]())
@@ -296,11 +303,14 @@ class SimNode:
                 "base": s["base"], "joints": s["joints"], "objects": s["objects"], "overlays": self.overlays(sim)}
 
     def overlays(self, sim: Optional[dict] = None) -> dict:
-        """robot_state.v1's overlays: the live markers, the sim's run state, the arm motors as the world sees them."""
+        """robot_state.v1's overlays: the live markers, the sim's run state, the arm motors as the world sees them
+        (``arm``: the primary arm; with several, ``arms`` per arm)."""
         w = self.world
         arm = w.arm if w.has_arm else None
+        arms = {n: {"enabled": a.enabled, "fault": a.fault} for n, a in w.arms.items()} if len(w.arms) > 1 else {}
         return {"markers": self.markers.list(), "sim": sim or {"running": w.running, "rtf": w.rtf},
-                **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {})}
+                **({"arm": {"enabled": arm.enabled, "fault": arm.fault}} if arm is not None else {}),
+                **({"arms": arms} if arms else {})}
 
     # -- state -------------------------------------------------------------------------------------------
 

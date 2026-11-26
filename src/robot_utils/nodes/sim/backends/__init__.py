@@ -19,7 +19,8 @@ def is_world(spec: Optional[str]) -> bool:
 
 
 def world_socket(spec: str, backend: str) -> Path:
-    """The backend socket for ``--sim world[=NAME|DIR]``: ``backend`` is ``arm``, ``swerve`` or ``camera-<name>``."""
+    """The backend socket for ``--sim world[=NAME|DIR]``: ``backend`` is an arm's name (``arm``; robots/), ``swerve``
+    or ``camera-<name>``."""
     from ..protocol import backend_socket
     if not is_world(spec):
         raise ValueError(f"--sim {spec!r}: expected world, world=NAME (sim instance) or world=DIR (socket directory)")

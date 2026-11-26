@@ -32,7 +32,8 @@ python -m robot_utils.collect cut ~/data/20261121-143000 --pre-roll 0.5 --post-r
 | `--robot` | (required) | the frontend, e.g. `http://botcore` (every path is `<robot>/nodes/...`); `local`: the nodes of this machine over their unix sockets, no frontend (session.json says `http://localhost`) |
 | `--out` | (required) | parent directory; the session is `<out>/<YYYYMMDD-HHMMSS>` (`--name` overrides) |
 | `--task` | (required) | `POST /nodes/quest_teleop/task {"text"}` before anything else: the task of the next episodes |
-| `--streams` | `camera/color,wrist_camera/color,camera/imu/stream,arm/stream,swerve/stream,estimator/stream,wbc/stream,quest_teleop/oplog/stream` | what to record (`camera/imu/stream`: the chassis camera's ~100 Hz IMU records, attitude and mean acceleration; cheap) |
+| `--streams` | `camera/color,wrist_camera/color,camera/imu/stream,arm/stream,swerve/stream,estimator/stream,wbc/stream,quest_teleop/oplog/stream` | what to record (`camera/imu/stream`: the chassis camera's ~100 Hz IMU records, attitude and mean acceleration; cheap); by default `arm/stream` is each arm of `--robot-profile` (a bimanual robot: `arm_left/stream,arm_right/stream`, files `arm_left.bin`, `arm_right.bin`) |
+| `--robot-profile` | `$ROBOT_UTILS_ROBOT`, else `rebot` | the robot profile (`src/robot_utils/robots/`) whose arms the default streams record |
 | `--batch-ms` | `50` | the row streams (`<node>/stream`: arm, swerve, estimator, wbc) in batches this long: the same rows and timestamps, far fewer records, packets and wakeups on the robot (measured 2026-11-22: the Pi near its CPU limit with the full stack plus a recorder). `0` = every row on its own, for a consumer that acts on them live (a policy run) |
 | `--start-teleop` | off | `POST /nodes/quest_teleop/start` once recording runs (a 409 ends the session with the WBC's reason) |
 | `--stop-teleop` | off | `POST /nodes/quest_teleop/stop` on Ctrl-C (the node aborts an open episode itself) |
@@ -186,7 +187,10 @@ What a replay of the sim needs beyond the robot's own streams (docs/scene3d.md):
   the head (OpenXR VIEW located in LOCAL) and both controllers (grip spaces in LOCAL), and, from a headset with the
   logging AR view (quest_env `ROBOT_AR.md`, "Logged placement"), the `robot_ar` block: where the sim world was drawn
   (`sim_in_local`, `scale`, the floor source, each re-anchoring) and both eyes (pose relative to the head, field of
-  view). Nothing in robot_utils filters it: the node passes the frame through as the headset sent it.
+  view). With `--body` on the headset, each record also carries the `body` block: Meta body tracking, every tracked
+  joint's LOCAL pose and flags (quest_env BODY_TRACKING.md; docs/quest_teleop_node.md, "Body tracking"). Nothing in
+  robot_utils filters it: the node passes the frame through as the headset sent it. The replay does not draw the
+  body; it counts the frames that have it (`body_frames` in its summary).
 
 ## Sim teleop records itself
 

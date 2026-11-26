@@ -31,10 +31,9 @@ from ..common.hub import RowHub
 from ..common.lease import Lease, RequestError
 from ..common.server import EventLog
 from . import ipc
-from .arm_channel import joint_socket_path
-from .model import EESpec, WbcModel, arm_config_limits, fetch_urdf
+from .model import WbcModel, ee_specs, fetch_urdf
 from .node import (POSTURES, STRUCTURAL, config_doc, estop_fanout, forward_estop, hints_doc, model_doc, open_peers,
-                   release_peers, state_document, stream_fields, validate_config)
+                   release_peers, resolve_arms, state_document, stream_fields, validate_config)
 from .spec import check_lead_torque, default_arm_gains, make_config, parse_hints
 
 log = logging.getLogger("wbc")
@@ -75,14 +74,20 @@ class ProcNode:
                  arm: Optional[str] = "arm", swerve: Optional[str] = "swerve", estimator: Optional[str] = "estimator",
                  config: Optional[dict] = None, udp_host: Optional[str] = "127.0.0.1", udp_port: int = 9410,
                  unix_socket: Optional[str] = None, arm_socket: Optional[str] = None, name: str = "wbc",
-                 log_level: int = logging.INFO):
-        self.config_in = dict(config or {})
-        self.cfg = make_config(config)
+                 log_level: int = logging.INFO, arms: Optional[dict] = None, arm_sockets: Optional[dict] = None,
+                 robot: Optional[str] = None):
+        from .node import robot_wbc_defaults
+        self.config_in = {**robot_wbc_defaults(robot), **(config or {})}     # the robot profile's, overridden
+        self.cfg = make_config(self.config_in)
         kp0, ml0, _ = default_arm_gains()
         check_lead_torque(self.cfg.lead_torque, kp0, ml0)
         self.clock = time.monotonic                 # one clock for both processes
         self.name = name
-        self.arm_target, self.swerve_target, self.estimator_target = arm, swerve, estimator
+        self.swerve_target, self.estimator_target = swerve, estimator
+        self.robot = robot
+        self._arms_in = (arm, arms, arm_socket, arm_sockets)
+        self.arm_targets: dict = {}            # EE -> arm node target (node.resolve_arms)
+        self.arm_sockets: dict = {}
         self.model_source = model_source
         self.model: Optional[WbcModel] = model
         self.model_info = "given" if model is not None else None
@@ -99,10 +104,9 @@ class ProcNode:
             from ..common.serve import socket_dir
             unix_socket = str(socket_dir() / f"{name}.target.sock")
         self.udp_host, self.udp_port, self.unix_socket = udp_host, udp_port, unix_socket
-        self.arm_socket = arm_socket or (str(joint_socket_path(arm)) if arm and "://" not in arm else None)
         self.log_level = log_level
         self.session_token: Optional[str] = None
-        self.arm_http = None
+        self.arm_https: dict = {}                    # EE -> the arm's HTTP client (its lease) while enabled
         self.base = None
         self.gen = 0                                 # enables so far: the twist slot's base generation
         self._enabling = False
@@ -125,15 +129,33 @@ class ProcNode:
 
     # -- model ---------------------------------------------------------------------------------------------
 
+    @property
+    def primary(self) -> str:
+        return next(iter(self.arm_targets), self.ees[0] if self.ees else "arm")
+
+    @property
+    def arm_target(self) -> Optional[str]:
+        return self.arm_targets.get(self.primary)
+
+    @property
+    def arm_socket(self) -> Optional[str]:
+        return self.arm_sockets.get(self.primary)
+
+    @property
+    def arm_http(self):
+        return self.arm_https.get(self.primary)
+
     def _setup_model(self) -> None:
         self.ees = list(self.model.ees)
-        self.fields, self.units, self.field_doc = stream_fields(self.ees)
+        self.arm_targets, self.arm_sockets = resolve_arms(self.ees, *self._arms_in)
+        self.fields, self.units, self.field_doc = stream_fields(self.ees, {e: len(self.model.arm_q[e])
+                                                                           for e in self.ees})
         self.hub = RowHub({"tick": len(self.fields)}, recent=500)
         self.events.on_add = self.hub.state_changed
 
     def load_model(self) -> None:
-        urdf, how = fetch_urdf(self.model_source)
-        self.model = WbcModel(urdf, (EESpec(arm_limits=arm_config_limits()),))
+        urdf, how = fetch_urdf(self.model_source, self.robot)
+        self.model = WbcModel(urdf, ee_specs(self.robot))
         self.model_info = how
         self._setup_model()
 
@@ -154,7 +176,8 @@ class ProcNode:
         m = self.model
         params = {"shm": self.shm.path, "width": len(self.fields), "srv_sock": srv_sock, "ctl_sock": ctl_sock,
                   "urdf": m.urdf, "ees": m.ee_specs, "margin": m.margin, "fields": self.fields,
-                  "arm": self.arm_target, "swerve": self.swerve_target, "estimator": self.estimator_target,
+                  "arm": self.arm_target, "arms": dict(self.arm_targets), "arm_sockets": dict(self.arm_sockets),
+                  "swerve": self.swerve_target, "estimator": self.estimator_target,
                   "config": self.config_in, "udp_host": self.udp_host, "udp_port": self.udp_port,
                   "unix_socket": self.unix_socket, "arm_socket": self.arm_socket, "name": self.name,
                   "ppid": os.getpid(), "log_level": self.log_level}
@@ -177,7 +200,9 @@ class ProcNode:
             self.inputs["swerve"] = Upstream("swerve", self.swerve_target, "/stream", feed, self.events)
         for u in self.inputs.values():
             u.start()
-        self.events.add(f"wbc started (model: {self.model_info}; arm {self.arm_target}, swerve {self.swerve_target}, "
+        arms = (self.arm_target if len(self.arm_targets) <= 1 else
+                ", ".join(f"{e}={t}" for e, t in self.arm_targets.items()))
+        self.events.add(f"wbc started (model: {self.model_info}; arm {arms}, swerve {self.swerve_target}, "
                         f"estimator {self.estimator_target}; targets udp {self.ready.get('udp_port')}, "
                         f"unix {self.ready.get('unix_socket')}; control process pid {self.ready.get('pid')})")
 
@@ -205,7 +230,7 @@ class ProcNode:
         self._closed = True
         for u in self.inputs.values():
             u.stop.set()
-        if self.proc_fault is None and (self.enabled or self.base is not None or self.arm_http is not None):
+        if self.proc_fault is None and (self.enabled or self.base is not None or self.arm_https):
             self.disable("node shutting down")
         self._stop.set()
         if self.port is not None:
@@ -220,8 +245,8 @@ class ProcNode:
         for t in self._threads:
             t.join(1.0)
         with self.lock:
-            base, arm_http, self.base, self.arm_http = self.base, self.arm_http, None, None
-        release_peers(arm_http, base, background=True)
+            base, arm_https, self.base, self.arm_https = self.base, self.arm_https, None, {}
+        release_peers(arm_https, base, background=True)
         self._cleanup()
 
     def _cleanup(self) -> None:
@@ -283,7 +308,8 @@ class ProcNode:
             if b is not None:
                 b.close(disable=True)
         elif kind == "fwd_estop":
-            forward_estop(self.arm_http, self.swerve_target, m[1], self.events, base=m[2], arm=m[3])
+            forward_estop(self.arm_https, self.swerve_target, m[1], self.events, base=m[2], arm=m[3],
+                          skip=m[4] if len(m) > 4 else None)
 
     _last_tw = None
     _last_rx = 0.0
@@ -356,14 +382,14 @@ class ProcNode:
             if self.proc_fault is not None:
                 return
             self.proc_fault = reason
-            base, arm_http, self.base, self.arm_http = self.base, self.arm_http, None, None
+            base, arm_https, self.base, self.arm_https = self.base, self.arm_https, None, {}
         if base is not None:
             base.mute()
         log.error("control process: %s", reason)
         self.events.add(f"FAULT: {reason}: the swerve and the arm are disabled and released; restart the node",
                         "error")
         self.port.send(("disable", None, f"server: {reason}"))       # if it is only stalled: it lets go too
-        release_peers(arm_http, base, background=True)
+        release_peers(arm_https, base, background=True)
 
     # -- commands ------------------------------------------------------------------------------------------
 
@@ -444,28 +470,28 @@ class ProcNode:
             self._enabling = True
             holder = self.lease.info.client if self.lease.info else "anonymous"
         try:
-            peers = open_peers(self.arm_target, self.swerve_target, self.cfg, f"wbc ({holder})",
-                               len(self.model.arm_q["arm"]), self.events,
+            peers = open_peers(self.arm_targets, self.swerve_target, self.cfg, f"wbc ({holder})",
+                               {e: len(self.model.arm_q[e]) for e in self.arm_targets}, self.events,
                                self.snap().get("kp_source") or "the arm's default profile")
             try:
                 with self.lock:
                     self.gen += 1
-                    self.base, self.arm_http = peers.base, peers.arm_http
+                    self.base, self.arm_https = peers.base, dict(peers.arm_http)
                     gen = self.gen
                 self._write_srv(force=True)
+                arms = {e: {"token": h.token, "lease": peers.arm_lease.get(e), "tcp": peers.tcp.get(e),
+                            "kp": None if peers.kp.get(e) is None else [float(x) for x in peers.kp[e]],
+                            "kp_source": peers.kp_source.get(e)} for e, h in peers.arm_http.items()}
                 out = self._call("enable", {
-                    "arm_token": peers.arm_http.token if peers.arm_http is not None else None,
-                    "arm_lease": peers.arm_lease, "tcp": peers.tcp,
-                    "kp": None if peers.kp is None else [float(x) for x in peers.kp], "kp_source": peers.kp_source,
-                    "base_lease_id": peers.base.lease_id if peers.base is not None else None, "gen": gen,
-                    "holder": holder}, timeout=3.0)
+                    "arms": arms, "base_lease_id": peers.base.lease_id if peers.base is not None else None,
+                    "gen": gen, "holder": holder}, timeout=3.0)
             except BaseException:
                 with self.lock:
-                    self.base = self.arm_http = None
+                    self.base, self.arm_https = None, {}
                 release_peers(peers.arm_http, peers.base, background=False)
                 raise
-            if peers.tcp is not None:
-                self.model.set_tcp("arm", peers.tcp)              # this side's copy (/state's model)
+            for e, tcp in peers.tcp.items():
+                self.model.set_tcp(e, tcp)                      # this side's copy (/state's model)
         finally:
             self._enabling = False
         return out["status"]
@@ -474,15 +500,15 @@ class ProcNode:
         if check:
             self.lease.check(token)
         with self.lock:
-            base, arm_http = self.base, self.arm_http
-            self.base = self.arm_http = None
+            base, arm_https = self.base, self.arm_https
+            self.base, self.arm_https = None, {}
         if base is not None:
             base.mute()              # disable coasts: no further twist (no zero twist), then the swerve disables
         try:
             out = self._call("disable", reason, timeout=1.0)   # a last hold to the arm, its channel closed
         except RequestError:
-            out = {"enabled": False, "was_enabled": base is not None or arm_http is not None}
-        release_peers(arm_http, base, background=True)
+            out = {"enabled": False, "was_enabled": base is not None or bool(arm_https)}
+        release_peers(arm_https, base, background=True)
         return out
 
     def trigger_estop(self, reason: str, source: str) -> dict:
@@ -496,7 +522,7 @@ class ProcNode:
             self._call("estop", reason, timeout=self.ESTOP_ACK_S)
         except RequestError as e:
             self.events.add(f"e-stop: the control process did not confirm ({e}); forwarding anyway", "error")
-        fw = estop_fanout(self.arm_http, self.arm_target, self.swerve_target, reason, source, self.events,
+        fw = estop_fanout(self.arm_https, self.arm_targets, self.swerve_target, reason, source, self.events,
                           self.ESTOP_JOIN_S)
         out = {"latched": True, "reason": info.reason, "source": info.source, "forwarded": fw}
         self.disable(f"e-stop ({reason or 'no reason'})")
@@ -522,7 +548,7 @@ class ProcNode:
 
     def set_hints(self, token: Optional[str], doc: dict) -> dict:
         self.lease.check(token)
-        h = parse_hints(doc, self.cfg, self.ees, POSTURES)
+        h = parse_hints(doc, self.cfg, self.ees, POSTURES, {e: len(self.model.arm_q[e]) for e in self.ees})
         return self._call("hints", h)
 
     def get_hints(self) -> dict:
@@ -581,6 +607,7 @@ class ProcNode:
         base = self.base
         last = self.hub.recent(1, "tick") if self.hub else []
         srv = {"estop": self.estop.info, "lease": self.lease.info, "arm_target": self.arm_target,
+               "arm_targets": dict(self.arm_targets),
                "swerve_target": self.swerve_target, "model": model_doc(self.model, self.model_info, self.model_error),
                "base": None if base is None else {"lease_id": base.lease_id, "sent": base.sent,
                                                   "errors": base.errors},

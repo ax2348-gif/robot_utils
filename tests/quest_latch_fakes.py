@@ -79,6 +79,8 @@ class Wbc:
         self.cur = 0                 # the WBC's armed arm_seq
         self.seen = 0
         self.caps = {"asserted": {}, "previous": {}}   # as WbcClient.caps: none asserted here
+        self.reason = "not armed yet"  # the WBC's /state disarm_reason
+        self.refuse_arm = None         # a reason: arming datagrams are refused (arm_far, estimator unusable, ...)
 
     def _dgram(self, m):
         self.seq += 1
@@ -90,9 +92,13 @@ class Wbc:
         self.seen = max(self.seen, m["arm_seq"])
         if row["armed"] and (not m["armed"] or m["arm_seq"] < self.cur):
             row["armed"], self.arm_seq_floor = 0.0, self.seen
+            self.reason = "client: armed false"
         elif (not row["armed"] and m["type"] == "target" and m["armed"] and m["arm_seq"] > self.arm_seq_floor
               and row["state"] in (2.0, 3.0, 4.0)):
-            row["armed"], self.cur = 1.0, m["arm_seq"]
+            if self.refuse_arm:            # the press never arms: a new arm_seq is needed
+                self.arm_seq_floor = max(self.arm_seq_floor, m["arm_seq"])
+            else:
+                row["armed"], self.cur = 1.0, m["arm_seq"]
         return m
 
     def send_target(self, body, armed=False, arm_seq=0):
@@ -101,9 +107,14 @@ class Wbc:
     def send_alive(self, armed=False, arm_seq=0):
         return self._dgram({"type": "alive", "armed": armed, "arm_seq": arm_seq})
 
-    def wbc_disarm(self):
-        """The WBC disarms on its own (an overrun, a fault, ...)."""
+    def wbc_disarm(self, reason="POST /disarm"):
+        """The WBC disarms on its own (an overrun, a fault, ...) with this /state disarm_reason."""
         self.stream.row["armed"], self.arm_seq_floor = 0.0, self.seen
+        self.reason = reason
+
+    def disarm_reason(self):
+        self.calls.append("why")
+        return None if self.stream.row["armed"] else self.reason
 
     def enable(self):
         self.calls.append("enable")

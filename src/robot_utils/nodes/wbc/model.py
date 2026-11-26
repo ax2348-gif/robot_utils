@@ -31,28 +31,49 @@ class EESpec:
     joints: tuple = tuple(f"arm_joint{i}" for i in range(1, 7))
     mount: str = "arm_base_link"
     arm_limits: Optional[dict] = field(default=None, compare=False)   # {joint: (lo, hi)} narrowing the URDF's
+    posture: Optional[tuple] = None         # the nominal posture (rad; the robot profile's), the named posture "ready"
+    arm_type: Optional[str] = None          # robots/arm_types.py (None / "rebot": the reBot's defaults)
+
+    @classmethod
+    def from_arm(cls, arm, arm_limits: Optional[dict] = None) -> "EESpec":
+        """The end effector of a robot profile's arm (robots.ArmSpec): named as the arm (its arm node instance),
+        its joints, end link, TCP and mount in the model. ``arm_limits`` as the field (``arm_config_limits``)."""
+        return cls(name=arm.name, link=arm.model_ee_link, tcp=tuple(float(v) for v in arm.tcp),
+                   joints=tuple(arm.model_joints), mount=arm.model_base_link, arm_limits=arm_limits,
+                   posture=None if getattr(arm, "posture", None) is None else tuple(arm.posture),
+                   arm_type=None if getattr(arm, "type", "rebot") == "rebot" else arm.type)
 
 
-def arm_config_limits() -> Optional[dict]:
+def arm_config_limits(prefix: str = "arm_") -> Optional[dict]:
     """The arm's own joint limits (rebot_ctl's hardware config, as the arm node enforces them), keyed by the
-    model's joint names; None if rebot_ctl is not importable."""
+    model's joint names (``prefix``: the arm's, robots.ArmSpec.prefix; a mirrored arm has the same limits);
+    None if rebot_ctl is not importable."""
     try:
         from reBotArm_control_py.actuator.rebotarm import joint_limits, load_cfg
         from ..arm.config import DEFAULT_PROFILE, PROFILES
         lim = joint_limits(load_cfg(PROFILES[DEFAULT_PROFILE]))
     except Exception:  # noqa: BLE001 - optional narrowing
         return None
-    return {f"arm_{k}": v for k, v in lim.items() if k.startswith("joint")}
+    return {f"{prefix}{k}": v for k, v in lim.items() if k.startswith("joint")}
 
 
-def fetch_urdf(source: str) -> tuple[str, str]:
+def ee_specs(robot=None) -> tuple:
+    """One EESpec per arm of a robot profile (robots/; None: $ROBOT_UTILS_ROBOT, else rebot), each narrowed by the
+    arm's config limits. The default robot's is the one ``EESpec(arm_limits=arm_config_limits())``."""
+    from ...robots import load
+    return tuple(EESpec.from_arm(a, arm_config_limits(a.prefix) if a.type == "rebot" else None)   # else its URDF's
+                 for a in load(robot).arms)
+
+
+def fetch_urdf(source: str, robot=None) -> tuple[str, str]:
     """(URDF text, where it came from): ``local`` assembles the shipped description here; a path to a
     ``.urdf`` file reads it; anything else is a description node (instance name or URL)."""
     if source == "local":
         import tempfile
         from ..description.model import Options
         from ..description.node import DescriptionNode
-        urdf, v = DescriptionNode(tempfile.mkdtemp(prefix="wbc-desc-"), None).model_urdf(Options(base="planar"))
+        urdf, v = DescriptionNode(tempfile.mkdtemp(prefix="wbc-desc-"), None, robot=robot).model_urdf(
+            Options(base="planar"))
         return urdf, f"local description (model {v})"
     if source.endswith(".urdf"):
         with open(source, encoding="utf-8") as f:
@@ -159,7 +180,8 @@ class WbcModel:
         m = self.model
         parent = m.frames[m.getFrameId(e.link)]
         m.frames[self.tcp[ee]].placement = parent.placement * pin.SE3(np.eye(3), np.asarray(offset, float))
-        self.ees[ee] = EESpec(e.name, e.link, tuple(float(v) for v in offset), e.joints, e.mount, e.arm_limits)
+        self.ees[ee] = EESpec(e.name, e.link, tuple(float(v) for v in offset), e.joints, e.mount, e.arm_limits,
+                              e.posture, e.arm_type)
 
     # -- kinematics (one Data: call from one thread) ----------------------------------------------------
 

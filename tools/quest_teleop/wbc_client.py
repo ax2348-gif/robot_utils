@@ -126,6 +126,11 @@ class WbcClient:
     def enable(self) -> dict:
         return self.http.post("/enable")
 
+    def disarm_reason(self) -> Optional[str]:
+        """The WBC's ``/state`` ``disarm_reason`` (None while armed): the teleop latch's hold classifies its own
+        disarms by it."""
+        return (self.http.get("/state") or {}).get("disarm_reason")
+
     def disable(self) -> Optional[dict]:
         return self.http.post("/disable")
 

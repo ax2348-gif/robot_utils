@@ -13,9 +13,18 @@ from __future__ import annotations
 
 import numpy as np
 
-from .geometry import ARM_BOXES, ARM_BOX_NAMES
+from .geometry import ARM_BOX_NAMES, ARM_BOXES, GRIPPER
 
-LINK_INDEX = {"link1": 0, "link2": 1, "link3": 2, "link4": 3, "link5": 4, "link6": 5, "end": 6}
+
+
+def frame_of(frames: list, name: str) -> np.ndarray:
+    """A box frame's 4x4 among ``frames`` (joint1..jointN, end_link, tcp): ``linkN`` = jointN's, ``end`` = end_link's,
+    ``base`` = the arm frame."""
+    if name == "base":
+        return np.eye(4)
+    if name == "end":
+        return frames[-2]
+    return frames[int(name[4:]) - 1]
 
 # The finger prong (geometry.py, "jaw" box, finger frame = end_link moved gap/2 along y): its inner face
 # is at y = 0 of the finger frame, it runs from the fingertip (x = 0) back to x = -58.9 mm, 13.6 mm thick,
@@ -23,7 +32,7 @@ LINK_INDEX = {"link1": 0, "link2": 1, "link3": 2, "link4": 3, "link5": 4, "link6
 _JAW = next(b for b, n in zip(ARM_BOXES, ARM_BOX_NAMES) if n == "jaw")
 JAW_LENGTH = _JAW[4] / 1000            # m, along end_link x
 JAW_THICKNESS = _JAW[5] / 1000         # m, along end_link y (outward from the inner face)
-JAW_HEIGHT_ROOT, JAW_HEIGHT_TIP = 0.033, 0.008   # m, along end_link z
+JAW_HEIGHT_ROOT, JAW_HEIGHT_TIP = GRIPPER.jaw_height_root, GRIPPER.jaw_height_tip   # m, along end_link z
 # Usable grasp depth: from the tips back to the jaw carriage's front face (the jaw-root box front, x = -59 mm).
 _ROOT = next(b for b, n in zip(ARM_BOXES, ARM_BOX_NAMES) if n == "jaw root")
 GRASP_DEPTH = -(_ROOT[1] + _ROOT[4] / 2) / 1000
@@ -56,11 +65,12 @@ def finger_frames(E: np.ndarray, gap: float) -> dict:
 def body(frames: list, gap: float) -> dict:
     """Gripper points, finger geometry and every arm box at one configuration, in the arm frame.
 
-    frames: 8 4x4 arrays (joint1..6, end_link, tcp) in the arm frame; gap: m (clipped to [0, 0.057]).
+    frames: N + 2 4x4 arrays (joint1..N, end_link, tcp) in the arm frame; gap: m (clipped to [0, 2 x the finger
+    travel]: 57 mm for the reBot's gripper).
     Returns numpy values; the node turns them into JSON in both frames.
     """
-    g = float(min(max(gap, 0.0), 0.057))
-    E, TCP = frames[6], frames[7]
+    g = float(min(max(gap, 0.0), 2 * GRIPPER.travel))
+    E, TCP = frames[-2], frames[-1]          # joint1..N, end_link, tcp
     x, y, z = E[:3, 0], E[:3, 1], E[:3, 2]
     jaws = {}
     for name, (F, sgn) in finger_frames(E, g).items():
@@ -79,6 +89,6 @@ def body(frames: list, gap: float) -> dict:
             for side, (F, sgn) in finger_frames(E, g).items():
                 boxes.append((f"{side} {n}", "finger", _box_corners(F, b, sgn), _box_pose(F, b, sgn)))
             continue
-        T = np.eye(4) if b[0] == "base" else frames[LINK_INDEX[b[0]]]
+        T = frame_of(frames, b[0])
         boxes.append((n, b[0], _box_corners(T, b), _box_pose(T, b)))
     return {"gap": g, "end_link": E, "tcp": TCP, "approach": x, "jaw_axis": y, "up": z, "jaws": jaws, "boxes": boxes}
