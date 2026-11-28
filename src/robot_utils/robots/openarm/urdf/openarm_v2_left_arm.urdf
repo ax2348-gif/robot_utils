@@ -10,13 +10,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/base_link.stl" />
+        <mesh filename="../meshes/collision/left_base_link.stl" />
       </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/base_link.stl" />
+        <mesh filename="../meshes/collision/left_base_link.stl" />
       </geometry>
     </collision>
   </link>
@@ -29,13 +29,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link1.stl" />
+        <mesh filename="../meshes/collision/left_link1.stl" />
       </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link1.stl" />
+        <mesh filename="../meshes/collision/left_link1.stl" />
       </geometry>
     </collision>
   </link>
@@ -48,13 +48,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link2.stl" />
+        <mesh filename="../meshes/collision/left_link2.stl" />
       </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link2.stl" />
+        <mesh filename="../meshes/collision/left_link2.stl" />
       </geometry>
     </collision>
   </link>
@@ -105,13 +105,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link5.stl" />
+        <mesh filename="../meshes/collision/left_link5.stl" />
       </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link5.stl" />
+        <mesh filename="../meshes/collision/left_link5.stl" />
       </geometry>
     </collision>
   </link>
@@ -124,13 +124,13 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link6.stl" />
+        <mesh filename="../meshes/collision/left_link6.stl" />
       </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="../meshes/collision/link6.stl" />
+        <mesh filename="../meshes/collision/left_link6.stl" />
       </geometry>
     </collision>
   </link>

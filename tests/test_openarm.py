@@ -98,10 +98,50 @@ def test_no_anvil_arm_data_in_the_package():
             assert f.startswith(("../meshes/collision/", "../gripper/meshes/")), f
             assert (B.HERE / "urdf" / f).resolve().is_file(), f
     meshes = {p.relative_to(B.HERE).as_posix() for p in Path(B.HERE).rglob("*") if p.suffix in (".stl", ".obj", ".dae")}
-    assert meshes == {f"meshes/collision/{n}.stl" for n in B.LINKS} | {
+    mirrored = ("base_link", "link1", "link2", "link5", "link6")      # upstream's left links: scale 1 -1 1, baked
+    assert meshes == {f"meshes/collision/{n}.stl" for n in B.LINKS} | {f"meshes/collision/left_{n}.stl" for n in mirrored} | {
         f"gripper/meshes/{n}" for n in ("hand_anodized_black.obj", "hand_camera_gray.stl", "left_finger_dark.stl",
                                         "right_finger_dark.stl", "left_finger_fine_tip_dark.stl",
                                         "right_finger_fine_tip_dark.stl")}
+
+
+def test_left_arm_geometry_mirrors_the_right():
+    """At q = 0 the two arms are each other's reflection in y (upstream mirrors the left arm's meshes by a mesh scale,
+    which build_urdf bakes into left_<name>.stl): every arm link's mesh bounds, in the arm frame, are the right arm's
+    with y negated, to 1 mm. A dropped mirror shows here (base_link and link1 were 110 mm off, 2026-11-27)."""
+    import os
+
+    import numpy as np
+    import pinocchio as pin
+
+    from robot_utils.robots.openarm import build_urdf as B
+
+    def bounds(side):
+        p = str(B.HERE / "urdf" / f"openarm_v2_{side}_arm.urdf")
+        m = pin.buildModelFromUrdf(p)
+        d = m.createData()
+        pin.forwardKinematics(m, d, pin.neutral(m))
+        g = pin.buildGeomFromUrdf(m, p, pin.COLLISION, package_dirs=[os.path.dirname(p)])
+        gd = g.createData()
+        pin.updateGeometryPlacements(m, d, g, gd)
+        out = {}
+        for i, o in enumerate(g.geometryObjects):
+            name = m.frames[o.parentFrame].name
+            if name not in B.LINKS:
+                continue
+            v = np.asarray(o.geometry.vertices())        # already in metres (the URDF's mesh scale applied)
+            w = v @ gd.oMg[i].rotation.T + gd.oMg[i].translation
+            lo, hi = w.min(0), w.max(0)
+            out[name] = (np.minimum(out[name][0], lo), np.maximum(out[name][1], hi)) if name in out else (lo, hi)
+        return out
+
+    left, right = bounds("left"), bounds("right")
+    assert set(left) == set(right) == set(B.LINKS)
+    flip = np.array([1.0, -1.0, 1.0])
+    for n in B.LINKS:
+        (llo, lhi), (rlo, rhi) = left[n], right[n]
+        mlo, mhi = np.minimum(rlo * flip, rhi * flip), np.maximum(rlo * flip, rhi * flip)
+        assert np.abs(llo - mlo).max() < 1e-3 and np.abs(lhi - mhi).max() < 1e-3, (n, llo, lhi, mlo, mhi)
 
 
 def test_anvil_ranges_carry_over_by_fk():
